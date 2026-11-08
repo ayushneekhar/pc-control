@@ -3,6 +3,7 @@ import { DarkTheme, DefaultTheme, LinkingOptions, NavigationContainer } from '@r
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SystemInsetsProvider } from './src/components/SystemInsets';
 import { Icon } from './src/components/ui';
 import { pendingList, startRootStore, useRootStore } from './src/lib/rootStore';
 import RootScreen from './src/screens/RootScreen';
@@ -55,32 +56,34 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <NavigationContainer theme={navTheme} linking={linking}>
-        <StatusBar style={t.dark ? 'light' : 'dark'} />
-        <Tab.Navigator
-          initialRouteName={waiting ? 'Root' : 'Routes'}
-          screenOptions={({ route }) => ({
-            headerShown: false,
-            tabBarActiveTintColor: t.accent,
-            tabBarInactiveTintColor: t.textFaint,
-            tabBarStyle: { backgroundColor: t.card, borderTopColor: t.border },
-            tabBarLabelStyle: { fontSize: 11.5, fontWeight: '600' },
-            tabBarIcon: ({ focused, color, size }) => (
-              <Icon name={ICONS[route.name][focused ? 0 : 1]} size={size - 1} color={color} />
-            ),
-          })}
-        >
-          <Tab.Screen name="Routes" component={RoutesScreen} />
-          <Tab.Screen name="Vitals" component={VitalsScreen} />
-          <Tab.Screen
-            name="Root"
-            component={RootScreen}
-            options={{ tabBarBadge: waiting || undefined, tabBarBadgeStyle: { backgroundColor: t.warn, color: '#1A1300', fontWeight: '800' } }}
-          />
-          <Tab.Screen name="Services" component={ServicesScreen} />
-          <Tab.Screen name="Settings" component={SettingsScreen} />
-        </Tab.Navigator>
-      </NavigationContainer>
+      <SystemInsetsProvider>
+        <NavigationContainer theme={navTheme} linking={linking}>
+          <StatusBar style={t.dark ? 'light' : 'dark'} />
+          <Tab.Navigator
+            initialRouteName={waiting ? 'Root' : 'Routes'}
+            screenOptions={({ route }) => ({
+              headerShown: false,
+              tabBarActiveTintColor: t.accent,
+              tabBarInactiveTintColor: t.textFaint,
+              tabBarStyle: { backgroundColor: t.card, borderTopColor: t.border },
+              tabBarLabelStyle: { fontSize: 11.5, fontWeight: '600' },
+              tabBarIcon: ({ focused, color, size }) => (
+                <Icon name={ICONS[route.name][focused ? 0 : 1]} size={size - 1} color={color} />
+              ),
+            })}
+          >
+            <Tab.Screen name="Routes" component={RoutesScreen} />
+            <Tab.Screen name="Vitals" component={VitalsScreen} />
+            <Tab.Screen
+              name="Root"
+              component={RootScreen}
+              options={{ tabBarBadge: waiting || undefined, tabBarBadgeStyle: { backgroundColor: t.warn, color: '#1A1300', fontWeight: '800' } }}
+            />
+            <Tab.Screen name="Services" component={ServicesScreen} />
+            <Tab.Screen name="Settings" component={SettingsScreen} />
+          </Tab.Navigator>
+        </NavigationContainer>
+      </SystemInsetsProvider>
     </SafeAreaProvider>
   );
 }

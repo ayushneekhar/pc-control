@@ -24,6 +24,8 @@ export type BiometricStatus =
 
 /** Error codes thrown by sign()/createKey(): E_CANCELLED, E_KEY_INVALIDATED, E_NO_KEY, E_LOCKOUT, E_AUTH, ... */
 export type PcNativeModule = {
+  /** System bar + display cutout insets in dp, or null before the activity is attached. */
+  windowInsets(): { top: number; bottom: number; left: number; right: number } | null;
   getSettings(): NativeSettings;
   setServerUrl(url: string): void;
   setDeviceFingerprint(fp: string | null): void;

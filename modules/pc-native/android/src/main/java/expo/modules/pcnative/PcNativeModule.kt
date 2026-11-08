@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.FragmentActivity
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.functions.Queues
@@ -57,6 +58,18 @@ class PcNativeModule : Module() {
       val i = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
         .putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       ctx.startActivity(i)
+    }
+
+    // ---- window insets (dp), measured on the activity's decor view. Edge-to-edge is mandatory on
+    // targetSdk 35+, so content always draws under the status/navigation bars; these are the absolute
+    // system-bar + cutout insets, independent of where any React view happens to be laid out.
+    Function("windowInsets") {
+      val activity = appContext.currentActivity ?: return@Function null
+      val raw = activity.window?.decorView?.rootWindowInsets ?: return@Function null
+      val i = WindowInsetsCompat.toWindowInsetsCompat(raw)
+        .getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+      val d = activity.resources.displayMetrics.density
+      mapOf("top" to i.top / d, "bottom" to i.bottom / d, "left" to i.left / d, "right" to i.right / d)
     }
 
     // ---- battery optimization (Doze)

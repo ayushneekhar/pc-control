@@ -2,7 +2,7 @@
 """pc-api: the pc-control app's backend (user service, 127.0.0.1:1990, tailnet via `tailscale serve /pc`).
 
 GET  /pc/api/info                     host, rootd status, latest APK info
-GET  /pc/api/routes                   tailscale serve routes as friendly cards
+GET  /pc/api/routes[?all=1]           tailscale serve routes as friendly cards (API-only ones hidden)
 GET  /pc/api/services                 user systemd units from ~/.config/systemd/user
 POST /pc/api/services/<unit>/restart
 GET  /pc/api/services/<unit>/logs     last journal lines
@@ -144,33 +144,44 @@ HUB = None
 
 # ---------------------------------------------------------------- routes
 
+# key -> (name, icon, subtitle, kind). Keys: ":<port>" for non-443 ports, the backend port for "/" on 443,
+# otherwise the path. kind "api" = backend endpoint used by another page (e.g. the Cat cams page), not a page
+# you'd open yourself: hidden from the app's Routes list unless routes.json says otherwise.
 KNOWN = {
-    "1984": ("Cameras", "cctv", "go2rtc live streams"),
-    "/cams/": ("Cat cams", "cat", "Camera wall"),
-    "/detect": ("Cat detector", "eye-outline", "YOLO detections"),
-    "/music": ("Cat music", "music", "Speaker audio + volume"),
-    "/ptz": ("Pan / tilt", "arrow-all", "Move the CP Plus cam"),
-    "/rec": ("Recordings", "record-rec", "24 h rolling recordings"),
-    "/vitals": ("Vitals", "heart-pulse", "CPU, memory, processes"),
-    ":5055": ("Seerr", "movie-search-outline", "Requests"),
-    ":6767": ("Bazarr", "subtitles-outline", "Subtitles"),
-    ":7878": ("Radarr", "filmstrip", "Movies"),
-    ":8989": ("Sonarr", "television-classic", "TV shows"),
-    ":8096": ("Jellyfin", "play-box-multiple-outline", "Media server"),
-    ":9696": ("Prowlarr", "radar", "Indexers"),
-    ":8080": ("qBittorrent", "download-outline", "Torrents"),
+    "1984": ("Cameras", "cctv", "go2rtc live streams", "page"),
+    "/cams/": ("Cat cams", "cat", "Camera wall", "page"),
+    "/detect": ("Cat detector", "eye-outline", "Cat cams backend: detections", "api"),
+    "/music": ("Cat music", "music", "Cat cams backend: speaker audio", "api"),
+    "/ptz": ("Pan / tilt", "arrow-all", "Cat cams backend: camera movement", "api"),
+    "/rec": ("Recordings", "record-rec", "Cat cams backend: recordings", "api"),
+    "/vitals": ("Vitals", "heart-pulse", "CPU, memory, processes", "page"),
+    ":5055": ("Seerr", "movie-search-outline", "Requests", "page"),
+    ":6767": ("Bazarr", "subtitles-outline", "Subtitles", "page"),
+    ":7878": ("Radarr", "filmstrip", "Movies", "page"),
+    ":8989": ("Sonarr", "television-classic", "TV shows", "page"),
+    ":8096": ("Jellyfin", "play-box-multiple-outline", "Media server", "page"),
+    ":9696": ("Prowlarr", "radar", "Indexers", "page"),
+    ":8080": ("qBittorrent", "download-outline", "Torrents", "page"),
 }
-_routes_cache = [0.0, None]
+ROUTES_CONF = os.path.join(CONF_DIR, "routes.json")
+_serve_cache = [0.0, None]
 
 
-def list_routes():
-    if time.time() - _routes_cache[0] < 10 and _routes_cache[1] is not None:
-        return _routes_cache[1]
+def serve_status():
+    if time.time() - _serve_cache[0] < 10 and _serve_cache[1] is not None:
+        return _serve_cache[1]
     p = subprocess.run(["tailscale", "serve", "status", "--json"], capture_output=True, timeout=10)
     d = json.loads(p.stdout or b"{}")
-    overrides = load_json(os.path.join(CONF_DIR, "routes.json"), {})
+    _serve_cache[:] = [time.time(), d]
+    return d
+
+
+def build_routes(status, overrides):
+    """tailscale serve status JSON -> route cards. overrides (routes.json) is keyed by the path for :443
+    routes, or ":<port>" for other ports: {"name","icon","subtitle","kind","hidden"}; read on every call, so
+    hiding a new API-only route needs no restart and no app rebuild."""
     out = []
-    for hostport, web in (d.get("Web") or {}).items():
+    for hostport, web in (status.get("Web") or {}).items():
         host, _, port = hostport.rpartition(":")
         for path, h in (web.get("Handlers") or {}).items():
             if path.rstrip("/") == "/pc": continue
@@ -181,15 +192,22 @@ def list_routes():
             if port != "443": key = ":" + port
             elif path == "/" and backend_port: key = backend_port
             else: key = path if path in KNOWN else path.rstrip("/")
-            name, icon, sub = KNOWN.get(key) or KNOWN.get(path) or (
-                path.strip("/").replace("-", " ").title() or f"Port {port}", "web", "")
-            o = overrides.get(path if port == "443" else ":" + port, {})
+            name, icon, sub, kind = KNOWN.get(key) or KNOWN.get(path) or (
+                path.strip("/").replace("-", " ").title() or f"Port {port}", "web", "", "page")
+            okey = path if port == "443" else ":" + port
+            o = overrides.get(okey) or overrides.get(okey.rstrip("/")) or {}
+            if not isinstance(o, dict): o = {}
+            kind = o.get("kind", kind)
             out.append({"id": f"{port}{path}", "name": o.get("name", name), "icon": o.get("icon", icon),
                         "subtitle": o.get("subtitle", sub), "url": url, "path": path, "port": int(port),
-                        "target": target})
+                        "target": target, "kind": kind, "hidden": bool(o.get("hidden", kind == "api"))})
     out.sort(key=lambda r: (r["port"] != 443, r["path"] == "/", r["name"].lower()))
-    _routes_cache[:] = [time.time(), out]
     return out
+
+
+def list_routes(include_hidden=False):
+    routes = build_routes(serve_status(), load_json(ROUTES_CONF, {}))
+    return routes if include_hidden else [r for r in routes if not r["hidden"]]
 
 
 # ---------------------------------------------------------------- services
@@ -326,7 +344,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(200, {"login": self.headers.get("Tailscale-User-Login"),
                                             "name": self.headers.get("Tailscale-User-Name"),
                                             "proxied": bool(self.headers.get("X-Forwarded-For"))})
-            if path == "/api/routes": return self.send_json(200, {"routes": list_routes()})
+            if path == "/api/routes":
+                return self.send_json(200, {"routes": list_routes(qs.get("all", ["0"])[0] == "1")})
             if path == "/api/services": return self.send_json(200, {"services": list_services()})
             m = re.fullmatch(r"/api/services/([^/]+)/logs", path)
             if m: return self.send_json(*service_logs(m.group(1), min(int(qs.get("n", ["80"])[0]), 500)))

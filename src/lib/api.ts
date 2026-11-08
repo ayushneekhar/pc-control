@@ -97,6 +97,8 @@ export type Route = {
   path: string;
   port: number;
   target: string;
+  kind?: 'page' | 'api';
+  hidden?: boolean;
 };
 
 export type Service = {

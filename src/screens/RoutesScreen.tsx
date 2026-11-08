@@ -49,7 +49,7 @@ export default function RoutesScreen() {
   const load = useCallback(async () => {
     try {
       const res = await get<{ routes: Route[] }>('/pc/api/routes');
-      setRoutes(res.routes);
+      setRoutes(res.routes.filter((r) => !r.hidden));
       setErr(null);
     } catch (e) {
       setErr((e as Error).message);

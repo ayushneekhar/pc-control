@@ -8,6 +8,12 @@ The app has five tabs:
 
 - **Routes**: every `tailscale serve` route (cams, vitals, music, recordings, Seerr, Radarr, Sonarr, Bazarr, …)
   as cards that open in the browser. The list is read live, so new routes appear by themselves.
+  API-only routes (backends used by another page, like the Cat cams page's `/rec`, `/music`, `/ptz` and
+  `/detect`) are hidden on the server. To hide a new one, or to show a hidden one, edit
+  `~/.config/pc-control/routes.json`; it is read live, so there's no restart and no app rebuild:
+  `{"/new-api": {"hidden": true}, ":9696": {"name": "Prowlarr", "hidden": false}}`
+  (keys are the path for the main HTTPS host, or `":<port>"` for other ports; you can also set `name`, `icon`
+  (a Material Community icon name), `subtitle` and `kind` (`"api"` hides a route)).
 - **Vitals**: CPU, temperatures, RAM, GPU, network, disks and battery from `/vitals/api`. It polls only while the
   tab is visible, and processes are sampled only when you switch them on.
 - **Root**: the approval inbox. Each request shows the exact command and the reason, with **Approve

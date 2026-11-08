@@ -1,0 +1,154 @@
+#!/usr/bin/python3 -I
+"""rootctl: ask rootd to run a command as root. Ayush must approve it on his phone (fingerprint).
+
+  rootctl run [--reason "why"] [--timeout SECS] -- cmd args...   submit, wait, print output, exit with its code
+  rootctl submit [--reason ...] [--timeout ...] -- cmd args...   submit only, print the request id
+  rootctl wait [--max SECS] <id>                                 wait for a decision + result (like run)
+  rootctl list                                                   pending/running/recent requests
+  rootctl history [N]                                            finished requests
+  rootctl cancel <id>                                            withdraw a pending request
+  rootctl status                                                 is rootd installed, is a phone enrolled
+
+Exit codes for `run`/`wait`: the command's own exit code; 128+N if killed by signal N; 124 if it timed out;
+125 if the request expired unapproved (180 s); 126 if Ayush denied it; 3 if rootd is not reachable;
+2 for usage errors / rejected submissions.
+"""
+import json, os, socket, sys, time
+
+SOCK = os.environ.get("ROOTD_SOCK", "/run/rootd/rootd.sock")
+
+
+def call(msg, timeout=30):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(SOCK)
+    except OSError as e:
+        print(f"rootctl: rootd is not reachable at {SOCK} ({e.strerror or e}). "
+              "Is it installed? (Ayush: sudo ~/code/pc-control/server/install-rootd.sh)", file=sys.stderr)
+        sys.exit(3)
+    s.sendall((json.dumps(msg) + "\n").encode())
+    data = b""
+    while not data.endswith(b"\n"):
+        c = s.recv(65536)
+        if not c: break
+        data += c
+    s.close()
+    return json.loads(data or b'{"error":"no reply from rootd"}')
+
+
+def die(msg, code=2):
+    print(f"rootctl: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def parse_submit(args):
+    reason, timeout = "", None
+    while args and args[0] != "--":
+        a = args.pop(0)
+        if a in ("--reason", "-r") and args: reason = args.pop(0)
+        elif a.startswith("--reason="): reason = a.split("=", 1)[1]
+        elif a in ("--timeout", "-t") and args: timeout = args.pop(0)
+        elif a.startswith("--timeout="): timeout = a.split("=", 1)[1]
+        else:
+            args.insert(0, a); break      # allow `rootctl run cmd args` without --
+    if args and args[0] == "--": args.pop(0)
+    if not args: die("no command given. usage: rootctl run [--reason ...] [--timeout N] -- cmd args...")
+    msg = {"op": "submit", "argv": args, "reason": reason}
+    if timeout is not None:
+        try: msg["timeout"] = int(timeout)
+        except ValueError: die("--timeout must be a number of seconds")
+    return msg
+
+
+def submit(args):
+    res = call(parse_submit(args))
+    if "error" in res: die(f"rejected: {res['error']}")
+    return res["request"]
+
+
+def announce(r):
+    left = max(0, int(r["expires"] - time.time()))
+    print(f"rootctl: waiting for Ayush to approve on his phone (id {r['id']}, expires in {left}s): "
+          f"{json.dumps(r['argv'], ensure_ascii=False)}", file=sys.stderr, flush=True)
+
+
+def wait(rid, max_wait=None, quiet=False, announced=None):
+    start = time.time()
+    while True:
+        res = call({"op": "wait", "id": rid, "timeout": 30}, timeout=60)
+        if "error" in res: die(res["error"], 1)
+        r = res["request"]
+        if r["status"] != announced and not quiet:
+            if r["status"] == "pending":
+                announce(r)
+            elif r["status"] == "running":
+                print(f"rootctl: approved by {r.get('device', '?')}, running...", file=sys.stderr)
+            announced = r["status"]
+        if r["status"] in ("done", "denied", "expired", "cancelled", "lost"):
+            return r
+        if max_wait is not None and time.time() - start > max_wait:
+            die(f"still {r['status']} after {max_wait}s (id {rid}); run `rootctl wait {rid}` again", 4)
+
+
+def finish(r):
+    st = r["status"]
+    if st == "done":
+        if r.get("stdout"): sys.stdout.write(r["stdout"]); sys.stdout.flush()
+        if r.get("stderr"): sys.stderr.write(r["stderr"]); sys.stderr.flush()
+        code = r.get("exit", 1)
+        if r.get("timed_out"): sys.exit(124)
+        sys.exit(128 - code if code < 0 else code)
+    if st == "denied": die(f"denied on {r.get('device', 'phone')}", 126)
+    if st == "expired": die("not approved within 180 s; request expired", 125)
+    if st == "cancelled": die("request was cancelled", 125)
+    if st == "lost": die("rootd restarted while the command was running; result unknown", 1)
+    die(f"unexpected status {st}", 1)
+
+
+def fmt(r):
+    t = time.strftime("%H:%M:%S", time.localtime(r["created"]))
+    extra = f" exit={r['exit']}" if "exit" in r else ""
+    return f"{r['id']}  {t}  {r['status']:<9}{extra}  {json.dumps(r['argv'], ensure_ascii=False)}  {r.get('reason', '')}"
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip()); return 0
+    cmd, args = argv[0], argv[1:]
+    if cmd == "run":
+        r = submit(args)
+        announce(r)
+        finish(wait(r["id"], announced="pending"))
+    elif cmd == "submit":
+        r = submit(args)
+        print(r["id"])
+    elif cmd == "wait":
+        max_wait = None
+        if args[:1] == ["--max"] and len(args) >= 2:
+            max_wait = float(args[1]); args = args[2:]
+        if len(args) != 1: die("usage: rootctl wait [--max SECS] <id>")
+        finish(wait(args[0], max_wait))
+    elif cmd == "list":
+        for r in call({"op": "list"}).get("requests", []): print(fmt(r))
+    elif cmd == "history":
+        n = int(args[0]) if args else 20
+        for r in call({"op": "history", "limit": n}).get("history", []): print(fmt(r))
+    elif cmd == "cancel" and len(args) == 1:
+        res = call({"op": "cancel", "id": args[0]})
+        if "error" in res: die(res["error"], 1)
+        print("cancelled")
+    elif cmd == "status":
+        res = call({"op": "ping"})
+        print(f"rootd v{res.get('version')} running; enrolled phones: {res.get('devices', 0)}")
+    else:
+        die(f"unknown command {cmd!r}; see rootctl --help")
+    return 0
+
+
+if __name__ == "__main__":
+    try: sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        print("\nrootctl: interrupted (a pending request stays pending until it expires; "
+              "`rootctl cancel <id>` withdraws it)", file=sys.stderr)
+        sys.exit(130)

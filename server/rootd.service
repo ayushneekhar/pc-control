@@ -1,0 +1,30 @@
+[Unit]
+Description=rootd: root commands approved by fingerprint on Ayush's phone (pc-control)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /usr/local/lib/rootd/rootd.py serve
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=2
+UMask=0077
+RuntimeDirectory=rootd
+RuntimeDirectoryMode=0755
+StateDirectory=rootd
+StateDirectoryMode=0700
+LogsDirectory=rootd
+LogsDirectoryMode=0700
+ConfigurationDirectory=rootd
+ConfigurationDirectoryMode=0700
+KillMode=control-group
+TimeoutStopSec=15
+# Hardening that does not reach the approved commands:
+LockPersonality=yes
+# Approved commands run as children of this service and must have full root (apt, systemctl, editing
+# /etc, mounting, ...). Sandboxing such as ProtectSystem, ProtectHome, PrivateTmp, NoNewPrivileges,
+# CapabilityBoundingSet or SystemCallFilter would be inherited by them and silently break them, so it is
+# deliberately not applied. The gate is the phone signature, not the sandbox.
+
+[Install]
+WantedBy=multi-user.target

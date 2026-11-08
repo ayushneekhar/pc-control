@@ -1,0 +1,13 @@
+[Unit]
+Description=pc-control API for the phone app (127.0.0.1:1990, tailnet via tailscale serve /pc)
+
+[Service]
+WorkingDirectory=%h
+ExecStart=/usr/bin/python3 -I %h/code/pc-control/server/pcapi.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=3
+Nice=5
+
+[Install]
+WantedBy=default.target

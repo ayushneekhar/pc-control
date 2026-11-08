@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "PC Control",
+    "slug": "pc-control",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "pccontrol",
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#0B0D12",
+    "android": {
+      "package": "com.neekhar.pccontrol",
+      "versionCode": 1,
+      "allowBackup": false,
+      "predictiveBackGestureEnabled": false,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-foreground.png",
+        "monochromeImage": "./assets/adaptive-monochrome.png",
+        "backgroundColor": "#11151F"
+      },
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 30,
+            "usesCleartextTraffic": false
+          }
+        }
+      ],
+      "./plugins/withReleaseSigning"
+    ]
+  }
+}

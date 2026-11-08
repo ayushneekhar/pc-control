@@ -1,0 +1,14 @@
+node_modules/
+/android/
+/ios/
+*.apk
+*.jks
+*.keystore
+.env*
+__pycache__/
+.expo/
+*.pem
+*.p12
+*.env
+build/
+dist/

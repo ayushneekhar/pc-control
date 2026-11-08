@@ -1,0 +1,36 @@
+{
+  "name": "pc-control",
+  "main": "index.js",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "expo start",
+    "prebuild": "expo prebuild -p android",
+    "android:apk:release": "./scripts/build-apk.sh",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "python3 -I -m unittest discover -s server/tests -v"
+  },
+  "dependencies": {
+    "@expo/vector-icons": "^15.1.1",
+    "@react-navigation/bottom-tabs": "^7.19.2",
+    "@react-navigation/native": "^7.4.1",
+    "expo": "~57.0.25",
+    "expo-build-properties": "~57.0.0",
+    "expo-constants": "~57.0.23",
+    "expo-font": "~57.0.4",
+    "expo-status-bar": "~57.0.1",
+    "expo-system-ui": "~57.0.4",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.29.0",
+    "@types/react": "~19.2.4",
+    "eslint": "^9.25.0",
+    "eslint-config-expo": "~57.0.2",
+    "typescript": "~6.0.3"
+  }
+}

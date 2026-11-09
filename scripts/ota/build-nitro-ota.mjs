@@ -6,6 +6,7 @@
 //
 // Usage: node scripts/ota/build-nitro-ota.mjs --ota-version <n> [--release-notes <text>] [--output-dir <dir>]
 // Output: <dir>/snapshot/ (the files), <dir>/bundle.zip, <dir>/ota.version.json (manifest uploaded next to the zip)
+import { Buffer } from 'node:buffer';
 import { spawnSync } from 'node:child_process';
 import { createHash, sign } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -20,7 +21,10 @@ for (let i = 2; i < process.argv.length; i++) {
   if (!k.startsWith('--')) continue;
   const v = process.argv[i + 1];
   if (!v || v.startsWith('--')) args[k.slice(2)] = 'true';
-  else (args[k.slice(2)] = v), i++;
+  else {
+    args[k.slice(2)] = v;
+    i++;
+  }
 }
 const otaVersion = String(args['ota-version'] ?? '').trim();
 if (!/^\d+$/.test(otaVersion)) {

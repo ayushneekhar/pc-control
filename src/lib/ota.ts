@@ -8,10 +8,14 @@
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { PcNative } from '../../modules/pc-native';
+import { ApkRelease, parseApkVersion, parseOtaManifest } from './otaManifest';
+
+export type { ApkRelease } from './otaManifest';
 
 type NitroOtaModule = typeof import('react-native-nitro-ota');
 type Manager = InstanceType<NitroOtaModule['OTAUpdateManager']>;
-export type OtaCheck = NonNullable<Awaited<ReturnType<Manager['checkForUpdatesJS']>>>;
+/** A validated manifest (src/lib/otaManifest.ts). Failures are thrown as one short message instead. */
+export type OtaCheck = { hasUpdate: boolean; isCompatible: boolean; remoteVersion: string; metadata?: { releaseNotes?: string } };
 
 const extra = (Constants.expoConfig?.extra ?? {}) as { github?: { repo?: string; otaTag?: string } };
 export const GITHUB_REPO = extra.github?.repo ?? 'ayushneekhar/pc-control';
@@ -62,8 +66,6 @@ function bundledOtaVersion(): string | null {
   return process.env.EXPO_PUBLIC_BUNDLED_OTA_VERSION?.trim() || null;
 }
 
-const num = (v: string | null | undefined) => (v && /^\d+$/.test(v.trim()) ? Number(v.trim()) : null);
-
 export function otaSnapshot() {
   const o = ota();
   return {
@@ -74,18 +76,35 @@ export function otaSnapshot() {
   };
 }
 
+/** GET a small JSON file from GitHub (no auth; 10 s timeout) -> [status, body]. Throws one clean message offline. */
+async function getText(url: string, what: string): Promise<[number, string]> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, headers: { 'Cache-Control': 'no-cache', Accept: 'application/json' } });
+    return [r.status, await r.text()];
+  } catch (e) {
+    throw new Error((e as Error)?.name === 'AbortError' ? `Couldn't check for ${what} (timed out)` : `Couldn't check for ${what} (offline?)`);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/** Fetches and validates the OTA manifest ourselves (nitro's check takes an HTML error page as a version).
+ *  -> null when OTA is unavailable in this build; throws "Couldn't check for updates (HTTP 404)" etc. */
 export async function checkForOta(): Promise<OtaCheck | null> {
   const o = ota();
   if (!o) return null;
-  const r = await o.manager.checkForUpdatesJS(binaryTarget());
-  if (!r) return null;
-  const current = o.manager.getVersion() ?? bundledOtaVersion();
-  if (/404|not found/i.test(r.remoteVersion ?? '')) return { ...r, hasUpdate: false, isCompatible: false };
-  // Nitro calls "no OTA applied yet" outdated and flags any different string; only strictly newer counts.
-  const remote = num(r.remoteVersion);
-  const cur = num(current);
-  if (remote !== null && cur !== null) return { ...r, hasUpdate: remote > cur };
-  return r;
+  const [status, body] = await getText(OTA_URLS.versionUrl, 'updates');
+  const blacklist = await o.mod.getBlacklistedVersions().catch(() => [] as string[]);
+  const r = parseOtaManifest(status, body, binaryTarget(), o.manager.getVersion() ?? bundledOtaVersion(), blacklist);
+  if (!r.ok) throw new Error(r.error);
+  return {
+    hasUpdate: r.hasUpdate,
+    isCompatible: r.isCompatible,
+    remoteVersion: r.remoteVersion,
+    ...(r.releaseNotes ? { metadata: { releaseNotes: r.releaseNotes } } : {}),
+  };
 }
 
 /** Download + unzip, then check the signature before anything uses it. Throws (and drops it) if it's refused. */
@@ -135,20 +154,10 @@ export function clearOtaRecovery() {
   } catch {}
 }
 
-export type ApkRelease = { versionName: string; versionCode: number; sha256: string; size: number };
-
-/** Newest APK on GitHub Releases, or null (offline, no release yet, or the repo is still private). */
-export async function latestApk(): Promise<ApkRelease | null> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 10000);
-  try {
-    const r = await fetch(APK_URLS.versionUrl, { signal: ctrl.signal, headers: { 'Cache-Control': 'no-cache' } });
-    if (!r.ok) return null;
-    const j = await r.json();
-    return typeof j?.versionCode === 'number' ? (j as ApkRelease) : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(t);
-  }
+/** Newest APK on GitHub Releases. Throws one clean message (offline, HTTP 404 while the repo is private, …). */
+export async function latestApk(): Promise<ApkRelease> {
+  const [status, body] = await getText(APK_URLS.versionUrl, 'app releases');
+  const r = parseApkVersion(status, body);
+  if (!r.ok) throw new Error(r.error);
+  return r.release;
 }

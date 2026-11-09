@@ -432,17 +432,18 @@ function Updates() {
   const t = useTheme();
   const tick = useAppActiveTick();
   const ota = useOta();
-  const [apk, setApk] = useState<ApkRelease | null | undefined>(undefined);
+  const [apk, setApk] = useState<ApkRelease | { error: string } | undefined>(undefined);
   const [recovery, setRecovery] = useState(() => otaRecovery());
   const snap = otaSnapshot();
   const myCode = Number(Constants.expoConfig?.android?.versionCode ?? 0);
 
   useEffect(() => {
-    latestApk().then(setApk);
+    latestApk().then(setApk, (e) => setApk({ error: (e as Error).message }));
     checkOta();
   }, [tick]);
 
-  const newer = apk && apk.versionCode > myCode ? apk : null;
+  const newer = apk && 'versionCode' in apk && apk.versionCode > myCode ? apk : null;
+  const apkError = apk && 'error' in apk ? apk.error : null;
   const otaReady = ota.check?.hasUpdate && ota.check.isCompatible;
   return (
     <Card style={{ gap: space(3) }}>
@@ -463,7 +464,8 @@ function Updates() {
           {ota.phase === 'ready' ? 'Downloaded. It applies the next time the app starts.' : ota.check?.metadata?.releaseNotes ?? ''}
         </Banner>
       ) : null}
-      {ota.error ? <Text style={{ color: t.bad, fontSize: 13 }}>{ota.error}</Text> : null}
+      {ota.error ? <Text style={{ color: t.textDim, fontSize: 13 }}>{ota.error}</Text> : null}
+      {apkError && apkError !== ota.error ? <Text style={{ color: t.textDim, fontSize: 13 }}>{apkError}</Text> : null}
       <View style={{ flexDirection: 'row', gap: space(2) }}>
         <Button label="Check" icon="refresh" kind="subtle" style={{ flex: 1 }} busy={ota.checking} onPress={() => checkOta(true)} />
         {otaReady && ota.phase !== 'ready' ? (
@@ -478,7 +480,7 @@ function Updates() {
         </Banner>
       ) : null}
       <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-        {apk === null ? 'Could not read the latest release from GitHub. ' : ''}JS-only changes arrive over the air, signed by the laptop and only for this exact build. Native changes need a new APK.
+        JS-only changes arrive over the air, signed by the laptop and only for this exact build. Native changes need a new APK.
       </Text>
     </Card>
   );

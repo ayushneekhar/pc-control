@@ -37,11 +37,11 @@ export const updateOffered = (s: State) =>
 export async function checkOta(force = false) {
   if (state.checking || state.phase === 'downloading') return;
   if (!force && Date.now() - state.checkedAt < 10 * 60_000) return;
-  set({ checking: true, error: force ? null : state.error });
+  set({ checking: true });
   try {
-    set({ check: await checkForOta(), checkedAt: Date.now() });
+    set({ check: await checkForOta(), error: null, checkedAt: Date.now() });
   } catch (e) {
-    set({ error: (e as Error).message, checkedAt: Date.now() });
+    set({ check: null, error: (e as Error).message, checkedAt: Date.now() });
   }
   set({ checking: false });
 }
@@ -55,7 +55,13 @@ export async function applyOta(restart: boolean) {
   if (state.phase === 'downloading') return;
   set({ phase: 'downloading', progress: 0, error: null });
   try {
-    const fresh = await checkForOta();
+    let fresh: OtaCheck | null;
+    try {
+      fresh = await checkForOta();
+    } catch (e) {
+      set({ phase: 'idle', check: null, error: (e as Error).message }); // re-check failed: no update to offer
+      return;
+    }
     if (!fresh?.hasUpdate || !fresh.isCompatible) {
       set({ phase: 'idle', check: fresh });
       return;

@@ -12,3 +12,5 @@ __pycache__/
 *.env
 build/
 dist/
+google-services.json
+fcm-service-account*.json

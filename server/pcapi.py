@@ -12,14 +12,25 @@ GET  /pc/api/root/request/<id>        one request incl. output
 POST /pc/api/root/approve|deny        {id, device, signature}: relayed to rootd, which verifies the signature
 POST /pc/api/enroll                   {name, pubkey}: proposes a phone key; only `sudo rootd-admin enroll` confirms
 GET  /pc/api/enroll/status?fingerprint=...
-GET  /pc/api/events                   SSE: hello, request, update, rootd, enrolled, ping (~25 s)
+GET  /pc/api/events                   SSE for the open app (live Root tab): hello, request, update, rootd, enrolled, ping
+POST /pc/api/push/register            {token, name}: store the phone's FCM token (re-sent on token refresh)
+POST /pc/api/push/unregister          {token}
+GET  /pc/api/push/status?token=...    {configured, registered, devices}
+POST /pc/api/push/test                {token?}: send a test notification through FCM now, report per-token results
+POST /pc/api/notify                   {title, body}: a plain notification to the phone(s) via FCM
 GET  /pc/app.apk                      latest app build
+
+Push: events are also sent through Firebase Cloud Messaging (HTTP v1, service account in
+~/.config/pc-control/fcm-service-account.json) to the registered phones. FCM payloads carry only notification
+text and ids: root requests say "Root approval needed" + the reason, never the command, and approval still
+happens over the tailnet with the phone's biometric signature.
 
 pc-api is NOT a security boundary for root: it runs as the agent's user, so it is treated as untrusted
 by rootd. Only the phone's signature releases a command. The tailnet identity check below just keeps
 other tailnet nodes/users away from the service controls.
 """
-import glob, json, os, queue, re, socket, subprocess, sys, threading, time, urllib.parse
+import base64, glob, json, os, queue, secrets, re, socket, subprocess, sys, threading, time, urllib.error, urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = os.path.expanduser("~")
@@ -126,7 +137,9 @@ class Hub:
                     ev = json.loads(line)
                     t = ev.get("type")
                     if t == "hello": self.set_status("ok", ev.get("pending", []))
-                    elif t in ("request", "update"): self.publish(t, ev["request"])
+                    elif t in ("request", "update"):
+                        self.publish(t, ev["request"])
+                        if PUSH: PUSH.on_root_event(t, ev["request"])
                     elif t == "enrolled": self.publish("enrolled", {"fingerprint": ev.get("fingerprint")})
                 raise OSError("watch closed")
             except (OSError, ValueError):
@@ -140,6 +153,188 @@ class Hub:
 
 
 HUB = None
+PUSH = None
+
+
+# ---------------------------------------------------------------- push (FCM HTTP v1)
+
+FCM_SA = os.environ.get("PCAPI_FCM_SA", os.path.join(CONF_DIR, "fcm-service-account.json"))
+FCM_API = os.environ.get("PCAPI_FCM_API", "https://fcm.googleapis.com").rstrip("/")
+FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
+TOKEN_RE = re.compile(r"^[A-Za-z0-9_:\-]{20,4096}$")
+MAX_TOKENS = 10
+
+
+def b64url(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def short(token):
+    return "…" + token[-6:]
+
+
+def clip(s, n):
+    s = " ".join(str(s or "").split())
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+class Push:
+    """Registered FCM tokens (DATA_DIR/push-tokens.json, mode 600) + an FCM HTTP v1 sender.
+    The service-account key is read from disk, kept in memory and never logged or returned."""
+
+    def __init__(self, sa_path=FCM_SA, data_dir=DATA_DIR, api=FCM_API):
+        self.sa_path, self.api = sa_path, api
+        self.tokens_file = os.path.join(data_dir, "push-tokens.json")
+        self.lock = threading.Lock()
+        t = load_json(self.tokens_file, {})
+        self.tokens = {k: v for k, v in t.items() if TOKEN_RE.match(k) and isinstance(v, dict)} \
+            if isinstance(t, dict) else {}
+        self._sa, self._access = None, (None, 0.0)
+        self.q = queue.Queue(maxsize=500)
+        threading.Thread(target=self.send_loop, daemon=True).start()
+
+    # ---- tokens
+    def configured(self):
+        return os.path.exists(self.sa_path)
+
+    def save(self):
+        os.makedirs(os.path.dirname(self.tokens_file), exist_ok=True)
+        tmp = self.tokens_file + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f: json.dump(self.tokens, f, indent=1)
+        os.replace(tmp, self.tokens_file)
+
+    def register(self, token, name):
+        if not isinstance(token, str) or not TOKEN_RE.match(token): return 400, {"error": "bad token"}
+        now = int(time.time())
+        with self.lock:
+            old = self.tokens.get(token) or {}
+            self.tokens[token] = {"name": clip(name, 80) or "phone", "added": old.get("added", now), "seen": now}
+            while len(self.tokens) > MAX_TOKENS:     # keep the most recently seen phones
+                del self.tokens[min(self.tokens, key=lambda k: self.tokens[k].get("seen", 0))]
+            self.save()
+            n = len(self.tokens)
+        return 200, {"ok": True, "registered": True, "devices": n, "configured": self.configured()}
+
+    def unregister(self, token):
+        with self.lock:
+            found = self.tokens.pop(token, None) is not None
+            if found: self.save()
+        return found
+
+    def status(self, token=None):
+        with self.lock:
+            return {"configured": self.configured(), "devices": len(self.tokens),
+                    **({"registered": token in self.tokens} if token is not None else {})}
+
+    # ---- OAuth2 (service-account JWT -> access token, cached until shortly before it expires)
+    def service_account(self):
+        if self._sa is None:
+            with open(self.sa_path) as f: sa = json.load(f)
+            from cryptography.hazmat.primitives import serialization
+            key = serialization.load_pem_private_key(sa["private_key"].encode(), password=None)
+            self._sa = {"key": key, "email": sa["client_email"], "kid": sa.get("private_key_id"),
+                        "token_uri": sa.get("token_uri") or "https://oauth2.googleapis.com/token",
+                        "project": sa["project_id"]}
+        return self._sa
+
+    def access_token(self, force=False):
+        with self.lock:
+            tok, exp = self._access
+            if tok and not force and time.time() < exp - 120: return tok
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+        sa = self.service_account()
+        now = int(time.time())
+        head = {"alg": "RS256", "typ": "JWT", **({"kid": sa["kid"]} if sa["kid"] else {})}
+        claims = {"iss": sa["email"], "scope": FCM_SCOPE, "aud": sa["token_uri"], "iat": now, "exp": now + 3600}
+        signing = b64url(json.dumps(head).encode()) + "." + b64url(json.dumps(claims).encode())
+        sig = sa["key"].sign(signing.encode(), padding.PKCS1v15(), hashes.SHA256())
+        form = urllib.parse.urlencode({"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                                       "assertion": signing + "." + b64url(sig)}).encode()
+        req = urllib.request.Request(sa["token_uri"], data=form,
+                                     headers={"Content-Type": "application/x-www-form-urlencoded"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r: d = json.load(r)
+        except urllib.error.HTTPError as e:
+            try: err = json.load(e).get("error", "")
+            except ValueError: err = ""
+            raise RuntimeError(f"OAuth token request failed: HTTP {e.code} {err}") from None
+        with self.lock:
+            self._access = (d["access_token"], time.time() + int(d.get("expires_in", 3600)))
+        return d["access_token"]
+
+    # ---- sending
+    def send_one(self, token, data, high=True, ttl=3600):
+        """-> (ok, error_code_or_None, dead_token)"""
+        sa = self.service_account()
+        msg = {"message": {"token": token, "data": {k: str(v) for k, v in data.items()},
+                           "android": {"priority": "HIGH" if high else "NORMAL", "ttl": f"{max(1, int(ttl))}s"}}}
+        body = json.dumps(msg, ensure_ascii=False).encode()
+        url = f"{self.api}/v1/projects/{sa['project']}/messages:send"
+        for attempt in (0, 1):
+            req = urllib.request.Request(url, data=body, headers={
+                "Authorization": "Bearer " + self.access_token(force=attempt > 0),
+                "Content-Type": "application/json; charset=utf-8"})
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r: json.load(r)
+                return True, None, False
+            except urllib.error.HTTPError as e:
+                try: err = json.load(e).get("error", {})
+                except ValueError: err = {}
+                if e.code == 401 and attempt == 0: continue        # stale access token: refresh once
+                codes = [d.get("errorCode") for d in err.get("details", []) if isinstance(d, dict)]
+                code = next((c for c in codes if c), None) or err.get("status") or f"HTTP {e.code}"
+                dead = e.code == 404 or "UNREGISTERED" in codes or (
+                    code == "INVALID_ARGUMENT" and "registration token" in str(err.get("message", "")).lower())
+                return False, code, dead
+        return False, "UNAUTHENTICATED", False
+
+    def send_all(self, data, high=True, ttl=3600, only=None):
+        with self.lock: targets = [t for t in self.tokens if only is None or t == only]
+        results = []
+        for t in targets:
+            try: ok, code, dead = self.send_one(t, data, high, ttl)
+            except Exception as e:  # network, OAuth, bad key file: report the kind, never the key
+                ok, code, dead = False, clip(f"{type(e).__name__}: {e}", 200), False
+            if dead: self.unregister(t)
+            if not ok: print(f"push: {data.get('kind')} to {short(t)} failed: {code}{' (token dropped)' if dead else ''}",
+                             file=sys.stderr, flush=True)
+            results.append({"token": short(t), "ok": ok, "error": code, "dropped": dead})
+        return results
+
+    def enqueue(self, data, high=True, ttl=3600):
+        if not self.configured() or not self.tokens: return
+        try: self.q.put_nowait((data, high, ttl))
+        except queue.Full: pass
+
+    def send_loop(self):
+        while True:
+            data, high, ttl = self.q.get()
+            try: self.send_all(data, high, ttl)
+            except Exception as e: print(f"push: send failed: {type(e).__name__}", file=sys.stderr, flush=True)
+
+    # ---- what gets pushed. Only notification text + ids: never the command, output or anything secret.
+    def on_root_event(self, t, r):
+        rid, st = str(r.get("id", "")), r.get("status")
+        if not rid: return
+        reason = clip(r.get("reason"), 300)
+        if t == "request" and st == "pending":
+            ttl = int(r.get("expires", 0)) - int(time.time())
+            if ttl <= 0: return
+            self.enqueue({"kind": "request", "id": rid, "title": "Root approval needed",
+                          "body": reason or "A command is waiting for your fingerprint.",
+                          "expires": int(r.get("expires", 0))}, True, ttl)
+        elif t == "update" and st == "done":
+            ex = r.get("exit", -1)
+            self.enqueue({"kind": "result", "id": rid,
+                          "title": "Command finished" if ex == 0 else f"Command failed (exit {ex})",
+                          "body": reason}, True, 600)
+        elif t == "update" and st != "pending":
+            self.enqueue({"kind": "dismiss", "id": rid}, False, 600)
+
+    def notify(self, nid, title, body):
+        self.enqueue({"kind": "notify", "id": nid, "title": title, "body": body}, True, 3600)
 
 
 # ---------------------------------------------------------------- routes
@@ -339,7 +534,9 @@ class H(BaseHTTPRequestHandler):
             if path == "/app.apk": return self.send_apk()
             if path == "/api/info":
                 return self.send_json(200, {"host": socket.gethostname(), "version": VERSION,
-                                            "rootd": rootd_state(), "apk": apk_info()})
+                                            "rootd": rootd_state(), "apk": apk_info(), "push": PUSH.status()})
+            if path == "/api/push/status":
+                return self.send_json(200, PUSH.status(qs.get("token", [""])[0]))
             if path == "/api/whoami":
                 return self.send_json(200, {"login": self.headers.get("Tailscale-User-Login"),
                                             "name": self.headers.get("Tailscale-User-Name"),
@@ -372,6 +569,25 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*rootd_or_503({"op": op, "id": str(b.get("id", "")),
                                                      "device": str(b.get("device", "")),
                                                      "signature": str(b.get("signature", ""))}))
+            if path == "/api/push/register":
+                return self.send_json(*PUSH.register(b.get("token"), b.get("name")))
+            if path == "/api/push/unregister":
+                return self.send_json(200, {"ok": True, "removed": PUSH.unregister(str(b.get("token", "")))})
+            if path == "/api/push/test":
+                if not PUSH.configured(): return self.send_json(503, {"error": "FCM is not configured on the laptop"})
+                only = b.get("token") or None
+                if only and not PUSH.status(only)["registered"]:
+                    return self.send_json(404, {"error": "this phone's token is not registered"})
+                res = PUSH.send_all({"kind": "notify", "id": "test-" + secrets.token_hex(6),
+                                     "title": "Test notification",
+                                     "body": f"Push from {socket.gethostname()} works."}, True, 300, only)
+                return self.send_json(200, {"sent": sum(r["ok"] for r in res), "results": res})
+            if path == "/api/notify":
+                title, body = clip(b.get("title"), 120), clip(b.get("body"), 500)
+                if not title: return self.send_json(400, {"error": "title required"})
+                nid = secrets.token_hex(8)
+                PUSH.notify(nid, title, body)
+                return self.send_json(200, {"ok": True, "id": nid})
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
@@ -443,10 +659,12 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global HUB
+    global HUB, PUSH
+    PUSH = Push()
     HUB = Hub()
     srv = Server(("127.0.0.1", PORT), H)
-    print(f"pc-api on 127.0.0.1:{PORT}, allowed tailnet logins: {sorted(ALLOWED_LOGINS) or 'NONE'}", flush=True)
+    print(f"pc-api on 127.0.0.1:{PORT}, allowed tailnet logins: {sorted(ALLOWED_LOGINS) or 'NONE'}, "
+          f"FCM {'configured' if PUSH.configured() else 'NOT configured'}, {len(PUSH.tokens)} push token(s)", flush=True)
     srv.serve_forever()
 
 

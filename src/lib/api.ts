@@ -86,6 +86,7 @@ export type Info = {
   version: number;
   rootd: { state: RootdState; version?: number; devices?: number };
   apk: { versionCode: number; versionName: string; sha256: string; size: number; built: number } | null;
+  push?: { configured: boolean; devices: number };
 };
 
 export type Route = {

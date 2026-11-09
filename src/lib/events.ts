@@ -1,5 +1,5 @@
 // In-app live updates: SSE over XMLHttpRequest (RN streams responseText via onprogress).
-// The background ForegroundService has its own native SSE connection for notifications.
+// Foreground only (the Root tab stays live while the app is open). Background notifications come via FCM.
 import { serverUrl } from './api';
 
 export type ServerEvent = { event: string; data: any };

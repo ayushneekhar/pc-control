@@ -2,8 +2,8 @@
 
 An Android app to manage Ayush's always-on Ubuntu laptop (`ayushlive-hp-pavilion`, tailnet
 `https://ayushlive-hp-pavilion.tail65e4a4.ts.net`), plus the server pieces behind it.
-Ayush uses it from his phone over Tailscale. Everything stays on the tailnet: no Telegram, no FCM/Google,
-no third-party push.
+Ayush uses it from his phone over Tailscale. Everything stays on the tailnet, except notification TEXT, which goes
+through Firebase Cloud Messaging (changed 9 Nov 2026, see section 3). No Telegram, no other third parties.
 
 ## 1. App features
 - **Routes**: list every `tailscale serve` route (cams, /vitals, /music, /rec, Seerr :5055, Bazarr :6767,
@@ -14,9 +14,9 @@ no third-party push.
 - **Services**: status of the user's own systemd user units (~/.config/systemd/user/*.service) with restart.
 - **Root approvals** (the main feature, see section 2): inbox of pending requests showing the exact argv and
   reason, Approve (fingerprint) / Deny, and a history with exit code + output.
-- **Notifications inside the app**, delivered over the tailnet (section 3).
-- Settings: server URL (default above), device enrollment for root approvals, background listener on/off,
-  battery-optimization exemption prompt.
+- **Notifications** via FCM push (section 3).
+- Settings: server URL (default above), device enrollment for root approvals, push status (FCM token
+  registered yes/no) + "Send test notification".
 
 Phone-first, clean, dark + light. Ayush is picky about polish.
 
@@ -65,20 +65,30 @@ approves that exact command with his fingerprint. No password exists in the flow
   is what counts), enroll, enroll/status, events (SSE: new root request, request updates, heartbeat ~25 s).
   It must work (with root features shown as "not installed") before rootd is installed.
   Also serve the latest APK at /pc/app.apk so Ayush can install/update from the phone.
-- Notifications: the app keeps an SSE connection to /pc/api/events from an Android foreground service
-  (type `specialUse`, so it can restart on boot under Android 15 rules), low-importance ongoing
-  notification, high-importance notification per new root request that opens the app on that request.
-  Reconnect with backoff, survive Doze (ask for the battery-optimization exemption), start on boot if enabled.
+- Notifications (changed 9 Nov 2026: FCM replaces the old foreground-service SSE listener, which was removed
+  together with the boot receiver, battery-exemption prompt and foreground-service permissions):
+  - App: native FirebaseMessagingService in pc-native. It registers its FCM token with pc-api
+    (`POST /pc/api/push/register`, tailnet-authenticated like every call) on app start and on token refresh.
+    pc-api stores the tokens in its state dir.
+  - pc-api: wherever it publishes rootd events to SSE, it also sends FCM HTTP v1 (service-account JWT →
+    OAuth2 access token, cached). Messages are data-only, high priority, and the app displays them itself
+    (its own channels + tap actions). Root request: only "Root approval needed" + the reason, plus the request
+    id; tapping opens the approval screen. Approval stays biometric-signed over the tailnet. No commands,
+    output, nonces or secrets go in FCM payloads. Tokens FCM reports as UNREGISTERED/404 are dropped.
+  - `POST /pc/api/push/test` sends a test notification; `POST /pc/api/notify` sends plain ones.
+  - `/pc/api/events` (SSE) stays only for the open app's live Root tab.
 
 ## 4. Tech + build
 - Expo (match ~/code/Apex: Expo SDK 57, RN 0.86, TypeScript, yarn, Node 22), Android only. Native bits as
-  a local Expo module in ./modules (Kotlin): keystore key + biometric signing, the foreground service,
-  battery-optimization helpers. androidx.biometric.
+  a local Expo module in ./modules (Kotlin): keystore key + biometric signing, the FCM
+  messaging service. androidx.biometric.
 - Build locally: JDK at ~/tools/jdk-21, Android SDK at ~/tools/android-sdk (~/.gradle is warm).
   `npx expo prebuild -p android` then a signed release APK. Release keystore OUTSIDE the repo at
   ~/.config/pc-control/release.jks (generate it, password in ~/.config/pc-control/keystore.env, chmod 600).
   Keep the same key for every build so updates install over the old app.
 - Typecheck + lint must pass. Python: stdlib + `cryptography` (system python3 has it), run with `python3 -I`.
+- Firebase: project `pc-control-neekhar`. `google-services.json` and the FCM service-account key live in
+  ~/.config/pc-control/ (mode 600) and are never committed.
 - Git: this folder is the repo. Ayush approved a new PRIVATE GitHub repo `ayushneekhar/pc-control`; push there.
   Never commit keystores, secrets or the APK.
 - Long builds: run them in the background, don't block on them.

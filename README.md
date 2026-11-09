@@ -1,8 +1,10 @@
 # pc-control
 
 An Android app for managing Ayush's always-on Ubuntu laptop (`ayushlive-hp-pavilion`) from his phone over
-Tailscale, plus the server pieces behind it. Nothing leaves the tailnet: no Telegram, no FCM/Google push,
-no third-party services.
+Tailscale, plus the server pieces behind it. Everything runs over the tailnet, with one exception: **notification
+text** goes through Firebase Cloud Messaging (FCM) so the phone gets notifications without a background
+connection. FCM payloads hold only a title, a short body and an id. A root request says "Root approval needed" and
+the reason, never the command. Approving still happens in the app, with a biometric signature, over the tailnet.
 
 The app has five tabs:
 
@@ -19,8 +21,28 @@ The app has five tabs:
 - **Root**: the approval inbox. Each request shows the exact command and the reason, with **Approve
   (fingerprint)** and **Deny** buttons. Below it is the history, with exit codes and output.
 - **Services**: your systemd user units with their status and logs, and a restart button.
-- **Settings**: root-approval enrollment, the background listener (notifications), the battery exemption,
-  the server URL and app updates.
+- **Settings**: root-approval enrollment, push notifications (FCM token status and a **Send test notification**
+  button), the server URL and app updates.
+
+## Notifications (FCM)
+
+- The app gets an FCM token and registers it with pc-api (`POST /pc/api/push/register`, over the tailnet,
+  checked like every other call). It registers again on every app start and whenever FCM rotates the token.
+  pc-api keeps the tokens in `~/.local/share/pc-control/push-tokens.json` (mode 600, at most 10).
+- pc-api sends through the FCM HTTP v1 API with the service-account key in
+  `~/.config/pc-control/fcm-service-account.json` (never in the repo, never logged). It signs a JWT, exchanges
+  it for an OAuth access token and caches that token for about an hour.
+- pc-api sends **data-only, high-priority** messages, and the app shows them itself, so channels and tap actions
+  work in the background too: new root request → "Root approval needed" + reason (tapping opens it in the
+  Root tab); command finished → "Command finished / failed (exit N)" + reason; decided, expired or cancelled →
+  a silent dismiss. Tokens that FCM reports as `UNREGISTERED`/404 (or as invalid) are dropped.
+- Anything local can send a plain notification:
+  `curl -s localhost:1990/pc/api/notify -H 'Content-Type: application/json' -d '{"title":"Backup done","body":"42 GB"}'`.
+- No foreground service, no pinned notification, no battery-optimization exemption. While the app is open,
+  the Root tab still updates live over SSE (`/pc/api/events`).
+- Build-time Firebase config: `app.config.js` uses `~/.config/pc-control/google-services.json` (or
+  `$PCC_GOOGLE_SERVICES`). It is never copied into the repo, only into the generated `android/`, which is
+  gitignored.
 
 ## Security model, in plain words
 
@@ -67,6 +89,10 @@ Tailscale login (the `Tailscale-User-Login` header that `tailscale serve` adds).
   sudo (first install or upgrade), check what you are installing: `git -C ~/code/pc-control log -p server/`
   or compare the sha256 the installer prints.
 - The agent can deny service: fill the pending queue, or flood enrollment proposals. It cannot get a command run.
+- **Notification text goes through Google.** The `--reason` of every root request (and any `/pc/api/notify`
+  text) is visible to FCM. Don't put secrets in reasons. The agent can also send you any notification text it
+  likes, but a notification can't approve anything: approving means checking the command in the app and
+  signing it with your fingerprint.
 
 ## Install
 
@@ -84,8 +110,8 @@ and adds the tailnet route `tailscale serve --bg --set-path /pc http://127.0.0.1
 On the phone, open `https://ayushlive-hp-pavilion.tail65e4a4.ts.net/pc/app.apk` (with Tailscale on) and install
 it. Later updates show up in Settings → Connection.
 
-In the app: Settings → **Background listener** on, then allow notifications and the battery-optimization
-exemption.
+Open the app and allow notifications. Then check Settings → Push notifications: it should say **Registered with
+the laptop**. Tap **Send test notification** to confirm.
 
 ### 3. Root daemon (Ayush, once, with sudo)
 
@@ -151,5 +177,5 @@ scripts/build-apk.sh [--bump]   # signed release APK -> ~/.local/share/pc-contro
   from the environment at build time.
 
 Layout: `App.tsx` + `src/` (screens, API, SSE, payload code), `modules/pc-native` (Kotlin: keystore +
-biometric signing, foreground SSE listener service, boot receiver, battery helpers), `server/` (rootd, pc-api,
+biometric signing, FCM push service + notification display), `server/` (rootd, pc-api incl. the FCM sender,
 rootctl, units, install scripts, tests).

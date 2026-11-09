@@ -1,11 +1,8 @@
 package expo.modules.pcnative
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
-import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.view.WindowInsetsCompat
@@ -23,14 +20,13 @@ class PcNativeModule : Module() {
     Name("PcNative")
 
     OnCreate {
-      appContext.reactContext?.let { ListenerService.ensureChannels(it) }
+      appContext.reactContext?.let { Notifier.ensureChannels(it) }
     }
 
-    // ---- settings shared with the background service
+    // ---- settings shared with the push service
     Function("getSettings") {
       mapOf(
         "serverUrl" to Prefs.serverUrl(ctx),
-        "listenerEnabled" to Prefs.listenerEnabled(ctx),
         "deviceFingerprint" to Prefs.deviceFingerprint(ctx),
         "defaultServerUrl" to Prefs.DEFAULT_SERVER,
       )
@@ -39,19 +35,19 @@ class PcNativeModule : Module() {
     Function("setDeviceFingerprint") { fp: String? -> Prefs.setDeviceFingerprint(ctx, fp) }
     Function("deviceName") { "${Build.MANUFACTURER} ${Build.MODEL}".trim() }
 
-    // ---- background listener
-    Function("setListenerEnabled") { on: Boolean ->
-      Prefs.setListenerEnabled(ctx, on)
-      if (on) ListenerService.start(ctx) else ListenerService.stop(ctx)
+    // ---- push (FCM)
+    Function("pushStatus") {
+      mapOf("available" to Push.available(ctx), "token" to Prefs.pushToken(ctx), "error" to Prefs.pushError(ctx))
     }
-    Function("restartListener") {
-      if (Prefs.listenerEnabled(ctx)) {
-        ListenerService.stop(ctx)
-        ListenerService.start(ctx)
+    // Fetch the FCM token and (re-)register it with pc-api. Runs on the module's background queue.
+    AsyncFunction("pushRegister") {
+      val c = ctx
+      val token = try { Push.token(c) } catch (e: PcException) { throw e } catch (e: Exception) {
+        Prefs.setPush(c, null, e.message ?: "could not get an FCM token")
+        throw PcException("E_FCM_TOKEN", e.message ?: "could not get an FCM token", e)
       }
-    }
-    Function("listenerStatus") {
-      mapOf("running" to ListenerService.running, "connected" to ListenerService.connected)
+      val ok = Push.register(c, token)
+      mapOf("token" to token, "registered" to ok, "error" to Prefs.pushError(c))
     }
     Function("notificationsEnabled") { NotificationManagerCompat.from(ctx).areNotificationsEnabled() }
     Function("openNotificationSettings") {
@@ -70,21 +66,6 @@ class PcNativeModule : Module() {
         .getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
       val d = activity.resources.displayMetrics.density
       mapOf("top" to i.top / d, "bottom" to i.bottom / d, "left" to i.left / d, "right" to i.right / d)
-    }
-
-    // ---- battery optimization (Doze)
-    Function("isIgnoringBatteryOptimizations") {
-      (ctx.getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(ctx.packageName)
-    }
-    Function("requestIgnoreBatteryOptimizations") {
-      @SuppressLint("BatteryLife")
-      val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${ctx.packageName}"))
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-      try {
-        ctx.startActivity(i)
-      } catch (_: Exception) {
-        ctx.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-      }
     }
 
     // ---- root-approval key

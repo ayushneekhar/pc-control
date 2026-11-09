@@ -56,7 +56,7 @@ class EndToEnd(unittest.TestCase):
             port = free_port()
             api = f"http://127.0.0.1:{port}"
             env = {**os.environ, "ROOTD_SOCK": sock, "PCAPI_PORT": str(port), "PCAPI_DATA": os.path.join(d, "data"),
-                   "ROOTD_INSTALLED_MARK": os.path.join(d, "nope")}
+                   "ROOTD_INSTALLED_MARK": os.path.join(d, "nope"), "PCAPI_FCM_SA": os.path.join(d, "no-fcm.json")}
             procs = []
             try:
                 # ---- before rootd exists: pc-api works and reports not_installed

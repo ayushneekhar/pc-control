@@ -5,6 +5,7 @@ import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { SystemInsetsProvider } from './src/components/SystemInsets';
 import { Icon } from './src/components/ui';
+import { askNotificationPermission, registerPush } from './src/lib/push';
 import { pendingList, startRootStore, useRootStore } from './src/lib/rootStore';
 import RootScreen from './src/screens/RootScreen';
 import RoutesScreen from './src/screens/RoutesScreen';
@@ -40,6 +41,10 @@ export default function App() {
   const t = useTheme();
   const store = useRootStore();
   useEffect(() => startRootStore(), []);
+  useEffect(() => {
+    // Notifications come through FCM: ask once for the permission (Android 13+), then (re-)register the token.
+    askNotificationPermission().finally(() => registerPush());
+  }, []);
   const waiting = pendingList(store).filter((r) => r.status === 'pending').length;
 
   const navTheme = {

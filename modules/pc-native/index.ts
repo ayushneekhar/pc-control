@@ -9,7 +9,6 @@ export type KeyInfo = {
 
 export type NativeSettings = {
   serverUrl: string;
-  listenerEnabled: boolean;
   deviceFingerprint: string | null;
   defaultServerUrl: string;
 };
@@ -30,13 +29,12 @@ export type PcNativeModule = {
   setServerUrl(url: string): void;
   setDeviceFingerprint(fp: string | null): void;
   deviceName(): string;
-  setListenerEnabled(on: boolean): void;
-  restartListener(): void;
-  listenerStatus(): { running: boolean; connected: boolean };
+  /** Firebase configured in this build, the FCM token pc-api last accepted (or null), the last error. */
+  pushStatus(): { available: boolean; token: string | null; error: string | null };
+  /** Fetch the FCM token and register it with pc-api. Rejects with E_NO_FIREBASE / E_FCM_TOKEN. */
+  pushRegister(): Promise<{ token: string; registered: boolean; error: string | null }>;
   notificationsEnabled(): boolean;
   openNotificationSettings(): void;
-  isIgnoringBatteryOptimizations(): boolean;
-  requestIgnoreBatteryOptimizations(): void;
   biometricStatus(): BiometricStatus;
   keyInfo(): KeyInfo | null;
   createKey(): Promise<KeyInfo>;

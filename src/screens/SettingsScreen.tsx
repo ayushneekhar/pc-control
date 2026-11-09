@@ -1,9 +1,10 @@
 import Constants from 'expo-constants';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Linking, PermissionsAndroid, Platform, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, AppState, Linking, StyleSheet, Text, TextInput, View } from 'react-native';
 import { KeyInfo, PcNative } from '../../modules/pc-native';
 import { Banner, Button, Card, Icon, KV, Mono, Pill, Screen, Section } from '../components/ui';
 import { ApiError, DEFAULT_SERVER, get, Info, post, serverUrl } from '../lib/api';
+import { askNotificationPermission, registerPush } from '../lib/push';
 import { reconnectRootStore, useRootStore } from '../lib/rootStore';
 import { keyFingerprint } from '../lib/rootPayload';
 import { radius, space, useTheme } from '../theme';
@@ -214,80 +215,89 @@ function Enrollment() {
   );
 }
 
-function Listener() {
+type TestState = { kind: 'idle' } | { kind: 'busy' } | { kind: 'done'; ok: boolean; text: string };
+
+function Push() {
   const t = useTheme();
   const tick = useAppActiveTick();
-  const [enabled, setEnabled] = useState(() => PcNative?.getSettings().listenerEnabled ?? false);
-  const [status, setStatus] = useState(() => PcNative?.listenerStatus() ?? { running: false, connected: false });
-  const [battery, setBattery] = useState(() => PcNative?.isIgnoringBatteryOptimizations() ?? false);
   const [notifs, setNotifs] = useState(() => PcNative?.notificationsEnabled() ?? false);
+  const [status, setStatus] = useState(() => PcNative?.pushStatus() ?? { available: false, token: null, error: null });
+  const [server, setServer] = useState<{ configured: boolean; registered?: boolean } | null>(null);
+  const [registering, setRegistering] = useState(false);
+  const [test, setTest] = useState<TestState>({ kind: 'idle' });
+
+  const refresh = useCallback(async () => {
+    if (!PcNative) return;
+    setRegistering(true);
+    setNotifs(PcNative.notificationsEnabled());
+    await registerPush();
+    const s = PcNative.pushStatus();
+    setStatus(s);
+    try {
+      setServer(await get<{ configured: boolean; registered?: boolean }>(`/pc/api/push/status?token=${encodeURIComponent(s.token ?? '')}`));
+    } catch {
+      setServer(null);
+    }
+    setRegistering(false);
+  }, []);
 
   useEffect(() => {
-    const refresh = () => {
-      if (!PcNative) return;
-      setStatus(PcNative.listenerStatus());
-      setBattery(PcNative.isIgnoringBatteryOptimizations());
-      setNotifs(PcNative.notificationsEnabled());
-    };
+    // re-check (and re-register) whenever the screen is shown or the app comes back to the foreground
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
-    const iv = setInterval(refresh, 3000);
-    return () => clearInterval(iv);
-  }, [tick]);
+  }, [refresh, tick]);
 
-  const toggle = async (on: boolean) => {
-    if (!PcNative) return;
-    if (on && Platform.OS === 'android' && Number(Platform.Version) >= 33) {
-      const r = await PermissionsAndroid.request('android.permission.POST_NOTIFICATIONS' as any);
-      if (r !== PermissionsAndroid.RESULTS.GRANTED) {
-        Alert.alert('Notifications are off', 'pc-control needs notifications to tell you about root requests.', [
-          { text: 'Not now', style: 'cancel' },
-          { text: 'Open settings', onPress: () => PcNative?.openNotificationSettings() },
-        ]);
-        return;
-      }
-    }
-    PcNative.setListenerEnabled(on);
-    setEnabled(on);
-    if (on && !PcNative.isIgnoringBatteryOptimizations()) {
-      Alert.alert(
-        'Keep it reliable',
-        'Allow pc-control to run in the background without battery optimization, so requests arrive even when the phone is idle (Doze).',
-        [
-          { text: 'Later', style: 'cancel' },
-          { text: 'Allow', onPress: () => PcNative?.requestIgnoreBatteryOptimizations() },
-        ],
-      );
+  const allow = async () => {
+    if (await askNotificationPermission()) setNotifs(true);
+    else
+      Alert.alert('Notifications are off', 'pc-control needs notifications to tell you about root requests.', [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Open settings', onPress: () => PcNative?.openNotificationSettings() },
+      ]);
+  };
+
+  const sendTest = async () => {
+    setTest({ kind: 'busy' });
+    try {
+      const r = await post<{ sent: number; results: { ok: boolean; error: string | null }[] }>('/pc/api/push/test', {
+        token: status.token,
+      });
+      const err = r.results.find((x) => !x.ok)?.error;
+      setTest(r.sent ? { kind: 'done', ok: true, text: 'Sent. It should arrive in a few seconds.' } : { kind: 'done', ok: false, text: `FCM refused it: ${err ?? 'no phones registered'}` });
+    } catch (e) {
+      setTest({ kind: 'done', ok: false, text: (e as Error).message });
     }
   };
 
+  const registered = !!status.token && server?.registered === true;
+  const subtitle = !status.available
+    ? 'This build has no Firebase config'
+    : registering && !registered
+      ? 'Registering with the laptop…'
+      : registered
+        ? 'Registered with the laptop'
+        : 'Not registered';
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <View style={[st.iconWrap, { backgroundColor: enabled ? t.accentSoft : t.cardAlt }]}>
-          <Icon name="bell-badge-outline" size={22} color={enabled ? t.accent : t.textDim} />
+        <View style={[st.iconWrap, { backgroundColor: registered && notifs ? t.accentSoft : t.cardAlt }]}>
+          <Icon name="bell-badge-outline" size={22} color={registered && notifs ? t.accent : t.textDim} />
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={{ color: t.text, fontWeight: '700', fontSize: 16 }}>Background listener</Text>
-          <Text style={{ color: t.textDim, fontSize: 13 }}>
-            {!enabled ? 'Off: you only see requests with the app open' : status.connected ? 'Connected over the tailnet' : status.running ? 'Connecting…' : 'Starting…'}
-          </Text>
+          <Text style={{ color: t.text, fontWeight: '700', fontSize: 16 }}>Push notifications</Text>
+          <Text style={{ color: t.textDim, fontSize: 13 }}>{subtitle}</Text>
         </View>
-        <Switch
-          value={enabled}
-          onValueChange={toggle}
-          trackColor={{ true: t.accent, false: t.border }}
-          thumbColor={t.dark ? '#ECEFF5' : '#FFFFFF'}
-        />
+        {registered && notifs ? <Pill tone="ok" icon="check" label="On" /> : null}
       </View>
+      <Row ok={notifs} label="Notifications allowed" fix={notifs ? undefined : { label: 'Allow', onPress: allow }} />
+      <Row ok={registered} label="FCM token registered" fix={registered || registering ? undefined : { label: 'Retry', onPress: refresh }} />
+      <Row ok={server?.configured === true} label="FCM set up on the laptop" />
+      {!registered && status.error ? <Text style={{ color: t.textFaint, fontSize: 12.5 }}>{status.error}</Text> : null}
+      <Button label="Send test notification" icon="send-outline" kind="subtle" busy={test.kind === 'busy'} disabled={!registered} onPress={sendTest} />
+      {test.kind === 'done' ? <Text style={{ color: test.ok ? t.ok : t.bad, fontSize: 13 }}>{test.text}</Text> : null}
       <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-        Keeps one connection to the laptop (no Google or third-party push) and notifies you of every root request. Starts on boot while on.
+        Delivered by Firebase Cloud Messaging. Only the notification text goes through Google, e.g. “Root approval needed” and the reason, never the command. Approving still happens here, with your fingerprint, over the tailnet.
       </Text>
-      <Row ok={notifs} label="Notifications" fix={notifs ? undefined : { label: 'Allow', onPress: () => PcNative?.openNotificationSettings() }} />
-      <Row
-        ok={battery}
-        label="Battery optimization exemption"
-        fix={battery ? undefined : { label: 'Allow', onPress: () => PcNative?.requestIgnoreBatteryOptimizations() }}
-      />
     </Card>
   );
 }
@@ -338,7 +348,7 @@ function Server() {
       return;
     }
     PcNative?.setServerUrl(clean);
-    PcNative?.restartListener();
+    registerPush();
     reconnectRootStore();
     test();
   };
@@ -396,7 +406,7 @@ export default function SettingsScreen() {
         <Enrollment />
       </Section>
       <Section label="Notifications">
-        <Listener />
+        <Push />
       </Section>
       <Section label="Connection">
         <Server />

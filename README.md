@@ -21,8 +21,40 @@ The app has five tabs:
 - **Root**: the approval inbox. Each request shows the exact command and the reason, with **Approve
   (fingerprint)** and **Deny** buttons. Below it is the history, with exit codes and output.
 - **Services**: your systemd user units with their status and logs, and a restart button.
-- **Settings**: root-approval enrollment, push notifications (FCM token status and a **Send test notification**
-  button), the server URL and app updates.
+- **Settings**: root-approval enrollment, **Notifications** (where each kind of notification goes: Telegram,
+  the app, or both), push status with **Test app** / **Test Telegram** buttons, the server URL, and **App
+  updates** (APK releases + over-the-air JS updates).
+
+## Notification router
+
+pc-api decides where every unsolicited notification goes. Each category has two switches, **Telegram** (the
+Qwen bot's chat) and **App** (FCM push), plus one master switch per channel (Settings → Notifications). The
+settings live on the laptop in `~/.local/share/pc-control/notify-settings.json`.
+
+| Category | Sent by | Telegram | App |
+|---|---|---|---|
+| Cat alerts (photo in Telegram, big picture in the app) | catdetect | on | off |
+| Download started | Radarr/Sonarr webhook (On Grab) | on | off |
+| Available to watch | Seerr webhook (media available) | on | off |
+| Download problems | Seerr (failed), Radarr/Sonarr (manual interaction), import-watch | on | on |
+| Qwen downloads finished | qBittorrent hook `notify_done.py` | on | off |
+| Backups & system alerts | config-backup, kernel-fix-watch, rec-digest | on | on |
+| Root approvals | rootd via pc-api | off | on |
+| Command results | rootd via pc-api | off | on |
+| Other messages | anything else sent to `/pc/api/notify` | off | on |
+
+The defaults keep what went to Telegram before the router. On the app side, only the things you shouldn't miss
+are on. The Qwen bot's replies to your own messages (`/status`, searches, repo runs…) don't go through here.
+
+- Local scripts call the helper `~/remote-pc/lib/pcnotify.py` (Python `pcnotify.notify(category, title, body,
+  telegram_text=, image=, link=)` or shell `python3 -I ~/remote-pc/lib/pcnotify.py <category> <title> [body]
+  [--image F] [--text T]`). It **fails open**: if pc-api is down, errors, or its Telegram send failed (HTTP
+  502), the helper sends straight to Telegram as before, so alerts are never lost.
+- Radarr, Sonarr and Seerr post to `http://127.0.0.1:1990/pc/api/hook/{radarr,sonarr,seerr}` with the shared
+  secret from `~/.config/pc-control/hook-secret` (Radarr/Sonarr: Basic auth password, Seerr: Authorization
+  header `Bearer …`). Without it pc-api answers 401.
+- Laptop-specific values (Telegram chat id, Seerr's public URL) are in `~/.config/pc-control/pcapi.json`
+  (`telegram_chat`, `seerr_url`); the bot token is read from the Qwen bot's token file. None of it is in git.
 
 ## Notifications (FCM)
 
@@ -36,8 +68,11 @@ The app has five tabs:
   work in the background too: new root request → "Root approval needed" + reason (tapping opens it in the
   Root tab); command finished → "Command finished / failed (exit N)" + reason; decided, expired or cancelled →
   a silent dismiss. Tokens that FCM reports as `UNREGISTERED`/404 (or as invalid) are dropped.
-- Anything local can send a plain notification:
-  `curl -s localhost:1990/pc/api/notify -H 'Content-Type: application/json' -d '{"title":"Backup done","body":"42 GB"}'`.
+- Anything local can send a notification through the router (see above):
+  `curl -s localhost:1990/pc/api/notify -H 'Content-Type: application/json' -d '{"category":"system","title":"Backup done","body":"42 GB"}'`.
+- Router notifications use one Android channel per category, so you can also tune them in Android settings.
+  A picture (cat alerts, Seerr posters) is fetched from pc-api over the tailnet when the notification arrives
+  (`/pc/api/notify/image/<id>`); FCM itself only carries the text and that path.
 - No foreground service, no pinned notification, no battery-optimization exemption. While the app is open,
   the Root tab still updates live over SSE (`/pc/api/events`).
 - Build-time Firebase config: `app.config.js` uses `~/.config/pc-control/google-services.json` (or
@@ -107,8 +142,9 @@ and adds the tailnet route `tailscale serve --bg --set-path /pc http://127.0.0.1
 
 ### 2. The app
 
-On the phone, open `https://ayushlive-hp-pavilion.tail65e4a4.ts.net/pc/app.apk` (with Tailscale on) and install
-it. Later updates show up in Settings → Connection.
+On the phone, open https://github.com/ayushneekhar/pc-control/releases/latest and install `pc-control.apk`.
+Later APK releases and over-the-air updates show up in Settings → App updates (and as an "App update available"
+card when you open the app).
 
 Open the app and allow notifications. Then check Settings → Push notifications: it should say **Registered with
 the laptop**. Tap **Send test notification** to confirm.
@@ -159,8 +195,33 @@ Tips for the agent: give a clear `--reason` (Ayush reads it on his lock screen),
 ```sh
 yarn test           # rootd + pc-api + rootctl tests, incl. end-to-end with a software key as the phone
 yarn typecheck && yarn lint
-scripts/build-apk.sh [--bump]   # signed release APK -> ~/.local/share/pc-control/app.apk (served at /pc/app.apk)
+scripts/build-apk.sh [--bump]   # build + sign the release APK locally (no publishing)
+scripts/release-apk.sh ["notes"]  # native release: build, sign, publish to GitHub Releases + matching OTA
+scripts/ota-publish.sh ["notes"]  # JS-only change: signed over-the-air update for the current build
 ```
+
+### Releases: native changes → new APK, JS-only → OTA
+
+- **Native change** (anything in `modules/*/android`, `plugins/`, `app.json`, `app.config.js`,
+  `package.json`/`yarn.lock`, a new native dependency): bump `version` and `versionCode` in `app.json` (or
+  `scripts/build-apk.sh --bump`), commit, push, then `scripts/release-apk.sh "notes"`. It builds and signs on the
+  laptop (the keystore never goes to GitHub), creates the GitHub release `v<version>` with `pc-control.apk` and
+  `version.json`, and publishes the matching OTA snapshot. Push the counter commit it makes.
+- **JS/TS-only change** (`App.tsx`, `src/`): commit, then `scripts/ota-publish.sh "what changed"`, then push the
+  counter commit. It refuses if native files changed since the installed build's tag `v<version>`.
+- OTA works like Apex's (react-native-nitro-ota 0.14.0): the app checks on launch and when it returns to the
+  foreground, shows **Later / Update**, downloads, and restarts into the new bundle. If the app crashes right
+  after an update, it rolls back. Differences from Apex: the snapshot is the rolling GitHub release
+  `ota-android` (`bundle.zip` + `ota.version.json`, public, no auth), not a branch; and bundles are **signed**.
+- Each bundle targets one exact build (`<version>+<versionCode>`). Installing a new APK drops all OTA data.
+  react-native-nitro-ota has no signing of its own, so `scripts/ota/build-nitro-ota.mjs` writes `ota.manifest`
+  (target build + SHA-256 of every file) and `ota.sig` (ECDSA P-256 with `~/.config/pc-control/ota-signing-key.pem`,
+  laptop only). `MainApplication` (generated through `plugins/withNitroOta.js`) checks both with
+  `OtaVerifier.kt` on every cold start, before React Native gets the bundle. A bundle that isn't signed, is for
+  another build, or has any file changed is refused, and the APK's own JS runs. Lose that key and OTA stops
+  working until a new APK ships with a new public key in `OtaVerifier.kt`.
+- OTA versions are plain counters (`scripts/ota/ota-bundle-version.json`). The APK's embedded JS knows its own
+  number, so only strictly newer bundles are offered.
 
 - `server/tests/test_rootd.py`: checks payload canonicalization against the app's own TypeScript
   (`src/lib/rootPayload.ts`, run through Node) with quotes, backslashes, unicode, emoji, `\n` and `\t`. Also
@@ -176,6 +237,7 @@ scripts/build-apk.sh [--bump]   # signed release APK -> ~/.local/share/pc-contro
   the repo. Keep it: every update must be signed with the same key. `plugins/withReleaseSigning.js` reads it
   from the environment at build time.
 
-Layout: `App.tsx` + `src/` (screens, API, SSE, payload code), `modules/pc-native` (Kotlin: keystore +
-biometric signing, FCM push service + notification display), `server/` (rootd, pc-api incl. the FCM sender,
-rootctl, units, install scripts, tests).
+Layout: `App.tsx` + `src/` (screens, API, SSE, payload code, OTA), `modules/pc-native` (Kotlin: keystore +
+biometric signing, FCM push service + notification display, OTA signature check), `plugins/` (release signing,
+nitro-ota MainApplication wiring), `scripts/` (build, release, OTA), `server/` (rootd, pc-api incl. the FCM
+sender and notification router, rootctl, units, install scripts, tests).

@@ -64,7 +64,7 @@ approves that exact command with his fingerprint. No password exists in the flow
   root/pending, root/history, root/approve, root/deny (relay the phone's signature to rootd; the signature
   is what counts), enroll, enroll/status, events (SSE: new root request, request updates, heartbeat ~25 s).
   It must work (with root features shown as "not installed") before rootd is installed.
-  Also serve the latest APK at /pc/app.apk so Ayush can install/update from the phone.
+  APKs are published to GitHub Releases (changed 9 Nov 2026; /pc/app.apk is legacy and goes away).
 - Notifications (changed 9 Nov 2026: FCM replaces the old foreground-service SSE listener, which was removed
   together with the boot receiver, battery-exemption prompt and foreground-service permissions):
   - App: native FirebaseMessagingService in pc-native. It registers its FCM token with pc-api
@@ -75,7 +75,8 @@ approves that exact command with his fingerprint. No password exists in the flow
     (its own channels + tap actions). Root request: only "Root approval needed" + the reason, plus the request
     id; tapping opens the approval screen. Approval stays biometric-signed over the tailnet. No commands,
     output, nonces or secrets go in FCM payloads. Tokens FCM reports as UNREGISTERED/404 are dropped.
-  - `POST /pc/api/push/test` sends a test notification; `POST /pc/api/notify` sends plain ones.
+  - `POST /pc/api/push/test` sends a test notification; `POST /pc/api/notify` is the notification router
+    (9 Nov 2026): per-category Telegram (Qwen bot) / app switches, see README "Notification router".
   - `/pc/api/events` (SSE) stays only for the open app's live Root tab.
 
 ## 4. Tech + build
@@ -96,7 +97,7 @@ approves that exact command with his fingerprint. No password exists in the flow
   standing in for the phone (a test script that signs like the app does).
 
 ## 5. Done means
-- pc-api running as a user service with the /pc tailnet route, APK built and served at /pc/app.apk.
+- pc-api running as a user service with the /pc tailnet route, APK built locally and published to GitHub Releases; JS-only changes as signed nitro-ota updates.
 - rootd + install script ready for Ayush to run with sudo (not run by you).
 - README with: what it is, the security model in plain words, install steps, how the agent uses rootctl.
 - A short final report: what works, what's untested (anything needing the real phone), the exact command

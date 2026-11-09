@@ -45,6 +45,8 @@ export type PcNativeModule = {
   /** Saves go2rtc's current frame of a stream to Pictures/PC Control; resolves to its content:// uri. */
   camsSaveSnapshot(stream: string, label: string): Promise<string>;
   camsShare(uri: string): Promise<void>;
+  /** Text shared to the app ("Share → PC Control"), once; null if none. */
+  takeSharedText(): string | null;
   getSettings(): NativeSettings;
   setServerUrl(url: string): void;
   setDeviceFingerprint(fp: string | null): void;

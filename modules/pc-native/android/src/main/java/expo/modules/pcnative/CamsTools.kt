@@ -60,7 +60,12 @@ object CamsTools {
       conn.disconnect()
     }
     if (bytes.size < 4 || bytes[0] != 0xFF.toByte() || bytes[1] != 0xD8.toByte()) throw PcException("E_SNAPSHOT", "not a JPEG")
-    val safe = label.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "-").trim('-').ifEmpty { stream }
+    return saveJpeg(ctx, bytes, label, stream)
+  }
+
+  /** Writes a JPEG to Pictures/PC Control as "<label>-<time>.jpg"; returns its content:// uri. */
+  fun saveJpeg(ctx: Context, bytes: ByteArray, label: String, fallbackName: String): String {
+    val safe = label.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "-").trim('-').ifEmpty { fallbackName }
     val name = "$safe-${SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.ROOT).format(Date())}.jpg"
     val values = ContentValues().apply {
       put(MediaStore.Images.Media.DISPLAY_NAME, name)

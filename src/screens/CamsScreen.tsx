@@ -7,7 +7,7 @@
 // - Everything starts muted: audio connections exist only while Listen / the cam mic / Talk are on.
 // - Leaving the screen or backgrounding the app closes every connection (and Talk/Listen); coming back
 //   reconnects at once.
-import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
 import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -35,6 +35,16 @@ import { serverUrl } from '../lib/api';
 import { CamLink, LinkKind, LinkState } from '../lib/cams/link';
 import { CAM_MIC_STREAM, CamId, CAMS, HD_STREAM, HD_WAIT_MS, LAPTOP_MIC_STREAM, NAMES, TALK_STREAM, WEB_PATH } from '../lib/cams/config';
 import { radius, space, useTheme } from '../theme';
+import { MusicTab } from './cams/MusicTab';
+import { ReplayTab } from './cams/ReplayTab';
+
+export type CamsTab = 'live' | 'replay' | 'music';
+export type CamsParams = { tab?: CamsTab; share?: string; shareId?: number } | undefined;
+const TABS: { id: CamsTab; label: string; icon: string }[] = [
+  { id: 'live', label: 'Live', icon: 'access-point' },
+  { id: 'replay', label: 'Replay', icon: 'history' },
+  { id: 'music', label: 'Music', icon: 'music' },
+];
 
 type Stream = { toURL(): string };
 
@@ -475,12 +485,33 @@ function ActButton({
 export default function CamsScreen() {
   const t = useTheme();
   const nav = useNavigation<any>();
+  const params = useRoute().params as CamsParams;
   const insets = useSafeAreaInsets();
   const win = useWindowDimensions();
   const toast = useToast();
   const showToast = toast.show;
   const [hd] = useState(hdSupport);
   const webrtcOk = !!NativeModules.WebRTCModule;
+  const [tab, setTab] = useState<CamsTab>(params?.tab ?? 'live');
+  // a YouTube link shared into the app (App.tsx navigates here with it): the Music tab plays it once
+  const [shared, setShared] = useState<string | null>(params?.share ?? null);
+  const shareId = params?.shareId;
+  useEffect(() => {
+    if (!shareId || !params?.share) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTab('music');
+    setShared(params.share);
+  }, [shareId, params?.share]);
+  const clearShared = useCallback(() => setShared(null), []);
+  // Replay decodes cat3hd's H.265 itself when the phone has a hardware HEVC decoder for 2304x1296, else the laptop
+  // transcodes it to H.264 (the page's &v=avc)
+  const [recHevc] = useState(() => {
+    try {
+      return !!PcNative?.camsHardware().h265?.hd;
+    } catch {
+      return false;
+    }
+  });
 
   // CP Plus mode: HD by default when the phone can (nothing saved: every open starts on HD, like the page)
   const [cat3Hd, setCat3Hd] = useState(hd.ok);
@@ -513,7 +544,9 @@ export default function CamsScreen() {
     stopPtz();
   });
 
-  const run = active && webrtcOk;
+  // live video only on the Live tab (frees the decoders and the link for Replay); Listen/Talk keep running
+  const run = active && webrtcOk && tab === 'live';
+  const audioRun = active && webrtcOk;
   const links = {
     cat: useLink(run ? 'cat' : null, 'video'),
     cat2: useLink(run ? 'cat2' : null, 'video'),
@@ -529,15 +562,15 @@ export default function CamsScreen() {
       },
     }),
   };
-  useLink(run && camMic ? CAM_MIC_STREAM : null, 'audio', {
+  useLink(audioRun && camMic ? CAM_MIC_STREAM : null, 'audio', {
     onState: (s) => {
       if (s.phase !== 'retrying' || s.attempt <= 2) return;
       setCamMic(false);
       showToast(`Cam's mic didn't connect (${s.error ?? 'error'}).`, 3500);
     },
   });
-  const ear = useLink(run && listen ? LAPTOP_MIC_STREAM : null, 'audio');
-  const mic = useLink(run && talk !== 'off' ? TALK_STREAM : null, 'talk', {
+  const ear = useLink(audioRun && listen ? LAPTOP_MIC_STREAM : null, 'audio');
+  const mic = useLink(audioRun && talk !== 'off' ? TALK_STREAM : null, 'talk', {
     maxAttempts: 2,
     onState: (s) => {
       if (s.phase !== 'error') return;
@@ -693,6 +726,7 @@ export default function CamsScreen() {
   const talkLive = mic.state.phase === 'live';
   const big = focus ? links[focus].state : null;
   const thumbW = (win.width - space(4) * 2 - space(2.5)) / 2;
+  const showBar = tab === 'live' || listen || talk !== 'off';
 
   return (
     <View style={{ flex: 1, backgroundColor: t.bg }}>
@@ -701,141 +735,164 @@ export default function CamsScreen() {
         <Pressable onPress={() => nav.goBack()} hitSlop={8} accessibilityLabel="Back" style={st.hBtn}>
           <Icon name="arrow-left" size={24} color={t.text} />
         </Pressable>
-        <Text style={{ color: t.text, fontSize: 20, fontWeight: '800', flex: 1 }}>Cat cams</Text>
-        <View style={[st.live, { backgroundColor: t.cardAlt }]}>
-          <View style={[st.liveDot, { backgroundColor: liveCount ? '#EF4444' : t.textFaint }]} />
-          <Text style={{ color: liveCount ? t.text : t.textDim, fontSize: 12, fontWeight: '700', letterSpacing: 0.6 }}>
-            LIVE <Text style={{ color: t.textDim, fontWeight: '500' }}>{`${liveCount}/${CAMS.length}`}</Text>
-          </Text>
+        <View style={[st.seg, { backgroundColor: t.cardAlt }]} accessibilityRole="tablist">
+          {TABS.map((x) => {
+            const on = tab === x.id;
+            return (
+              <Pressable
+                key={x.id}
+                onPress={() => setTab(x.id)}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: on }}
+                style={[st.segBtn, on && { backgroundColor: t.card }]}
+              >
+                {x.id === 'live' && on ? (
+                  <View style={[st.liveDot, { backgroundColor: liveCount ? '#EF4444' : t.textFaint }]} />
+                ) : (
+                  <Icon name={x.icon} size={15} color={on ? t.text : t.textDim} />
+                )}
+                <Text style={{ color: on ? t.text : t.textDim, fontWeight: '700', fontSize: 13 }} numberOfLines={1}>
+                  {x.id === 'live' && on ? `${x.label} ${liveCount}/${CAMS.length}` : x.label}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
         <Pressable onPress={() => setMenu(true)} hitSlop={8} accessibilityLabel="More" style={st.hBtn}>
           <Icon name="dots-vertical" size={24} color={t.text} />
         </Pressable>
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: space(4), paddingBottom: 110 + insets.bottom, gap: space(3) }}>
-        {!webrtcOk ? (
-          <Banner tone="bad" title="Native player unavailable">
-            This build has no WebRTC module. Use the web page from the menu.
-          </Banner>
-        ) : null}
-        {/* cat alerts */}
-        <View style={st.detRow}>
-          <Pressable
-            onPress={() => det.det && det.toggle(!det.det.enabled)}
-            disabled={!det.det || det.busy}
-            style={[
-              st.detTog,
-              {
-                backgroundColor: det.det?.enabled ? t.okSoft : t.card,
-                borderColor: det.det?.enabled ? t.ok + '66' : t.border,
-                opacity: det.det ? 1 : 0.5,
-              },
-            ]}
-          >
-            <Icon name="cctv" size={18} color={det.det?.enabled ? t.ok : t.textDim} />
-            <Text style={{ color: det.det?.enabled ? t.text : t.textDim, fontWeight: '700', fontSize: 14 }}>Cat alerts</Text>
-            <Switch
-              value={!!det.det?.enabled}
-              onValueChange={(v) => det.toggle(v)}
-              disabled={!det.det || det.busy}
-              trackColor={{ true: t.ok, false: t.border }}
-              thumbColor={t.dark ? '#ECEFF5' : '#FFFFFF'}
-              style={{ marginVertical: -8 }}
-            />
-          </Pressable>
-          <Text style={{ color: t.textDim, fontSize: 13, flex: 1 }} numberOfLines={2}>
-            {det.line}
-          </Text>
-        </View>
-
-        {/* cameras */}
-        {focus ? (
+      <ScrollView
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={{ padding: space(4), paddingBottom: (showBar ? 110 : space(6)) + insets.bottom, gap: space(3) }}
+      >
+        {tab === 'replay' ? <ReplayTab visible={active} hevcOk={recHevc} toast={toast.show} /> : null}
+        {tab === 'music' ? <MusicTab visible={active} toast={toast.show} shared={shared} onSharedDone={clearShared} /> : null}
+        {tab !== 'live' ? null : (
           <>
-            <CamCard
-              id={focus}
-              name={NAMES[focus]}
-              link={links[focus]}
-              mode={focus === 'cat3' ? cat3Mode : undefined}
-              onPress={() => setFocus(null)}
-            >
-              {cardButtons(focus, false)}
-            </CamCard>
-            {big ? <StreamInfo s={big} hdDecoder={focus === 'cat3' && cat3Hd ? hd.decoder : null} /> : null}
-            <View style={{ flexDirection: 'row', gap: space(2.5) }}>
-              {ordered.slice(1).map((c) => (
+            {!webrtcOk ? (
+              <Banner tone="bad" title="Native player unavailable">
+                This build has no WebRTC module. Use the web page from the menu.
+              </Banner>
+            ) : null}
+            {/* cat alerts */}
+            <View style={st.detRow}>
+              <Pressable
+                onPress={() => det.det && det.toggle(!det.det.enabled)}
+                disabled={!det.det || det.busy}
+                style={[
+                  st.detTog,
+                  {
+                    backgroundColor: det.det?.enabled ? t.okSoft : t.card,
+                    borderColor: det.det?.enabled ? t.ok + '66' : t.border,
+                    opacity: det.det ? 1 : 0.5,
+                  },
+                ]}
+              >
+                <Icon name="cctv" size={18} color={det.det?.enabled ? t.ok : t.textDim} />
+                <Text style={{ color: det.det?.enabled ? t.text : t.textDim, fontWeight: '700', fontSize: 14 }}>Cat alerts</Text>
+                <Switch
+                  value={!!det.det?.enabled}
+                  onValueChange={(v) => det.toggle(v)}
+                  disabled={!det.det || det.busy}
+                  trackColor={{ true: t.ok, false: t.border }}
+                  thumbColor={t.dark ? '#ECEFF5' : '#FFFFFF'}
+                  style={{ marginVertical: -8 }}
+                />
+              </Pressable>
+              <Text style={{ color: t.textDim, fontSize: 13, flex: 1 }} numberOfLines={2}>
+                {det.line}
+              </Text>
+            </View>
+
+            {/* cameras */}
+            {focus ? (
+              <>
+                <CamCard
+                  id={focus}
+                  name={NAMES[focus]}
+                  link={links[focus]}
+                  mode={focus === 'cat3' ? cat3Mode : undefined}
+                  onPress={() => setFocus(null)}
+                >
+                  {cardButtons(focus, false)}
+                </CamCard>
+                {big ? <StreamInfo s={big} hdDecoder={focus === 'cat3' && cat3Hd ? hd.decoder : null} /> : null}
+                <View style={{ flexDirection: 'row', gap: space(2.5) }}>
+                  {ordered.slice(1).map((c) => (
+                    <CamCard
+                      key={c.id}
+                      id={c.id}
+                      name={c.name}
+                      link={links[c.id]}
+                      compact
+                      style={{ width: thumbW }}
+                      onPress={() => setFocus(c.id)}
+                    />
+                  ))}
+                </View>
+              </>
+            ) : (
+              CAMS.map((c) => (
                 <CamCard
                   key={c.id}
                   id={c.id}
                   name={c.name}
                   link={links[c.id]}
-                  compact
-                  style={{ width: thumbW }}
+                  mode={c.id === 'cat3' ? cat3Mode : undefined}
                   onPress={() => setFocus(c.id)}
-                />
-              ))}
-            </View>
+                >
+                  {cardButtons(c.id, false)}
+                </CamCard>
+              ))
+            )}
+            {!hd.ok && webrtcOk ? (
+              <Text style={{ color: t.textFaint, fontSize: 12, textAlign: 'center' }}>Food bowl HD unavailable: {hd.why}.</Text>
+            ) : null}
           </>
-        ) : (
-          CAMS.map((c) => (
-            <CamCard
-              key={c.id}
-              id={c.id}
-              name={c.name}
-              link={links[c.id]}
-              mode={c.id === 'cat3' ? cat3Mode : undefined}
-              onPress={() => setFocus(c.id)}
-            >
-              {cardButtons(c.id, false)}
-            </CamCard>
-          ))
         )}
-        {!hd.ok && webrtcOk ? (
-          <Text style={{ color: t.textFaint, fontSize: 12, textAlign: 'center' }}>Food bowl HD unavailable: {hd.why}.</Text>
-        ) : null}
       </ScrollView>
 
-      {/* Listen / Talk */}
-      <View style={[st.bar, { paddingBottom: insets.bottom + space(3), backgroundColor: t.bg + 'F2', borderTopColor: t.border }]}>
-        <ActButton
-          state={!listen ? 'off' : ear.state.phase === 'live' ? 'on' : ear.state.phase === 'error' ? 'blocked' : 'busy'}
-          icon={listen ? 'volume-high' : 'volume-off'}
-          t1={listen ? 'Listening' : 'Listen'}
-          t2={
-            !listen
-              ? 'Laptop mic is off'
-              : ear.state.phase === 'live'
-                ? 'Tap to stop'
-                : ear.state.phase === 'error'
-                  ? (ear.state.error ?? 'Failed')
-                  : 'Connecting…'
-          }
-          onPress={() => setListen(!listen)}
-        />
-        <ActButton
-          state={talk === 'off' ? 'off' : talkLive ? 'talking' : 'busy'}
-          icon={talk === 'off' ? 'microphone-off' : 'microphone'}
-          t1={talk === 'off' ? 'Talk' : talkLive ? 'Talking' : 'Connecting…'}
-          t2={
-            talk === 'off'
-              ? 'Hold to talk · tap to latch'
-              : `${Math.floor(talkSecs / 60)}:${String(talkSecs % 60).padStart(2, '0')} · ${talk === 'held' ? 'release to stop' : 'tap to stop'}`
-          }
-          onPressIn={talkIn}
-          onPressOut={talkOut}
-        />
-      </View>
+      {/* Listen / Talk (on Replay / Music only while one of them is on, like the page) */}
+      {showBar ? (
+        <View style={[st.bar, { paddingBottom: insets.bottom + space(3), backgroundColor: t.bg + 'F2', borderTopColor: t.border }]}>
+          <ActButton
+            state={!listen ? 'off' : ear.state.phase === 'live' ? 'on' : ear.state.phase === 'error' ? 'blocked' : 'busy'}
+            icon={listen ? 'volume-high' : 'volume-off'}
+            t1={listen ? 'Listening' : 'Listen'}
+            t2={
+              !listen
+                ? 'Laptop mic is off'
+                : ear.state.phase === 'live'
+                  ? 'Tap to stop'
+                  : ear.state.phase === 'error'
+                    ? (ear.state.error ?? 'Failed')
+                    : 'Connecting…'
+            }
+            onPress={() => setListen(!listen)}
+          />
+          <ActButton
+            state={talk === 'off' ? 'off' : talkLive ? 'talking' : 'busy'}
+            icon={talk === 'off' ? 'microphone-off' : 'microphone'}
+            t1={talk === 'off' ? 'Talk' : talkLive ? 'Talking' : 'Connecting…'}
+            t2={
+              talk === 'off'
+                ? 'Hold to talk · tap to latch'
+                : `${Math.floor(talkSecs / 60)}:${String(talkSecs % 60).padStart(2, '0')} · ${talk === 'held' ? 'release to stop' : 'tap to stop'}`
+            }
+            onPressIn={talkIn}
+            onPressOut={talkOut}
+          />
+        </View>
+      ) : null}
 
-      <Toast toast={toast} bottom={insets.bottom + 96} />
+      <Toast toast={toast} bottom={insets.bottom + (showBar ? 96 : 24)} />
 
       <Modal visible={menu} transparent animationType="fade" onRequestClose={() => setMenu(false)}>
         <Pressable style={st.menuBg} onPress={() => setMenu(false)}>
           <View style={[st.menu, { top: insets.top + 52, backgroundColor: t.card, borderColor: t.border }]}>
-            {[
-              { icon: 'web', label: 'Open the web page', hash: '' },
-              { icon: 'history', label: 'Replay (web)', hash: '#replay' },
-              { icon: 'music', label: 'Music (web)', hash: '#music' },
-            ].map((m) => (
+            {[{ icon: 'web', label: 'Open the web page', hash: tab === 'live' ? '' : '#' + tab }].map((m) => (
               <Pressable key={m.label} onPress={() => openWeb(m.hash)} android_ripple={{ color: t.accentSoft }} style={st.menuItem}>
                 <Icon name={m.icon} size={20} color={t.textDim} />
                 <Text style={{ color: t.text, fontSize: 15 }}>{m.label}</Text>
@@ -891,7 +948,17 @@ const st = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   hBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 22 },
-  live: { flexDirection: 'row', alignItems: 'center', gap: 7, height: 30, paddingHorizontal: 11, borderRadius: 99 },
+  seg: { flex: 1, flexDirection: 'row', padding: 3, borderRadius: 99, gap: 2 },
+  segBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    height: 34,
+    borderRadius: 99,
+    paddingHorizontal: 6,
+  },
   liveDot: { width: 8, height: 8, borderRadius: 4 },
   detRow: { flexDirection: 'row', alignItems: 'center', gap: space(3) },
   detTog: {

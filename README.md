@@ -28,8 +28,8 @@ The app has five tabs:
 
 ## Cat cams (native player)
 
-Tapping **Cat cams** in Routes opens a native screen instead of the `/cams/` page. The menu (top right) still opens
-the web page, its Replay and its Music tabs, which aren't ported.
+Tapping **Cat cams** in Routes opens a native screen instead of the `/cams/` page, with **Live | Replay | Music**
+at the top (like the page's tabs). The menu (top right) still opens the web page.
 
 - **Transport: WebRTC** (react-native-webrtc 155 = libwebrtc M155), using go2rtc's own WebSocket signalling
   (`/api/ws?src=…`, trickle ICE, `src/lib/cams/signal.ts`). Media goes straight over the tailnet (UDP to go2rtc's
@@ -64,6 +64,23 @@ the web page, its Replay and its Music tabs, which aren't ported.
   release), the Cat alerts switch (`/detect/state` every 15 s, `/detect/toggle`). Leaving the screen or
   backgrounding the app closes every connection (Listen/Talk too); coming back reconnects at once. A dropped camera
   retries with backoff (0.5 s … 10 s); no new frame for 6 s counts as dropped.
+- **Replay** (`src/screens/cams/ReplayTab.tsx` + `replayEngine.ts`, maths in `src/lib/cams/replay.ts`): the last
+  24 h of cat, cat2 and cat3hd from camrec. Each cam is **one continuous VOD HLS playlist** (`/rec/<cam>/index.m3u8?a=…&b=…`,
+  recording gaps left out) in a native Media3 ExoPlayer (`RecPlayerView.kt`: TextureView, muted, hardware decode,
+  H.265 for cat3hd when the phone has a hardware HEVC decoder for 2304×1296, else the laptop's `&v=avc` H.264). One
+  wall clock drives all three, as on the page: it follows the big tile while playing (media ↔ wall time through
+  `index.json`'s spans), the others seek when they drift > 1.5 s, a cam without footage says so, and if none has
+  footage the clock jumps to the next recording. Timeline: 24 h overview (tap/drag) and a zoomable ribbon (drag to
+  scrub with keyframe previews, pinch or the zoom button, tap to jump) with cat sightings in amber; play/pause,
+  ±10 s / ±1 min, 1×/4×/16×, **Now** (live edge), last-seen chip, previous/next visit and a row of visits; the
+  camera button saves the frame on screen (full resolution) to Pictures/PC Control. Playlists are reloaded near
+  their end when newer footage exists.
+- **Music** (`src/screens/cams/MusicTab.tsx`): the cam-music service (`/music/api`): paste a YouTube link, or in
+  the YouTube app **Share → PC Control** (an `ACTION_SEND text/plain` target; `SharePackage.kt` keeps the text until
+  the app takes it, then Cat cams → Music plays it). Now playing with state, position, pause/resume, stop, loop,
+  volume (sent 200 ms after the last change, one request at a time) and mute, and the recent list. Status is polled
+  every 2 s (1 s while loading) only while the Music tab is on screen.
+- `yarn test:js` runs the TypeScript unit tests (`src/**/*.test.ts`: replay timeline maths, YouTube link parsing).
 - `node scripts/cams/signal-test.mjs [base] [stream:kind …]` checks the signalling against go2rtc in a headless
   browser (needs playwright-core via `PW_CORE`): time to connect / first frame, codec, fps, jitter buffer, and that
   go2rtc answers H.265 for `cat3hd`.

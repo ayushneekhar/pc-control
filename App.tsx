@@ -1,9 +1,11 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { DarkTheme, DefaultTheme, LinkingOptions, NavigationContainer } from '@react-navigation/native';
+import { createNavigationContainerRef, DarkTheme, DefaultTheme, LinkingOptions, NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
-import { AppState, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, StyleSheet, Text, View } from 'react-native';
+import { PcNative } from './modules/pc-native';
+import { youtubeLink } from './src/lib/cams/youtube';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SystemInsetsProvider } from './src/components/SystemInsets';
 import { Button, Icon } from './src/components/ui';
@@ -20,6 +22,26 @@ import { radius, space, useTheme } from './src/theme';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
+const navRef = createNavigationContainerRef<any>();
+
+/** "Share → PC Control" from YouTube: open Cat cams → Music, which plays it on the laptop speakers. */
+function takeShare() {
+  let text: string | null = null;
+  try {
+    text = PcNative?.takeSharedText() ?? null;
+  } catch {
+    return;
+  }
+  if (!text) return;
+  const link = youtubeLink(text);
+  if (!link) {
+    Alert.alert('Not a YouTube link', 'PC Control can play YouTube links on the laptop speakers. Share a video from the YouTube app.');
+    return;
+  }
+  const go = () => navRef.navigate('Cams', { tab: 'music', share: link, shareId: Date.now() });
+  if (navRef.isReady()) go();
+  else setTimeout(() => (navRef.isReady() ? go() : setTimeout(go, 1000)), 300);
+}
 
 const linking: LinkingOptions<any> = {
   prefixes: ['pccontrol://'],
@@ -56,6 +78,11 @@ export default function App() {
     askNotificationPermission().finally(() => registerPush());
   }, []);
   useEffect(() => {
+    takeShare();
+    const s = AppState.addEventListener('change', (st) => st === 'active' && takeShare());
+    return () => s.remove();
+  }, []);
+  useEffect(() => {
     // Live download progress: also start it when the app is opened (or comes back) while something downloads.
     startLiveIfDownloading();
     const s = AppState.addEventListener('change', (st) => st === 'active' && startLiveIfDownloading());
@@ -77,7 +104,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <SystemInsetsProvider>
-        <NavigationContainer theme={navTheme} linking={linking}>
+        <NavigationContainer ref={navRef} theme={navTheme} linking={linking}>
           <StatusBar style={t.dark ? 'light' : 'dark'} />
           <Stack.Navigator screenOptions={{ headerShown: false }}>
             <Stack.Screen name="Tabs" component={Tabs} />

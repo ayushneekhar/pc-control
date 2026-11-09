@@ -114,6 +114,20 @@ class PcNativeModule : Module() {
       CamsTools.share(a, uri)
     }.runOnQueue(Queues.MAIN)
 
+    // "Share → PC Control" text (SharePackage), once
+    Function("takeSharedText") { SharedText.take() }
+
+    // Replay player (Media3, see RecPlayerView)
+    View(RecPlayerView::class) {
+      Events("onProgress", "onPlayerError")
+      Prop("source") { view: RecPlayerView, src: Map<String, Any?>? -> view.setSource(src) }
+      Prop("playing") { view: RecPlayerView, on: Boolean -> view.setPlaying(on) }
+      Prop("rate") { view: RecPlayerView, r: Double -> view.setRate(r) }
+      AsyncFunction("seek") { view: RecPlayerView, seconds: Double, exact: Boolean -> view.seek(seconds, exact) }.runOnQueue(Queues.MAIN)
+      AsyncFunction("snapshot") { view: RecPlayerView, label: String -> view.snapshot(label) }.runOnQueue(Queues.MAIN)
+      OnViewDestroys { view: RecPlayerView -> view.release() }
+    }
+
     Function("windowInsets") {
       val activity = appContext.currentActivity ?: return@Function null
       val raw = activity.window?.decorView?.rootWindowInsets ?: return@Function null

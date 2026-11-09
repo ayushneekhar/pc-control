@@ -453,7 +453,7 @@ function Updates() {
         </Banner>
       ) : null}
       <View>
-        <KV k="App" v={`${Constants.expoConfig?.version ?? '?'} (${myCode})`} />
+        <KV k="App version" v={`${Constants.expoConfig?.version ?? '?'} (${myCode})`} />
         <KV k="Build" v={binaryTarget()} mono />
         <KV k="JS update" v={snap.otaVersion ? `OTA ${snap.otaVersion}${snap.fromDownload ? '' : ' (built in)'}` : 'built in'} />
       </View>

@@ -14,3 +14,4 @@ build/
 dist/
 google-services.json
 fcm-service-account*.json
+.artifacts/

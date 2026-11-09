@@ -2,7 +2,7 @@
   "expo": {
     "name": "PC Control",
     "slug": "pc-control",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "pccontrol",
@@ -10,7 +10,7 @@
     "backgroundColor": "#0B0D12",
     "android": {
       "package": "com.neekhar.pccontrol",
-      "versionCode": 3,
+      "versionCode": 4,
       "allowBackup": false,
       "predictiveBackGestureEnabled": false,
       "adaptiveIcon": {
@@ -35,7 +35,14 @@
           }
         }
       ],
-      "./plugins/withReleaseSigning"
-    ]
+      "./plugins/withReleaseSigning",
+      "./plugins/withNitroOta"
+    ],
+    "extra": {
+      "github": {
+        "repo": "ayushneekhar/pc-control",
+        "otaTag": "ota-android"
+      }
+    }
   }
 }

@@ -17,8 +17,17 @@ POST /pc/api/push/register            {token, name}: store the phone's FCM token
 POST /pc/api/push/unregister          {token}
 GET  /pc/api/push/status?token=...    {configured, registered, devices}
 POST /pc/api/push/test                {token?}: send a test notification through FCM now, report per-token results
-POST /pc/api/notify                   {title, body}: a plain notification to the phone(s) via FCM
-GET  /pc/app.apk                      latest app build
+POST /pc/api/notify                   {category, title, body, telegram_text?, image_b64?, link?}: the notification
+                                      router: sends to Telegram (Qwen bot) and/or the app (FCM) per category settings.
+                                      502 if Telegram was wanted but failed (callers then send to Telegram directly)
+GET  /pc/api/notify/settings          {masters: {telegram, app}, categories: [...], channels: {...}}
+POST /pc/api/notify/settings          {masters?: {telegram?, app?}, categories?: {<id>: {telegram?, app?}}}
+POST /pc/api/notify/test              {channel: telegram|app}: a labelled test message on that channel
+GET  /pc/api/notify/image/<id>        a notification's picture (the app fetches it for a big-picture notification)
+POST /pc/api/hook/radarr|sonarr|seerr webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
+                                      (Authorization: Bearer/Basic password, or X-PC-Hook-Secret); maps events to categories
+GET  /pc/app.apk                      LEGACY (pre-1.2 builds' updater): serves the last laptop-hosted APK. Releases now
+                                      go to GitHub Releases (scripts/release-apk.sh); remove this with apk_info/send_apk.
 
 Push: events are also sent through Firebase Cloud Messaging (HTTP v1, service account in
 ~/.config/pc-control/fcm-service-account.json) to the registered phones. FCM payloads carry only notification
@@ -139,7 +148,7 @@ class Hub:
                     if t == "hello": self.set_status("ok", ev.get("pending", []))
                     elif t in ("request", "update"):
                         self.publish(t, ev["request"])
-                        if PUSH: PUSH.on_root_event(t, ev["request"])
+                        if NOTIFY: NOTIFY.on_root_event(t, ev["request"])
                     elif t == "enrolled": self.publish("enrolled", {"fingerprint": ev.get("fingerprint")})
                 raise OSError("watch closed")
             except (OSError, ValueError):
@@ -333,8 +342,323 @@ class Push:
         elif t == "update" and st != "pending":
             self.enqueue({"kind": "dismiss", "id": rid}, False, 600)
 
-    def notify(self, nid, title, body):
-        self.enqueue({"kind": "notify", "id": nid, "title": title, "body": body}, True, 3600)
+    def notify(self, nid, title, body, extra=None):
+        self.enqueue({"kind": "notify", "id": nid, "title": title, "body": body, **(extra or {})}, True, 3600)
+
+
+# ---------------------------------------------------------------- notification router (Telegram + FCM)
+
+# id, label, description, default Telegram, default app, icon. Telegram defaults = what went to Telegram before
+# the router existed; app defaults are on for things worth a phone buzz that you can't afford to miss.
+CATEGORIES = [
+    ("cats", "Cat alerts", "A cat on one of the cams. Telegram gets the photo.", True, False, "cat"),
+    ("grabbed", "Download started", "Radarr or Sonarr grabbed a release.", True, False, "download-outline"),
+    ("available", "Available to watch", "A Seerr request is ready in Jellyfin.", True, False, "play-circle-outline"),
+    ("problems", "Download problems", "Failed requests, stuck or manual imports.", True, True, "alert-outline"),
+    ("qwen_done", "Qwen downloads finished", "Downloads you started through the Qwen bot.", True, False,
+     "check-circle-outline"),
+    ("system", "Backups & system alerts", "Config backup failures, kernel fixes, recording digests.", True, True,
+     "server-outline"),
+    ("root", "Root approvals", "A root command is waiting for your fingerprint.", False, True, "shield-key-outline"),
+    ("results", "Command results", "An approved root command finished or failed.", False, True, "console"),
+    ("other", "Other messages", "Anything else sent to /pc/api/notify.", False, True, "message-outline"),
+]
+CAT_IDS = [c[0] for c in CATEGORIES]
+CHANNELS = ("telegram", "app")
+TG_API = os.environ.get("PCAPI_TG_API", "https://api.telegram.org").rstrip("/")
+TG_TOKEN_FILE = os.environ.get("PCAPI_TG_TOKEN_FILE", CONFIG.get("telegram_token_file")
+                               or os.path.join(HOME, "tools", "localagent", ".tgbot-token"))
+TG_CHAT = str(CONFIG.get("telegram_chat") or os.environ.get("PCAPI_TG_CHAT") or "")   # in ~/.config/pc-control/pcapi.json
+HOOK_SECRET_FILE = os.environ.get("PCAPI_HOOK_SECRET", os.path.join(CONF_DIR, "hook-secret"))
+IMG_RE = re.compile(r"^[0-9a-f]{16}$")
+MAX_IMAGES = 40
+POSTER_HOSTS = ("image.tmdb.org",)          # remote images pc-api may fetch for a webhook (Seerr posters)
+
+
+def image_type(b):
+    if b[:3] == b"\xff\xd8\xff": return "image/jpeg"
+    if b[:8] == b"\x89PNG\r\n\x1a\n": return "image/png"
+    if b[:4] == b"RIFF" and b[8:12] == b"WEBP": return "image/webp"
+    return None
+
+
+def multipart(fields, file=None):
+    """-> (body, content type). file = (field, filename, content type, bytes)."""
+    b = secrets.token_hex(16)
+    parts = [f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode() for k, v in fields.items()]
+    if file:
+        name, fn, ct, data = file
+        parts.append(f'--{b}\r\nContent-Disposition: form-data; name="{name}"; filename="{fn}"\r\n'
+                     f'Content-Type: {ct}\r\n\r\n'.encode() + data + b"\r\n")
+    return b"".join(parts) + f"--{b}--\r\n".encode(), f"multipart/form-data; boundary={b}"
+
+
+class Notify:
+    """Routes a notification of a category to Telegram (Qwen bot) and/or the app (FCM), per the settings in
+    DATA_DIR/notify-settings.json. Only unsolicited notifications come here: the Qwen bot's chat replies don't."""
+
+    def __init__(self, push, data_dir=DATA_DIR, tg_api=TG_API, token_file=TG_TOKEN_FILE, chat=TG_CHAT):
+        self.push, self.tg_api, self.token_file, self.chat = push, tg_api, token_file, chat
+        self.file = os.path.join(data_dir, "notify-settings.json")
+        self.img_dir = os.path.join(data_dir, "notify-images")
+        self.lock = threading.Lock()
+        s = load_json(self.file, {})
+        self.s = s if isinstance(s, dict) else {}
+
+    # ---- settings
+    def settings(self):
+        with self.lock:
+            m, c = self.s.get("masters") or {}, self.s.get("categories") or {}
+            cats = []
+            for cid, label, desc, d_tg, d_app, icon in CATEGORIES:
+                cur = c.get(cid) or {}
+                cats.append({"id": cid, "label": label, "description": desc, "icon": icon,
+                             "telegram": bool(cur.get("telegram", d_tg)), "app": bool(cur.get("app", d_app)),
+                             "defaults": {"telegram": d_tg, "app": d_app}})
+            masters = {ch: bool(m.get(ch, True)) for ch in CHANNELS}
+        return {"masters": masters, "categories": cats,
+                "channels": {"telegram": {"configured": self.tg_token() is not None and bool(self.chat)},
+                             "app": self.push.status()}}
+
+    def update(self, b):
+        m, c = b.get("masters"), b.get("categories")
+        if m is not None and not (isinstance(m, dict) and all(k in CHANNELS and isinstance(v, bool) for k, v in m.items())):
+            return 400, {"error": "masters must be {telegram?: bool, app?: bool}"}
+        if c is not None and not (isinstance(c, dict) and all(
+                k in CAT_IDS and isinstance(v, dict) and all(ch in CHANNELS and isinstance(x, bool) for ch, x in v.items())
+                for k, v in c.items())):
+            return 400, {"error": "categories must be {<category>: {telegram?: bool, app?: bool}}"}
+        with self.lock:
+            self.s.setdefault("masters", {}).update(m or {})
+            for k, v in (c or {}).items(): self.s.setdefault("categories", {}).setdefault(k, {}).update(v)
+            os.makedirs(os.path.dirname(self.file), exist_ok=True)
+            tmp = self.file + ".tmp"
+            with open(tmp, "w") as f: json.dump(self.s, f, indent=1)
+            os.replace(tmp, self.file)
+        return 200, self.settings()
+
+    def wants(self, cat):
+        """-> {"telegram": bool, "app": bool} after the master switches."""
+        s = self.settings()
+        row = next(x for x in s["categories"] if x["id"] == cat)
+        return {ch: s["masters"][ch] and row[ch] for ch in CHANNELS}
+
+    # ---- Telegram
+    def tg_token(self):
+        try:
+            with open(self.token_file) as f: tok = f.read().split()[0]
+            return tok if re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", tok) else None
+        except (OSError, IndexError):
+            return None
+
+    def tg_send(self, text, image=None):
+        """-> (ok, error). sendPhoto when there's an image (caption max 1024), else sendMessage (max 4096).
+        The token never appears in errors or logs."""
+        tok = self.tg_token()
+        if not tok: return False, "Telegram token missing"
+        if not self.chat: return False, "telegram_chat missing in ~/.config/pc-control/pcapi.json"
+        if image:
+            method, (body, ct) = "sendPhoto", multipart({"chat_id": self.chat, "caption": text[:1024]},
+                                                       ("photo", "image.jpg", image_type(image) or "image/jpeg", image))
+        else:
+            method, (body, ct) = "sendMessage", multipart({"chat_id": self.chat, "text": text[:4096] or "(empty)"})
+        err = None
+        for attempt in (0, 1):
+            req = urllib.request.Request(f"{self.tg_api}/bot{tok}/{method}", data=body, headers={"Content-Type": ct})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r: res = json.load(r)
+                if res.get("ok"): return True, None
+                err = clip(res.get("description") or "not ok", 200)
+            except urllib.error.HTTPError as e:
+                try: err = f"HTTP {e.code} {clip(json.load(e).get('description', ''), 200)}"
+                except ValueError: err = f"HTTP {e.code}"
+                if e.code < 500 and e.code != 429: break       # bad request: retrying won't help
+            except (OSError, ValueError) as e:
+                err = clip(f"{type(e).__name__}: {e}", 200)
+            if attempt == 0: time.sleep(2)
+        return False, (err or "failed").replace(tok, "<token>")
+
+    # ---- images (kept so the phone can fetch a big picture over the tailnet)
+    def store_image(self, nid, data):
+        os.makedirs(self.img_dir, mode=0o700, exist_ok=True)
+        with open(os.path.join(self.img_dir, nid), "wb") as f: f.write(data)
+        files = sorted(os.scandir(self.img_dir), key=lambda e: e.stat().st_mtime)
+        for e in files[:-MAX_IMAGES]:
+            try: os.remove(e.path)
+            except OSError: pass
+
+    def image(self, nid):
+        if not IMG_RE.match(nid): return None
+        try:
+            with open(os.path.join(self.img_dir, nid), "rb") as f: return f.read()
+        except OSError:
+            return None
+
+    @staticmethod
+    def fetch_poster(url):
+        try:
+            u = urllib.parse.urlsplit(url)
+            if u.scheme != "https" or u.hostname not in POSTER_HOSTS: return None
+            with urllib.request.urlopen(url, timeout=15) as r: data = r.read(8 * 1024 * 1024 + 1)
+            return data if len(data) <= 8 * 1024 * 1024 and image_type(data) else None
+        except (OSError, ValueError):
+            return None
+
+    # ---- send
+    def send(self, cat, title, body="", telegram_text=None, image=None, link=None):
+        """-> (http code, result). 502 when Telegram was wanted but failed, so callers can fall back to sending
+        straight to Telegram themselves (alerts are never lost because pc-api had a bad moment)."""
+        if cat not in CAT_IDS: return 400, {"error": f"unknown category (one of: {', '.join(CAT_IDS)})"}
+        title, body = clip(title, 120), str(body or "").strip()[:3000]
+        if not title: return 400, {"error": "title required"}
+        if image is not None and (len(image) > 10 * 1024 * 1024 or not image_type(image)):
+            return 400, {"error": "image must be a JPEG, PNG or WebP under 10 MB"}
+        if link is not None and not re.fullmatch(r"https?://[^\s]{1,500}", str(link)):
+            return 400, {"error": "link must be an http(s) URL"}
+        w, nid, res = self.wants(cat), secrets.token_hex(8), {"ok": True, "category": cat}
+        res["id"] = nid
+        if w["app"]:
+            if not self.push.configured(): res["app"] = "not configured"
+            elif not self.push.tokens: res["app"] = "no phones registered"
+            else:
+                extra = {"cat": cat, **({"link": link} if link else {})}
+                if image:
+                    self.store_image(nid, image)
+                    extra["image"] = f"/pc/api/notify/image/{nid}"
+                self.push.notify(nid, title, clip(body, 500), extra)
+                res["app"] = "queued"
+        else: res["app"] = "off"
+        code = 200
+        if w["telegram"]:
+            text = telegram_text or (f"{title}\n{body}" if body else title)
+            if link and link not in text: text += f"\n{link}"
+            ok, err = self.tg_send(text, image)
+            res["telegram"] = "sent" if ok else f"failed: {err}"
+            if not ok: code, res["ok"] = 502, False
+        else: res["telegram"] = "off"
+        return code, res
+
+    def send_async(self, *a, **kw):
+        def run():
+            try:
+                code, r = self.send(*a, **kw)
+                if code != 200: print(f"notify: {a[0]}: {r}", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"notify: {a[0]} failed: {type(e).__name__}", file=sys.stderr, flush=True)
+        threading.Thread(target=run, daemon=True).start()
+
+    def test(self, channel):
+        host = socket.gethostname()
+        if channel == "telegram":
+            ok, err = self.tg_send(f"🧪 Test from pc-control: Telegram notifications from {host} work.")
+            return (200, {"ok": True}) if ok else (502, {"error": err})
+        if channel == "app":
+            if not self.push.configured(): return 503, {"error": "FCM is not configured on the laptop"}
+            r = self.push.send_all({"kind": "notify", "id": "test-" + secrets.token_hex(6), "cat": "other",
+                                    "title": "Test notification", "body": f"Push from {host} works."}, True, 300)
+            return 200, {"ok": any(x["ok"] for x in r), "sent": sum(x["ok"] for x in r), "results": r}
+        return 400, {"error": "channel must be telegram or app"}
+
+    # ---- rootd events: the app gets the usual push; Telegram (off by default) gets the same text, never the command
+    def on_root_event(self, t, r):
+        st = r.get("status")
+        cat = "root" if t == "request" and st == "pending" else "results" if t == "update" and st == "done" else None
+        w = self.wants(cat) if cat else {"telegram": False, "app": True}      # dismissals always go to the app
+        if w["app"] and self.push.configured(): self.push.on_root_event(t, r)
+        if cat and w["telegram"]:
+            reason = clip(r.get("reason"), 300)
+            if cat == "root": text = f"🔐 Root approval needed\n{reason}\nApprove it in the pc-control app."
+            else:
+                ex = r.get("exit", -1)
+                text = f"{'✅ Command finished' if ex == 0 else f'❌ Command failed (exit {ex})'}\n{reason}"
+            threading.Thread(target=self.tg_send, args=(text,), daemon=True).start()
+
+
+# ---------------------------------------------------------------- webhooks (Radarr, Sonarr, Seerr -> categories)
+
+def hook_secret():
+    """Shared secret for /pc/api/hook/*, created on first use (mode 600, never logged)."""
+    try:
+        with open(HOOK_SECRET_FILE) as f:
+            s = f.read().strip()
+            if len(s) >= 32: return s
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(HOOK_SECRET_FILE), exist_ok=True)
+    s = secrets.token_urlsafe(32)
+    fd = os.open(HOOK_SECRET_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f: f.write(s + "\n")
+    return s
+
+
+def hook_authorized(headers, secret):
+    """Accepts `Authorization: Bearer <s>`, a bare `Authorization: <s>` (Seerr's auth header field), Basic auth
+    with the secret as password (Radarr/Sonarr username/password fields) or `X-PC-Hook-Secret: <s>`."""
+    cands = [headers.get("X-PC-Hook-Secret") or ""]
+    a = (headers.get("Authorization") or "").strip()
+    if a.lower().startswith("bearer "): cands.append(a[7:].strip())
+    elif a.lower().startswith("basic "):
+        try: cands.append(base64.b64decode(a[6:].strip()).decode().partition(":")[2])
+        except (ValueError, UnicodeDecodeError): pass
+    else: cands.append(a)
+    return any(c and secrets.compare_digest(c.encode(), secret.encode()) for c in cands)
+
+
+def human_size(n):
+    try: n = float(n)
+    except (TypeError, ValueError): return ""
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or u == "TB": return f"{n:.1f} {u}" if u in ("GB", "TB") else f"{n:.0f} {u}"
+        n /= 1024
+
+
+def map_hook(source, p):
+    """Webhook payload -> dict(category, title, body[, link, image_url]) or None (event we don't notify about)."""
+    if source in ("radarr", "sonarr"):
+        app, ev = source.title(), p.get("eventType")
+        if ev == "Test":
+            return {"category": "grabbed", "title": f"🧪 {app} test",
+                    "body": f"Test from {app}: its webhook to pc-api works."}
+        if source == "radarr":
+            m = p.get("movie") or p.get("remoteMovie") or {}
+            name = f"{m.get('title', '?')}" + (f" ({m['year']})" if m.get("year") else "")
+        else:
+            s = p.get("series") or {}
+            eps = p.get("episodes") or []
+            tag = ", ".join(f"S{e.get('seasonNumber', 0):02d}E{e.get('episodeNumber', 0):02d}" for e in eps[:4])
+            name = f"{s.get('title', '?')}" + (f" {tag}" if tag else "")
+            if len(eps) == 1 and eps[0].get("title"): name += f" · {eps[0]['title']}"
+        rel = p.get("release") or {}
+        if ev == "Grab":
+            bits = [x for x in (rel.get("quality"), human_size(rel.get("size")), rel.get("indexer")) if x]
+            return {"category": "grabbed", "title": f"{'🎬 Movie' if source == 'radarr' else '📺 Episode'} grabbed",
+                    "body": name + (f"\n{' · '.join(bits)}" if bits else "")}
+        if ev == "ManualInteractionRequired":
+            msgs = [m for s in (p.get("downloadStatusMessages") or []) for m in (s.get("messages") or [])]
+            why = msgs[0] if msgs else (p.get("downloadStatus") or "needs a manual import")
+            return {"category": "problems", "title": f"⚠️ {app} needs manual interaction",
+                    "body": f"{name}\n{clip(why, 300)}"}
+        return None
+    if source == "seerr":
+        nt = p.get("notification_type")
+        cat = {"MEDIA_AVAILABLE": "available", "MEDIA_FAILED": "problems", "TEST_NOTIFICATION": "available"}.get(nt)
+        if not cat: return None
+        title = clip(p.get("event") or ("Seerr test" if nt == "TEST_NOTIFICATION" else "Seerr"), 120)
+        if nt == "TEST_NOTIFICATION": title = "🧪 " + title
+        elif nt == "MEDIA_AVAILABLE": title = "🍿 " + title
+        else: title = "⚠️ " + title
+        body = "\n".join(x for x in (clip(p.get("subject"), 200), clip(p.get("message"), 400)) if x)
+        out = {"category": cat, "title": title, "body": body}
+        media = p.get("media") or {}
+        base = str(CONFIG.get("seerr_url") or "").rstrip("/")     # Seerr's public URL, from pcapi.json
+        if base and media.get("media_type") in ("movie", "tv") and str(media.get("tmdbId", "")).isdigit():
+            out["link"] = f"{base}/{media['media_type']}/{media['tmdbId']}"
+        if p.get("image"): out["image_url"] = p["image"]
+        return out
+    return None
+
+
+NOTIFY = None
 
 
 # ---------------------------------------------------------------- routes
@@ -515,9 +839,9 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def body(self):
+    def body(self, limit=64 * 1024):
         n = int(self.headers.get("Content-Length") or 0)
-        if n > 64 * 1024: raise ValueError("body too large")
+        if n > limit: raise ValueError("body too large")
         data = json.loads(self.rfile.read(n) or b"{}")
         if not isinstance(data, dict): raise ValueError("body must be an object")
         return data
@@ -532,6 +856,12 @@ class H(BaseHTTPRequestHandler):
         path = path[3:]
         if method == "GET":
             if path == "/app.apk": return self.send_apk()
+            if path == "/api/notify/settings": return self.send_json(200, NOTIFY.settings())
+            m = re.fullmatch(r"/api/notify/image/([0-9a-f]{16})", path)
+            if m:
+                img = NOTIFY.image(m.group(1))
+                if img is None: return self.send_json(404, {"error": "no such image"})
+                return self.send_bytes(img, image_type(img) or "application/octet-stream")
             if path == "/api/info":
                 return self.send_json(200, {"host": socket.gethostname(), "version": VERSION,
                                             "rootd": rootd_state(), "apk": apk_info(), "push": PUSH.status()})
@@ -560,7 +890,9 @@ class H(BaseHTTPRequestHandler):
                                                      "fingerprint": qs.get("fingerprint", [""])[0]}))
             if path == "/api/events": return self.sse()
         elif method == "POST":
-            try: b = self.body()
+            m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
+            if m: return self.hook(m.group(1))
+            try: b = self.body(16 * 1024 * 1024 if path == "/api/notify" else 64 * 1024)
             except ValueError as e: return self.send_json(400, {"error": str(e)})
             m = re.fullmatch(r"/api/services/([^/]+)/restart", path)
             if m: return self.send_json(*restart_service(m.group(1)))
@@ -583,15 +915,41 @@ class H(BaseHTTPRequestHandler):
                                      "body": f"Push from {socket.gethostname()} works."}, True, 300, only)
                 return self.send_json(200, {"sent": sum(r["ok"] for r in res), "results": res})
             if path == "/api/notify":
-                title, body = clip(b.get("title"), 120), clip(b.get("body"), 500)
-                if not title: return self.send_json(400, {"error": "title required"})
-                nid = secrets.token_hex(8)
-                PUSH.notify(nid, title, body)
-                return self.send_json(200, {"ok": True, "id": nid})
+                img = None
+                if b.get("image_b64"):
+                    try: img = base64.b64decode(str(b["image_b64"]), validate=True)
+                    except ValueError: return self.send_json(400, {"error": "image_b64 is not base64"})
+                tt = b.get("telegram_text")
+                return self.send_json(*NOTIFY.send(str(b.get("category") or "other"), b.get("title"), b.get("body"),
+                                                   str(tt)[:4096] if tt else None, img, b.get("link") or None))
+            if path == "/api/notify/settings": return self.send_json(*NOTIFY.update(b))
+            if path == "/api/notify/test": return self.send_json(*NOTIFY.test(str(b.get("channel", ""))))
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
         return self.send_json(404, {"error": "not found"})
+
+    def send_bytes(self, data, ctype, extra=()):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        for k, v in extra: self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def hook(self, source):
+        """Webhook ingest for Radarr/Sonarr/Seerr. Needs the shared secret on top of the usual local/tailnet check."""
+        if not hook_authorized(self.headers, hook_secret()):
+            n = int(self.headers.get("Content-Length") or 0)
+            if 0 < n <= 1024 * 1024: self.rfile.read(n)
+            return self.send_json(401, {"error": "bad or missing webhook secret"})
+        try: p = self.body(1024 * 1024)
+        except ValueError as e: return self.send_json(400, {"error": str(e)})
+        n = map_hook(source, p)
+        if not n: return self.send_json(200, {"ok": True, "ignored": True})
+        img = NOTIFY.fetch_poster(n["image_url"]) if n.get("image_url") else None
+        return self.send_json(*NOTIFY.send(n["category"], n["title"], n["body"], None, img, n.get("link")))
 
     def send_apk(self):
         p = os.path.join(DATA_DIR, "app.apk")
@@ -659,8 +1017,10 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global HUB, PUSH
+    global HUB, PUSH, NOTIFY
     PUSH = Push()
+    NOTIFY = Notify(PUSH)
+    hook_secret()
     HUB = Hub()
     srv = Server(("127.0.0.1", PORT), H)
     print(f"pc-api on 127.0.0.1:{PORT}, allowed tailnet logins: {sorted(ALLOWED_LOGINS) or 'NONE'}, "

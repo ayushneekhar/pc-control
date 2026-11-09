@@ -21,7 +21,7 @@ class PushService : FirebaseMessagingService() {
       "request" -> Notifier.request(this, id, title.ifEmpty { "Root approval needed" }, body, d["expires"]?.toLongOrNull() ?: 0)
       "result" -> Notifier.result(this, id, title.ifEmpty { "Command finished" }, body)
       "dismiss" -> Notifier.dismiss(this, id)
-      "notify" -> Notifier.message(this, id, title.ifEmpty { "PC Control" }, body)
+      "notify" -> Notifier.message(this, id, title.ifEmpty { "PC Control" }, body, d["cat"], d["image"], d["link"])
     }
   }
 }

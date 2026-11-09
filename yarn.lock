@@ -4666,6 +4666,16 @@ react-is@^19.1.0:
   resolved "https://registry.yarnpkg.com/react-is/-/react-is-19.3.1.tgz#81f7f7e431fc9b5bd9781b0a9f19997f08dee51b"
   integrity sha512-RRieF6IyxQBkcK6pP8xOHprLTPW6QjRkbGdImtqNme+/hYVwCZkLQLdlZGOhUqXwkS9IEynaGvPJtv6XB/cz0Q==
 
+react-native-nitro-modules@0.35.1:
+  version "0.35.1"
+  resolved "https://registry.yarnpkg.com/react-native-nitro-modules/-/react-native-nitro-modules-0.35.1.tgz#99bfc160be559e3e63044574855ddf1562ef0f19"
+  integrity sha512-XIPN8+1kPCaLEQuzPCgFQwy96B97u66SHQ0hA1xWWSHUQ+GXxM4fAysqgTHvW4SU25IRZqzhaSmGsoZlNDSmRA==
+
+react-native-nitro-ota@0.14.0:
+  version "0.14.0"
+  resolved "https://registry.yarnpkg.com/react-native-nitro-ota/-/react-native-nitro-ota-0.14.0.tgz#1b1407c118d830300d88a349fcf478e5be801080"
+  integrity sha512-Dpk8c6tjoaR1uSVBRNGRzLdO8El/FMoC7rzPxbFDH4D2i1mKdaE1bWNCbcoOnJiJBYs+yFY0/KOsKD2/h5/tTA==
+
 react-native-safe-area-context@~5.7.0:
   version "5.7.0"
   resolved "https://registry.yarnpkg.com/react-native-safe-area-context/-/react-native-safe-area-context-5.7.0.tgz#035699d5ec17fefb98cc1fa44a9ec852c7d530d0"

@@ -1,9 +1,11 @@
 import Constants from 'expo-constants';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Linking, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, AppState, Linking, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { KeyInfo, PcNative } from '../../modules/pc-native';
 import { Banner, Button, Card, Icon, KV, Mono, Pill, Screen, Section } from '../components/ui';
 import { ApiError, DEFAULT_SERVER, get, Info, post, serverUrl } from '../lib/api';
+import { ApkRelease, APK_URLS, binaryTarget, clearOtaRecovery, latestApk, otaRecovery, otaSnapshot } from '../lib/ota';
+import { applyOta, checkOta, useOta } from '../lib/otaStore';
 import { askNotificationPermission, registerPush } from '../lib/push';
 import { reconnectRootStore, useRootStore } from '../lib/rootStore';
 import { keyFingerprint } from '../lib/rootPayload';
@@ -225,6 +227,17 @@ function Push() {
   const [server, setServer] = useState<{ configured: boolean; registered?: boolean } | null>(null);
   const [registering, setRegistering] = useState(false);
   const [test, setTest] = useState<TestState>({ kind: 'idle' });
+  const [tgTest, setTgTest] = useState<TestState>({ kind: 'idle' });
+
+  const sendTgTest = async () => {
+    setTgTest({ kind: 'busy' });
+    try {
+      await post('/pc/api/notify/test', { channel: 'telegram' });
+      setTgTest({ kind: 'done', ok: true, text: 'Sent to the Qwen bot chat.' });
+    } catch (e) {
+      setTgTest({ kind: 'done', ok: false, text: (e as Error).message });
+    }
+  };
 
   const refresh = useCallback(async () => {
     if (!PcNative) return;
@@ -293,10 +306,179 @@ function Push() {
       <Row ok={registered} label="FCM token registered" fix={registered || registering ? undefined : { label: 'Retry', onPress: refresh }} />
       <Row ok={server?.configured === true} label="FCM set up on the laptop" />
       {!registered && status.error ? <Text style={{ color: t.textFaint, fontSize: 12.5 }}>{status.error}</Text> : null}
-      <Button label="Send test notification" icon="send-outline" kind="subtle" busy={test.kind === 'busy'} disabled={!registered} onPress={sendTest} />
+      <View style={{ flexDirection: 'row', gap: space(2) }}>
+        <Button label="Test app" icon="cellphone-message" kind="subtle" style={{ flex: 1 }} busy={test.kind === 'busy'} disabled={!registered} onPress={sendTest} />
+        <Button label="Test Telegram" icon="send-outline" kind="subtle" style={{ flex: 1 }} busy={tgTest.kind === 'busy'} onPress={sendTgTest} />
+      </View>
+      {tgTest.kind === 'done' ? <Text style={{ color: tgTest.ok ? t.ok : t.bad, fontSize: 13 }}>{tgTest.text}</Text> : null}
       {test.kind === 'done' ? <Text style={{ color: test.ok ? t.ok : t.bad, fontSize: 13 }}>{test.text}</Text> : null}
       <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-        Delivered by Firebase Cloud Messaging. Only the notification text goes through Google, e.g. “Root approval needed” and the reason, never the command. Approving still happens here, with your fingerprint, over the tailnet.
+        App notifications are delivered by Firebase Cloud Messaging. Only the notification text goes through Google, e.g. “Root approval needed” and the reason, never the command; pictures are fetched from the laptop over the tailnet. Approving still happens here, with your fingerprint.
+      </Text>
+    </Card>
+  );
+}
+
+type Channel = 'telegram' | 'app';
+type NotifCategory = { id: string; label: string; description: string; icon: string; telegram: boolean; app: boolean };
+type NotifSettings = {
+  masters: Record<Channel, boolean>;
+  categories: NotifCategory[];
+  channels: { telegram: { configured: boolean }; app: { configured: boolean; devices: number } };
+};
+
+/** Per-category delivery: Telegram (Qwen bot) and/or this app. Stored on the laptop (pc-api). */
+function NotificationPrefs() {
+  const t = useTheme();
+  const tick = useAppActiveTick();
+  const [s, setS] = useState<NotifSettings | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    get<NotifSettings>('/pc/api/notify/settings')
+      .then((r) => {
+        setS(r);
+        setErr(null);
+      })
+      .catch((e) => setErr((e as Error).message));
+  }, [tick]);
+
+  const save = async (patch: { masters?: Partial<Record<Channel, boolean>>; categories?: Record<string, Partial<Record<Channel, boolean>>> }, optimistic: NotifSettings) => {
+    const before = s;
+    setS(optimistic);
+    try {
+      setS(await post<NotifSettings>('/pc/api/notify/settings', patch));
+      setErr(null);
+    } catch (e) {
+      setS(before);
+      setErr(`Not saved: ${(e as Error).message}`);
+    }
+  };
+  const setMaster = (ch: Channel, v: boolean) => s && save({ masters: { [ch]: v } }, { ...s, masters: { ...s.masters, [ch]: v } });
+  const setCat = (id: string, ch: Channel, v: boolean) =>
+    s && save({ categories: { [id]: { [ch]: v } } }, { ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, [ch]: v } : c)) });
+
+  if (!s)
+    return (
+      <Card>
+        {err ? <Banner tone="bad" title="Can't load notification settings">{err}</Banner> : <Text style={{ color: t.textDim }}>Loading…</Text>}
+      </Card>
+    );
+
+  const sw = (on: boolean, dim: boolean, onChange: (v: boolean) => void, label: string) => (
+    <Switch
+      value={on}
+      onValueChange={onChange}
+      accessibilityLabel={label}
+      trackColor={{ true: dim ? t.border : t.accent, false: t.cardAlt }}
+      thumbColor={on ? (dim ? t.textFaint : '#fff') : t.textFaint}
+    />
+  );
+  return (
+    <Card style={{ gap: space(1), paddingHorizontal: space(3) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3), paddingHorizontal: space(1), marginBottom: space(2) }}>
+        <View style={[st.iconWrap, { backgroundColor: t.accentSoft }]}>
+          <Icon name="bell-cog-outline" size={22} color={t.accent} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: t.text, fontWeight: '700', fontSize: 16 }}>Where notifications go</Text>
+          <Text style={{ color: t.textDim, fontSize: 13 }}>Per category: the Qwen bot on Telegram, this app, or both.</Text>
+        </View>
+      </View>
+      {err ? <Banner tone="bad" title="Notification settings">{err}</Banner> : null}
+
+      <View style={[st.masters, { backgroundColor: t.cardAlt }]}>
+        {(['telegram', 'app'] as Channel[]).map((ch) => (
+          <View key={ch} style={st.master}>
+            <Icon name={ch === 'telegram' ? 'send-outline' : 'cellphone'} size={18} color={s.masters[ch] ? t.accent : t.textFaint} />
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: t.text, fontWeight: '600', fontSize: 14 }}>{ch === 'telegram' ? 'Telegram' : 'App'}</Text>
+              <Text style={{ color: t.textFaint, fontSize: 11.5 }}>
+                {!s.channels[ch].configured ? 'not set up' : s.masters[ch] ? 'on' : 'all off'}
+              </Text>
+            </View>
+            {sw(s.masters[ch], false, (v) => setMaster(ch, v), `${ch} master switch`)}
+          </View>
+        ))}
+      </View>
+
+      <View style={[st.colHead, { borderBottomColor: t.border }]}>
+        <Text style={{ flex: 1, color: t.textFaint, fontSize: 11.5, fontWeight: '700', letterSpacing: 0.6 }}>CATEGORY</Text>
+        <Text style={[st.col, { color: t.textFaint }]}>TELEGRAM</Text>
+        <Text style={[st.col, { color: t.textFaint }]}>APP</Text>
+      </View>
+      {s.categories.map((c, i) => (
+        <View key={c.id} style={[st.catRow, i < s.categories.length - 1 && { borderBottomColor: t.border, borderBottomWidth: StyleSheet.hairlineWidth }]}>
+          <Icon name={c.icon} size={20} color={c.telegram || c.app ? t.text : t.textFaint} />
+          <View style={{ flex: 1, paddingRight: space(1) }}>
+            <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600' }}>{c.label}</Text>
+            <Text style={{ color: t.textFaint, fontSize: 12, lineHeight: 16 }}>{c.description}</Text>
+          </View>
+          <View style={st.colCell}>{sw(c.telegram, !s.masters.telegram, (v) => setCat(c.id, 'telegram', v), `${c.label} on Telegram`)}</View>
+          <View style={st.colCell}>{sw(c.app, !s.masters.app, (v) => setCat(c.id, 'app', v), `${c.label} in the app`)}</View>
+        </View>
+      ))}
+      {!s.masters.telegram || !s.masters.app ? (
+        <Text style={{ color: t.textFaint, fontSize: 12.5, paddingHorizontal: space(1), paddingTop: space(2) }}>
+          A channel that is all off ignores its per-category switches (shown greyed).
+        </Text>
+      ) : null}
+    </Card>
+  );
+}
+
+/** APK releases (GitHub) + over-the-air JS updates (signed, for this exact build). */
+function Updates() {
+  const t = useTheme();
+  const tick = useAppActiveTick();
+  const ota = useOta();
+  const [apk, setApk] = useState<ApkRelease | null | undefined>(undefined);
+  const [recovery, setRecovery] = useState(() => otaRecovery());
+  const snap = otaSnapshot();
+  const myCode = Number(Constants.expoConfig?.android?.versionCode ?? 0);
+
+  useEffect(() => {
+    latestApk().then(setApk);
+    checkOta();
+  }, [tick]);
+
+  const newer = apk && apk.versionCode > myCode ? apk : null;
+  const otaReady = ota.check?.hasUpdate && ota.check.isCompatible;
+  return (
+    <Card style={{ gap: space(3) }}>
+      {recovery ? (
+        <Banner tone="warn" title="An update was rolled back">
+          {recovery.message}
+          <Button label="OK" compact kind="subtle" style={{ alignSelf: 'flex-start', marginTop: 8 }} onPress={() => (clearOtaRecovery(), setRecovery(null))} />
+        </Banner>
+      ) : null}
+      <View>
+        <KV k="App" v={`${Constants.expoConfig?.version ?? '?'} (${myCode})`} />
+        <KV k="Build" v={binaryTarget()} mono />
+        <KV k="JS update" v={snap.otaVersion ? `OTA ${snap.otaVersion}${snap.fromDownload ? '' : ' (built in)'}` : 'built in'} />
+      </View>
+
+      {otaReady ? (
+        <Banner tone="accent" icon="cloud-download-outline" title={`JS update ${ota.check?.remoteVersion} available`}>
+          {ota.phase === 'ready' ? 'Downloaded. It applies the next time the app starts.' : ota.check?.metadata?.releaseNotes ?? ''}
+        </Banner>
+      ) : null}
+      {ota.error ? <Text style={{ color: t.bad, fontSize: 13 }}>{ota.error}</Text> : null}
+      <View style={{ flexDirection: 'row', gap: space(2) }}>
+        <Button label="Check" icon="refresh" kind="subtle" style={{ flex: 1 }} busy={ota.checking} onPress={() => checkOta(true)} />
+        {otaReady && ota.phase !== 'ready' ? (
+          <Button label={ota.phase === 'downloading' ? `${Math.round(ota.progress * 100)}%` : 'Update now'} icon="restart" style={{ flex: 1 }} busy={ota.phase === 'downloading'} onPress={() => applyOta(true)} />
+        ) : null}
+      </View>
+
+      {newer ? (
+        <Banner tone="accent" icon="download" title={`New app version: ${newer.versionName} (${newer.versionCode})`}>
+          This one changes native code, so it’s a full APK from GitHub Releases.
+          <Button label="Download APK" compact kind="primary" icon="download" style={{ alignSelf: 'flex-start', marginTop: 8 }} onPress={() => Linking.openURL(APK_URLS.apkUrl)} />
+        </Banner>
+      ) : null}
+      <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
+        {apk === null ? 'Could not read the latest release from GitHub. ' : ''}JS-only changes arrive over the air, signed by the laptop and only for this exact build. Native changes need a new APK.
       </Text>
     </Card>
   );
@@ -353,8 +535,6 @@ function Server() {
     test();
   };
 
-  const myCode = Number(Constants.expoConfig?.android?.versionCode ?? 0);
-  const update = info?.apk && info.apk.versionCode > myCode ? info.apk : null;
 
   return (
     <Card style={{ gap: space(3) }}>
@@ -380,20 +560,7 @@ function Server() {
           <KV k="Host" v={info.host} />
           <KV k="Signed in as" v={who?.login ?? '–'} />
           <KV k="rootd" v={info.rootd.state === 'ok' ? `running · ${info.rootd.devices ?? 0} phone(s)` : info.rootd.state.replace('_', ' ')} />
-          <KV k="App" v={`${Constants.expoConfig?.version ?? '?'} (${myCode})`} />
         </View>
-      ) : null}
-      {update ? (
-        <Banner tone="accent" icon="download" title={`Update available: ${update.versionName} (${update.versionCode})`}>
-          <Button
-            label="Download"
-            compact
-            kind="primary"
-            icon="download"
-            style={{ alignSelf: 'flex-start', marginTop: 8 }}
-            onPress={() => Linking.openURL(serverUrl() + '/pc/app.apk')}
-          />
-        </Banner>
       ) : null}
     </Card>
   );
@@ -406,10 +573,14 @@ export default function SettingsScreen() {
         <Enrollment />
       </Section>
       <Section label="Notifications">
+        <NotificationPrefs />
         <Push />
       </Section>
       <Section label="Connection">
         <Server />
+      </Section>
+      <Section label="App updates">
+        <Updates />
       </Section>
     </Screen>
   );
@@ -418,5 +589,11 @@ export default function SettingsScreen() {
 const st = StyleSheet.create({
   iconWrap: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
   code: { borderRadius: radius.md, borderWidth: 1, paddingVertical: space(4), alignItems: 'center' },
+  masters: { flexDirection: 'row', borderRadius: radius.md, padding: space(2), gap: space(2), marginBottom: space(2) },
+  master: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space(2), paddingLeft: space(1) },
+  colHead: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: space(1), paddingBottom: space(1), borderBottomWidth: StyleSheet.hairlineWidth },
+  col: { width: 64, textAlign: 'center', fontSize: 10.5, fontWeight: '700', letterSpacing: 0.4 },
+  colCell: { width: 64, alignItems: 'center' },
+  catRow: { flexDirection: 'row', alignItems: 'center', gap: space(3), paddingVertical: space(3), paddingHorizontal: space(1) },
   input: { borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: space(3), height: 46, fontSize: 14 },
 });

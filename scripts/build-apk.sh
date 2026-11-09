@@ -1,6 +1,8 @@
 #!/bin/bash
-# Build the signed release APK and publish it at /pc/app.apk.
+# Build + sign the release APK locally (the keystore never leaves the laptop). Publishing is scripts/release-apk.sh.
 #   scripts/build-apk.sh [--bump]     --bump increments versionCode (and patch version) in app.json first
+# EXPO_PUBLIC_BUNDLED_OTA_VERSION (set by release-apk.sh) is inlined into the embedded JS so the app knows
+# which OTA version it is running before any OTA is downloaded.
 # Keystore + passwords live OUTSIDE the repo: ~/.config/pc-control/{release.jks,keystore.env}.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,6 +24,7 @@ fi
 yarn -s typecheck
 yarn -s lint
 npx expo prebuild -p android --clean --no-install
+rm -rf "${TMPDIR:-/tmp}"/metro-* "${TMPDIR:-/tmp}"/haste-map-*   # EXPO_PUBLIC_* values are inlined: no stale cache
 # Optional: use an already-cached Gradle when the wrapper's download is unavailable, e.g.
 #   GRADLE_DIST_URL=https://services.gradle.org/distributions/gradle-9.8.0-bin.zip scripts/build-apk.sh
 if [ -n "${GRADLE_DIST_URL:-}" ]; then
@@ -41,14 +44,4 @@ WANT=$(keytool -list -keystore "$PCC_KEYSTORE" -storepass "$PCC_STORE_PASSWORD" 
 GOT=$("$BT/apksigner" verify --print-certs "$APK" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')
 [ "$WANT" = "$GOT" ] || { echo "APK is not signed with the release key ($GOT != $WANT)" >&2; exit 1; }
 
-OUT="$HOME/.local/share/pc-control"
-mkdir -p "$OUT"
-cp "$APK" "$OUT/app.apk.new" && mv "$OUT/app.apk.new" "$OUT/app.apk"
-node -e '
-  const fs = require("fs"), crypto = require("crypto");
-  const j = JSON.parse(fs.readFileSync("app.json")).expo; const apk = process.argv[1];
-  const buf = fs.readFileSync(apk);
-  fs.writeFileSync(process.argv[2], JSON.stringify({ versionCode: j.android.versionCode, versionName: j.version,
-    sha256: crypto.createHash("sha256").update(buf).digest("hex"), size: buf.length, built: Math.floor(Date.now() / 1000) }, null, 1));
-' "$OUT/app.apk" "$OUT/app.json"
-echo "Published $(cat "$OUT/app.json" | tr -d '\n') -> /pc/app.apk"
+echo "Signed APK: $APK"

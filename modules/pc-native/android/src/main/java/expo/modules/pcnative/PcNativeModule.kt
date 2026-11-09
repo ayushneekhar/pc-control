@@ -56,6 +56,15 @@ class PcNativeModule : Module() {
       ctx.startActivity(i)
     }
 
+    // ---- OTA (react-native-nitro-ota + our own signature check, see OtaVerifier)
+    Function("otaCheck") { path: String -> OtaVerifier.check(ctx, path) }
+    Function("otaBinaryTarget") { OtaVerifier.binaryTarget(ctx) }
+    Function("otaRecoveryStatus") {
+      val f = OtaVerifier.recoveryFile(ctx)
+      if (f.isFile) f.readText() else null
+    }
+    Function("clearOtaRecoveryStatus") { OtaVerifier.recoveryFile(ctx).delete() }
+
     // ---- window insets (dp), measured on the activity's decor view. Edge-to-edge is mandatory on
     // targetSdk 35+, so content always draws under the status/navigation bars; these are the absolute
     // system-bar + cutout insets, independent of where any React view happens to be laid out.

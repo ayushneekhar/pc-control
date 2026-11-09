@@ -16,6 +16,7 @@ The app has five tabs:
   `{"/new-api": {"hidden": true}, ":9696": {"name": "Prowlarr", "hidden": false}}`
   (keys are the path for the main HTTPS host, or `":<port>"` for other ports; you can also set `name`, `icon`
   (a Material Community icon name), `subtitle` and `kind` (`"api"` hides a route)).
+  **Cat cams** is the exception: it opens the app's own cams player (below), not the browser.
 - **Vitals**: CPU, temperatures, RAM, GPU, network, disks and battery from `/vitals/api`. It polls only while the
   tab is visible, and processes are sampled only when you switch them on.
 - **Root**: the approval inbox. Each request shows the exact command and the reason, with **Approve
@@ -24,6 +25,43 @@ The app has five tabs:
 - **Settings**: root-approval enrollment, **Notifications** (where each kind of notification goes: Telegram,
   the app, or both), push status with **Test app** / **Test Telegram** buttons, the server URL, and **App
   updates** (APK releases + over-the-air JS updates).
+
+## Cat cams (native player)
+
+Tapping **Cat cams** in Routes opens a native screen instead of the `/cams/` page. The menu (top right) still opens
+the web page, its Replay and its Music tabs, which aren't ported.
+
+- **Transport: WebRTC** (react-native-webrtc 155 = libwebrtc M155), using go2rtc's own WebSocket signalling
+  (`/api/ws?src=…`, trickle ICE, `src/lib/cams/signal.ts`). Media goes straight over the tailnet (UDP to go2rtc's
+  :8555), hardware-decoded by MediaCodec into the view. One **video-only** connection per camera (the page found
+  audio on the same connection held video back ~400 ms for lip sync); audio has its own connections, only while on.
+  Why not RTSP/fMP4 into ExoPlayer/MediaCodec: everything goes through `tailscale serve` over TCP (head-of-line
+  stalls on a lossy link become delay), it needs a second stack for Talk (WebRTC is the only way into go2rtc's
+  backchannel) and its own demuxer, and the page measured MSE well behind WebRTC. Cost: libwebrtc adds ~12.5 MB
+  (arm64 only) to the APK.
+- **Latency tweaks** (`CamsWebrtc.kt`, set at app start before react-native-webrtc's module exists): field trial
+  `WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/` (libwebrtc's low-latency renderer: a frame is shown as soon as it's
+  decoded instead of waiting for the jitter estimate; a jittery link gives uneven motion, not extra delay), and a
+  decoder factory that decodes H.264 **and H.265** on MediaCodec hardware (react-native-webrtc's default one only
+  offers hardware H.264, so the phone would never offer H.265).
+- **CP Plus HD/SD**: HD (`cat3hd`, H.265 2304×1296, passthrough) when the phone has a hardware HEVC decoder for that
+  size and WebRTC lists H.265; no HD frame within 12 s falls back to SD (`cat3`, H.264 720p) with a toast. The
+  badge says what plays (`20 fps · HD·WebRTC`); focusing a camera shows codec, size, decoder name (`c2.….hevc.decoder`
+  = hardware), jitter-buffer time and round trip.
+- **Audio**: everything starts muted. The speaker chip on the Food bowl card plays the cam's mic (`cat3hd` audio),
+  **Listen** the laptop mic (`mic`), **Talk** sends the phone mic to the laptop speakers (`talk`): hold to talk,
+  or tap to latch until the next tap. The mic (RECORD_AUDIO, asked on first use) is captured only while Talk is on.
+  Playback uses the media stream (loudspeaker, media volume), capture the voice-communication source (echo
+  canceller on).
+- **Also**: tap a camera to focus it (the others become thumbnails), fullscreen = landscape with hidden system
+  bars, snapshot = go2rtc's `/api/frame.jpeg` saved to Pictures/PC Control (with a Share button; the Food bowl
+  always uses `cat3`, frame.jpeg fails on `cat3hd`), hold-to-move pan/tilt pad (`/ptz/move?dir=`, `/ptz/stop` on
+  release), the Cat alerts switch (`/detect/state` every 15 s, `/detect/toggle`). Leaving the screen or
+  backgrounding the app closes every connection (Listen/Talk too); coming back reconnects at once. A dropped camera
+  retries with backoff (0.5 s … 10 s); no new frame for 6 s counts as dropped.
+- `node scripts/cams/signal-test.mjs [base] [stream:kind …]` checks the signalling against go2rtc in a headless
+  browser (needs playwright-core via `PW_CORE`): time to connect / first frame, codec, fps, jitter buffer, and that
+  go2rtc answers H.265 for `cat3hd`.
 
 ## Notification router
 

@@ -31,10 +31,20 @@ export type BiometricStatus =
   | 'security_update_required'
   | 'unsupported';
 
+export type HwDecoder = { name: string; maxWidth: number; maxHeight: number; hd: boolean; lowLatency: boolean } | null;
+
 /** Error codes thrown by sign()/createKey(): E_CANCELLED, E_KEY_INVALIDATED, E_NO_KEY, E_LOCKOUT, E_AUTH, ... */
 export type PcNativeModule = {
   /** System bar + display cutout insets in dp, or null before the activity is attached. */
   windowInsets(): { top: number; bottom: number; left: number; right: number } | null;
+  /** Hardware H.264/H.265 decoders, and whether the cams' WebRTC options were set at app start. */
+  camsHardware(): { h264: HwDecoder; h265: HwDecoder; configured: boolean; error: string | null; fieldTrials: string };
+  /** Landscape + hidden system bars, or back to portrait. */
+  camsSetFullscreen(on: boolean): Promise<void>;
+  camsKeepAwake(on: boolean): Promise<void>;
+  /** Saves go2rtc's current frame of a stream to Pictures/PC Control; resolves to its content:// uri. */
+  camsSaveSnapshot(stream: string, label: string): Promise<string>;
+  camsShare(uri: string): Promise<void>;
   getSettings(): NativeSettings;
   setServerUrl(url: string): void;
   setDeviceFingerprint(fp: string | null): void;

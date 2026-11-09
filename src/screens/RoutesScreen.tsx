@@ -1,4 +1,4 @@
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useCallback, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Banner, Card, Icon, Screen } from '../components/ui';
@@ -13,12 +13,17 @@ function tint(id: string) {
   return PALETTE[h % PALETTE.length];
 }
 
+/** Routes the app plays natively instead of opening the browser (the screen keeps a link to the web page). */
+const NATIVE: Record<string, string> = { '/cams/': 'Cams' };
+
 function RouteCard({ r }: { r: Route }) {
   const t = useTheme();
+  const nav = useNavigation<any>();
   const c = tint(r.name);
+  const screen = r.port === 443 ? NATIVE[r.path] : undefined;
   return (
     <Pressable
-      onPress={() => Linking.openURL(r.url)}
+      onPress={() => (screen ? nav.navigate(screen) : Linking.openURL(r.url))}
       android_ripple={{ color: t.accentSoft, foreground: true }}
       style={({ pressed }) => [st.tile, { backgroundColor: t.card, borderColor: t.border, opacity: pressed ? 0.9 : 1 }]}
     >

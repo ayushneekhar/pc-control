@@ -1,5 +1,6 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { DarkTheme, DefaultTheme, LinkingOptions, NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { AppState, StyleSheet, Text, View } from 'react-native';
@@ -18,16 +19,22 @@ import VitalsScreen from './src/screens/VitalsScreen';
 import { radius, space, useTheme } from './src/theme';
 
 const Tab = createBottomTabNavigator();
+const Stack = createNativeStackNavigator();
 
 const linking: LinkingOptions<any> = {
   prefixes: ['pccontrol://'],
   config: {
     screens: {
-      Routes: 'routes',
-      Vitals: 'vitals',
-      Root: 'root/:requestId?',
-      Services: 'services',
-      Settings: 'settings',
+      Tabs: {
+        screens: {
+          Routes: 'routes',
+          Vitals: 'vitals',
+          Root: 'root/:requestId?',
+          Services: 'services',
+          Settings: 'settings',
+        },
+      },
+      Cams: 'cams',
     },
   },
 };
@@ -42,7 +49,6 @@ const ICONS: Record<string, [string, string]> = {
 
 export default function App() {
   const t = useTheme();
-  const store = useRootStore();
   useEffect(() => startRootStore(), []);
   useEffect(() => startOta(), []);
   useEffect(() => {
@@ -55,7 +61,6 @@ export default function App() {
     const s = AppState.addEventListener('change', (st) => st === 'active' && startLiveIfDownloading());
     return () => s.remove();
   }, []);
-  const waiting = pendingList(store).filter((r) => r.status === 'pending').length;
 
   const navTheme = {
     ...(t.dark ? DarkTheme : DefaultTheme),
@@ -74,33 +79,52 @@ export default function App() {
       <SystemInsetsProvider>
         <NavigationContainer theme={navTheme} linking={linking}>
           <StatusBar style={t.dark ? 'light' : 'dark'} />
-          <Tab.Navigator
-            initialRouteName={waiting ? 'Root' : 'Routes'}
-            screenOptions={({ route }) => ({
-              headerShown: false,
-              tabBarActiveTintColor: t.accent,
-              tabBarInactiveTintColor: t.textFaint,
-              tabBarStyle: { backgroundColor: t.card, borderTopColor: t.border },
-              tabBarLabelStyle: { fontSize: 11.5, fontWeight: '600' },
-              tabBarIcon: ({ focused, color, size }) => (
-                <Icon name={ICONS[route.name][focused ? 0 : 1]} size={size - 1} color={color} />
-              ),
-            })}
-          >
-            <Tab.Screen name="Routes" component={RoutesScreen} />
-            <Tab.Screen name="Vitals" component={VitalsScreen} />
-            <Tab.Screen
-              name="Root"
-              component={RootScreen}
-              options={{ tabBarBadge: waiting || undefined, tabBarBadgeStyle: { backgroundColor: t.warn, color: '#1A1300', fontWeight: '800' } }}
+          <Stack.Navigator screenOptions={{ headerShown: false }}>
+            <Stack.Screen name="Tabs" component={Tabs} />
+            {/* loaded on first open: react-native-webrtc stays out of app start */}
+            <Stack.Screen
+              name="Cams"
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              getComponent={() => require('./src/screens/CamsScreen').default}
+              options={{ animation: 'slide_from_right' }}
             />
-            <Tab.Screen name="Services" component={ServicesScreen} />
-            <Tab.Screen name="Settings" component={SettingsScreen} />
-          </Tab.Navigator>
+          </Stack.Navigator>
           <OtaPrompt />
         </NavigationContainer>
       </SystemInsetsProvider>
     </SafeAreaProvider>
+  );
+}
+
+/** The five tabs (the root stack's first screen). */
+function Tabs() {
+  const t = useTheme();
+  const store = useRootStore();
+  const waiting = pendingList(store).filter((r) => r.status === 'pending').length;
+  return (
+    <Tab.Navigator
+      initialRouteName={waiting ? 'Root' : 'Routes'}
+      screenOptions={({ route }) => ({
+        headerShown: false,
+        tabBarActiveTintColor: t.accent,
+        tabBarInactiveTintColor: t.textFaint,
+        tabBarStyle: { backgroundColor: t.card, borderTopColor: t.border },
+        tabBarLabelStyle: { fontSize: 11.5, fontWeight: '600' },
+        tabBarIcon: ({ focused, color, size }) => (
+          <Icon name={ICONS[route.name][focused ? 0 : 1]} size={size - 1} color={color} />
+        ),
+      })}
+    >
+      <Tab.Screen name="Routes" component={RoutesScreen} />
+      <Tab.Screen name="Vitals" component={VitalsScreen} />
+      <Tab.Screen
+        name="Root"
+        component={RootScreen}
+        options={{ tabBarBadge: waiting || undefined, tabBarBadgeStyle: { backgroundColor: t.warn, color: '#1A1300', fontWeight: '800' } }}
+      />
+      <Tab.Screen name="Services" component={ServicesScreen} />
+      <Tab.Screen name="Settings" component={SettingsScreen} />
+    </Tab.Navigator>
   );
 }
 

@@ -98,6 +98,22 @@ class PcNativeModule : Module() {
     // ---- window insets (dp), measured on the activity's decor view. Edge-to-edge is mandatory on
     // targetSdk 35+, so content always draws under the status/navigation bars; these are the absolute
     // system-bar + cutout insets, independent of where any React view happens to be laid out.
+    // ---- cams player (react-native-webrtc; CamsWebrtc sets its decoders at app start)
+    Function("camsHardware") { CamsWebrtc.hardwareDecoders() }
+    AsyncFunction("camsSetFullscreen") { on: Boolean ->
+      appContext.currentActivity?.let { CamsTools.setFullscreen(it, on) }
+      Unit
+    }.runOnQueue(Queues.MAIN)
+    AsyncFunction("camsKeepAwake") { on: Boolean ->
+      appContext.currentActivity?.let { CamsTools.keepAwake(it, on) }
+      Unit
+    }.runOnQueue(Queues.MAIN)
+    AsyncFunction("camsSaveSnapshot") { stream: String, label: String -> CamsTools.saveSnapshot(ctx, stream, label) }
+    AsyncFunction("camsShare") { uri: String ->
+      val a = appContext.currentActivity ?: throw PcException("E_SHARE", "no activity")
+      CamsTools.share(a, uri)
+    }.runOnQueue(Queues.MAIN)
+
     Function("windowInsets") {
       val activity = appContext.currentActivity ?: return@Function null
       val raw = activity.window?.decorView?.rootWindowInsets ?: return@Function null

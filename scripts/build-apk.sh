@@ -36,6 +36,8 @@ JDK17="${JDK17:-$HOME/tools/jdk-17-deb/usr/lib/jvm/java-17-openjdk-amd64}"
 TOOLCHAIN=()
 [ -x "$JDK17/bin/javac" ] && TOOLCHAIN=(-Porg.gradle.java.installations.paths="$JDK17")
 (cd android && ./gradlew --no-daemon "${TOOLCHAIN[@]}" -PreactNativeArchitectures=arm64-v8a assembleRelease)
+# cams player: nothing JNI-backed may run in Application.onCreate (libwebrtc is not loaded yet)
+scripts/cams/check-startup-jni.sh
 
 APK=android/app/build/outputs/apk/release/app-release.apk
 BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)

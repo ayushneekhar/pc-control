@@ -9,15 +9,23 @@ import com.oney.WebRTCModule.EglUtils
 import com.oney.WebRTCModule.WebRTCModuleOptions
 import org.webrtc.HardwareVideoDecoderFactory
 import org.webrtc.SoftwareVideoDecoderFactory
-import org.webrtc.SoftwareVideoEncoderFactory
 import org.webrtc.VideoCodecInfo
 import org.webrtc.VideoDecoder
 import org.webrtc.VideoDecoderFactory
+import org.webrtc.VideoEncoder
+import org.webrtc.VideoEncoderFactory
+import org.webrtc.audio.AudioDeviceModule
 import org.webrtc.audio.JavaAudioDeviceModule
 
 /**
  * Native cams player (react-native-webrtc): options that must be in place before its WebRTCModule is created,
  * so they are set from Application.onCreate (CamsPackage).
+ *
+ * At that point libjingle_peerconnection_so is NOT loaded yet (react-native-webrtc loads it in
+ * PeerConnectionFactory.initialize, when its module is created), so nothing built here may touch JNI:
+ * 1.4.0 constructed SoftwareVideoEncoderFactory here, whose constructor calls native code, and configure()
+ * failed with UnsatisfiedLinkError on the phone. Everything below is plain Java/Kotlin until first use, which
+ * is always after the library is loaded. scripts/cams/check-startup-jni.sh checks the compiled classes for this.
  *
  * - Video decoders: H.264 and H.265 on MediaCodec hardware only (react-native-webrtc's default factory offers
  *   hardware H.264 but never H.265, so go2rtc could not send the CP Plus HD stream as is). VP8/VP9/AV1 stay in
@@ -43,19 +51,9 @@ object CamsWebrtc {
     try {
       val o = WebRTCModuleOptions.getInstance()
       o.videoDecoderFactory = HwH26xDecoderFactory()
-      o.videoEncoderFactory = SoftwareVideoEncoderFactory()   // the app never sends video
+      o.videoEncoderFactory = NoVideoEncoderFactory()
       o.fieldTrials = FIELD_TRIALS
-      o.audioDeviceModule = JavaAudioDeviceModule.builder(ctx.applicationContext)
-        .setAudioAttributes(
-          AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_MEDIA)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-            .build(),
-        )
-        .setUseHardwareAcousticEchoCanceler(true)
-        .setUseHardwareNoiseSuppressor(true)
-        .setEnableVolumeLogger(false)
-        .createAudioDeviceModule()
+      o.audioDeviceModule = LazyAudioDeviceModule(ctx.applicationContext)
       configured = true
     } catch (t: Throwable) {
       // react-native-webrtc then falls back to its own defaults (H.264 only): the app shows SD for the CP Plus.
@@ -112,4 +110,39 @@ class HwH26xDecoderFactory : VideoDecoderFactory {
     // starts with it is what makes the offer advertise it prominently.
     return (hwCodecs.sortedBy { if (it.name.equals("H265", true)) 0 else 1 } + swCodecs).toTypedArray()
   }
+}
+
+/** The app only receives video: no encoders (and no native factory to create before the library is loaded). */
+class NoVideoEncoderFactory : VideoEncoderFactory {
+  override fun createEncoder(info: VideoCodecInfo): VideoEncoder? = null
+  override fun getSupportedCodecs(): Array<VideoCodecInfo> = emptyArray()
+}
+
+/**
+ * JavaAudioDeviceModule, built on first use (PeerConnectionFactory asks for its native pointer while
+ * react-native-webrtc creates the factory, after loading the library). Playback as media (loudspeaker), capture
+ * with the voice-communication source plus the phone's echo canceller and noise suppressor.
+ */
+class LazyAudioDeviceModule(private val ctx: Context) : AudioDeviceModule {
+  private var real: JavaAudioDeviceModule? = null
+
+  @Synchronized
+  private fun adm(): JavaAudioDeviceModule = real ?: JavaAudioDeviceModule.builder(ctx)
+    .setAudioAttributes(
+      AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build(),
+    )
+    .setUseHardwareAcousticEchoCanceler(true)
+    .setUseHardwareNoiseSuppressor(true)
+    .setEnableVolumeLogger(false)
+    .createAudioDeviceModule()
+    .also { real = it }
+
+  override fun getNative(webrtcEnvRef: Long): Long = adm().getNative(webrtcEnvRef)
+  @Synchronized override fun release() { real?.release() }
+  override fun setSpeakerMute(mute: Boolean) = adm().setSpeakerMute(mute)
+  override fun setMicrophoneMute(mute: Boolean) = adm().setMicrophoneMute(mute)
+  override fun setNoiseSuppressorEnabled(enabled: Boolean): Boolean = adm().setNoiseSuppressorEnabled(enabled)
 }

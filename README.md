@@ -44,6 +44,11 @@ the web page, its Replay and its Music tabs, which aren't ported.
   decoded instead of waiting for the jitter estimate; a jittery link gives uneven motion, not extra delay), and a
   decoder factory that decodes H.264 **and H.265** on MediaCodec hardware (react-native-webrtc's default one only
   offers hardware H.264, so the phone would never offer H.265).
+  These options are set in Application.onCreate, before react-native-webrtc loads libjingle, so nothing built
+  there may call native code (1.4.0 did and lost H.265 to an UnsatisfiedLinkError). The encoder factory is an empty
+  Java one (the app never sends video), the audio device module and the hardware decoder factory are created on first
+  use. `scripts/cams/check-startup-jni.sh` (run by `build-apk.sh`) fails the build if that startup path calls into
+  `org.webrtc`.
 - **CP Plus HD/SD**: HD (`cat3hd`, H.265 2304×1296, passthrough) when the phone has a hardware HEVC decoder for that
   size and WebRTC lists H.265; no HD frame within 12 s falls back to SD (`cat3`, H.264 720p) with a toast. The
   badge says what plays (`20 fps · HD·WebRTC`); focusing a camera shows codec, size, decoder name (`c2.….hevc.decoder`

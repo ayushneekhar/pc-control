@@ -14,6 +14,7 @@ class PushService : FirebaseMessagingService() {
 
   override fun onMessageReceived(msg: RemoteMessage) {
     val d = msg.data
+    // High priority, so Android lets us start the (dataSync) foreground service from the background here.
     val id = d["id"]?.takeIf { it.isNotEmpty() } ?: return
     val title = d["title"].orEmpty()
     val body = d["body"].orEmpty()
@@ -21,6 +22,7 @@ class PushService : FirebaseMessagingService() {
       "request" -> Notifier.request(this, id, title.ifEmpty { "Root approval needed" }, body, d["expires"]?.toLongOrNull() ?: 0)
       "result" -> Notifier.result(this, id, title.ifEmpty { "Command finished" }, body)
       "dismiss" -> Notifier.dismiss(this, id)
+      "downloads" -> LiveDownloads.start(this, fromPush = true)   // a download started: live progress for a while
       "notify" -> Notifier.message(this, id, title.ifEmpty { "PC Control" }, body, d["cat"], d["image"], d["link"])
     }
   }

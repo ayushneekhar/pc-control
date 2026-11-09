@@ -42,6 +42,7 @@ settings live on the laptop in `~/.local/share/pc-control/notify-settings.json`.
 | Root approvals | rootd via pc-api | off | on |
 | Command results | rootd via pc-api | off | on |
 | Other messages | anything else sent to `/pc/api/notify` | off | on |
+| Live download progress | Radarr/Sonarr Grab webhook, Qwen bot downloads | – (app only) | on |
 
 The defaults keep what went to Telegram before the router. On the app side, only the things you shouldn't miss
 are on. The Qwen bot's replies to your own messages (`/status`, searches, repo runs…) don't go through here.
@@ -55,6 +56,33 @@ are on. The Qwen bot's replies to your own messages (`/status`, searches, repo r
   header `Bearer …`). Without it pc-api answers 401.
 - Laptop-specific values (Telegram chat id, Seerr's public URL) are in `~/.config/pc-control/pcapi.json`
   (`telegram_chat`, `seerr_url`); the bot token is read from the Qwen bot's token file. None of it is in git.
+
+## Live download progress (status bar chip / Now Bar)
+
+While something downloads in qBittorrent (any category: `radarr`, `tv-sonarr`, `qwen`), the app shows **one**
+ongoing notification with the progress. On Android 16 it is a promoted "Live Update" (`ProgressStyle`,
+`setRequestPromotedOngoing`, a short "42%" chip), so it shows in the status bar chip and, on Samsung One UI 8, in the
+Now Bar. On older Android it is a normal ongoing progress notification.
+
+- One download: its title (the Radarr/Sonarr title when known, else a cleaned-up release name), %, speed, ETA.
+  Several: "3 downloads · 42%" with the combined progress. Actions: tap opens the app, **Stop** (or swiping it
+  away) hides it until the next new download.
+- There's still no always-on connection. When a download starts (Radarr/Sonarr Grab webhook, or the Qwen bot's
+  `start_download` calling `POST /pc/api/downloads/started`), pc-api sends a high-priority FCM data message
+  (`kind: downloads`, no names in it, at most one per 20 s). That lets the app start a short-lived `dataSync`
+  foreground service, which polls `GET /pc/api/downloads` over the tailnet every 3 s while the screen is on (30 s
+  while it's off). Opening the app while something downloads starts it too.
+- It stops (and replaces the notification with a quiet "Download finished" when something completed) when nothing
+  is downloading, when the laptop can't be reached for 2 minutes, when every download has been stalled for 15
+  minutes, on Stop, when the category is switched off, or when Android's dataSync time limit runs out.
+- Paused, errored and seeding torrents don't count. Titles come from the Grab webhook's `downloadId` (kept in
+  `~/.local/share/pc-control/download-titles.json`) or, failing that, from Radarr's/Sonarr's queue API (API key read
+  from their `config.xml`, at most once per 30 s, only for unknown torrents). The qBittorrent WebUI password is read
+  from `~/tools/localagent/.qbt-password` (override: `qbt_password_file`, `qbt_url`, `qbt_user` in `pcapi.json`).
+- Settings → Notifications → **Live download progress** shows whether Android allows promoted ("Live")
+  notifications for the app (`canPostPromotedNotifications()`), with a button to that system setting, and a **Show
+  now** button. On Samsung, if it doesn't appear in the Now Bar, turn on Developer options → "Live notifications
+  for all apps".
 
 ## Notifications (FCM)
 
@@ -73,8 +101,9 @@ are on. The Qwen bot's replies to your own messages (`/status`, searches, repo r
 - Router notifications use one Android channel per category, so you can also tune them in Android settings.
   A picture (cat alerts, Seerr posters) is fetched from pc-api over the tailnet when the notification arrives
   (`/pc/api/notify/image/<id>`); FCM itself only carries the text and that path.
-- No foreground service, no pinned notification, no battery-optimization exemption. While the app is open,
-  the Root tab still updates live over SSE (`/pc/api/events`).
+- No always-on foreground service, no pinned notification, no battery-optimization exemption. The only foreground
+  service is the short-lived live download progress one above. While the app is open, the Root tab still updates
+  live over SSE (`/pc/api/events`).
 - Build-time Firebase config: `app.config.js` uses `~/.config/pc-control/google-services.json` (or
   `$PCC_GOOGLE_SERVICES`). It is never copied into the repo, only into the generated `android/`, which is
   gitignored.

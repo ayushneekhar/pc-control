@@ -6,6 +6,7 @@ import { Banner, Button, Card, Icon, KV, Mono, Pill, Screen, Section } from '../
 import { ApiError, DEFAULT_SERVER, get, Info, post, serverUrl } from '../lib/api';
 import { ApkRelease, APK_URLS, binaryTarget, clearOtaRecovery, latestApk, otaRecovery, otaSnapshot } from '../lib/ota';
 import { applyOta, checkOta, useOta } from '../lib/otaStore';
+import { liveStatus, LiveStart, startLiveIfDownloading } from '../lib/live';
 import { askNotificationPermission, registerPush } from '../lib/push';
 import { reconnectRootStore, useRootStore } from '../lib/rootStore';
 import { keyFingerprint } from '../lib/rootPayload';
@@ -320,7 +321,7 @@ function Push() {
 }
 
 type Channel = 'telegram' | 'app';
-type NotifCategory = { id: string; label: string; description: string; icon: string; telegram: boolean; app: boolean };
+type NotifCategory = { id: string; label: string; description: string; icon: string; telegram: boolean; app: boolean; channels?: Channel[] };
 type NotifSettings = {
   masters: Record<Channel, boolean>;
   categories: NotifCategory[];
@@ -414,7 +415,15 @@ function NotificationPrefs() {
             <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600' }}>{c.label}</Text>
             <Text style={{ color: t.textFaint, fontSize: 12, lineHeight: 16 }}>{c.description}</Text>
           </View>
-          <View style={st.colCell}>{sw(c.telegram, !s.masters.telegram, (v) => setCat(c.id, 'telegram', v), `${c.label} on Telegram`)}</View>
+          <View style={st.colCell}>
+            {(c.channels ?? ['telegram', 'app']).includes('telegram') ? (
+              sw(c.telegram, !s.masters.telegram, (v) => setCat(c.id, 'telegram', v), `${c.label} on Telegram`)
+            ) : (
+              <Text style={{ color: t.textFaint, fontSize: 16 }} accessibilityLabel={`${c.label}: app only`}>
+                –
+              </Text>
+            )}
+          </View>
           <View style={st.colCell}>{sw(c.app, !s.masters.app, (v) => setCat(c.id, 'app', v), `${c.label} in the app`)}</View>
         </View>
       ))}
@@ -423,6 +432,73 @@ function NotificationPrefs() {
           A channel that is all off ignores its per-category switches (shown greyed).
         </Text>
       ) : null}
+    </Card>
+  );
+}
+
+const LIVE_RESULT: Record<LiveStart, string> = {
+  started: 'Started: look at the status bar.',
+  running: 'Already showing.',
+  none: 'Nothing is downloading right now. It starts by itself when a download begins.',
+  off: '“Live download progress” is off above (App column).',
+  refused: 'Android didn’t start it. Check that notifications and the “Live download progress” channel are on.',
+  unavailable: 'This build has no live progress.',
+  unreachable: 'Can’t reach the laptop. Is Tailscale connected?',
+};
+
+/** Live download progress: Android 16 Live Updates (status bar chip + Samsung Now Bar) status and a manual start. */
+function LiveProgress() {
+  const t = useTheme();
+  const tick = useAppActiveTick();
+  const [live, setLive] = useState(() => liveStatus());
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => setLive(liveStatus()), [tick]);
+  if (!live) return null;
+
+  const showNow = async () => {
+    setBusy(true);
+    const r = await startLiveIfDownloading();
+    setMsg(LIVE_RESULT[r]);
+    setLive(liveStatus());
+    setBusy(false);
+  };
+  const stop = () => {
+    PcNative?.liveStop();
+    setTimeout(() => setLive(liveStatus()), 500);
+  };
+  const good = live.channelEnabled && (!live.supported || live.canPromote);
+  return (
+    <Card style={{ gap: space(3) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
+        <View style={[st.iconWrap, { backgroundColor: good ? t.accentSoft : t.cardAlt }]}>
+          <Icon name="progress-download" size={22} color={good ? t.accent : t.textDim} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: t.text, fontWeight: '700', fontSize: 16 }}>Live download progress</Text>
+          <Text style={{ color: t.textDim, fontSize: 13 }}>
+            {live.running ? 'Showing now' : live.supported ? 'Status bar chip + Now Bar while something downloads' : 'A progress notification while something downloads'}
+          </Text>
+        </View>
+        {live.running ? <Pill tone="ok" icon="download" label="Live" /> : null}
+      </View>
+      {live.supported ? (
+        <Row ok={live.canPromote} label="Live notifications allowed" fix={live.canPromote ? undefined : { label: 'Allow', onPress: () => PcNative?.openLiveSettings() }} />
+      ) : (
+        <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
+          Android {live.sdk >= 35 ? '15' : live.sdk >= 34 ? '14' : 'version ' + live.sdk} has no Live Updates, so this shows as a normal ongoing progress notification. Android 16 puts it in the status bar chip and the Now Bar.
+        </Text>
+      )}
+      <Row ok={live.channelEnabled} label="“Live download progress” channel on" fix={live.channelEnabled ? undefined : { label: 'Open', onPress: () => PcNative?.openNotificationSettings() }} />
+      <View style={{ flexDirection: 'row', gap: space(2) }}>
+        <Button label="Show now" icon="play-outline" kind="subtle" style={{ flex: 1 }} busy={busy} disabled={live.running} onPress={showNow} />
+        {live.running ? <Button label="Stop" icon="stop" kind="subtle" style={{ flex: 1 }} onPress={stop} /> : null}
+      </View>
+      {msg ? <Text style={{ color: t.textDim, fontSize: 13 }}>{msg}</Text> : null}
+      <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
+        No background connection: the laptop sends a push when a download starts, then the app checks every few seconds while the screen is on and stops when nothing is downloading. On Samsung, if it doesn’t appear in the Now Bar, turn on Developer options → “Live notifications for all apps”.
+      </Text>
     </Card>
   );
 }
@@ -576,6 +652,7 @@ export default function SettingsScreen() {
       </Section>
       <Section label="Notifications">
         <NotificationPrefs />
+        <LiveProgress />
         <Push />
       </Section>
       <Section label="Connection">

@@ -13,6 +13,16 @@ export type NativeSettings = {
   defaultServerUrl: string;
 };
 
+export type LiveStatus = {
+  sdk: number;
+  /** Android 16+: Live Updates (status bar chip, Samsung Now Bar). Older: a normal progress notification. */
+  supported: boolean;
+  /** NotificationManager.canPostPromotedNotifications(): the per-app "Live notifications" switch. */
+  canPromote: boolean;
+  channelEnabled: boolean;
+  running: boolean;
+};
+
 export type BiometricStatus =
   | 'ok'
   | 'none_enrolled'
@@ -35,6 +45,13 @@ export type PcNativeModule = {
   pushRegister(): Promise<{ token: string; registered: boolean; error: string | null }>;
   notificationsEnabled(): boolean;
   openNotificationSettings(): void;
+  liveStatus(): LiveStatus;
+  /** Start live download progress for these active downloads (pc-api ids). false = not started (notifications
+   *  off, the user already stopped it for all of them, or Android refused the foreground service). */
+  liveStart(activeIds: string[]): boolean;
+  liveStop(): void;
+  /** Android 16's "Live notifications" setting for this app (or its notification settings). */
+  openLiveSettings(): boolean;
   biometricStatus(): BiometricStatus;
   keyInfo(): KeyInfo | null;
   createKey(): Promise<KeyInfo>;

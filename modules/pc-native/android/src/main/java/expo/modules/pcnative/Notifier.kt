@@ -49,6 +49,7 @@ object Notifier {
       NotificationManager.IMPORTANCE_HIGH).apply {
       description = "Notifications from the laptop, including test notifications"
     })
+    LiveDownloads.ensureChannel(ctx)
     for ((id, v) in CATEGORY_CHANNELS) {
       nm.createNotificationChannel(NotificationChannel("cat_$id", v.first, v.second))
     }

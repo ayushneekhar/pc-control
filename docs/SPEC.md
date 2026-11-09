@@ -78,6 +78,10 @@ approves that exact command with his fingerprint. No password exists in the flow
   - `POST /pc/api/push/test` sends a test notification; `POST /pc/api/notify` is the notification router
     (9 Nov 2026): per-category Telegram (Qwen bot) / app switches, see README "Notification router".
   - `/pc/api/events` (SSE) stays only for the open app's live Root tab.
+  - Live download progress (9 Nov 2026, app 1.3.0): router category "live" (app only, default on). A download
+    start (Radarr/Sonarr Grab, Qwen bot) sends a high-priority FCM data message; the app then runs a short-lived
+    dataSync foreground service that polls `GET /pc/api/downloads` and keeps one Android 16 Live Update
+    (ProgressStyle, promoted ongoing) notification, and stops when nothing downloads. See README.
 
 ## 4. Tech + build
 - Expo (match ~/code/Apex: Expo SDK 57, RN 0.86, TypeScript, yarn, Node 22), Android only. Native bits as

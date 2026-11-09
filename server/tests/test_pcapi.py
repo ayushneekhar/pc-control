@@ -286,9 +286,10 @@ class RouterTests(unittest.TestCase):
 
 
 class FakePush:
-    def __init__(self): self.sent, self.root, self.tokens = [], [], {"t": {}}
+    def __init__(self): self.sent, self.root, self.tokens, self.queued = [], [], {"t": {}}, []
     def configured(self): return True
     def status(self, token=None): return {"configured": True, "devices": 1}
+    def enqueue(self, data, high=True, ttl=3600): self.queued.append((data, high, ttl))
     def notify(self, nid, title, body, extra=None): self.sent.append((nid, title, body, extra or {}))
     def on_root_event(self, t, r): self.root.append((t, r))
 
@@ -333,6 +334,222 @@ class HookTests(unittest.TestCase):
         self.assertIsNone(pcapi.map_hook("seerr", {"notification_type": "MEDIA_PENDING"}))
         self.assertIsNone(pcapi.Notify.fetch_poster("https://evil.example/x.jpg"))
         self.assertIsNone(pcapi.Notify.fetch_poster("http://image.tmdb.org/x.jpg"))
+
+
+# ---------------------------------------------------------------- downloads + live progress
+
+HASH_A, HASH_B, HASH_Q, HASH_S = "A" * 40, "B" * 40, "C" * 40, "D" * 40
+
+
+class FakeQbt(BaseHTTPRequestHandler):
+    """qBittorrent WebUI (login + torrents/info) and a Radarr queue endpoint."""
+    torrents, logins, radarr_calls, expire_session = [], [0], [0], [False]
+
+    def log_message(self, *a): pass
+
+    def reply(self, code, obj, headers=()):
+        b = json.dumps(obj).encode() if not isinstance(obj, bytes) else obj
+        self.send_response(code)
+        for k, v in headers: self.send_header(k, v)
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+
+    def do_POST(self):
+        body = urllib.parse.parse_qs(self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode())
+        if self.path == "/api/v2/auth/login":
+            if body.get("password") != ["pw"]: return self.reply(200, b"Fails.")
+            self.logins[0] += 1
+            return self.reply(200, b"Ok.", [("Set-Cookie", f"QBT_SID_8080=s{self.logins[0]}; path=/")])
+        if self.path == "/api/v2/torrents/info":
+            if "QBT_SID_8080" not in (self.headers.get("Cookie") or "") or self.expire_session[0]:
+                self.expire_session[0] = False
+                return self.reply(403, b"Forbidden")
+            return self.reply(200, self.torrents)
+        self.reply(404, {})
+
+    def do_GET(self):
+        if self.path.startswith("/api/v3/queue"):
+            if self.headers.get("X-Api-Key") != "k" * 32: return self.reply(401, {})
+            self.radarr_calls[0] += 1
+            return self.reply(200, {"records": [{"downloadId": HASH_B, "movie": {"title": "Dune", "year": 2021}}]})
+        self.reply(404, {})
+
+
+def torrent(h, name, state, cat, size=1000, done=250, speed=5000, eta=60):
+    return {"hash": h.lower(), "name": name, "state": state, "category": cat, "size": size, "completed": done,
+            "progress": done / size if size else 0, "dlspeed": speed, "eta": eta, "num_seeds": 3, "added_on": 1}
+
+
+class DownloadsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeQbt)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+        cls.dir = tempfile.mkdtemp()
+        cls.pw = os.path.join(cls.dir, "pw")
+        with open(cls.pw, "w") as f: f.write("pw\n")
+        cls.radarr_conf = os.path.join(cls.dir, "config.xml")
+        with open(cls.radarr_conf, "w") as f: f.write(f"<Config><ApiKey>{'k' * 32}</ApiKey></Config>")
+
+    def setUp(self):
+        FakeQbt.radarr_calls[0] = 0
+        FakeQbt.torrents[:] = [
+            torrent(HASH_A, "Severance.S02E03.1080p.WEB.h264", "downloading", "tv-sonarr", 1000, 500, 4000, 120),
+            torrent(HASH_B, "Dune.2021.2160p.UHD.BluRay.x265", "stalledDL", "radarr", 3000, 0, 0, 8640000),
+            torrent(HASH_Q, "www.Site.org - Some.Film.1999.1080p", "queuedDL", "qwen", 0, 0, 0, 0),
+            torrent(HASH_S, "Done.Already.2020", "stalledUP", "radarr"),        # seeding: not a download
+            torrent("E" * 40, "Paused.2020", "stoppedDL", "qwen"),               # paused: doesn't keep it alive
+        ]
+        self.data = tempfile.mkdtemp(dir=self.dir)
+        self.d = pcapi.Downloads(self.base, "admin", self.pw, {
+            "radarr": ("radarr", self.base, self.radarr_conf),
+            "tv-sonarr": ("sonarr", "http://127.0.0.1:1", os.path.join(self.dir, "missing.xml"))}, self.data)
+
+    def test_active_lists_only_downloads_with_titles_and_totals(self):
+        r = self.d.active()
+        self.assertEqual(r["qbt"], "ok")
+        names = [(x["name"], x["state"]) for x in r["downloads"]]
+        self.assertEqual(names, [("Severance S02E03", "downloading"), ("Dune (2021)", "stalled"),
+                                 ("Some Film (1999)", "queued")])
+        dune = r["downloads"][1]
+        self.assertEqual((dune["id"], dune["eta"], dune["progress"]), ("b" * 16, None, 0))
+        self.assertEqual(FakeQbt.radarr_calls[0], 1)                 # Radarr title from its queue
+        t = r["total"]
+        self.assertEqual((t["count"], t["downloading"], t["speed"], t["eta"]), (3, 1, 4000, 120))
+        self.assertEqual(t["progress"], round(500 / 4000, 4))        # the size-less (metadata) one is left out
+        # cached briefly, then Radarr isn't asked again for a title it already gave
+        self.d.cache = (0.0, None)
+        self.d.active()
+        self.assertEqual(FakeQbt.radarr_calls[0], 1)
+        self.assertEqual(json.load(open(os.path.join(self.data, "download-titles.json"))), {HASH_B: "Dune (2021)"})
+
+    def test_webhook_title_wins_and_bad_hashes_ignored(self):
+        self.assertTrue(self.d.remember(HASH_A.lower(), "Severance S02E03 · Who Is Alive?"))
+        self.assertFalse(self.d.remember("../x", "nope"))
+        self.assertFalse(self.d.remember(HASH_A, ""))
+        self.assertEqual(self.d.active()["downloads"][0]["name"], "Severance S02E03 · Who Is Alive?")
+
+    def test_session_expiry_relogs_and_bad_password_is_auth(self):
+        self.d.active()
+        FakeQbt.expire_session[0] = True
+        self.d.cache = (0.0, None)
+        self.assertEqual(self.d.active()["qbt"], "ok")
+        bad = os.path.join(self.dir, "bad")
+        with open(bad, "w") as f: f.write("wrong")
+        r = pcapi.Downloads(self.base, "admin", bad, {}, self.data).active()
+        self.assertEqual((r["qbt"], r["downloads"]), ("auth", []))
+        r = pcapi.Downloads("http://127.0.0.1:1", "admin", self.pw, {}, self.data).active()
+        self.assertEqual(r["qbt"], "down")
+
+    def test_release_titles(self):
+        self.assertEqual(pcapi.release_title("Dallas.Buyers.Club.2013.REPACK.1080p"), "Dallas Buyers Club (2013)")
+        self.assertEqual(pcapi.release_title("Some Show S03 Complete 1080p"), "Some Show S03")
+        self.assertEqual(pcapi.release_title("Plain Name"), "Plain Name")
+
+
+class LiveCategoryTests(unittest.TestCase):
+    def setUp(self):
+        self.push = FakePush()
+        self.n = pcapi.Notify(self.push, data_dir=tempfile.mkdtemp(), token_file="/nonexistent", chat="")
+
+    def test_app_only_default_on(self):
+        c = next(x for x in self.n.settings()["categories"] if x["id"] == "live")
+        self.assertEqual((c["telegram"], c["app"], c["channels"]), (False, True, ["app"]))
+        self.assertEqual(self.n.update({"categories": {"live": {"telegram": True}}})[0], 400)
+        self.assertEqual(self.n.send("live", "x")[0], 400)               # not a message category
+
+    def test_kick_sends_one_high_priority_data_push_without_names_and_respects_switches(self):
+        self.assertEqual(self.n.live_kick("radarr"), "queued")
+        data, high, ttl = self.push.queued[-1]
+        self.assertEqual((data, high, ttl), ({"kind": "downloads", "id": "live", "why": "radarr"}, True, 300))
+        self.assertEqual(self.n.live_kick("radarr"), "throttled")       # a season pack = one push
+        self.assertEqual(len(self.push.queued), 1)
+        self.n._live_at = 0
+        self.n.update({"categories": {"live": {"app": False}}})
+        self.assertEqual(self.n.live_kick(), "off")
+        self.n.update({"categories": {"live": {"app": True}}, "masters": {"app": False}})
+        self.assertEqual(self.n.live_kick(), "off")
+        self.assertEqual(len(self.push.queued), 1)
+
+
+class DownloadsHttpTests(unittest.TestCase):
+    """GET /pc/api/downloads, POST /pc/api/downloads/started and the Radarr Grab hook through pc-api's handler."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qbt = ThreadingHTTPServer(("127.0.0.1", 0), FakeQbt)
+        threading.Thread(target=cls.qbt.serve_forever, daemon=True).start()
+        cls.dir = tempfile.mkdtemp()
+        pw = os.path.join(cls.dir, "pw")
+        with open(pw, "w") as f: f.write("pw")
+        cls.saved = (pcapi.PUSH, pcapi.NOTIFY, pcapi.DOWNLOADS, pcapi.HOOK_SECRET_FILE, pcapi.ALLOWED_LOGINS)
+        pcapi.PUSH = FakePush()
+        pcapi.NOTIFY = pcapi.Notify(pcapi.PUSH, data_dir=cls.dir, token_file="/nonexistent", chat="")
+        pcapi.DOWNLOADS = pcapi.Downloads(f"http://127.0.0.1:{cls.qbt.server_address[1]}", "admin", pw, {}, cls.dir)
+        pcapi.NOTIFY.update({"categories": {"grabbed": {"telegram": False}}})   # no Telegram in these tests
+        pcapi.HOOK_SECRET_FILE = os.path.join(cls.dir, "hook-secret")
+        with open(pcapi.HOOK_SECRET_FILE, "w") as f: f.write("s" * 40)
+        pcapi.ALLOWED_LOGINS = {"me@example.com"}
+        cls.api = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        threading.Thread(target=cls.api.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.api.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.api.shutdown(); cls.qbt.shutdown()
+        pcapi.PUSH, pcapi.NOTIFY, pcapi.DOWNLOADS, pcapi.HOOK_SECRET_FILE, pcapi.ALLOWED_LOGINS = cls.saved
+
+    def setUp(self):
+        FakeQbt.torrents[:] = [torrent(HASH_A, "Film.2001.1080p", "downloading", "radarr")]
+        pcapi.DOWNLOADS.cache = (0.0, None)
+        pcapi.PUSH.queued.clear()
+        pcapi.NOTIFY._live_at = 0
+
+    def call(self, method, path, body=None, headers=None):
+        import urllib.request, urllib.error
+        req = urllib.request.Request(self.url + path, method=method, headers={"Content-Type": "application/json",
+                                     **(headers or {})}, data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.load(e)
+
+    def test_get_downloads_same_auth_as_other_endpoints(self):
+        code, r = self.call("GET", "/pc/api/downloads")
+        self.assertEqual(code, 200)
+        self.assertTrue(r["enabled"])
+        self.assertEqual([d["name"] for d in r["downloads"]], ["Film (2001)"])
+        self.assertEqual(self.call("GET", "/pc/api/downloads", headers={"Tailscale-User-Login": "me@example.com"})[0], 200)
+        self.assertEqual(self.call("GET", "/pc/api/downloads", headers={"Tailscale-User-Login": "x@evil.com"})[0], 403)
+        self.assertEqual(self.call("GET", "/pc/api/downloads", headers={"X-Forwarded-For": "100.64.0.9"})[0], 403)
+        self.assertEqual(self.call("POST", "/pc/api/downloads/started", {},
+                                   headers={"Tailscale-User-Login": "x@evil.com"})[0], 403)
+
+    def test_started_wakes_the_phone_and_records_title(self):
+        code, r = self.call("POST", "/pc/api/downloads/started", {"hash": HASH_A, "title": "Qwen pick", "source": "qwen"})
+        self.assertEqual((code, r["app"]), (200, "queued"))
+        self.assertEqual(pcapi.PUSH.queued[-1][0], {"kind": "downloads", "id": "live", "why": "qwen"})
+        self.assertEqual(self.call("GET", "/pc/api/downloads")[1]["downloads"][0]["name"], "Qwen pick")
+
+    def test_radarr_grab_hook_triggers_live_push_and_maps_title(self):
+        hook = {"eventType": "Grab", "downloadId": HASH_A, "movie": {"title": "Film", "year": 2001},
+                "release": {"quality": "Bluray-1080p"}}
+        self.assertEqual(self.call("POST", "/pc/api/hook/radarr", hook)[0], 401)          # needs the secret
+        self.assertEqual(pcapi.PUSH.queued, [])
+        code, r = self.call("POST", "/pc/api/hook/radarr", hook, {"Authorization": "Bearer " + "s" * 40})
+        self.assertEqual(code, 200)
+        self.assertEqual(pcapi.PUSH.queued[-1][0]["kind"], "downloads")
+        self.assertEqual(pcapi.DOWNLOADS.titles[HASH_A], "Film (2001)")
+        # a non-Grab event doesn't wake the phone
+        pcapi.PUSH.queued.clear(); pcapi.NOTIFY._live_at = 0
+        self.call("POST", "/pc/api/hook/radarr", {"eventType": "Download"}, {"Authorization": "Bearer " + "s" * 40})
+        self.assertEqual(pcapi.PUSH.queued, [])
+
+    def test_disabled_category_reported_to_the_app(self):
+        pcapi.NOTIFY.update({"categories": {"live": {"app": False}}})
+        self.addCleanup(pcapi.NOTIFY.update, {"categories": {"live": {"app": True}}})
+        self.assertFalse(self.call("GET", "/pc/api/downloads")[1]["enabled"])
+        self.assertEqual(self.call("POST", "/pc/api/downloads/started", {})[1]["app"], "off")
 
 
 if __name__ == "__main__":

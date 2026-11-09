@@ -3,6 +3,11 @@
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <uses-permission android:name="android.permission.USE_BIOMETRIC" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- Live download progress: a short-lived dataSync foreground service (started from a high-priority FCM message
+       or when the app is opened) and an Android 16 promoted "Live Update" notification. Install-time permissions. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
 
   <application>
     <!-- Firebase Cloud Messaging: data messages from pc-api, displayed locally by Notifier. -->
@@ -13,5 +18,9 @@
         <action android:name="com.google.firebase.MESSAGING_EVENT" />
       </intent-filter>
     </service>
+    <service
+      android:name="expo.modules.pcnative.LiveDownloadService"
+      android:exported="false"
+      android:foregroundServiceType="dataSync" />
   </application>
 </manifest>

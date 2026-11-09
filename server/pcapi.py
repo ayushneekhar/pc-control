@@ -24,6 +24,10 @@ GET  /pc/api/notify/settings          {masters: {telegram, app}, categories: [..
 POST /pc/api/notify/settings          {masters?: {telegram?, app?}, categories?: {<id>: {telegram?, app?}}}
 POST /pc/api/notify/test              {channel: telegram|app}: a labelled test message on that channel
 GET  /pc/api/notify/image/<id>        a notification's picture (the app fetches it for a big-picture notification)
+GET  /pc/api/downloads                active qBittorrent downloads (all categories) for the app's live progress
+                                      notification: {enabled, qbt, downloads: [...], total: {...}}. Read-only.
+POST /pc/api/downloads/started        {hash?, title?}: "a download just started" (the Qwen bot calls it): wakes the
+                                      phone's live progress (FCM "downloads") if that category is on
 POST /pc/api/hook/radarr|sonarr|seerr webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
                                       (Authorization: Bearer/Basic password, or X-PC-Hook-Secret); maps events to categories
 GET  /pc/app.apk                      LEGACY (pre-1.2 builds' updater): serves the last laptop-hosted APK. Releases now
@@ -362,8 +366,11 @@ CATEGORIES = [
     ("root", "Root approvals", "A root command is waiting for your fingerprint.", False, True, "shield-key-outline"),
     ("results", "Command results", "An approved root command finished or failed.", False, True, "console"),
     ("other", "Other messages", "Anything else sent to /pc/api/notify.", False, True, "message-outline"),
+    ("live", "Live download progress", "Progress in the status bar and Now Bar while something downloads.", False,
+     True, "progress-download"),
 ]
 CAT_IDS = [c[0] for c in CATEGORIES]
+APP_ONLY = {"live"}         # categories with no Telegram side (live progress is a phone notification, not a message)
 CHANNELS = ("telegram", "app")
 TG_API = os.environ.get("PCAPI_TG_API", "https://api.telegram.org").rstrip("/")
 TG_TOKEN_FILE = os.environ.get("PCAPI_TG_TOKEN_FILE", CONFIG.get("telegram_token_file")
@@ -412,9 +419,11 @@ class Notify:
             cats = []
             for cid, label, desc, d_tg, d_app, icon in CATEGORIES:
                 cur = c.get(cid) or {}
+                tg_ok = cid not in APP_ONLY
                 cats.append({"id": cid, "label": label, "description": desc, "icon": icon,
-                             "telegram": bool(cur.get("telegram", d_tg)), "app": bool(cur.get("app", d_app)),
-                             "defaults": {"telegram": d_tg, "app": d_app}})
+                             "telegram": tg_ok and bool(cur.get("telegram", d_tg)), "app": bool(cur.get("app", d_app)),
+                             "defaults": {"telegram": d_tg, "app": d_app},
+                             "channels": list(CHANNELS) if tg_ok else ["app"]})
             masters = {ch: bool(m.get(ch, True)) for ch in CHANNELS}
         return {"masters": masters, "categories": cats,
                 "channels": {"telegram": {"configured": self.tg_token() is not None and bool(self.chat)},
@@ -428,6 +437,8 @@ class Notify:
                 k in CAT_IDS and isinstance(v, dict) and all(ch in CHANNELS and isinstance(x, bool) for ch, x in v.items())
                 for k, v in c.items())):
             return 400, {"error": "categories must be {<category>: {telegram?: bool, app?: bool}}"}
+        if c and any(k in APP_ONLY and "telegram" in v for k, v in c.items()):
+            return 400, {"error": f"{', '.join(sorted(APP_ONLY))}: app only, there is no Telegram switch"}
         with self.lock:
             self.s.setdefault("masters", {}).update(m or {})
             for k, v in (c or {}).items(): self.s.setdefault("categories", {}).setdefault(k, {}).update(v)
@@ -508,7 +519,8 @@ class Notify:
     def send(self, cat, title, body="", telegram_text=None, image=None, link=None):
         """-> (http code, result). 502 when Telegram was wanted but failed, so callers can fall back to sending
         straight to Telegram themselves (alerts are never lost because pc-api had a bad moment)."""
-        if cat not in CAT_IDS: return 400, {"error": f"unknown category (one of: {', '.join(CAT_IDS)})"}
+        if cat not in CAT_IDS or cat in APP_ONLY:
+            return 400, {"error": f"unknown category (one of: {', '.join(c for c in CAT_IDS if c not in APP_ONLY)})"}
         title, body = clip(title, 120), str(body or "").strip()[:3000]
         if not title: return 400, {"error": "title required"}
         if image is not None and (len(image) > 10 * 1024 * 1024 or not image_type(image)):
@@ -537,6 +549,20 @@ class Notify:
             if not ok: code, res["ok"] = 502, False
         else: res["telegram"] = "off"
         return code, res
+
+    def live_kick(self, why=""):
+        """A download started: wake the phone's live progress notification with a high-priority data message
+        (the app then polls /pc/api/downloads over the tailnet for a while). No names in the payload.
+        Throttled, so a season pack's dozen grabs make one push. -> "queued" | "off" | "throttled" | why not."""
+        if not self.wants("live")["app"]: return "off"
+        if not self.push.configured(): return "not configured"
+        if not self.push.tokens: return "no phones registered"
+        now = time.time()
+        with self.lock:
+            if now - getattr(self, "_live_at", 0) < LIVE_KICK_GAP: return "throttled"
+            self._live_at = now
+        self.push.enqueue({"kind": "downloads", "id": "live", **({"why": why} if why else {})}, True, 300)
+        return "queued"
 
     def send_async(self, *a, **kw):
         def run():
@@ -632,7 +658,7 @@ def map_hook(source, p):
         if ev == "Grab":
             bits = [x for x in (rel.get("quality"), human_size(rel.get("size")), rel.get("indexer")) if x]
             return {"category": "grabbed", "title": f"{'🎬 Movie' if source == 'radarr' else '📺 Episode'} grabbed",
-                    "body": name + (f"\n{' · '.join(bits)}" if bits else "")}
+                    "body": name + (f"\n{' · '.join(bits)}" if bits else ""), "name": name}
         if ev == "ManualInteractionRequired":
             msgs = [m for s in (p.get("downloadStatusMessages") or []) for m in (s.get("messages") or [])]
             why = msgs[0] if msgs else (p.get("downloadStatus") or "needs a manual import")
@@ -659,6 +685,164 @@ def map_hook(source, p):
 
 
 NOTIFY = None
+
+
+# ---------------------------------------------------------------- downloads (qBittorrent -> the app's live progress)
+
+LIVE_KICK_GAP = 20          # s between "downloads active" pushes
+QBT_URL = os.environ.get("PCAPI_QBT_URL", CONFIG.get("qbt_url") or "http://127.0.0.1:8080").rstrip("/")
+QBT_USER = CONFIG.get("qbt_user") or "admin"
+QBT_PASSWORD_FILE = os.environ.get("PCAPI_QBT_PASSWORD_FILE", CONFIG.get("qbt_password_file")
+                                   or os.path.join(HOME, "tools", "localagent", ".qbt-password"))
+# qBittorrent category -> (app, base URL, config.xml holding its API key). Used only to show the movie/show title
+# instead of the release name; the key is read from disk when needed and never logged or returned.
+ARR = {"radarr": ("radarr", "http://127.0.0.1:7878", os.path.join(HOME, ".config", "Radarr", "config.xml")),
+       "tv-sonarr": ("sonarr", "http://127.0.0.1:8989", os.path.join(HOME, ".config", "Sonarr", "config.xml"))}
+# qBittorrent states that count as "downloading" -> what the app shows. Paused/stopped, errored and complete
+# torrents are left out, so they never keep the phone's live notification (and its polling) alive.
+DL_STATE = {"downloading": "downloading", "forcedDL": "downloading", "stalledDL": "stalled", "metaDL": "metadata",
+            "forcedMetaDL": "metadata", "queuedDL": "queued", "checkingDL": "checking",
+            "checkingResumeData": "checking", "allocating": "checking", "moving": "moving"}
+HASH_RE = re.compile(r"^[0-9A-Fa-f]{40}$")
+MAX_TITLES = 300
+
+
+def release_title(name):
+    """Release name -> something readable: 'Dallas.Buyers.Club.2013.1080p.BluRay' -> 'Dallas Buyers Club (2013)',
+    'Show.Name.S02E05.720p' -> 'Show Name S02E05'. Falls back to the cleaned name."""
+    n = re.sub(r"^www\.\S+\s*-\s*", "", " ".join(str(name or "").split()))
+    n = re.sub(r"\.(mkv|mp4|avi)$", "", n, flags=re.I)
+    if " " not in n: n = re.sub(r"[._]", " ", n)
+    m = re.match(r"(.+?)[\s.(\[-]+(S\d{1,2}(?:E\d{1,3})?(?:-?E\d{1,3})?)\b", n, re.I)
+    if m: return f"{m.group(1).strip(' -')} {m.group(2).upper()}"
+    m = re.match(r"(.+?)[\s(\[]+((?:19|20)\d{2})(?:[\s)\]]|$)", n)
+    if m and m.group(1).strip(): return f"{m.group(1).strip(' -')} ({m.group(2)})"
+    return n.strip() or str(name or "")
+
+
+class Downloads:
+    """Read-only view of qBittorrent's active downloads, with Radarr/Sonarr titles when they're cheap to get:
+    first from their Grab webhooks (downloadId -> title, kept in DATA_DIR/download-titles.json), then from their
+    queue API (at most once per 30 s per app, only for torrents we have no title for)."""
+
+    def __init__(self, url=QBT_URL, user=QBT_USER, password_file=QBT_PASSWORD_FILE, arr=None, data_dir=DATA_DIR):
+        self.url, self.user, self.password_file = url, user, password_file
+        self.arr = ARR if arr is None else arr
+        self.titles_file = os.path.join(data_dir, "download-titles.json")
+        t = load_json(self.titles_file, {})
+        self.titles = {k: v for k, v in t.items() if HASH_RE.match(k) and isinstance(v, str)} if isinstance(t, dict) else {}
+        self.lock, self.opener = threading.Lock(), None
+        self.arr_at = {}
+        self.cache = (0.0, None)
+
+    # ---- titles
+    def remember(self, h, title):
+        if not (isinstance(h, str) and HASH_RE.match(h) and title): return False
+        with self.lock:
+            self.titles[h.upper()] = clip(title, 120)
+            while len(self.titles) > MAX_TITLES: del self.titles[next(iter(self.titles))]
+            try:
+                os.makedirs(os.path.dirname(self.titles_file), exist_ok=True)
+                tmp = self.titles_file + ".tmp"
+                with open(tmp, "w") as f: json.dump(self.titles, f, indent=1)
+                os.replace(tmp, self.titles_file)
+            except OSError: pass
+        return True
+
+    def arr_lookup(self, cat):
+        """Radarr/Sonarr queue -> {HASH: title}. Errors (app down, no key) just mean no titles."""
+        app, base, conf = self.arr[cat]
+        try:
+            with open(conf) as f: key = re.search(r"<ApiKey>(\w+)</ApiKey>", f.read())[1]
+            q = "includeMovie=true" if app == "radarr" else "includeSeries=true&includeEpisode=true"
+            req = urllib.request.Request(f"{base}/api/v3/queue?pageSize=200&{q}", headers={"X-Api-Key": key})
+            with urllib.request.urlopen(req, timeout=5) as r: recs = json.load(r).get("records") or []
+        except (OSError, ValueError, TypeError, AttributeError):
+            return {}
+        out = {}
+        for x in recs:
+            h = str(x.get("downloadId") or "").upper()
+            if not HASH_RE.match(h): continue
+            if app == "radarr":
+                m = x.get("movie") or {}
+                if m.get("title"): out[h] = m["title"] + (f" ({m['year']})" if m.get("year") else "")
+            else:
+                s, e = x.get("series") or {}, x.get("episode") or {}
+                if not s.get("title"): continue
+                tag = f" S{e['seasonNumber']:02d}E{e['episodeNumber']:02d}" if isinstance(e.get("seasonNumber"), int) \
+                    and isinstance(e.get("episodeNumber"), int) else ""
+                # a season pack is several queue records with the same downloadId: keep just the season
+                if h in out and tag: tag = f" S{e['seasonNumber']:02d}"
+                out[h] = s["title"] + tag
+        return out
+
+    # ---- qBittorrent
+    def qbt(self, method, **params):
+        data = urllib.parse.urlencode(params).encode()
+        for attempt in (0, 1):
+            if self.opener is None:
+                import http.cookiejar
+                jar = http.cookiejar.CookieJar()
+                op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+                with open(self.password_file) as f: pw = f.read().strip()
+                form = urllib.parse.urlencode({"username": self.user, "password": pw}).encode()
+                op.open(f"{self.url}/api/v2/auth/login", form, timeout=5).close()
+                if not any("SID" in c.name for c in jar): raise PermissionError("qBittorrent login failed")
+                self.opener = op
+            try:
+                with self.opener.open(f"{self.url}/api/v2/{method}", data, timeout=8) as r: return json.load(r)
+            except urllib.error.HTTPError as e:
+                self.opener = None
+                if e.code in (401, 403) and attempt == 0: continue      # session expired (qBittorrent restarted)
+                raise
+        raise PermissionError("qBittorrent login failed")
+
+    def active(self):
+        """-> {"qbt": "ok"|"down"|"auth", "downloads": [...], "total": {...}}. Cached ~1.5 s (one phone polls ~3 s)."""
+        with self.lock:
+            at, res = self.cache
+            if res is not None and time.time() - at < 1.5: return res
+            try:
+                items, st = self.qbt("torrents/info", filter="all", sort="added_on"), "ok"
+            except PermissionError:
+                items, st = [], "auth"
+            except (OSError, ValueError):
+                items, st = [], "down"
+            items = [t for t in items if isinstance(t, dict) and t.get("state") in DL_STATE]
+        missing = {t.get("category") for t in items if t.get("category") in self.arr
+                   and str(t.get("hash", "")).upper() not in self.titles}
+        for cat in missing:
+            if time.time() - self.arr_at.get(cat, 0) < 30: continue
+            self.arr_at[cat] = time.time()
+            for h, title in self.arr_lookup(cat).items():
+                if h not in self.titles: self.remember(h, title)
+        out = []
+        for t in items:
+            h = str(t.get("hash", "")).upper()
+            size, done = int(t.get("size") or 0), int(t.get("completed") or 0)
+            eta = int(t.get("eta") or 0)
+            state = DL_STATE[t["state"]]
+            if state == "downloading" and int(t.get("dlspeed") or 0) == 0: state = "stalled"
+            out.append({"id": h[:16].lower(), "name": self.titles.get(h) or release_title(t.get("name")),
+                        "torrent": clip(t.get("name"), 200), "category": str(t.get("category") or ""),
+                        "state": state, "progress": round(min(1.0, max(0.0, float(t.get("progress") or 0))), 4),
+                        "speed": int(t.get("dlspeed") or 0), "eta": eta if 0 < eta < 8640000 else None,
+                        "size": size, "done": min(done, size) if size else done,
+                        "seeds": int(t.get("num_seeds") or 0), "added": int(t.get("added_on") or 0)})
+        rank = {"downloading": 0, "stalled": 1, "metadata": 2, "checking": 3, "moving": 3, "queued": 4}
+        out.sort(key=lambda d: (rank.get(d["state"], 5), d["added"]))
+        sized = [d for d in out if d["size"] > 0]
+        etas = [d["eta"] for d in out if d["eta"]]
+        total = {"count": len(out), "downloading": sum(d["state"] == "downloading" for d in out),
+                 "progress": round(sum(d["done"] for d in sized) / sum(d["size"] for d in sized), 4) if sized else None,
+                 "speed": sum(d["speed"] for d in out), "eta": max(etas) if etas else None,
+                 "size": sum(d["size"] for d in sized), "done": sum(d["done"] for d in sized)}
+        res = {"qbt": st, "downloads": out, "total": total}
+        with self.lock: self.cache = (time.time(), res)
+        return res
+
+
+DOWNLOADS = None
 
 
 # ---------------------------------------------------------------- routes
@@ -889,6 +1073,9 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*rootd_or_503({"op": "enroll_status",
                                                      "fingerprint": qs.get("fingerprint", [""])[0]}))
             if path == "/api/events": return self.sse()
+            if path == "/api/downloads":
+                return self.send_json(200, {**DOWNLOADS.active(), "enabled": NOTIFY.wants("live")["app"],
+                                            "ts": int(time.time())})
         elif method == "POST":
             m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
             if m: return self.hook(m.group(1))
@@ -924,6 +1111,9 @@ class H(BaseHTTPRequestHandler):
                                                    str(tt)[:4096] if tt else None, img, b.get("link") or None))
             if path == "/api/notify/settings": return self.send_json(*NOTIFY.update(b))
             if path == "/api/notify/test": return self.send_json(*NOTIFY.test(str(b.get("channel", ""))))
+            if path == "/api/downloads/started":
+                if b.get("hash") and b.get("title"): DOWNLOADS.remember(str(b["hash"]), str(b["title"]))
+                return self.send_json(200, {"ok": True, "app": NOTIFY.live_kick(clip(b.get("source") or "", 20))})
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
@@ -947,6 +1137,10 @@ class H(BaseHTTPRequestHandler):
         try: p = self.body(1024 * 1024)
         except ValueError as e: return self.send_json(400, {"error": str(e)})
         n = map_hook(source, p)
+        if source in ("radarr", "sonarr") and p.get("eventType") == "Grab":
+            # the torrent hash -> the movie/show title for the live progress notification, then wake the phone
+            if n and n.get("name"): DOWNLOADS.remember(str(p.get("downloadId") or ""), n["name"])
+            NOTIFY.live_kick(source)
         if not n: return self.send_json(200, {"ok": True, "ignored": True})
         img = NOTIFY.fetch_poster(n["image_url"]) if n.get("image_url") else None
         return self.send_json(*NOTIFY.send(n["category"], n["title"], n["body"], None, img, n.get("link")))
@@ -1017,9 +1211,10 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global HUB, PUSH, NOTIFY
+    global HUB, PUSH, NOTIFY, DOWNLOADS
     PUSH = Push()
     NOTIFY = Notify(PUSH)
+    DOWNLOADS = Downloads()
     hook_secret()
     HUB = Hub()
     srv = Server(("127.0.0.1", PORT), H)

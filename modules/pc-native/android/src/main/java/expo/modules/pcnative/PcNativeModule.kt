@@ -56,6 +56,36 @@ class PcNativeModule : Module() {
       ctx.startActivity(i)
     }
 
+    // ---- live download progress (Android 16 Live Updates / Now Bar; see LiveDownloads)
+    Function("liveStatus") {
+      val c = ctx
+      mapOf(
+        "sdk" to Build.VERSION.SDK_INT,
+        "supported" to (Build.VERSION.SDK_INT >= 36),
+        "canPromote" to LiveDownloads.canPromote(c),
+        "channelEnabled" to LiveDownloads.channelEnabled(c),
+        "running" to LiveDownloads.running,
+      )
+    }
+    Function("liveStart") { activeIds: List<String> -> LiveDownloads.start(ctx, fromPush = false, activeIds = activeIds) }
+    Function("liveStop") { LiveDownloads.stop(ctx) }
+    // Android 16's per-app "Live notifications" switch; falls back to the app's notification settings.
+    Function("openLiveSettings") {
+      val c = ctx
+      val pkg = c.packageName
+      val tries = buildList {
+        if (Build.VERSION.SDK_INT >= 36) add(Intent(Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS))
+        add(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS))
+      }
+      for (i in tries) {
+        try {
+          c.startActivity(i.putExtra(Settings.EXTRA_APP_PACKAGE, pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+          return@Function true
+        } catch (_: Exception) {}
+      }
+      false
+    }
+
     // ---- OTA (react-native-nitro-ota + our own signature check, see OtaVerifier)
     Function("otaCheck") { path: String -> OtaVerifier.check(ctx, path) }
     Function("otaBinaryTarget") { OtaVerifier.binaryTarget(ctx) }

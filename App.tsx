@@ -2,11 +2,12 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { DarkTheme, DefaultTheme, LinkingOptions, NavigationContainer } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { AppState, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SystemInsetsProvider } from './src/components/SystemInsets';
 import { Button, Icon } from './src/components/ui';
 import { applyOta, dismissOta, startOta, updateOffered, useOta } from './src/lib/otaStore';
+import { startLiveIfDownloading } from './src/lib/live';
 import { askNotificationPermission, registerPush } from './src/lib/push';
 import { pendingList, startRootStore, useRootStore } from './src/lib/rootStore';
 import RootScreen from './src/screens/RootScreen';
@@ -47,6 +48,12 @@ export default function App() {
   useEffect(() => {
     // Notifications come through FCM: ask once for the permission (Android 13+), then (re-)register the token.
     askNotificationPermission().finally(() => registerPush());
+  }, []);
+  useEffect(() => {
+    // Live download progress: also start it when the app is opened (or comes back) while something downloads.
+    startLiveIfDownloading();
+    const s = AppState.addEventListener('change', (st) => st === 'active' && startLiveIfDownloading());
+    return () => s.remove();
   }, []);
   const waiting = pendingList(store).filter((r) => r.status === 'pending').length;
 

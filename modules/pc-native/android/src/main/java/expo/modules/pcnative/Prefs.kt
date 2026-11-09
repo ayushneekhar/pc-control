@@ -14,6 +14,10 @@ object Prefs {
   fun deviceFingerprint(ctx: Context): String? = sp(ctx).getString("deviceFingerprint", null)
   fun setDeviceFingerprint(ctx: Context, fp: String?) = sp(ctx).edit().putString("deviceFingerprint", fp).apply()
 
+  /** Downloads (pc-api ids) the user stopped live progress for: opening the app doesn't bring those back. */
+  fun liveDismissed(ctx: Context): Set<String> = sp(ctx).getStringSet("liveDismissed", null)?.toSet() ?: emptySet()
+  fun setLiveDismissed(ctx: Context, ids: Set<String>) = sp(ctx).edit().putStringSet("liveDismissed", ids).apply()
+
   /** Last FCM token pc-api accepted (null if the last attempt failed) and the last error. */
   fun pushToken(ctx: Context): String? = sp(ctx).getString("pushToken", null)
   fun pushError(ctx: Context): String? = sp(ctx).getString("pushError", null)

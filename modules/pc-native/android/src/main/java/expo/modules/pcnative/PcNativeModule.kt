@@ -98,8 +98,18 @@ class PcNativeModule : Module() {
     // ---- window insets (dp), measured on the activity's decor view. Edge-to-edge is mandatory on
     // targetSdk 35+, so content always draws under the status/navigation bars; these are the absolute
     // system-bar + cutout insets, independent of where any React view happens to be laid out.
-    // ---- cams player (react-native-webrtc; CamsWebrtc sets its decoders at app start)
-    Function("camsHardware") { CamsWebrtc.hardwareDecoders() }
+    // ---- cams player (react-native-webrtc; options + crash guard in CamsWebrtc)
+    Function("camsHardware") { CamsWebrtc.hardwareDecoders(ctx) }
+    // App.tsx, right before the Cams screen loads react-native-webrtc: crash marker + this process's options
+    Function("camsPrepare") { CamsWebrtc.prepare(ctx) }
+    Function("camsStatus") { CamsWebrtc.status(ctx) }
+    Function("camsMarkOpening") { on: Boolean -> CamsWebrtc.markOpening(ctx, on) }
+    Function("camsSetSetting") { key: String, on: Boolean -> CamsWebrtc.setSetting(ctx, key, on) }
+    Function("camsCrashSeen") { CamsWebrtc.clearCrashedWhileOpening() }
+
+    // ---- crash reports (CrashReporter), uploaded by src/lib/crash.ts
+    AsyncFunction("crashPending") { CrashReporter.pending(ctx) }
+    Function("crashAck") { ids: List<String> -> CrashReporter.ack(ctx, ids) }
     AsyncFunction("camsSetFullscreen") { on: Boolean ->
       appContext.currentActivity?.let { CamsTools.setFullscreen(it, on) }
       Unit

@@ -39,18 +39,24 @@ at the top (like the page's tabs). The menu (top right) still opens the web page
   stalls on a lossy link become delay), it needs a second stack for Talk (WebRTC is the only way into go2rtc's
   backchannel) and its own demuxer, and the page measured MSE well behind WebRTC. Cost: libwebrtc adds ~12.5 MB
   (arm64 only) to the APK.
-- **Latency tweaks** (`CamsWebrtc.kt`, set at app start before react-native-webrtc's module exists): field trial
-  `WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/` (libwebrtc's low-latency renderer: a frame is shown as soon as it's
-  decoded instead of waiting for the jitter estimate; a jittery link gives uneven motion, not extra delay), and a
-  decoder factory that decodes H.264 **and H.265** on MediaCodec hardware (react-native-webrtc's default one only
-  offers hardware H.264, so the phone would never offer H.265).
-  These options are set in Application.onCreate, before react-native-webrtc loads libjingle, so nothing built
-  there may call native code (1.4.0 did and lost H.265 to an UnsatisfiedLinkError). The encoder factory is an empty
-  Java one (the app never sends video), the audio device module and the hardware decoder factory are created on first
-  use. `scripts/cams/check-startup-jni.sh` (run by `build-apk.sh`) fails the build if that startup path calls into
-  `org.webrtc`.
-- **CP Plus HD/SD**: HD (`cat3hd`, H.265 2304×1296, passthrough) when the phone has a hardware HEVC decoder for that
-  size and WebRTC lists H.265; no HD frame within 12 s falls back to SD (`cat3`, H.264 720p) with a toast. The
+- **WebRTC options** (`CamsWebrtc.kt`, applied by `camsPrepare()` right before the Cams screen loads
+  react-native-webrtc): field trial `WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/` (libwebrtc's low-latency
+  renderer) and media-usage audio (loudspeaker). An H.265 decoder factory exists but is off
+  (`LIBWEBRTC_H265 = false`): org.jitsi:webrtc 155 has no H.265 depacketizer, so when 1.4.1 to 1.5.0 offered H.265,
+  go2rtc sent cat3hd as H.265 and libwebrtc segfaulted on the worker thread (`payload_type_map_[pt]->Parse()` on a
+  null depacketizer). That was the "Cat cams crashes the app" bug. `scripts/cams/check-webrtc-h265.sh` (run by
+  `build-apk.sh`) fails the build if the flag is on but the packaged libjingle can't receive H.265.
+  Nothing built there may call native code before libjingle is loaded (1.4.0 did and got an UnsatisfiedLinkError).
+  `scripts/cams/check-startup-jni.sh` fails the build if the app-start path (CamsPackage, CrashReporter, the
+  CamsWebrtc marker code) calls into `org.webrtc`.
+- **Crash guard / safe mode**: a marker (SharedPreferences, synchronous) is set while live video starts and cleared
+  after 15 s or when it stops. If the next start finds it and Android's last exit was a crash, safe mode turns on
+  (react-native-webrtc's own defaults), the screen says so once, and the menu can leave safe mode.
+- **Crash reports**: `CrashReporter.kt` keeps Java crash stacks and reads Android's exit records (native crash
+  tombstones, ANRs). `src/lib/crash.ts` POSTs them to `/pc/api/crash` on the next start (stored in
+  `DATA_DIR/crashes`, `GET /pc/api/crash` lists them).
+- **CP Plus HD/SD**: HD (`cat3hd`, H.265 2304×1296, passthrough) only with a libwebrtc that can receive H.265 (not
+  the current one: live is SD) and a hardware HEVC decoder for that size; no HD frame within 12 s falls back to SD (`cat3`, H.264 720p) with a toast. The
   badge says what plays (`20 fps · HD·WebRTC`); focusing a camera shows codec, size, decoder name (`c2.….hevc.decoder`
   = hardware), jitter-buffer time and round trip.
 - **Audio**: everything starts muted. The speaker chip on the Food bowl card plays the cam's mic (`cat3hd` audio),

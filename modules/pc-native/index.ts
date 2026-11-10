@@ -33,12 +33,49 @@ export type BiometricStatus =
 
 export type HwDecoder = { name: string; maxWidth: number; maxHeight: number; hd: boolean; lowLatency: boolean } | null;
 
+export type CamsSettings = { safeMode: boolean; decoder: boolean; lowLatency: boolean; mediaAudio: boolean };
+export type CamsStatus = {
+  prepared: boolean;
+  applied: Partial<Record<'decoder' | 'lowLatency' | 'mediaAudio', boolean>>;
+  error: string | null;
+  settings: CamsSettings;
+  /** ms: the previous run crashed while Cat cams was opening (safe mode was turned on), else 0. */
+  crashedWhileOpening: number;
+};
+export type CrashReport = {
+  id: string;
+  kind: string;
+  ts: number;
+  reason: string;
+  where: string;
+  text: string;
+  trace_b64?: string | null;
+};
+
 /** Error codes thrown by sign()/createKey(): E_CANCELLED, E_KEY_INVALIDATED, E_NO_KEY, E_LOCKOUT, E_AUTH, ... */
 export type PcNativeModule = {
   /** System bar + display cutout insets in dp, or null before the activity is attached. */
   windowInsets(): { top: number; bottom: number; left: number; right: number } | null;
-  /** Hardware H.264/H.265 decoders, and whether the cams' WebRTC options were set at app start. */
-  camsHardware(): { h264: HwDecoder; h265: HwDecoder; configured: boolean; error: string | null; fieldTrials: string };
+  /** Hardware H.264/H.265 decoders; configured = H.265 over WebRTC is on in this process (else error says why). */
+  camsHardware(): {
+    h264: HwDecoder;
+    h265: HwDecoder;
+    configured: boolean;
+    safeMode: boolean;
+    error: string | null;
+    fieldTrials: string;
+  };
+  /** Right before react-native-webrtc loads (App.tsx): sets the crash marker and this process's WebRTC options. */
+  camsPrepare(): CamsStatus;
+  camsStatus(): CamsStatus;
+  /** The Cams screen clears the marker once it has run 15 s, or when it is left. */
+  camsMarkOpening(on: boolean): void;
+  camsSetSetting(key: keyof CamsSettings, on: boolean): void;
+  /** The "crashed last time" notice was shown. */
+  camsCrashSeen(): void;
+  /** Crash reports not uploaded yet (own Java crash files + Android's exit records). */
+  crashPending(): Promise<CrashReport[]>;
+  crashAck(ids: string[]): void;
   /** Landscape + hidden system bars, or back to portrait. */
   camsSetFullscreen(on: boolean): Promise<void>;
   camsKeepAwake(on: boolean): Promise<void>;

@@ -552,5 +552,52 @@ class DownloadsHttpTests(unittest.TestCase):
         self.assertEqual(self.call("POST", "/pc/api/downloads/started", {})[1]["app"], "off")
 
 
+class CrashTests(unittest.TestCase):
+    """POST/GET /pc/api/crash: the app's crash reports, stored under DATA_DIR/crashes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp()
+        cls.saved = (pcapi.CRASHES, pcapi.ALLOWED_LOGINS)
+        pcapi.CRASHES = pcapi.Crashes(cls.dir)
+        pcapi.ALLOWED_LOGINS = {"me@example.com"}
+        cls.api = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        threading.Thread(target=cls.api.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.api.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.api.shutdown()
+        pcapi.CRASHES, pcapi.ALLOWED_LOGINS = cls.saved
+
+    call = DownloadsHttpTests.call
+
+    def test_store_list_and_trace(self):
+        import base64
+        code, r = self.call("POST", "/pc/api/crash", {"kind": "native", "ts": 1794000000, "app": "1.5.0+8",
+                            "reason": "CRASH_NATIVE signal 6", "where": "cams-open", "text": "Abort message: x\nline2",
+                            "trace_b64": base64.b64encode(b"\x08\x01tombstone").decode()})
+        self.assertEqual(code, 200)
+        d = os.path.join(self.dir, "crashes")
+        self.assertTrue(os.path.exists(os.path.join(d, r["id"] + ".trace")))
+        self.assertEqual(os.stat(os.path.join(d, r["id"] + ".json")).st_mode & 0o777, 0o600)
+        code, lst = self.call("GET", "/pc/api/crash")
+        self.assertEqual(code, 200)
+        c = next(x for x in lst["crashes"] if x["id"] == r["id"])
+        self.assertEqual((c["kind"], c["where"], c["trace_bytes"], c["head"][0]), ("native", "cams-open", 11, "Abort message: x"))
+
+    def test_bad_input_and_auth(self):
+        self.assertEqual(self.call("POST", "/pc/api/crash", {"kind": "java", "trace_b64": "!!"})[0], 400)
+        code, r = self.call("POST", "/pc/api/crash", {"kind": "weird", "text": "x"})
+        self.assertEqual((code, r["id"].split("-")[2]), (200, "other"))
+        self.assertEqual(self.call("POST", "/pc/api/crash", {"text": "x"}, headers={"Tailscale-User-Login": "x@evil.com"})[0], 403)
+
+    def test_keeps_newest(self):
+        c = pcapi.Crashes(tempfile.mkdtemp())
+        c.KEEP = 3
+        for i in range(5): c.store({"kind": "js", "ts": 1794000000 + i * 60, "text": str(i)})
+        self.assertEqual([x["head"][0] for x in c.list()], ["4", "3", "2"])
+
+
 if __name__ == "__main__":
     unittest.main()

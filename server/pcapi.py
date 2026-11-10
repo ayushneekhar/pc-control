@@ -30,6 +30,9 @@ POST /pc/api/downloads/started        {hash?, title?}: "a download just started"
                                       phone's live progress (FCM "downloads") if that category is on
 POST /pc/api/hook/radarr|sonarr|seerr webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
                                       (Authorization: Bearer/Basic password, or X-PC-Hook-Secret); maps events to categories
+POST /pc/api/crash                   {kind, ts, reason, where, text, trace_b64?, app, device, android}: a crash report
+                                      the app uploads on its next start (stored in DATA_DIR/crashes, newest 30)
+GET  /pc/api/crash                    stored crash reports (no traces)
 GET  /pc/app.apk                      LEGACY (pre-1.2 builds' updater): serves the last laptop-hosted APK. Releases now
                                       go to GitHub Releases (scripts/release-apk.sh); remove this with apk_info/send_apk.
 
@@ -845,6 +848,68 @@ class Downloads:
 DOWNLOADS = None
 
 
+# ---------------------------------------------------------------- app crash reports
+
+class Crashes:
+    """Crash reports the app uploads on its next start (POST /pc/api/crash): a Java/JS stack it wrote itself, or
+    Android's ApplicationExitInfo for a native crash or ANR (with the tombstone / trace when Android has one).
+    Kept as DATA_DIR/crashes/<time>-<kind>-<id>.json (+ .trace, the raw tombstone protobuf or ANR text; `strings`
+    shows the backtrace), mode 600, newest KEEP only. GET /pc/api/crash lists them (no traces)."""
+    KEEP = 30
+    KINDS = {"java", "js", "native", "anr", "other"}
+    MAX_TRACE = 1024 * 1024
+
+    def __init__(self, data_dir=DATA_DIR):
+        self.dir = os.path.join(data_dir, "crashes")
+        self.lock = threading.Lock()
+
+    def store(self, b):
+        kind = str(b.get("kind") or "other")
+        if kind not in self.KINDS: kind = "other"
+        try: ts = float(b.get("ts") or time.time())
+        except (TypeError, ValueError): ts = time.time()
+        trace = None
+        if b.get("trace_b64"):
+            try: trace = base64.b64decode(str(b["trace_b64"]), validate=True)
+            except ValueError: return 400, {"error": "trace_b64 is not base64"}
+            if len(trace) > self.MAX_TRACE: trace = trace[:self.MAX_TRACE]
+        rec = {"kind": kind, "ts": ts, "received": time.time(),
+               "app": clip(b.get("app") or "", 40), "device": clip(b.get("device") or "", 80),
+               "android": clip(b.get("android") or "", 20), "reason": clip(b.get("reason") or "", 200),
+               "where": clip(b.get("where") or "", 200), "text": str(b.get("text") or "")[:200_000],
+               "trace_bytes": len(trace) if trace else 0}
+        name = time.strftime("%Y%m%d-%H%M%S", time.localtime(ts)) + f"-{kind}-{secrets.token_hex(3)}"
+        with self.lock:
+            os.makedirs(self.dir, mode=0o700, exist_ok=True)
+            for ext, data in ((".json", json.dumps(rec, indent=1).encode()), (".trace", trace)):
+                if data is None: continue
+                fd = os.open(os.path.join(self.dir, name + ext), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as f: f.write(data)
+            self.prune()
+        print(f"pc-api: crash report {name} ({rec['app']}, {rec['reason'] or kind})", flush=True)
+        return 200, {"ok": True, "id": name}
+
+    def prune(self):
+        names = sorted({f.rsplit(".", 1)[0] for f in os.listdir(self.dir) if f.endswith(".json")})
+        for old in names[:-self.KEEP]:
+            for ext in (".json", ".trace"):
+                try: os.remove(os.path.join(self.dir, old + ext))
+                except FileNotFoundError: pass
+
+    def list(self):
+        out = []
+        try: files = sorted((f for f in os.listdir(self.dir) if f.endswith(".json")), reverse=True)
+        except FileNotFoundError: files = []
+        for f in files:
+            r = load_json(os.path.join(self.dir, f), None)
+            if r: out.append({**{k: r.get(k) for k in ("kind", "ts", "app", "reason", "where", "trace_bytes")},
+                              "id": f[:-5], "head": (r.get("text") or "").splitlines()[:3]})
+        return out
+
+
+CRASHES = Crashes()
+
+
 # ---------------------------------------------------------------- routes
 
 # key -> (name, icon, subtitle, kind). Keys: ":<port>" for non-443 ports, the backend port for "/" on 443,
@@ -1073,13 +1138,15 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*rootd_or_503({"op": "enroll_status",
                                                      "fingerprint": qs.get("fingerprint", [""])[0]}))
             if path == "/api/events": return self.sse()
+            if path == "/api/crash": return self.send_json(200, {"crashes": CRASHES.list()})
             if path == "/api/downloads":
                 return self.send_json(200, {**DOWNLOADS.active(), "enabled": NOTIFY.wants("live")["app"],
                                             "ts": int(time.time())})
         elif method == "POST":
             m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
             if m: return self.hook(m.group(1))
-            try: b = self.body(16 * 1024 * 1024 if path == "/api/notify" else 64 * 1024)
+            limit = {"/api/notify": 16 * 1024 * 1024, "/api/crash": 2 * 1024 * 1024}.get(path, 64 * 1024)
+            try: b = self.body(limit)
             except ValueError as e: return self.send_json(400, {"error": str(e)})
             m = re.fullmatch(r"/api/services/([^/]+)/restart", path)
             if m: return self.send_json(*restart_service(m.group(1)))
@@ -1109,6 +1176,7 @@ class H(BaseHTTPRequestHandler):
                 tt = b.get("telegram_text")
                 return self.send_json(*NOTIFY.send(str(b.get("category") or "other"), b.get("title"), b.get("body"),
                                                    str(tt)[:4096] if tt else None, img, b.get("link") or None))
+            if path == "/api/crash": return self.send_json(*CRASHES.store(b))
             if path == "/api/notify/settings": return self.send_json(*NOTIFY.update(b))
             if path == "/api/notify/test": return self.send_json(*NOTIFY.test(str(b.get("channel", ""))))
             if path == "/api/downloads/started":

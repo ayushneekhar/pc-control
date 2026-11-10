@@ -38,6 +38,8 @@ TOOLCHAIN=()
 (cd android && ./gradlew --no-daemon "${TOOLCHAIN[@]}" -PreactNativeArchitectures=arm64-v8a assembleRelease)
 # cams player: nothing JNI-backed may run in Application.onCreate (libwebrtc is not loaded yet)
 scripts/cams/check-startup-jni.sh
+# cams player: H.265 is only offered when the bundled libwebrtc can receive it
+scripts/cams/check-webrtc-h265.sh
 
 APK=android/app/build/outputs/apk/release/app-release.apk
 BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)

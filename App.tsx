@@ -11,6 +11,7 @@ import { SystemInsetsProvider } from './src/components/SystemInsets';
 import { Button, Icon } from './src/components/ui';
 import { applyOta, dismissOta, startOta, updateOffered, useOta } from './src/lib/otaStore';
 import { startLiveIfDownloading } from './src/lib/live';
+import { uploadCrashes } from './src/lib/crash';
 import { askNotificationPermission, registerPush } from './src/lib/push';
 import { pendingList, startRootStore, useRootStore } from './src/lib/rootStore';
 import RootScreen from './src/screens/RootScreen';
@@ -73,6 +74,7 @@ export default function App() {
   const t = useTheme();
   useEffect(() => startRootStore(), []);
   useEffect(() => startOta(), []);
+  useEffect(() => void uploadCrashes(), []);
   useEffect(() => {
     // Notifications come through FCM: ask once for the permission (Android 13+), then (re-)register the token.
     askNotificationPermission().finally(() => registerPush());
@@ -111,8 +113,16 @@ export default function App() {
             {/* loaded on first open: react-native-webrtc stays out of app start */}
             <Stack.Screen
               name="Cams"
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              getComponent={() => require('./src/screens/CamsScreen').default}
+              getComponent={() => {
+                // WebRTC options + crash marker, before react-native-webrtc's module is created (CamsWebrtc)
+                try {
+                  PcNative?.camsPrepare();
+                } catch {
+                  // defaults
+                }
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                return require('./src/screens/CamsScreen').default;
+              }}
               options={{ animation: 'slide_from_right' }}
             />
           </Stack.Navigator>

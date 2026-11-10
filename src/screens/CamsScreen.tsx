@@ -54,7 +54,7 @@ function hdSupport(): { ok: boolean; why: string; decoder: string | null } {
   let decoder: string | null = null;
   try {
     const hw = PcNative?.camsHardware();
-    if (hw && !hw.configured) return { ok: false, why: `WebRTC options not set (${hw.error ?? 'old build'})`, decoder };
+    if (hw && !hw.configured) return { ok: false, why: hw.error ?? 'WebRTC options not set', decoder };
     if (!hw?.h265) return { ok: false, why: 'This phone has no hardware H.265 decoder', decoder };
     decoder = hw.h265.name;
     if (!hw.h265.hd) return { ok: false, why: `${hw.h265.name} can't decode 2304×1296`, decoder };
@@ -580,6 +580,48 @@ export default function CamsScreen() {
   });
   const det = useDetector(active, toast.show);
 
+  // crash guard (CamsWebrtc): a marker while live video starts, cleared after 15 s of it or when it stops. If the
+  // app dies meanwhile, the next start turns safe mode on (react-native-webrtc's defaults).
+  useEffect(() => {
+    if (!run) return;
+    try {
+      PcNative?.camsMarkOpening(true);
+    } catch {
+      return;
+    }
+    const id = setTimeout(() => PcNative?.camsMarkOpening(false), 15000);
+    return () => {
+      clearTimeout(id);
+      PcNative?.camsMarkOpening(false);
+    };
+  }, [run]);
+  const [safeMode, setSafeMode] = useState(() => {
+    try {
+      return !!PcNative?.camsStatus().settings.safeMode;
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      if (!PcNative?.camsStatus().crashedWhileOpening) return;
+      PcNative.camsCrashSeen();
+    } catch {
+      return;
+    }
+    showToast('Cat cams crashed last time, so it now uses safe mode (default WebRTC settings). Menu → Leave safe mode.', 7000);
+  }, [showToast]);
+  const toggleSafe = () => {
+    setMenu(false);
+    try {
+      PcNative?.camsSetSetting('safeMode', !safeMode);
+    } catch {
+      return;
+    }
+    setSafeMode(!safeMode);
+    showToast(safeMode ? 'Safe mode off from the next app start.' : 'Safe mode on from the next app start.', 4000);
+  };
+
   // keep the screen on while watching
   useEffect(() => {
     if (!active) return;
@@ -892,8 +934,11 @@ export default function CamsScreen() {
       <Modal visible={menu} transparent animationType="fade" onRequestClose={() => setMenu(false)}>
         <Pressable style={st.menuBg} onPress={() => setMenu(false)}>
           <View style={[st.menu, { top: insets.top + 52, backgroundColor: t.card, borderColor: t.border }]}>
-            {[{ icon: 'web', label: 'Open the web page', hash: tab === 'live' ? '' : '#' + tab }].map((m) => (
-              <Pressable key={m.label} onPress={() => openWeb(m.hash)} android_ripple={{ color: t.accentSoft }} style={st.menuItem}>
+            {[
+              { icon: 'web', label: 'Open the web page', run: () => openWeb(tab === 'live' ? '' : '#' + tab) },
+              { icon: 'shield-check-outline', label: safeMode ? 'Leave safe mode' : 'Safe mode (WebRTC defaults)', run: toggleSafe },
+            ].map((m) => (
+              <Pressable key={m.label} onPress={m.run} android_ripple={{ color: t.accentSoft }} style={st.menuItem}>
                 <Icon name={m.icon} size={20} color={t.textDim} />
                 <Text style={{ color: t.text, fontSize: 15 }}>{m.label}</Text>
               </Pressable>

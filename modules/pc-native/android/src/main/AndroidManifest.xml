@@ -9,6 +9,11 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
   <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
 
+  <!-- Routes app tiles: packages launchApp() may open (Android 11+ package visibility). -->
+  <queries>
+    <package android:name="org.jellyfin.mobile" />
+  </queries>
+
   <application>
     <!-- Firebase Cloud Messaging: data messages from pc-api, displayed locally by Notifier. -->
     <service

@@ -8,12 +8,15 @@ the reason, never the command. Approving still happens in the app, with a biomet
 
 The app has five tabs:
 
-- **Routes**: every `tailscale serve` route (cams, vitals, music, recordings, Seerr, Radarr, Sonarr, Bazarr, …)
-  as cards that open in the browser. The list is read live, so new routes appear by themselves.
+- **Routes**: the `tailscale serve` routes (Cat cams, Vitals, …) as cards that open in the browser, plus a
+  **Jellyfin** tile that launches the Jellyfin app (`org.jellyfin.mobile`, needs the 1.5.2+ APK). If the app isn't
+  installed, or on older builds, it opens `http://<tailnet host>:8096/` instead. The list is read live, so new
+  routes appear by themselves. Cameras (go2rtc `/`), Seerr, Radarr, Sonarr and Bazarr are hidden by default
+  (`HIDDEN` in `server/pcapi.py`). Only the tiles are hidden: the routes and services keep running.
   API-only routes (backends used by another page, like the Cat cams page's `/rec`, `/music`, `/ptz` and
   `/detect`) are hidden on the server. To hide a new one, or to show a hidden one, edit
   `~/.config/pc-control/routes.json`; it is read live, so there's no restart and no app rebuild:
-  `{"/new-api": {"hidden": true}, ":9696": {"name": "Prowlarr", "hidden": false}}`
+  `{"/new-api": {"hidden": true}, ":7878": {"hidden": false}, "jellyfin": {"hidden": true}}`
   (keys are the path for the main HTTPS host, or `":<port>"` for other ports; you can also set `name`, `icon`
   (a Material Community icon name), `subtitle` and `kind` (`"api"` hides a route)).
   **Cat cams** is the exception: it opens the app's own cams player (below), not the browser.

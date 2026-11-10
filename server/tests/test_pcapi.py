@@ -26,9 +26,10 @@ def visible(overrides=None):
 
 class Routes(unittest.TestCase):
     def test_defaults_hide_cat_cam_backends(self):
-        self.assertEqual(visible(), {"Cat cams", "Vitals", "Cameras", "Seerr", "Bazarr", "Radarr", "Sonarr", "New Api"})
-        hidden = {r["path"]: r["kind"] for r in pcapi.build_routes(STATUS, {}) if r["hidden"]}
-        self.assertEqual(hidden, {"/detect": "api", "/music": "api", "/ptz": "api", "/rec": "api"})
+        self.assertEqual(visible(), {"Cat cams", "Vitals", "Jellyfin", "New Api"})
+        hidden = {r["id"]: r["kind"] for r in pcapi.build_routes(STATUS, {}) if r["hidden"]}
+        self.assertEqual(hidden, {"443/detect": "api", "443/music": "api", "443/ptz": "api", "443/rec": "api",
+                                  "443/": "page", "5055/": "page", "6767/": "page", "7878/": "page", "8989/": "page"})
         self.assertNotIn("/pc", [r["path"] for r in pcapi.build_routes(STATUS, {})])
 
     def test_config_hides_new_route_and_unhides_builtin(self):
@@ -37,6 +38,16 @@ class Routes(unittest.TestCase):
         self.assertNotIn("Seerr", v)
         self.assertIn("Recordings", v)
         self.assertNotIn("New Api", visible({"/new-api": {"hidden": True}}))
+
+    def test_unhide_default_hidden_page(self):
+        self.assertIn("Radarr", visible({":7878": {"hidden": False}}))
+        self.assertIn("Cameras", visible({"/": {"hidden": False}}))
+
+    def test_jellyfin_app_tile(self):
+        j = next(r for r in pcapi.build_routes(STATUS, {}) if r["id"] == "jellyfin")
+        self.assertEqual((j["app"], j["url"], j["kind"]), ("org.jellyfin.mobile", f"http://{H}:8096/", "app"))
+        self.assertNotIn("Jellyfin", visible({"jellyfin": {"hidden": True}}))
+        self.assertEqual(pcapi.build_routes({}, {}), [])
 
     def test_bad_override_ignored(self):
         self.assertIn("Vitals", visible({"/vitals": "nonsense"}))

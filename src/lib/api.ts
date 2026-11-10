@@ -98,8 +98,10 @@ export type Route = {
   path: string;
   port: number;
   target: string;
-  kind?: 'page' | 'api';
+  kind?: 'page' | 'api' | 'app';
   hidden?: boolean;
+  /** Android package to launch instead of opening url (url is the fallback when it isn't installed). */
+  app?: string;
 };
 
 export type Service = {

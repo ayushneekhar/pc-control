@@ -6,8 +6,10 @@ Ayush uses it from his phone over Tailscale. Everything stays on the tailnet, ex
 through Firebase Cloud Messaging (changed 9 Nov 2026, see section 3). No Telegram, no other third parties.
 
 ## 1. App features
-- **Routes**: list every `tailscale serve` route (cams, /vitals, /music, /rec, Seerr :5055, Bazarr :6767,
-  Radarr :7878, Sonarr :8989, …) as tappable cards with friendly names + icons that open in the browser.
+- **Routes**: list the `tailscale serve` routes (cams, /vitals, …) as tappable cards with friendly names + icons
+  that open in the browser. go2rtc `/`, Seerr :5055, Bazarr :6767, Radarr :7878 and Sonarr :8989 are served but
+  have no tile (server-side `HIDDEN`, overridable in routes.json). A Jellyfin tile launches the Jellyfin app
+  (`PcNative.launchApp`, package in the module's `<queries>`), falling back to http://<tailnet host>:8096/.
   Read the live list from the server (`tailscale serve status --json`), so new routes show up by themselves.
 - **Vitals**: CPU/temp/RAM/GPU/net/battery summary from the existing `GET /vitals/api` (see
   ~/remote-pc/vitals/vitals.py; `?procs=1` only when a process list is shown). Poll only while visible.

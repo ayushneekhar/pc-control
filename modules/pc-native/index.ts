@@ -84,6 +84,8 @@ export type PcNativeModule = {
   camsShare(uri: string): Promise<void>;
   /** Text shared to the app ("Share → PC Control"), once; null if none. */
   takeSharedText(): string | null;
+  /** Launches an installed app by package (1.5.2+); false if it isn't installed or isn't in <queries>. */
+  launchApp?(pkg: string): boolean;
   getSettings(): NativeSettings;
   setServerUrl(url: string): void;
   setDeviceFingerprint(fp: string | null): void;

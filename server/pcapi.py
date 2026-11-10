@@ -2,7 +2,7 @@
 """pc-api: the pc-control app's backend (user service, 127.0.0.1:1990, tailnet via `tailscale serve /pc`).
 
 GET  /pc/api/info                     host, rootd status, latest APK info
-GET  /pc/api/routes[?all=1]           tailscale serve routes as friendly cards (API-only ones hidden)
+GET  /pc/api/routes[?all=1]           tailscale serve routes + app tiles as friendly cards (API-only/HIDDEN hidden)
 GET  /pc/api/services                 user systemd units from ~/.config/systemd/user
 POST /pc/api/services/<unit>/restart
 GET  /pc/api/services/<unit>/logs     last journal lines
@@ -931,6 +931,12 @@ KNOWN = {
     ":9696": ("Prowlarr", "radar", "Indexers", "page"),
     ":8080": ("qBittorrent", "download-outline", "Torrents", "page"),
 }
+# Real pages you just don't want as tiles (KNOWN keys). The tailscale serve routes stay up; this only hides the
+# cards. routes.json {"<key>": {"hidden": false}} shows one again.
+HIDDEN = {"1984", ":5055", ":6767", ":7878", ":8989"}  # Cameras (go2rtc), Seerr, Bazarr, Radarr, Sonarr
+# Tiles for apps that aren't `tailscale serve` routes: key -> (name, icon, subtitle, android package, port).
+# The app launches the package; without it (or on builds before 1.5.2) it opens http://<tailnet host>:<port>/.
+APPS = {"jellyfin": ("Jellyfin", "play-box-multiple-outline", "Movies & TV (opens the app)", "org.jellyfin.mobile", 8096)}
 ROUTES_CONF = os.path.join(CONF_DIR, "routes.json")
 _serve_cache = [0.0, None]
 
@@ -968,7 +974,15 @@ def build_routes(status, overrides):
             kind = o.get("kind", kind)
             out.append({"id": f"{port}{path}", "name": o.get("name", name), "icon": o.get("icon", icon),
                         "subtitle": o.get("subtitle", sub), "url": url, "path": path, "port": int(port),
-                        "target": target, "kind": kind, "hidden": bool(o.get("hidden", kind == "api"))})
+                        "target": target, "kind": kind, "hidden": bool(o.get("hidden", kind == "api" or key in HIDDEN))})
+    host = next((hp.rpartition(":")[0] for hp in (status.get("Web") or {})), None)
+    for key, (name, icon, sub, pkg, port) in APPS.items():
+        o = overrides.get(key) if isinstance(overrides.get(key), dict) else {}
+        if not host or any(r["port"] == port for r in out): continue
+        out.append({"id": key, "name": o.get("name", name), "icon": o.get("icon", icon),
+                    "subtitle": o.get("subtitle", sub), "url": o.get("url", f"http://{host}:{port}/"), "path": "/",
+                    "port": port, "target": f"app:{pkg}", "kind": "app", "app": o.get("app", pkg),
+                    "hidden": bool(o.get("hidden", False))})
     out.sort(key=lambda r: (r["port"] != 443, r["path"] == "/", r["name"].lower()))
     return out
 

@@ -2,6 +2,7 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useCallback, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Banner, Card, Icon, Screen } from '../components/ui';
+import { PcNative } from '../../modules/pc-native';
 import { get, Route } from '../lib/api';
 import { radius, space, useTheme } from '../theme';
 
@@ -16,6 +17,12 @@ function tint(id: string) {
 /** Routes the app plays natively instead of opening the browser (the screen keeps a link to the web page). */
 const NATIVE: Record<string, string> = { '/cams/': 'Cams' };
 
+/** App tiles launch the Android app; the web URL if it isn't installed (or the build has no launchApp). */
+function open(r: Route) {
+  if (r.app && PcNative?.launchApp?.(r.app)) return;
+  Linking.openURL(r.url);
+}
+
 function RouteCard({ r }: { r: Route }) {
   const t = useTheme();
   const nav = useNavigation<any>();
@@ -23,7 +30,7 @@ function RouteCard({ r }: { r: Route }) {
   const screen = r.port === 443 ? NATIVE[r.path] : undefined;
   return (
     <Pressable
-      onPress={() => (screen ? nav.navigate(screen) : Linking.openURL(r.url))}
+      onPress={() => (screen ? nav.navigate(screen) : open(r))}
       android_ripple={{ color: t.accentSoft, foreground: true }}
       style={({ pressed }) => [st.tile, { backgroundColor: t.card, borderColor: t.border, opacity: pressed ? 0.9 : 1 }]}
     >
@@ -38,7 +45,7 @@ function RouteCard({ r }: { r: Route }) {
           {r.subtitle || r.path}
         </Text>
         <Text style={{ color: t.textFaint, fontSize: 11.5, fontFamily: t.mono }} numberOfLines={1}>
-          {r.port === 443 ? r.path : `:${r.port}`}
+          {r.kind === 'app' ? 'app' : r.port === 443 ? r.path : `:${r.port}`}
         </Text>
       </View>
     </Pressable>

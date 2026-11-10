@@ -127,6 +127,16 @@ class PcNativeModule : Module() {
     // "Share → PC Control" text (SharePackage), once
     Function("takeSharedText") { SharedText.take() }
 
+    // Routes app tiles (Jellyfin): the package must be listed in this module's manifest <queries>
+    Function("launchApp") { pkg: String ->
+      val i = ctx.packageManager.getLaunchIntentForPackage(pkg) ?: return@Function false
+      try {
+        ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true
+      } catch (e: android.content.ActivityNotFoundException) {
+        false
+      }
+    }
+
     // Replay player (Media3, see RecPlayerView)
     View(RecPlayerView::class) {
       Events("onProgress", "onPlayerError")

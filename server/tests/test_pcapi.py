@@ -493,7 +493,9 @@ class DownloadsHttpTests(unittest.TestCase):
         cls.dir = tempfile.mkdtemp()
         pw = os.path.join(cls.dir, "pw")
         with open(pw, "w") as f: f.write("pw")
-        cls.saved = (pcapi.PUSH, pcapi.NOTIFY, pcapi.DOWNLOADS, pcapi.HOOK_SECRET_FILE, pcapi.ALLOWED_LOGINS)
+        cls.saved = (pcapi.PUSH, pcapi.NOTIFY, pcapi.DOWNLOADS, pcapi.HOOK_SECRET_FILE, pcapi.ALLOWED_LOGINS,
+                     pcapi.LOWSPACE)
+        pcapi.LOWSPACE = os.path.join(cls.dir, "none.py")   # setUp writes a stand-in per test
         pcapi.PUSH = FakePush()
         pcapi.NOTIFY = pcapi.Notify(pcapi.PUSH, data_dir=cls.dir, token_file="/nonexistent", chat="")
         pcapi.DOWNLOADS = pcapi.Downloads(f"http://127.0.0.1:{cls.qbt.server_address[1]}", "admin", pw, {}, cls.dir)
@@ -508,9 +510,18 @@ class DownloadsHttpTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.api.shutdown(); cls.qbt.shutdown()
-        pcapi.PUSH, pcapi.NOTIFY, pcapi.DOWNLOADS, pcapi.HOOK_SECRET_FILE, pcapi.ALLOWED_LOGINS = cls.saved
+        (pcapi.PUSH, pcapi.NOTIFY, pcapi.DOWNLOADS, pcapi.HOOK_SECRET_FILE, pcapi.ALLOWED_LOGINS,
+         pcapi.LOWSPACE) = cls.saved
 
     def setUp(self):
+        # a stand-in for the Qwen bot's lowspace.py that records its argv, so no test reaches the real one;
+        # one per test, so a check a previous test started can't land in this test's log
+        n = getattr(DownloadsHttpTests, "_n", 0) + 1
+        DownloadsHttpTests._n = n
+        self.space_log = os.path.join(self.dir, f"lowspace{n}.argv")
+        pcapi.LOWSPACE = os.path.join(self.dir, f"lowspace{n}.py")
+        with open(pcapi.LOWSPACE, "w") as f:
+            f.write(f"import json, sys\nopen({self.space_log!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n")
         FakeQbt.torrents[:] = [torrent(HASH_A, "Film.2001.1080p", "downloading", "radarr")]
         pcapi.DOWNLOADS.cache = (0.0, None)
         pcapi.PUSH.queued.clear()
@@ -555,6 +566,53 @@ class DownloadsHttpTests(unittest.TestCase):
         pcapi.PUSH.queued.clear(); pcapi.NOTIFY._live_at = 0
         self.call("POST", "/pc/api/hook/radarr", {"eventType": "Download"}, {"Authorization": "Bearer " + "s" * 40})
         self.assertEqual(pcapi.PUSH.queued, [])
+
+    def space_runs(self, n=1):
+        end = time.time() + 10
+        while time.time() < end:
+            if os.path.exists(self.space_log):
+                lines = open(self.space_log).read().splitlines()
+                if len(lines) >= n: return [json.loads(x) for x in lines]
+            time.sleep(0.05)
+        return [json.loads(x) for x in open(self.space_log).read().splitlines()] if os.path.exists(self.space_log) else []
+
+    def test_grab_starts_the_space_check_with_hash_and_size(self):
+        hook = {"eventType": "Grab", "downloadId": HASH_A.lower(), "movie": {"title": "Film", "year": 2001},
+                "release": {"quality": "Bluray-1080p", "size": 5000000000}}
+        self.assertEqual(self.call("POST", "/pc/api/hook/radarr", hook)[0], 401)
+        time.sleep(0.3)
+        self.assertFalse(os.path.exists(self.space_log), "no secret, no check")
+        self.assertEqual(self.call("POST", "/pc/api/hook/radarr", hook, {"Authorization": "Bearer " + "s" * 40})[0], 200)
+        self.assertEqual(self.space_runs(), [["event", "--source", "radarr", "--hash", HASH_A.upper(),
+                                              "--size", "5000000000"]])
+
+    def test_space_check_only_on_grab_and_odd_fields_dropped(self):
+        auth = {"Authorization": "Bearer " + "s" * 40}
+        self.call("POST", "/pc/api/hook/sonarr", {"eventType": "Download"}, auth)
+        self.call("POST", "/pc/api/hook/sonarr", {"eventType": "Grab", "downloadId": "x; rm -rf ~",
+                                                  "release": {"size": "big"}, "series": {"title": "S"}}, auth)
+        self.assertEqual(self.space_runs(), [["event", "--source", "sonarr"]])
+
+    def test_space_check_failure_never_breaks_the_grab(self):
+        auth = {"Authorization": "Bearer " + "s" * 40}
+        hook = {"eventType": "Grab", "downloadId": HASH_A, "movie": {"title": "Film"}}
+        saved = pcapi.LOWSPACE
+        try:
+            pcapi.LOWSPACE = os.path.join(self.dir, "missing.py")
+            self.assertEqual(self.call("POST", "/pc/api/hook/radarr", hook, auth)[0], 200)
+            pcapi.LOWSPACE = saved
+            real = pcapi.subprocess.Popen
+            pcapi.subprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(OSError("no fork"))
+            try:
+                pcapi.NOTIFY._live_at = 0
+                code, _ = self.call("POST", "/pc/api/hook/radarr", hook, auth)
+                self.assertEqual(code, 200)
+                self.assertEqual(pcapi.PUSH.queued[-1][0]["kind"], "downloads")
+                self.assertEqual(pcapi.space_check("radarr", hook), "failed")
+            finally:
+                pcapi.subprocess.Popen = real
+        finally:
+            pcapi.LOWSPACE = saved
 
     def test_disabled_category_reported_to_the_app(self):
         pcapi.NOTIFY.update({"categories": {"live": {"app": False}}})

@@ -29,7 +29,8 @@ GET  /pc/api/downloads                active qBittorrent downloads (all categori
 POST /pc/api/downloads/started        {hash?, title?}: "a download just started" (the Qwen bot calls it): wakes the
                                       phone's live progress (FCM "downloads") if that category is on
 POST /pc/api/hook/radarr|sonarr|seerr webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
-                                      (Authorization: Bearer/Basic password, or X-PC-Hook-Secret); maps events to categories
+                                      (Authorization: Bearer/Basic password, or X-PC-Hook-Secret); maps events to categories.
+                                      A Grab also starts the Qwen bot's low-space check (~/tools/localagent/lowspace.py)
 POST /pc/api/crash                   {kind, ts, reason, where, text, trace_b64?, app, device, android}: a crash report
                                       the app uploads on its next start (stored in DATA_DIR/crashes, newest 30)
 GET  /pc/api/crash                    stored crash reports (no traces)
@@ -689,6 +690,28 @@ def map_hook(source, p):
 
 NOTIFY = None
 
+LOWSPACE = os.environ.get("PCAPI_LOWSPACE", os.path.join(HOME, "tools", "localagent", "lowspace.py"))
+
+
+def space_check(source, p):
+    """A Radarr/Sonarr grab: start the Qwen bot's low-space check (will the downloads in progress take the HDD
+    below its line? It alerts on Telegram at most once a day). Background, fire and forget: never raises, so it
+    can't get in the way of the grab notification. Hash and size go as separate argv items, never a shell.
+    -> "started" | why not."""
+    try:
+        if not os.path.isfile(LOWSPACE): return "no lowspace.py"
+        args = ["/usr/bin/python3", LOWSPACE, "event", "--source", source]
+        h = str(p.get("downloadId") or "")
+        if re.fullmatch(r"[0-9A-Fa-f]{40}", h): args += ["--hash", h.upper()]
+        size = (p.get("release") or {}).get("size")
+        if isinstance(size, int) and not isinstance(size, bool) and size > 0: args += ["--size", str(size)]
+        proc = subprocess.Popen(args, cwd=os.path.dirname(LOWSPACE), stdin=subprocess.DEVNULL, start_new_session=True)
+        threading.Thread(target=proc.wait, daemon=True).start()     # reaps it
+        return "started"
+    except Exception as e:
+        print(f"lowspace: {source} check didn't start: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return "failed"
+
 
 # ---------------------------------------------------------------- downloads (qBittorrent -> the app's live progress)
 
@@ -1223,6 +1246,7 @@ class H(BaseHTTPRequestHandler):
             # the torrent hash -> the movie/show title for the live progress notification, then wake the phone
             if n and n.get("name"): DOWNLOADS.remember(str(p.get("downloadId") or ""), n["name"])
             NOTIFY.live_kick(source)
+            space_check(source, p)
         if not n: return self.send_json(200, {"ok": True, "ignored": True})
         img = NOTIFY.fetch_poster(n["image_url"]) if n.get("image_url") else None
         return self.send_json(*NOTIFY.send(n["category"], n["title"], n["body"], None, img, n.get("link")))

@@ -1,6 +1,8 @@
 import { useNavigation, useRoute } from '@react-navigation/native';
-import { useEffect, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Modal, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { WebView } from 'react-native-webview';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Banner, Button, Card, Icon, Mono, Screen, Section } from '../components/ui';
 import {
   AgentAction,
@@ -51,6 +53,50 @@ const ACTION_NAMES: Record<AgentAction, string> = {
   block: 'Block',
 };
 
+type PreviewState = { html: string; label: string };
+
+const PREVIEW_LOCKDOWN = `
+(function () {
+  try {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition = function (success, failure) {
+        failure && failure({ code: 1, message: 'Geolocation is disabled.' });
+      };
+      navigator.geolocation.watchPosition = function (success, failure) {
+        failure && failure({ code: 1, message: 'Geolocation is disabled.' });
+        return 0;
+      };
+    }
+  } catch (e) {}
+  try {
+    if (navigator.mediaDevices) {
+      navigator.mediaDevices.getUserMedia = function () { return Promise.reject(new Error('Media capture is disabled.')); };
+      navigator.mediaDevices.getDisplayMedia = function () { return Promise.reject(new Error('Media capture is disabled.')); };
+      navigator.mediaDevices.enumerateDevices = function () { return Promise.resolve([]); };
+    }
+    navigator.getUserMedia = function (constraints, success, failure) { failure && failure(new Error('Media capture is disabled.')); };
+    navigator.webkitGetUserMedia = navigator.getUserMedia;
+  } catch (e) {}
+  try {
+    if (navigator.permissions && navigator.permissions.query) {
+      var query = navigator.permissions.query.bind(navigator.permissions);
+      navigator.permissions.query = function (desc) {
+        if (desc && (desc.name === 'geolocation' || desc.name === 'camera' || desc.name === 'microphone')) {
+          return Promise.resolve({ state: 'denied', onchange: null });
+        }
+        return query(desc);
+      };
+    }
+  } catch (e) {}
+})();
+true;
+`;
+
+function urlOrigin(raw: string): string | undefined {
+  const m = /^([a-z][a-z0-9+.-]*:)\/\/([^/?#]+)/i.exec((raw ?? '').trim());
+  return m ? `${m[1]}//${m[2]}` : undefined;
+}
+
 function draftFrom(rule: AgentRule, url: string | null): Draft {
   const exact = url ? buildExactMatch(url) : null;
   const site = url ? buildSiteMatch(url) : null;
@@ -71,17 +117,25 @@ function draftFrom(rule: AgentRule, url: string | null): Draft {
 
 export default function AgentRuleScreen() {
   const t = useTheme();
+  const insets = useSafeAreaInsets();
   const nav = useNavigation<any>();
   const params = (useRoute().params ?? {}) as Params;
   const [loading, setLoading] = useState(true);
   const [rule, setRule] = useState<AgentRule | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [original, setOriginal] = useState<OriginalMeta | null>(null);
-  const [preview, setPreview] = useState(false);
+  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [previewBlocked, setPreviewBlocked] = useState(false);
+  const previewLoaded = useRef(false);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   const ruleUrl = params.url ?? (rule ? urlFromMatch(rule.match, rule.matchType) : null) ?? '';
+  const previewBaseUrl = useMemo(() => urlOrigin(ruleUrl), [ruleUrl]);
+  const previewSource = useMemo(
+    () => (preview ? { html: preview.html, baseUrl: previewBaseUrl } : null),
+    [preview, previewBaseUrl]
+  );
 
   useEffect(() => {
     let off = false;
@@ -177,13 +231,43 @@ export default function AgentRuleScreen() {
       const o = await getOriginalHtml(ruleUrl);
       patch({ html: o.html });
       setOriginal({ available: true, captured_at: o.captured_at, size: o.size, truncated: o.truncated });
-      setPreview(false);
       setErr(null);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(null);
     }
+  };
+
+  const openPreview = (html: string, label: string) => {
+    if (!html.trim()) return;
+    previewLoaded.current = false;
+    setPreviewBlocked(false);
+    setPreview({ html, label });
+  };
+
+  const previewOriginal = async () => {
+    if (!ruleUrl) {
+      setErr('This rule has no URL to preview.');
+      return;
+    }
+    setBusy('original-preview');
+    try {
+      const o = await getOriginalHtml(ruleUrl);
+      setOriginal({ available: true, captured_at: o.captured_at, size: o.size, truncated: o.truncated });
+      setErr(null);
+      openPreview(o.html, 'Original HTML');
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const closePreview = () => {
+    setPreview(null);
+    setPreviewBlocked(false);
+    previewLoaded.current = false;
   };
 
   const typography = { color: t.text, backgroundColor: t.cardAlt, borderColor: t.border, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.md, paddingHorizontal: space(3), paddingVertical: space(2.5), fontSize: 14 };
@@ -200,12 +284,13 @@ export default function AgentRuleScreen() {
     draft?.matchMode === 'exact' ? 'regex' : draft?.matchMode === 'site' ? 'glob' : draft?.customMatchType ?? 'glob';
 
   return (
-    <Screen
-      title={title}
-      subtitle={ruleUrl ? `${host}${path}` : 'Agent view'}
-      onBack={() => nav.goBack()}
-      scroll
-    >
+    <>
+      <Screen
+        title={title}
+        subtitle={ruleUrl ? `${host}${path}` : 'Agent view'}
+        onBack={() => nav.goBack()}
+        scroll
+      >
       {ruleUrl ? (
         <Card style={{ gap: 2 }}>
           <Text style={{ color: t.textFaint, fontSize: 12, fontWeight: '700', letterSpacing: 0.6 }}>URL</Text>
@@ -358,12 +443,24 @@ export default function AgentRuleScreen() {
                 />
                 <View style={{ flexDirection: 'row', gap: space(2) }}>
                   <Button
-                    label={preview ? 'Edit HTML' : 'Preview'}
-                    icon={preview ? 'pencil-outline' : 'eye-outline'}
+                    label="Preview"
+                    icon="eye-outline"
                     kind="subtle"
                     compact
+                    disabled={!draft.html.trim()}
                     style={{ flex: 1 }}
-                    onPress={() => setPreview((p) => !p)}
+                    onPress={() => openPreview(draft.html, 'Edited HTML')}
+                  />
+                </View>
+                <View style={{ flexDirection: 'row', gap: space(2) }}>
+                  <Button
+                    label="Preview original"
+                    icon="eye-outline"
+                    kind="subtle"
+                    compact
+                    busy={busy === 'original-preview'}
+                    style={{ flex: 1 }}
+                    onPress={previewOriginal}
                   />
                   <Button
                     label="Reset to original"
@@ -375,18 +472,6 @@ export default function AgentRuleScreen() {
                     onPress={resetOriginal}
                   />
                 </View>
-                {preview ? (
-                  <View style={{ gap: space(2) }}>
-                    <View style={[st.preview, { backgroundColor: t.cardAlt, borderColor: t.border }]}>
-                      <ScrollView nestedScrollEnabled contentContainerStyle={{ padding: space(3) }}>
-                        <Mono style={{ fontSize: 11.5, lineHeight: 16 }}>{draft.html || '(empty)'}</Mono>
-                      </ScrollView>
-                    </View>
-                    <Text style={{ color: t.textFaint, fontSize: 12, lineHeight: 17 }}>
-                      Plain-text preview only: this build has no WebView dependency, so the HTML is not rendered.
-                    </Text>
-                  </View>
-                ) : null}
               </Card>
             </Section>
           ) : null}
@@ -524,13 +609,94 @@ export default function AgentRuleScreen() {
           Open a URL or a rule from Agent view.
         </Banner>
       ) : null}
-    </Screen>
+      </Screen>
+
+      {preview && previewSource ? (
+        <Modal visible animationType="slide" onRequestClose={closePreview} statusBarTranslucent navigationBarTranslucent>
+          <View style={{ flex: 1, backgroundColor: t.bg, paddingTop: insets.top }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: space(2),
+                paddingHorizontal: space(4),
+                paddingVertical: space(3),
+                borderBottomWidth: StyleSheet.hairlineWidth,
+                borderBottomColor: t.border,
+              }}
+            >
+              <Pressable onPress={closePreview} hitSlop={8} accessibilityLabel="Close preview" style={st.previewClose}>
+                <Icon name="close" size={24} color={t.text} />
+              </Pressable>
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: t.text, fontSize: 17, fontWeight: '800' }}>Preview</Text>
+                <Text style={{ color: t.textDim, fontSize: 12 }} numberOfLines={1}>
+                  {preview.label} · {host}
+                </Text>
+              </View>
+            </View>
+            <WebView
+              source={previewSource}
+              originWhitelist={['*']}
+              javaScriptEnabled
+              domStorageEnabled
+              incognito
+              thirdPartyCookiesEnabled={false}
+              sharedCookiesEnabled={false}
+              allowFileAccess={false}
+              allowFileAccessFromFileURLs={false}
+              allowUniversalAccessFromFileURLs={false}
+              geolocationEnabled={false}
+              mediaCapturePermissionGrantType="deny"
+              javaScriptCanOpenWindowsAutomatically={false}
+              setSupportMultipleWindows={false}
+              setBuiltInZoomControls={false}
+              setDisplayZoomControls={false}
+              saveFormDataDisabled
+              allowsLinkPreview={false}
+              injectedJavaScriptBeforeContentLoaded={PREVIEW_LOCKDOWN}
+              injectedJavaScriptBeforeContentLoadedForMainFrameOnly={false}
+              onLoadEnd={() => {
+                previewLoaded.current = true;
+              }}
+              onShouldStartLoadWithRequest={(req) => {
+                if (req.url === 'about:blank') return true;
+                if (!previewLoaded.current) {
+                  const sameOrigin = previewBaseUrl ? urlOrigin(req.url) === previewBaseUrl : req.url.startsWith('data:');
+                  if (sameOrigin) return true;
+                }
+                setPreviewBlocked(true);
+                return false;
+              }}
+              style={{ flex: 1, backgroundColor: t.bg }}
+            />
+            <View
+              style={{
+                gap: space(2),
+                paddingHorizontal: space(4),
+                paddingTop: space(3),
+                paddingBottom: insets.bottom + space(3),
+                borderTopWidth: StyleSheet.hairlineWidth,
+                borderTopColor: t.border,
+              }}
+            >
+              {previewBlocked ? (
+                <Text style={{ color: t.warn, fontSize: 12.5, textAlign: 'center' }}>
+                  Navigation is disabled in the preview.
+                </Text>
+              ) : null}
+              <Button label="Close preview" kind="subtle" compact onPress={closePreview} />
+            </View>
+          </View>
+        </Modal>
+      ) : null}
+    </>
   );
 }
 
 const st = StyleSheet.create({
   actionIcon: { width: 42, height: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
   choice: { flex: 1, alignItems: 'center', justifyContent: 'center', height: 38, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth },
-  preview: { borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, maxHeight: 360, overflow: 'hidden' },
+  previewClose: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', marginLeft: -space(2) },
   radioRow: { flexDirection: 'row', alignItems: 'center', gap: space(3), padding: space(3), borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth },
 });

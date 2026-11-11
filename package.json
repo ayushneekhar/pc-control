@@ -29,7 +29,8 @@
     "react-native-nitro-ota": "0.14.0",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
-    "react-native-webrtc": "155.0.1"
+    "react-native-webrtc": "155.0.1",
+    "react-native-webview": "13.16.1"
   },
   "devDependencies": {
     "@babel/core": "^7.29.0",

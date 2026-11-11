@@ -14,6 +14,8 @@ import { startLiveIfDownloading } from './src/lib/live';
 import { uploadCrashes } from './src/lib/crash';
 import { askNotificationPermission, registerPush } from './src/lib/push';
 import { pendingList, startRootStore, useRootStore } from './src/lib/rootStore';
+import AgentRuleScreen from './src/screens/AgentRuleScreen';
+import AgentViewScreen from './src/screens/AgentViewScreen';
 import RootScreen from './src/screens/RootScreen';
 import RoutesScreen from './src/screens/RoutesScreen';
 import ServicesScreen from './src/screens/ServicesScreen';
@@ -111,6 +113,8 @@ export default function App() {
           <Stack.Navigator screenOptions={{ headerShown: false }}>
             <Stack.Screen name="Tabs" component={Tabs} />
             {/* loaded on first open: react-native-webrtc stays out of app start */}
+            <Stack.Screen name="AgentView" component={AgentViewScreen} options={{ animation: 'slide_from_right' }} />
+            <Stack.Screen name="AgentRule" component={AgentRuleScreen} options={{ animation: 'slide_from_right' }} />
             <Stack.Screen
               name="Cams"
               getComponent={() => {

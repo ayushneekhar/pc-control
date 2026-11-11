@@ -15,7 +15,12 @@ function tint(id: string) {
 }
 
 /** Routes the app plays natively instead of opening the browser (the screen keeps a link to the web page). */
-const NATIVE: Record<string, string> = { '/cams/': 'Cams' };
+const NATIVE: Record<string, string> = { '/cams/': 'Cams', '/agentview': 'AgentView' };
+
+/** Phone-side names for routes that open a native screen. */
+const TILE: Record<string, Partial<Pick<Route, 'name' | 'icon' | 'subtitle'>> & { color?: string }> = {
+  '/agentview': { name: 'Agent view', icon: 'robot-outline', subtitle: 'What agents see', color: '#E7B75F' },
+};
 
 /** App tiles launch the Android app; the web URL if it isn't installed (or the build has no launchApp). */
 function open(r: Route) {
@@ -26,7 +31,11 @@ function open(r: Route) {
 function RouteCard({ r }: { r: Route }) {
   const t = useTheme();
   const nav = useNavigation<any>();
-  const c = tint(r.name);
+  const view = r.port === 443 ? TILE[r.path] : undefined;
+  const name = view?.name ?? r.name;
+  const icon = view?.icon ?? r.icon;
+  const subtitle = view?.subtitle ?? r.subtitle;
+  const c = view?.color ?? tint(name);
   const screen = r.port === 443 ? NATIVE[r.path] : undefined;
   return (
     <Pressable
@@ -35,14 +44,14 @@ function RouteCard({ r }: { r: Route }) {
       style={({ pressed }) => [st.tile, { backgroundColor: t.card, borderColor: t.border, opacity: pressed ? 0.9 : 1 }]}
     >
       <View style={[st.tileIcon, { backgroundColor: c + (t.dark ? '24' : '1F') }]}>
-        <Icon name={r.icon} size={24} color={c} />
+        <Icon name={icon} size={24} color={c} />
       </View>
       <View style={{ gap: 2 }}>
         <Text style={{ color: t.text, fontSize: 15.5, fontWeight: '700' }} numberOfLines={1}>
-          {r.name}
+          {name}
         </Text>
         <Text style={{ color: t.textDim, fontSize: 12.5 }} numberOfLines={1}>
-          {r.subtitle || r.path}
+          {subtitle || r.path}
         </Text>
         <Text style={{ color: t.textFaint, fontSize: 11.5, fontFamily: t.mono }} numberOfLines={1}>
           {r.kind === 'app' ? 'app' : r.port === 443 ? r.path : `:${r.port}`}

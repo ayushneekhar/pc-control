@@ -20,13 +20,19 @@ export class ApiError extends Error {
   }
 }
 
-export async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs = 12000): Promise<T> {
+export async function request<T>(
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  path: string,
+  body?: unknown,
+  timeoutMs = 12000,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(serverUrl() + path, {
       method,
-      headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}), ...extraHeaders },
       body: body ? JSON.stringify(body) : undefined,
       signal: ctrl.signal,
     });
@@ -53,6 +59,8 @@ export async function request<T>(method: 'GET' | 'POST', path: string, body?: un
 
 export const get = <T>(path: string, timeoutMs?: number) => request<T>('GET', path, undefined, timeoutMs);
 export const post = <T>(path: string, body: unknown, timeoutMs?: number) => request<T>('POST', path, body, timeoutMs);
+export const put = <T>(path: string, body: unknown, timeoutMs?: number) => request<T>('PUT', path, body, timeoutMs);
+export const del = <T>(path: string, timeoutMs?: number) => request<T>('DELETE', path, undefined, timeoutMs);
 
 // ---------------------------------------------------------------- types
 

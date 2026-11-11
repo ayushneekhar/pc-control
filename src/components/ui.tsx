@@ -27,6 +27,7 @@ export function Screen({
   title,
   subtitle,
   right,
+  onBack,
   children,
   onRefresh,
   refreshing = false,
@@ -35,6 +36,7 @@ export function Screen({
   title: string;
   subtitle?: ReactNode;
   right?: ReactNode;
+  onBack?: () => void;
   children: ReactNode;
   onRefresh?: () => void;
   refreshing?: boolean;
@@ -44,6 +46,11 @@ export function Screen({
   const insets = useSafeAreaInsets();
   const header = (
     <View style={[styles.header, { paddingTop: insets.top + space(4) }]}>
+      {onBack ? (
+        <Pressable onPress={onBack} hitSlop={8} accessibilityLabel="Back" style={styles.back}>
+          <Icon name="arrow-left" size={24} color={t.text} />
+        </Pressable>
+      ) : null}
       <View style={{ flex: 1 }}>
         <Text style={[styles.title, { color: t.text }]}>{title}</Text>
         {subtitle ? (
@@ -265,6 +272,7 @@ export function Bar({ pct, color, height = 6 }: { pct: number; color?: string; h
 
 export const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: space(5), paddingBottom: space(4), gap: space(3) },
+  back: { width: 36, height: 40, alignItems: 'center', justifyContent: 'center', marginLeft: -space(2) },
   title: { fontSize: 30, fontWeight: '800', letterSpacing: -0.6 },
   subtitle: { fontSize: 14, marginTop: 2 },
   card: { borderRadius: radius.lg, borderWidth: StyleSheet.hairlineWidth, padding: space(4) },

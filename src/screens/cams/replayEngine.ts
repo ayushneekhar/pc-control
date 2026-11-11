@@ -11,9 +11,11 @@ import {
   needsReload,
   parseSightings,
   playlistUrl,
+  recCamOf,
   REC_CAMS,
   RecCam,
   RecIndex,
+  sightingSeek,
   Sighting,
   snapSeek,
   spanEnd,
@@ -77,6 +79,8 @@ export class ReplayEngine {
   private visits: Visit[] = [];
   private detOn: boolean | null = null;
   private error = '';
+  /** a cat alert's camera + epoch ms, applied once the recorder's index is here */
+  private target: { cam: string; ts: number } | null = null;
   private open = false;
   private run = 0; // start/stop generation: a start() still awaiting its first fetch after stop() bails out
   private timers: ReturnType<typeof setInterval>[] = [];
@@ -93,11 +97,12 @@ export class ReplayEngine {
     const run = ++this.run;
     await Promise.all([this.refreshIdx(), this.refreshSightings()]);
     if (!this.open || run !== this.run) return;
-    if (!this.T || this.T < nowS() - DAY) {
+    const applied = this.applyTarget();
+    if (!applied && (!this.T || this.T < nowS() - DAY)) {
       const first = Math.min(...REC_CAMS.map((c) => this.idx[c]?.spans?.[0]?.[0] ?? Infinity));
       this.T = Math.max((latestEnd(this.idx) || nowS()) - 60, Number.isFinite(first) ? first : 0);
     }
-    this.T = snapSeek(this.idx, this.T, nowS(), -1);
+    if (!applied) this.T = snapSeek(this.idx, this.T, nowS(), -1);
     for (const c of REC_CAMS) this.load(c, this.T);
     this.timers = [
       setInterval(() => this.tick(), 250),
@@ -211,6 +216,38 @@ export class ReplayEngine {
     this.T = snapSeek(this.idx, at, nowS(), dir);
     for (const c of REC_CAMS) this.jump(c, this.T);
     this.tick();
+  }
+
+  /** Set by the index once loaded; returns true when the target became the clock. */
+  private applyTarget(): boolean {
+    const t = this.target;
+    if (!t) return false;
+    const r = sightingSeek(this.idx, t.cam, t.ts, nowS());
+    if (!r) {
+      this.target = null;
+      return false;
+    }
+    if (!REC_CAMS.some((c) => (this.idx[c]?.spans?.length ?? 0) > 0)) return false; // wait for the index
+    this.target = null;
+    this.big = r.cam;
+    this.playing = true;
+    this.T = r.T;
+    return true;
+  }
+
+  /**
+   * A cat notification: select the camera that saw it and seek to ~5 s before the sighting. If the recorder index
+   * isn't here yet the target waits for start()/refreshIdx(); an unknown cam or bad timestamp is ignored.
+   */
+  seekSighting(cam: unknown, tsMs: unknown): boolean {
+    const rc = recCamOf(cam);
+    const ts = typeof tsMs === 'number' ? tsMs : typeof tsMs === 'string' && tsMs.trim() ? Number(tsMs) : NaN;
+    if (!rc || !Number.isFinite(ts)) return false;
+    this.target = { cam: rc, ts };
+    if (!this.applyTarget()) return true;
+    for (const c of REC_CAMS) this.jump(c, this.T);
+    this.tick();
+    return true;
   }
 
   // ---------------------------------------------------------------- the clock

@@ -17,8 +17,10 @@ POST /pc/api/push/register            {token, name}: store the phone's FCM token
 POST /pc/api/push/unregister          {token}
 GET  /pc/api/push/status?token=...    {configured, registered, devices}
 POST /pc/api/push/test                {token?}: send a test notification through FCM now, report per-token results
-POST /pc/api/notify                   {category, title, body, telegram_text?, image_b64?, link?}: the notification
-                                      router: sends to Telegram (Qwen bot) and/or the app (FCM) per category settings.
+POST /pc/api/notify                   {category, title, body, telegram_text?, image_b64?, link?, cam?, ts?}: the
+                                      notification router: sends to Telegram (Qwen bot) and/or the app (FCM) per
+                                      category settings. cam/ts (a sighting's camera key and epoch ms) only ride in
+                                      the app push, so a cat alert opens Replay at that moment.
                                       502 if Telegram was wanted but failed (callers then send to Telegram directly)
 GET  /pc/api/notify/settings          {masters: {telegram, app}, categories: [...], channels: {...}}
 POST /pc/api/notify/settings          {masters?: {telegram?, app?}, categories?: {<id>: {telegram?, app?}}}
@@ -520,9 +522,11 @@ class Notify:
             return None
 
     # ---- send
-    def send(self, cat, title, body="", telegram_text=None, image=None, link=None):
+    def send(self, cat, title, body="", telegram_text=None, image=None, link=None, cam=None, ts=None):
         """-> (http code, result). 502 when Telegram was wanted but failed, so callers can fall back to sending
-        straight to Telegram themselves (alerts are never lost because pc-api had a bad moment)."""
+        straight to Telegram themselves (alerts are never lost because pc-api had a bad moment).
+        cam/ts are optional app-push extras (a sighting's camera key and epoch ms); invalid ones are dropped and
+        never change the Telegram path."""
         if cat not in CAT_IDS or cat in APP_ONLY:
             return 400, {"error": f"unknown category (one of: {', '.join(c for c in CAT_IDS if c not in APP_ONLY)})"}
         title, body = clip(title, 120), str(body or "").strip()[:3000]
@@ -538,6 +542,12 @@ class Notify:
             elif not self.push.tokens: res["app"] = "no phones registered"
             else:
                 extra = {"cat": cat, **({"link": link} if link else {})}
+                if cam is not None and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", str(cam)):
+                    extra["cam"] = str(cam)
+                if ts is not None:
+                    try: ts_ms = int(float(ts))
+                    except (TypeError, ValueError): ts_ms = None
+                    if ts_ms is not None and 0 < ts_ms < 4102444800000: extra["ts"] = ts_ms
                 if image:
                     self.store_image(nid, image)
                     extra["image"] = f"/pc/api/notify/image/{nid}"
@@ -1212,7 +1222,8 @@ class H(BaseHTTPRequestHandler):
                     except ValueError: return self.send_json(400, {"error": "image_b64 is not base64"})
                 tt = b.get("telegram_text")
                 return self.send_json(*NOTIFY.send(str(b.get("category") or "other"), b.get("title"), b.get("body"),
-                                                   str(tt)[:4096] if tt else None, img, b.get("link") or None))
+                                                   str(tt)[:4096] if tt else None, img, b.get("link") or None,
+                                                   b.get("cam"), b.get("ts")))
             if path == "/api/crash": return self.send_json(*CRASHES.store(b))
             if path == "/api/notify/settings": return self.send_json(*NOTIFY.update(b))
             if path == "/api/notify/test": return self.send_json(*NOTIFY.test(str(b.get("channel", ""))))

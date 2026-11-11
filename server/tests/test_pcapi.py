@@ -262,6 +262,25 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(self.n.image(r["id"]), JPEG)
         self.assertIsNone(self.n.image("../../etc/passwd"))
 
+    def test_sighting_cam_and_ts_ride_in_the_app_push_only(self):
+        self.n.update({"categories": {"cats": {"app": True}}})
+        code, r = self.n.send("cats", "🐱 Cat at Bowl", "Confidence 91%", image=JPEG, cam="cat3", ts=1700000000123)
+        self.assertEqual(code, 200)
+        extra = self.push.sent[-1][3]
+        self.assertEqual((extra["cat"], extra["cam"], extra["ts"]), ("cats", "cat3", 1700000000123))
+        # Telegram is unchanged: the caption never carries the replay metadata
+        self.assertEqual(FakeTelegram.log[-1][1]["caption"], "🐱 Cat at Bowl\nConfidence 91%")
+
+    def test_bad_sighting_extras_are_dropped_without_failing_the_alert(self):
+        self.n.update({"categories": {"cats": {"app": True}}})
+        code, _ = self.n.send("cats", "Cat", cam="../etc/passwd", ts="not a time")
+        self.assertEqual(code, 200)
+        extra = self.push.sent[-1][3]
+        self.assertNotIn("cam", extra)
+        self.assertNotIn("ts", extra)
+        self.assertEqual(self.n.send("cats", "Cat", ts=-5)[0], 200)
+        self.assertNotIn("ts", self.push.sent[-1][3])
+
     def test_telegram_failure_is_502_and_token_never_leaks(self):
         FakeTelegram.fail[0] = 2
         code, r = self.n.send("system", "Backup failed")

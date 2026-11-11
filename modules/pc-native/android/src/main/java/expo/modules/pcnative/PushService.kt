@@ -23,7 +23,8 @@ class PushService : FirebaseMessagingService() {
       "result" -> Notifier.result(this, id, title.ifEmpty { "Command finished" }, body)
       "dismiss" -> Notifier.dismiss(this, id)
       "downloads" -> LiveDownloads.start(this, fromPush = true)   // a download started: live progress for a while
-      "notify" -> Notifier.message(this, id, title.ifEmpty { "PC Control" }, body, d["cat"], d["image"], d["link"])
+      "notify" -> Notifier.message(this, id, title.ifEmpty { "PC Control" }, body, d["cat"], d["image"], d["link"],
+        d["cam"]?.takeIf { it.isNotEmpty() }, d["ts"]?.toLongOrNull())
     }
   }
 }

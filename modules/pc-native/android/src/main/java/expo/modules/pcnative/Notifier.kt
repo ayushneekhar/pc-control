@@ -94,12 +94,18 @@ object Notifier {
   }
 
   fun message(ctx: Context, id: String, title: String, body: String, cat: String? = null, image: String? = null,
-              link: String? = null) {
+              link: String? = null, cam: String? = null, ts: Long? = null) {
     val ch = if (cat != null && CATEGORY_CHANNELS.containsKey(cat)) "cat_$cat" else CH_MESSAGES
-    val tap = if (link != null && (link.startsWith("https://") || link.startsWith("http://"))) {
-      PendingIntent.getActivity(ctx, id.hashCode(), Intent(Intent.ACTION_VIEW, Uri.parse(link))
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-    } else open(ctx, "routes", id.hashCode())
+    // A cat sighting carries its camera + frame time: tapping opens the Cams screen on Replay, seeked there.
+    val sighting = if (cam != null && ts != null)
+      "cams?tab=replay&cam=${Uri.encode(cam)}&ts=$ts" else null
+    val tap = when {
+      link != null && (link.startsWith("https://") || link.startsWith("http://")) ->
+        PendingIntent.getActivity(ctx, id.hashCode(), Intent(Intent.ACTION_VIEW, Uri.parse(link))
+          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+      sighting != null -> open(ctx, sighting, id.hashCode())
+      else -> open(ctx, "routes", id.hashCode())
+    }
     val b = base(ctx, ch, title, body).setPriority(NotificationCompat.PRIORITY_HIGH).setContentIntent(tap)
     val pic = image?.let { fetchImage(ctx, it) }
     if (pic != null) b.setLargeIcon(pic).setStyle(NotificationCompat.BigPictureStyle().bigPicture(pic)

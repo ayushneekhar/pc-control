@@ -43,7 +43,20 @@ const pinchOf = (e: GestureResponderEvent) => {
   return ts.length >= 2 ? Math.abs(ts[0].pageX - ts[1].pageX) || 1 : 0;
 };
 
-export function ReplayTab({ visible, hevcOk, toast }: { visible: boolean; hevcOk: boolean; toast: Toast }) {
+export function ReplayTab({
+  visible,
+  hevcOk,
+  toast,
+  target,
+  onTargetConsumed,
+}: {
+  visible: boolean;
+  hevcOk: boolean;
+  toast: Toast;
+  /** a cat notification's camera key + epoch ms: seek there once Replay is up */
+  target?: { cam: string; ts: number } | null;
+  onTargetConsumed?: () => void;
+}) {
   const t = useTheme();
   const [v, setV] = useState<ReplayView | null>(null);
   const [eng] = useState(() => new ReplayEngine({ base: serverUrl, hevcOk, onChange: setV }));
@@ -58,6 +71,12 @@ export function ReplayTab({ visible, hevcOk, toast }: { visible: boolean; hevcOk
     eng.start();
     return () => eng.stop();
   }, [visible, eng]);
+
+  useEffect(() => {
+    if (!visible || !target) return;
+    // an unknown cam / bad ts is refused: leave it for a later good one, never crash
+    if (eng.seekSighting(target.cam, target.ts)) onTargetConsumed?.();
+  }, [visible, target, eng, onTargetConsumed]);
 
   const snapshot = async () => {
     if (snapBusy) return;

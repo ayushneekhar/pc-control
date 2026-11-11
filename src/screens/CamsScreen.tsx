@@ -34,12 +34,15 @@ import { Banner, Button, Icon } from '../components/ui';
 import { serverUrl } from '../lib/api';
 import { CamLink, LinkKind, LinkState } from '../lib/cams/link';
 import { CAM_MIC_STREAM, CamId, CAMS, HD_STREAM, HD_WAIT_MS, LAPTOP_MIC_STREAM, NAMES, TALK_STREAM, WEB_PATH } from '../lib/cams/config';
+import { parseSightingTarget } from '../lib/cams/replay';
 import { radius, space, useTheme } from '../theme';
 import { MusicTab } from './cams/MusicTab';
 import { ReplayTab } from './cams/ReplayTab';
 
 export type CamsTab = 'live' | 'replay' | 'music';
-export type CamsParams = { tab?: CamsTab; share?: string; shareId?: number } | undefined;
+export type CamsParams =
+  | { tab?: CamsTab; share?: string; shareId?: number; cam?: string; ts?: string | number }
+  | undefined;
 const TABS: { id: CamsTab; label: string; icon: string }[] = [
   { id: 'live', label: 'Live', icon: 'access-point' },
   { id: 'replay', label: 'Replay', icon: 'history' },
@@ -503,6 +506,18 @@ export default function CamsScreen() {
     setShared(params.share);
   }, [shareId, params?.share]);
   const clearShared = useCallback(() => setShared(null), []);
+  // A cat notification (pccontrol://cams?tab=replay&cam=cat&ts=<ms>): open Replay and seek there.
+  const [replayTarget, setReplayTarget] = useState<{ cam: string; ts: number } | null>(null);
+  const replayCam = params?.cam;
+  const replayTs = params?.ts;
+  useEffect(() => {
+    const target = parseSightingTarget(replayCam, replayTs);
+    if (!target) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTab('replay');
+    setReplayTarget(target);
+  }, [replayCam, replayTs]);
+  const clearReplayTarget = useCallback(() => setReplayTarget(null), []);
   // Replay decodes cat3hd's H.265 itself when the phone has a hardware HEVC decoder for 2304x1296, else the laptop
   // transcodes it to H.264 (the page's &v=avc)
   const [recHevc] = useState(() => {
@@ -809,7 +824,15 @@ export default function CamsScreen() {
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={{ padding: space(4), paddingBottom: (showBar ? 110 : space(6)) + insets.bottom, gap: space(3) }}
       >
-        {tab === 'replay' ? <ReplayTab visible={active} hevcOk={recHevc} toast={toast.show} /> : null}
+        {tab === 'replay' ? (
+          <ReplayTab
+            visible={active}
+            hevcOk={recHevc}
+            toast={toast.show}
+            target={replayTarget}
+            onTargetConsumed={clearReplayTarget}
+          />
+        ) : null}
         {tab === 'music' ? <MusicTab visible={active} toast={toast.show} shared={shared} onSharedDone={clearShared} /> : null}
         {tab !== 'live' ? null : (
           <>

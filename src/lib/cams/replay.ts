@@ -21,9 +21,14 @@ export const REC_CAMS = ['cat', 'cat2', 'cat3hd'] as const;
 export type RecCam = (typeof REC_CAMS)[number];
 /** catdetect cam ids -> camrec cam ids */
 export const DET2REC: Record<string, RecCam> = { cat: 'cat', cat2: 'cat2', cat3: 'cat3hd', cat3hd: 'cat3hd' };
+/** A detector cam key (cat / cat2 / cat3 / cat3hd) -> the recorder cam, or null if it isn't one. */
+export const recCamOf = (cam: unknown): RecCam | null =>
+  typeof cam === 'string' && DET2REC[cam] ? DET2REC[cam] : null;
 export const SHORT: Record<RecCam, string> = { cat: 'Living', cat2: 'Hall', cat3hd: 'Bowl' };
 export const DAY = 86400;
 export const VISIT_GAP = 90;
+/** A cat alert opens Replay this many seconds before the sighting, so the cat is already in frame. */
+export const SEEK_LEAD = 5;
 export const ZOOMS = [DAY, 6 * 3600, 3600, 600];
 export const SPEEDS = [1, 4, 16];
 
@@ -97,6 +102,52 @@ export function snapSeek(
     else if (pv.length) T = Math.max(...pv) - 2;
   }
   return T;
+}
+
+/**
+ * Seek within one cam's footage: clamp to its last 24 h; if that moment wasn't recorded, the nearest footage before
+ * it (dir < 0) or after it. Empty spans -> just clamp (the caller shows "No recordings yet").
+ */
+export function snapSeekCam(spans: Span[], at: number, now: number, dir = 0): number {
+  if (!spans.length) return clamp(at, now - DAY, now);
+  const first = spans[0][0];
+  const last = spanEnd(spans[spans.length - 1]);
+  let T = clamp(at, Math.max(now - DAY, Math.min(first, last)), last);
+  const r = w2m(spans, T);
+  if (r.gap) {
+    if (dir < 0) T = r.prev != null ? Math.max(first, r.prev - 2) : (r.next ?? T);
+    else T = r.next ?? (r.prev != null ? Math.max(first, r.prev - 2) : T);
+  }
+  return T;
+}
+
+/**
+ * A notification payload's cam + ts (epoch ms; JSON may hand a string): the recorder cam and a safe number, or null
+ * for anything missing/unknown. Bad payloads are ignored, never crashes.
+ */
+export function parseSightingTarget(cam: unknown, tsMs: unknown): { cam: RecCam; ts: number } | null {
+  const rc = recCamOf(cam);
+  const ms = typeof tsMs === 'number' ? tsMs : typeof tsMs === 'string' && tsMs.trim() ? Number(tsMs) : NaN;
+  if (!rc || !Number.isFinite(ms) || ms <= 0) return null;
+  return { cam: rc, ts: ms };
+}
+
+/**
+ * A cat alert -> where Replay should go: the recorder cam that saw it and the wall time ~SEEK_LEAD s before the
+ * detection (epoch ms). Returns null for a missing/unknown cam or timestamp, so a bad notification never crashes.
+ */
+export function sightingSeek(
+  idx: Partial<Record<string, RecIndex>>,
+  cam: unknown,
+  tsMs: unknown,
+  now: number,
+  lead = SEEK_LEAD,
+): { cam: RecCam; T: number } | null {
+  const t = parseSightingTarget(cam, tsMs);
+  if (!t) return null;
+  const at = t.ts / 1000 - lead;
+  const spans = idx[t.cam]?.spans ?? [];
+  return { cam: t.cam, T: spans.length ? snapSeekCam(spans, at, now, -1) : snapSeek(idx, at, now, -1) };
 }
 
 /** Visits: runs of sightings of one cam less than VISIT_GAP apart, by start time. */

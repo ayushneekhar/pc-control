@@ -2,7 +2,22 @@
 /// <reference types="node" />
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { m2w, needsReload, parseSightings, RecIndex, snapSeek, Span, startMedia, ticks, visitsOf, w2m } from './replay';
+import {
+  m2w,
+  needsReload,
+  parseSightingTarget,
+  parseSightings,
+  RecIndex,
+  recCamOf,
+  sightingSeek,
+  snapSeek,
+  snapSeekCam,
+  Span,
+  startMedia,
+  ticks,
+  visitsOf,
+  w2m,
+} from './replay';
 
 // two stretches: wall 1000..1060 (media 0..60) and wall 2000..2030 (media 60..90)
 const spans: Span[] = [
@@ -44,6 +59,43 @@ test('snapSeek snaps out of a gap shared by every cam, in the direction of trave
   assert.equal(snapSeek(I, 1500, now, -1), 1148); // backward: end of the latest footage before, minus 2 s
   assert.equal(snapSeek(I, 1120, now, 1), 1120); // cat2 has footage: stays
   assert.equal(snapSeek(I, 5000, now, 0), 2028); // clamped to the newest footage's (exclusive) end, then 2 s back
+});
+
+test('snapSeekCam stays on one cam and falls back to its nearest footage', () => {
+  const now = 2100;
+  assert.equal(snapSeekCam(spans, 1010, now, -1), 1010); // inside footage
+  assert.equal(snapSeekCam(spans, 1500, now, -1), 1058); // gap: end of the footage before, minus 2 s
+  assert.equal(snapSeekCam(spans, 1500, now, 1), 2000); // forward: next start
+  assert.equal(snapSeekCam(spans, 5000, now, -1), 2028); // not recorded yet: near the latest
+  assert.equal(snapSeekCam(spans, 500, now, -1), 1000); // before the first footage: its start
+  assert.equal(snapSeekCam([], 5000, now), 2100); // no recordings: just clamp (to now here)
+});
+
+test('parseSightingTarget accepts notification payload strings and rejects junk', () => {
+  assert.deepEqual(parseSightingTarget('cat3', '2005000'), { cam: 'cat3hd', ts: 2005000 });
+  assert.deepEqual(parseSightingTarget('cat', 1010000), { cam: 'cat', ts: 1010000 });
+  assert.equal(parseSightingTarget('nope', 1010000), null);
+  assert.equal(parseSightingTarget('cat', ''), null);
+  assert.equal(parseSightingTarget('cat', 0), null);
+  assert.equal(parseSightingTarget(undefined, 1010000), null);
+});
+
+test('sightingSeek maps the detector cam and seeks 5 s before the sighting', () => {
+  const I = { cat: idx('cat', spans), cat3hd: idx('cat3hd', [[2000, 0, 30]]) };
+  assert.deepEqual(sightingSeek(I, 'cat', 1010_000, 2100), { cam: 'cat', T: 1005 });
+  assert.deepEqual(sightingSeek(I, 'cat3', 2005_000, 2100), { cam: 'cat3hd', T: 2000 });
+  assert.deepEqual(sightingSeek(I, 'cat', 1505_000, 2100), { cam: 'cat', T: 1058 }); // in a gap
+  assert.equal(recCamOf('cat3'), 'cat3hd');
+  assert.equal(recCamOf('nope'), null);
+  assert.equal(sightingSeek(I, 'nope', 1010_000, 2100), null);
+  assert.equal(sightingSeek(I, 'cat', 'soon' as unknown as number, 2100), null);
+});
+
+test('sightingSeek falls back when the moment is outside the 24 h window', () => {
+  const now = 1_700_000_000;
+  const I = { cat: idx('cat', [[now - 2000, 0, 100]]) }; // footage inside the window
+  // 10 h older than the window: nearest available = the first footage
+  assert.deepEqual(sightingSeek(I, 'cat', (now - 10 * 3600) * 1000, now), { cam: 'cat', T: now - 2000 });
 });
 
 test('visits merge sightings of one cam less than 90 s apart', () => {

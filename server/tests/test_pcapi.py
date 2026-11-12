@@ -689,3 +689,117 @@ class CrashTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- health overview + service down watcher
+
+def svc(unit, active="active", enabled="enabled", type="simple", timer=False, description=""):
+    return {"unit": unit, "description": description, "active": active, "sub": "running", "enabled": enabled,
+            "since": "", "pid": 1, "memory": None, "restarts": 0, "type": type, "result": "success", "timer": timer}
+
+
+class HealthTests(unittest.TestCase):
+    def sources(self, **over):
+        base = {
+            "services": lambda: {"units": [svc("ok.service"), svc("bad.service", active="failed")]},
+            "downloads": lambda: {"qbt": "ok", "total": {"count": 1, "downloading": 1, "speed": 100,
+                                                         "upspeed": 20, "progress": .5, "eta": 10, "size": 10,
+                                                         "done": 5},
+                                  "items": [{"name": "Dune", "state": "stalled", "progress": .1}],
+                                  "stalled": 1, "stalled_items": ["Dune"]},
+            "radarr": lambda: {"queue": 2, "needs_action": 1,
+                               "items": [{"title": "Dune (2021)", "reason": "No files found", "state": "importBlocked"}]},
+            "sonarr": lambda: {"queue": 0, "needs_action": 0, "items": []},
+            "jellyfin": lambda: {"streams": [{"user": "Ayush", "title": "Dune", "method": "direct"}]},
+            "disks": lambda: {"disks": [
+                {"mount": "/", "kind": "SSD", "used": 50, "total": 100, "pct": 50.0},
+                {"mount": "/hdd", "kind": "HDD", "used": 95, "total": 100, "pct": 95.0}]},
+        }
+        base.update(over)
+        return base
+
+    def test_problems_are_aggregated_and_sections_are_complete(self):
+        r = pcapi.health_report(sources=self.sources(), timeout=1)
+        self.assertTrue(r["services"]["available"])
+        self.assertEqual(r["services"]["counts"], {"running": 1, "failed": 1, "inactive": 0, "other": 0})
+        kinds = {p["kind"] for p in r["problems"]}
+        self.assertEqual(kinds, {"service", "stalled", "arr", "disk"})
+        self.assertTrue(any(p["title"] == "Radarr: 1 needs manual action" for p in r["problems"]))
+        self.assertTrue(any(p["kind"] == "disk" and "under 10% free" in p["title"] for p in r["problems"]))
+        self.assertEqual(r["downloads"]["total"]["upspeed"], 20)
+        self.assertEqual(r["jellyfin"]["streams"][0]["method"], "direct")
+
+    def test_partial_failure_marks_only_that_section_unavailable(self):
+        def boom(): raise OSError("radarr down")
+        def slow(): time.sleep(0.6); return {"streams": []}
+        r = pcapi.health_report(sources=self.sources(radarr=boom, jellyfin=slow), timeout=0.2)
+        self.assertEqual((r["radarr"]["available"], r["radarr"]["error"]), (False, "OSError"))
+        self.assertEqual((r["jellyfin"]["available"], r["jellyfin"]["error"]), (False, "timeout"))
+        self.assertTrue(r["services"]["available"])
+        self.assertTrue(r["sonarr"]["available"])
+        self.assertTrue(r["disks"]["available"])
+        titles = {p["title"] for p in r["problems"]}
+        self.assertIn("Radarr unavailable", titles)
+        self.assertIn("Jellyfin unavailable", titles)
+
+    def test_category_is_available_and_appears_in_settings(self):
+        n = pcapi.Notify(FakePush(), data_dir=tempfile.mkdtemp(), token_file="/nonexistent", chat="")
+        c = next(x for x in n.settings()["categories"] if x["id"] == "service_down")
+        self.assertEqual((c["telegram"], c["app"]), (True, True))
+        n.update({"categories": {"service_down": {"telegram": False}}})
+        self.assertEqual(n.send("service_down", "x")[0], 200)
+
+
+class FakeNotifier:
+    def __init__(self): self.calls = []
+
+    def send(self, *a): self.calls.append(a)
+
+
+class ServiceWatcherTests(unittest.TestCase):
+    def setUp(self):
+        self.n = FakeNotifier()
+        self.w = pcapi.ServiceWatcher(self.n, list_fn=lambda: [], interval=999)
+
+    def test_two_bad_checks_one_alert_per_outage_and_recovery(self):
+        active = svc("camrec.service")
+        down = svc("camrec.service", active="inactive")
+        failed = svc("camrec.service", active="failed")
+        self.w.check([active])
+        self.w.check([down])
+        self.assertEqual(self.n.calls, [])                       # first bad check is only a suspicion
+        self.w.check([down])
+        self.assertEqual(len(self.n.calls), 1)
+        self.assertEqual(self.n.calls[0][0], "service_down")
+        self.assertEqual(self.n.calls[0][1], "camrec is inactive")
+        self.w.check([down])
+        self.assertEqual(len(self.n.calls), 1)                   # one alert per outage
+        self.w.check([active])
+        self.assertEqual(len(self.n.calls), 2)
+        self.assertEqual(self.n.calls[1][1], "camrec recovered")
+        self.w.check([active])
+        self.assertEqual(len(self.n.calls), 2)                   # recovery is sent once
+        self.w.check([failed])
+        self.w.check([failed])
+        self.assertEqual(len(self.n.calls), 3)
+        self.assertEqual(self.n.calls[2][1], "camrec is failed")
+
+    def test_ignores_oneshot_timer_static_disabled_and_never_active_units(self):
+        ignored = [svc("config-backup.service", active="inactive", enabled="static", type="oneshot"),
+                   svc("import-watch.service", active="inactive", enabled="static", type="oneshot", timer=True),
+                   svc("kbd-lock.service", active="inactive", enabled="static"),
+                   svc("ollama.service", active="inactive", enabled="disabled")]
+        for _ in range(3): self.w.check(ignored)
+        self.assertEqual(self.n.calls, [])                       # none of these is watched
+        # an enabled unit that was already down when pc-api started is not alerted until it has been active
+        never = svc("vitals.service", active="inactive")
+        self.w.check([never]); self.w.check([never])
+        self.assertEqual(self.n.calls, [])
+        self.w.check([svc("vitals.service")])
+        self.w.check([never]); self.w.check([never])
+        self.assertEqual(len(self.n.calls), 1)
+
+    def test_bad_list_never_kills_the_loop(self):
+        w = pcapi.ServiceWatcher(self.n, list_fn=lambda: (_ for _ in ()).throw(OSError("systemctl down")))
+        with self.assertRaises(OSError):
+            w.check()

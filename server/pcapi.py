@@ -6,6 +6,9 @@ GET  /pc/api/routes[?all=1]           tailscale serve routes + app tiles as frie
 GET  /pc/api/services                 user systemd units from ~/.config/systemd/user
 POST /pc/api/services/<unit>/restart
 GET  /pc/api/services/<unit>/logs     last journal lines
+GET  /pc/api/health                   one-call health overview: problems, services, downloads, Radarr/Sonarr queues,
+                                      Jellyfin streams and disks. Each source has a ~2 s budget and runs
+                                      concurrently; a source that is down only marks its section unavailable.
 GET  /pc/api/root/pending             pending + running root requests
 GET  /pc/api/root/history?limit=N
 GET  /pc/api/root/request/<id>        one request incl. output
@@ -369,6 +372,8 @@ CATEGORIES = [
      "check-circle-outline"),
     ("system", "Backups & system alerts", "Config backup failures, kernel fixes, recording digests.", True, True,
      "server-outline"),
+    ("service_down", "Service down", "A long-running user service stopped or failed, and when it recovers.", True, True,
+     "server-off"),
     ("root", "Root approvals", "A root command is waiting for your fingerprint.", False, True, "shield-key-outline"),
     ("results", "Command results", "An approved root command finished or failed.", False, True, "console"),
     ("other", "Other messages", "Anything else sent to /pc/api/notify.", False, True, "message-outline"),
@@ -699,6 +704,7 @@ def map_hook(source, p):
 
 
 NOTIFY = None
+WATCHER = None
 
 LOWSPACE = os.environ.get("PCAPI_LOWSPACE", os.path.join(HOME, "tools", "localagent", "lowspace.py"))
 
@@ -785,14 +791,14 @@ class Downloads:
             except OSError: pass
         return True
 
-    def arr_lookup(self, cat):
+    def arr_lookup(self, cat, timeout=5):
         """Radarr/Sonarr queue -> {HASH: title}. Errors (app down, no key) just mean no titles."""
         app, base, conf = self.arr[cat]
         try:
             with open(conf) as f: key = re.search(r"<ApiKey>(\w+)</ApiKey>", f.read())[1]
             q = "includeMovie=true" if app == "radarr" else "includeSeries=true&includeEpisode=true"
             req = urllib.request.Request(f"{base}/api/v3/queue?pageSize=200&{q}", headers={"X-Api-Key": key})
-            with urllib.request.urlopen(req, timeout=5) as r: recs = json.load(r).get("records") or []
+            with urllib.request.urlopen(req, timeout=timeout) as r: recs = json.load(r).get("records") or []
         except (OSError, ValueError, TypeError, AttributeError):
             return {}
         out = {}
@@ -813,7 +819,7 @@ class Downloads:
         return out
 
     # ---- qBittorrent
-    def qbt(self, method, **params):
+    def qbt(self, method, timeout=8, **params):
         data = urllib.parse.urlencode(params).encode()
         for attempt in (0, 1):
             if self.opener is None:
@@ -822,24 +828,24 @@ class Downloads:
                 op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
                 with open(self.password_file) as f: pw = f.read().strip()
                 form = urllib.parse.urlencode({"username": self.user, "password": pw}).encode()
-                op.open(f"{self.url}/api/v2/auth/login", form, timeout=5).close()
+                op.open(f"{self.url}/api/v2/auth/login", form, timeout=timeout).close()
                 if not any("SID" in c.name for c in jar): raise PermissionError("qBittorrent login failed")
                 self.opener = op
             try:
-                with self.opener.open(f"{self.url}/api/v2/{method}", data, timeout=8) as r: return json.load(r)
+                with self.opener.open(f"{self.url}/api/v2/{method}", data, timeout=timeout) as r: return json.load(r)
             except urllib.error.HTTPError as e:
                 self.opener = None
                 if e.code in (401, 403) and attempt == 0: continue      # session expired (qBittorrent restarted)
                 raise
         raise PermissionError("qBittorrent login failed")
 
-    def active(self):
+    def active(self, timeout=8):
         """-> {"qbt": "ok"|"down"|"auth", "downloads": [...], "total": {...}}. Cached ~1.5 s (one phone polls ~3 s)."""
         with self.lock:
             at, res = self.cache
             if res is not None and time.time() - at < 1.5: return res
             try:
-                items, st = self.qbt("torrents/info", filter="all", sort="added_on"), "ok"
+                items, st = self.qbt("torrents/info", timeout=timeout, filter="all", sort="added_on"), "ok"
             except PermissionError:
                 items, st = [], "auth"
             except (OSError, ValueError):
@@ -850,7 +856,7 @@ class Downloads:
         for cat in missing:
             if time.time() - self.arr_at.get(cat, 0) < 30: continue
             self.arr_at[cat] = time.time()
-            for h, title in self.arr_lookup(cat).items():
+            for h, title in self.arr_lookup(cat, timeout=timeout).items():
                 if h not in self.titles: self.remember(h, title)
         out = []
         for t in items:
@@ -862,7 +868,8 @@ class Downloads:
             out.append({"id": h[:16].lower(), "name": self.titles.get(h) or release_title(t.get("name")),
                         "torrent": clip(t.get("name"), 200), "category": str(t.get("category") or ""),
                         "state": state, "progress": round(min(1.0, max(0.0, float(t.get("progress") or 0))), 4),
-                        "speed": int(t.get("dlspeed") or 0), "eta": eta if 0 < eta < 8640000 else None,
+                        "speed": int(t.get("dlspeed") or 0), "upspeed": int(t.get("upspeed") or 0),
+                        "eta": eta if 0 < eta < 8640000 else None,
                         "size": size, "done": min(done, size) if size else done,
                         "seeds": int(t.get("num_seeds") or 0), "added": int(t.get("added_on") or 0)})
         rank = {"downloading": 0, "stalled": 1, "metadata": 2, "checking": 3, "moving": 3, "queued": 4}
@@ -871,7 +878,8 @@ class Downloads:
         etas = [d["eta"] for d in out if d["eta"]]
         total = {"count": len(out), "downloading": sum(d["state"] == "downloading" for d in out),
                  "progress": round(sum(d["done"] for d in sized) / sum(d["size"] for d in sized), 4) if sized else None,
-                 "speed": sum(d["speed"] for d in out), "eta": max(etas) if etas else None,
+                 "speed": sum(d["speed"] for d in out), "upspeed": sum(d["upspeed"] for d in out),
+                 "eta": max(etas) if etas else None,
                  "size": sum(d["size"] for d in sized), "done": sum(d["done"] for d in sized)}
         res = {"qbt": st, "downloads": out, "total": total}
         with self.lock: self.cache = (time.time(), res)
@@ -879,6 +887,246 @@ class Downloads:
 
 
 DOWNLOADS = None
+
+
+# ---------------------------------------------------------------- health overview (/pc/api/health)
+
+HEALTH_TIMEOUT = 2.0        # seconds, shared by all sources (they run concurrently)
+JELLYFIN_URL = os.environ.get("PCAPI_JELLYFIN_URL", CONFIG.get("jellyfin_url") or "http://127.0.0.1:8096").rstrip("/")
+JELLYFIN_KEY_FILE = os.environ.get("PCAPI_JELLYFIN_KEY_FILE", CONFIG.get("jellyfin_key_file")
+                                   or os.path.join(HOME, "tools", "localagent", ".jellyfin-key"))
+
+
+def watched_service(s):
+    """A unit the Health tab and the down watcher care about. Oneshot and timer-driven units are normally
+    inactive, and static/disabled units aren't expected to run, so none of those should ever raise an alert."""
+    return s.get("enabled") == "enabled" and s.get("type") != "oneshot" and not s.get("timer")
+
+
+def service_name(unit):
+    return str(unit or "service").removesuffix(".service")
+
+
+def health_services(timeout=HEALTH_TIMEOUT):
+    return {"units": list_services(timeout=timeout)}
+
+
+def health_downloads(timeout=HEALTH_TIMEOUT):
+    r = DOWNLOADS.active(timeout=timeout)
+    items = r.get("downloads") or []
+    stalled = [d for d in items if d.get("state") == "stalled"]
+    return {"qbt": r.get("qbt"), "total": r.get("total"), "items": items[:6],
+            "stalled": len(stalled), "stalled_items": [d.get("name") for d in stalled[:3]]}
+
+
+def _arr_needs_action(x):
+    status = str(x.get("status") or "").lower()
+    tracked = str(x.get("trackedDownloadStatus") or "").lower()
+    state = str(x.get("trackedDownloadState") or "").lower()
+    return status in ("warning", "failed") or tracked in ("warning", "error") or \
+        state in ("importpending", "importblocked", "importfailed")
+
+
+def _arr_record_title(app, x):
+    if app == "radarr":
+        m = x.get("movie") or {}
+        return str(m.get("title") or x.get("title") or "Movie") + (f" ({m['year']})" if m.get("year") else "")
+    s, e = x.get("series") or {}, x.get("episode") or {}
+    title = str(s.get("title") or x.get("title") or "Episode")
+    sn, en = e.get("seasonNumber"), e.get("episodeNumber")
+    if isinstance(sn, int) and isinstance(en, int):
+        title += f" S{sn:02d}E{en:02d}"
+    return title
+
+
+def _arr_reason(x):
+    if x.get("errorMessage"): return clip(x["errorMessage"], 220)
+    for m in x.get("statusMessages") or []:
+        msgs = m.get("messages") if isinstance(m, dict) else None
+        if msgs: return clip(msgs[0], 220)
+    return str(x.get("trackedDownloadState") or x.get("status") or "needs attention").replace("_", " ")
+
+
+def arr_queue(cat, timeout=HEALTH_TIMEOUT):
+    """Radarr/Sonarr queue summary. The API key is read from their local config.xml and never returned/logged."""
+    app, base, conf = ARR[cat]
+    with open(conf) as f: key = re.search(r"<ApiKey>(\w+)</ApiKey>", f.read())[1]
+    q = "includeMovie=true" if app == "radarr" else "includeSeries=true&includeEpisode=true"
+    req = urllib.request.Request(f"{base}/api/v3/queue?pageSize=200&{q}", headers={"X-Api-Key": key})
+    with urllib.request.urlopen(req, timeout=timeout) as r: recs = json.load(r).get("records") or []
+    need = []
+    for x in recs:
+        if not isinstance(x, dict) or not _arr_needs_action(x): continue
+        need.append({"title": _arr_record_title(app, x), "state": str(x.get("trackedDownloadState")
+                    or x.get("status") or "attention").replace("_", " "), "reason": _arr_reason(x)})
+    return {"queue": len(recs), "needs_action": len(need), "items": need[:5]}
+
+
+def jellyfin_streams(timeout=HEALTH_TIMEOUT):
+    """Now-playing sessions from Jellyfin's local API. Key from ~/tools/localagent/.jellyfin-key (never logged)."""
+    with open(JELLYFIN_KEY_FILE) as f: key = f.read().strip()
+    if not key: raise ValueError("no Jellyfin API key")
+    req = urllib.request.Request(f"{JELLYFIN_URL}/Sessions",
+                                 headers={"Authorization": f'MediaBrowser Token="{key}"'})
+    with urllib.request.urlopen(req, timeout=timeout) as r: sessions = json.load(r)
+    out = []
+    for s in sessions if isinstance(sessions, list) else []:
+        item, play = s.get("NowPlayingItem") or {}, s.get("PlayState") or {}
+        if not isinstance(item, dict) or not item: continue
+        method = str(play.get("PlayMethod") or ("Transcode" if s.get("TranscodingInfo") else "DirectPlay"))
+        method = {"DirectPlay": "direct", "DirectStream": "direct_stream", "Transcode": "transcode"}.get(
+            method, method.lower())
+        series, sn, en = item.get("SeriesName") or "", item.get("ParentIndexNumber"), item.get("IndexNumber")
+        subtitle = series + (f" S{sn:02d}E{en:02d}" if isinstance(sn, int) and isinstance(en, int) else "")
+        run, pos = item.get("RunTimeTicks"), play.get("PositionTicks")
+        progress = round(min(1.0, max(0.0, pos / run)), 4) if isinstance(run, int) and run > 0 and isinstance(pos, int) else None
+        out.append({"user": str(s.get("UserName") or "Someone"),
+                    "title": str(item.get("Name") or series or "Something"),
+                    "subtitle": subtitle, "method": method, "paused": bool(play.get("IsPaused")),
+                    "device": str(s.get("DeviceName") or s.get("Client") or ""), "progress": progress})
+    return {"streams": out}
+
+
+def _disk_kind(device, mount):
+    base = re.sub(r"p?\d+$", "", os.path.basename(device or "")) or ""
+    try:
+        with open(f"/sys/block/{base}/queue/rotational") as f:
+            return "HDD" if f.read().strip() == "1" else "SSD"
+    except OSError:
+        return "HDD" if re.search(r"/(media|mnt)/", mount or "") else "SSD"
+
+
+def health_disks():
+    """SSD/HDD usage. Uses psutil when available (same source as the Vitals page), with a / fallback."""
+    disks, seen = [], set()
+    try:
+        import psutil
+        for part in psutil.disk_partitions():
+            if part.fstype in ("squashfs", "vfat") or part.device.startswith("/dev/loop") or part.mountpoint in seen:
+                continue
+            try: u = psutil.disk_usage(part.mountpoint)
+            except OSError: continue
+            seen.add(part.mountpoint)
+            disks.append({"mount": part.mountpoint, "kind": _disk_kind(part.device, part.mountpoint),
+                          "used": u.used, "total": u.total, "pct": round(u.percent, 1)})
+    except ImportError:
+        pass
+    if not disks:
+        import shutil
+        u = shutil.disk_usage("/")
+        disks.append({"mount": "/", "kind": "SSD", "used": u.used, "total": u.total,
+                      "pct": round(u.used / u.total * 100, 1) if u.total else 0})
+    return {"disks": disks}
+
+
+def health_sources(timeout=HEALTH_TIMEOUT):
+    return {
+        "services": lambda: health_services(timeout),
+        "downloads": lambda: health_downloads(timeout),
+        "radarr": lambda: arr_queue("radarr", timeout),
+        "sonarr": lambda: arr_queue("tv-sonarr", timeout),
+        "jellyfin": lambda: jellyfin_streams(timeout),
+        "disks": health_disks,
+    }
+
+
+def _health_gather(sources, timeout):
+    """Run every source in its own daemon thread, then wait at most `timeout` for all of them together. A source
+    that errors or is still running is reported as unavailable, never as a failed call."""
+    out = {}
+
+    def run(key, fn):
+        try: out[key] = ("ok", fn())
+        except Exception as e: out[key] = ("error", type(e).__name__)
+
+    threads = []
+    for key, fn in sources.items():
+        t = threading.Thread(target=run, args=(key, fn), daemon=True, name=f"health-{key}")
+        t.start()
+        threads.append((key, t))
+    deadline = time.monotonic() + max(0.05, timeout)
+    for key, t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    return dict(out)
+
+
+def _health_section(raw, key):
+    if key not in raw: return {"available": False, "error": "timeout"}
+    ok, value = raw[key]
+    if ok != "ok": return {"available": False, "error": value}
+    return {"available": True, **(value or {})}
+
+
+def health_report(sources=None, timeout=HEALTH_TIMEOUT):
+    raw = _health_gather(sources if sources is not None else health_sources(timeout), timeout)
+    services = _health_section(raw, "services")
+    downloads = _health_section(raw, "downloads")
+    radarr = _health_section(raw, "radarr")
+    sonarr = _health_section(raw, "sonarr")
+    jellyfin = _health_section(raw, "jellyfin")
+    disks = _health_section(raw, "disks")
+
+    if services["available"]:
+        counts = {"running": 0, "failed": 0, "inactive": 0, "other": 0}
+        for s in services.get("units") or []:
+            a = s.get("active")
+            counts["running" if a == "active" else "failed" if a == "failed"
+                   else "inactive" if a == "inactive" else "other"] += 1
+        services["counts"] = counts
+
+    problems = []
+
+    def source_problem(label, section):
+        if not section["available"]:
+            problems.append({"kind": "source", "severity": "warn", "title": f"{label} unavailable",
+                             "detail": section.get("error") or "no answer"})
+
+    source_problem("Services", services)
+    source_problem("Downloads", downloads)
+    source_problem("Radarr", radarr)
+    source_problem("Sonarr", sonarr)
+    source_problem("Jellyfin", jellyfin)
+    source_problem("Disks", disks)
+
+    if services["available"]:
+        for s in services.get("units") or []:
+            if not watched_service(s) or s.get("active") == "active": continue
+            a = s.get("active") or "inactive"
+            problems.append({"kind": "service", "unit": s.get("unit"),
+                             "severity": "bad" if a == "failed" else "warn",
+                             "title": f"{service_name(s.get('unit'))} is {a}",
+                             "detail": s.get("description") or s.get("sub") or ""})
+
+    if downloads["available"]:
+        if downloads.get("qbt") in ("down", "auth"):
+            problems.append({"kind": "downloads", "severity": "warn", "title": "qBittorrent unavailable",
+                             "detail": "sign-in failed" if downloads.get("qbt") == "auth" else "not answering"})
+        if downloads.get("stalled"):
+            n = downloads["stalled"]
+            names = ", ".join(x for x in downloads.get("stalled_items") or [] if x)
+            problems.append({"kind": "stalled", "severity": "warn",
+                             "title": f"{n} stalled download{'s' if n != 1 else ''}",
+                             "detail": names})
+
+    for label, section in (("Radarr", radarr), ("Sonarr", sonarr)):
+        if not section["available"] or not section.get("needs_action"): continue
+        n = section["needs_action"]
+        first = (section.get("items") or [{}])[0]
+        detail = " · ".join(x for x in (first.get("title"), first.get("reason")) if x)
+        problems.append({"kind": "arr", "severity": "bad" if n > 0 else "warn",
+                         "title": f"{label}: {n} need{'s' if n == 1 else ''} manual action",
+                         "detail": detail})
+
+    if disks["available"]:
+        for d in disks.get("disks") or []:
+            total, used = d.get("total") or 0, d.get("used") or 0
+            if total and (total - used) / total < 0.10:
+                problems.append({"kind": "disk", "severity": "bad",
+                                 "title": f"{d.get('kind') or 'Disk'} under 10% free",
+                                 "detail": f"{d.get('mount')}: {human_size(total - used)} free of {human_size(total)}"})
+
+    return {"ts": int(time.time()), "problems": problems, "services": services, "downloads": downloads,
+            "radarr": radarr, "sonarr": sonarr, "jellyfin": jellyfin, "disks": disks}
 
 
 # ---------------------------------------------------------------- app crash reports
@@ -1044,11 +1292,11 @@ PROPS = ["Id", "Description", "ActiveState", "SubState", "UnitFileState", "Activ
          "MainPID", "MemoryCurrent", "NRestarts", "Type", "Result"]
 
 
-def list_services():
+def list_services(timeout=15):
     units = own_units()
     if not units: return []
     p = subprocess.run(["systemctl", "--user", "show", "--no-pager", "-p", ",".join(PROPS), *units],
-                       capture_output=True, text=True, timeout=15)
+                       capture_output=True, text=True, timeout=timeout)
     blocks, cur = [], {}
     for line in p.stdout.splitlines():
         if not line.strip():
@@ -1085,6 +1333,57 @@ def service_logs(unit, n):
     p = subprocess.run(["journalctl", "--user", "-u", unit, "-n", str(n), "--no-pager", "-o", "short-iso"],
                        capture_output=True, text=True, timeout=15)
     return 200, {"lines": p.stdout.splitlines()[-n:]}
+
+
+class ServiceWatcher:
+    """Watch enabled long-running user units. After two consecutive bad checks it sends one `service_down`
+    notification through the usual router, and one recovery notification when the unit is active again. Oneshot,
+    timer-driven, static/disabled units are ignored, and a unit must have been seen active first."""
+
+    def __init__(self, notify, list_fn=None, interval=60, checks=2):
+        self.notify = notify
+        self.list_fn = list_fn or (lambda: list_services(timeout=15))
+        self.interval, self.checks = interval, checks
+        self.state = {}
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+
+    def start(self):
+        threading.Thread(target=self.loop, daemon=True, name="service-watcher").start()
+        return self
+
+    def loop(self):
+        while not self.stop.is_set():
+            try: self.check()
+            except Exception as e:
+                print(f"service-watcher: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            self.stop.wait(self.interval)
+
+    def _send(self, title, body):
+        fn = getattr(self.notify, "send_async", None) or getattr(self.notify, "send", None)
+        if fn: fn("service_down", title, body)
+
+    def check(self, services=None):
+        services = self.list_fn() if services is None else services
+        with self.lock:
+            for s in services:
+                if not watched_service(s): continue
+                unit = s.get("unit")
+                if not unit: continue
+                st = self.state.setdefault(unit, {"seen_active": False, "bad": 0, "alerted": False})
+                name = service_name(unit)
+                if s.get("active") == "active":
+                    st["seen_active"], st["bad"] = True, 0
+                    if st["alerted"]:
+                        st["alerted"] = False
+                        self._send(f"{name} recovered", s.get("description") or "It is running again.")
+                    continue
+                if not st["seen_active"]: continue
+                st["bad"] += 1
+                if st["bad"] >= self.checks and not st["alerted"]:
+                    st["alerted"] = True
+                    self._send(f"{name} is {s.get('active') or 'inactive'}",
+                               s.get("description") or "The unit is not running.")
 
 
 # ---------------------------------------------------------------- APK
@@ -1170,6 +1469,7 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/routes":
                 return self.send_json(200, {"routes": list_routes(qs.get("all", ["0"])[0] == "1")})
             if path == "/api/services": return self.send_json(200, {"services": list_services()})
+            if path == "/api/health": return self.send_json(200, health_report())
             m = re.fullmatch(r"/api/services/([^/]+)/logs", path)
             if m: return self.send_json(*service_logs(m.group(1), min(int(qs.get("n", ["80"])[0]), 500)))
             if path == "/api/root/pending":
@@ -1328,12 +1628,13 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global HUB, PUSH, NOTIFY, DOWNLOADS
+    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER
     PUSH = Push()
     NOTIFY = Notify(PUSH)
     DOWNLOADS = Downloads()
     hook_secret()
     HUB = Hub()
+    WATCHER = ServiceWatcher(NOTIFY).start()
     srv = Server(("127.0.0.1", PORT), H)
     print(f"pc-api on 127.0.0.1:{PORT}, allowed tailnet logins: {sorted(ALLOWED_LOGINS) or 'NONE'}, "
           f"FCM {'configured' if PUSH.configured() else 'NOT configured'}, {len(PUSH.tokens)} push token(s)", flush=True)

@@ -1203,7 +1203,7 @@ KNOWN = {
     "/music": ("Cat music", "music", "Cat cams backend: speaker audio", "api"),
     "/ptz": ("Pan / tilt", "arrow-all", "Cat cams backend: camera movement", "api"),
     "/rec": ("Recordings", "record-rec", "Cat cams backend: recordings", "api"),
-    "/vitals": ("Vitals", "heart-pulse", "CPU, memory, processes", "page"),
+    "/vitals": ("Vitals", "heart-pulse", "Laptop vitals API (app)", "api"),
     ":5055": ("Seerr", "movie-search-outline", "Requests", "page"),
     ":6767": ("Bazarr", "subtitles-outline", "Subtitles", "page"),
     ":7878": ("Radarr", "filmstrip", "Movies", "page"),

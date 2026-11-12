@@ -235,10 +235,24 @@ export function Empty({ icon, title, body }: { icon: string; title: string; body
   );
 }
 
-export function Mono({ children, style, selectable = true }: { children: ReactNode; style?: StyleProp<TextStyle>; selectable?: boolean }) {
+export function Mono({
+  children,
+  style,
+  selectable = true,
+  numberOfLines,
+}: {
+  children: ReactNode;
+  style?: StyleProp<TextStyle>;
+  selectable?: boolean;
+  numberOfLines?: number;
+}) {
   const t = useTheme();
   return (
-    <Text selectable={selectable} style={[{ fontFamily: t.mono, color: t.text, fontSize: 13, lineHeight: 19 }, style]}>
+    <Text
+      selectable={selectable}
+      numberOfLines={numberOfLines}
+      style={[{ fontFamily: t.mono, color: t.text, fontSize: 13, lineHeight: 19 }, style]}
+    >
       {children}
     </Text>
   );

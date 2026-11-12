@@ -26,10 +26,11 @@ def visible(overrides=None):
 
 class Routes(unittest.TestCase):
     def test_defaults_hide_cat_cam_backends(self):
-        self.assertEqual(visible(), {"Cat cams", "Vitals", "Jellyfin", "New Api"})
+        self.assertEqual(visible(), {"Cat cams", "Jellyfin", "New Api"})
         hidden = {r["id"]: r["kind"] for r in pcapi.build_routes(STATUS, {}) if r["hidden"]}
         self.assertEqual(hidden, {"443/detect": "api", "443/music": "api", "443/ptz": "api", "443/rec": "api",
-                                  "443/": "page", "5055/": "page", "6767/": "page", "7878/": "page", "8989/": "page"})
+                                  "443/vitals": "api", "443/": "page", "5055/": "page", "6767/": "page",
+                                  "7878/": "page", "8989/": "page"})
         self.assertNotIn("/pc", [r["path"] for r in pcapi.build_routes(STATUS, {})])
 
     def test_config_hides_new_route_and_unhides_builtin(self):
@@ -50,7 +51,8 @@ class Routes(unittest.TestCase):
         self.assertEqual(pcapi.build_routes({}, {}), [])
 
     def test_bad_override_ignored(self):
-        self.assertIn("Vitals", visible({"/vitals": "nonsense"}))
+        self.assertNotIn("Vitals", visible({"/vitals": "nonsense"}))
+        self.assertIn("Vitals", visible({"/vitals": {"hidden": False}}))
 
 
 class FakeGoogle(BaseHTTPRequestHandler):

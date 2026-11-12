@@ -127,17 +127,27 @@ export type Service = {
   timer: boolean;
 };
 
-export type Proc = { pid: number; name: string; user: string; cpu: number; rss: number; cmd: string; gpu?: number | null };
+export type Proc = {
+  pid: number;
+  name: string;
+  user: string;
+  cpu: number;
+  rss: number;
+  cmd: string;
+  thr?: number;
+  status?: string;
+  gpu?: number | null;
+};
 
 export type Vitals = {
   t: number;
   cpu: number;
   percpu: number[];
-  freq: number;
+  freq: number | null;
   load: number[];
   mem: { used: number; total: number; pct: number };
   swap: { used: number; total: number; pct: number };
-  temps: Record<string, number>;
+  temps: Record<string, number | null>;
   gpu: { name: string; util: number; mem_used: number; mem_total: number; temp: number; power: number } | null;
   nics: Record<string, { rx: number; tx: number }>;
   disk_io: { r: number; w: number };
@@ -145,7 +155,7 @@ export type Vitals = {
   bat: { pct: number; plugged: boolean } | null;
   uptime: number;
   procs: Proc[] | null;
-  hist: { t: number; cpu: number; mem: number; temp: number; gpu: number; rx: number; tx: number }[];
+  hist: { t: number; cpu: number; mem: number; temp: number | null; gpu: number | null; rx: number; tx: number }[];
 };
 
 export type HealthProblem = {

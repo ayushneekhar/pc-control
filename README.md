@@ -8,20 +8,26 @@ the reason, never the command. Approving still happens in the app, with a biomet
 
 The app has five tabs:
 
-- **Routes**: the `tailscale serve` routes (Cat cams, Vitals, …) as cards that open in the browser, plus a
+- **Routes**: the `tailscale serve` routes (Cat cams, …) as cards that open in the browser, plus a
   **Jellyfin** tile that launches the Jellyfin app (`org.jellyfin.mobile`, needs the 1.5.2+ APK). If the app isn't
   installed, or on older builds, it opens `http://<tailnet host>:8096/` instead. The list is read live, so new
   routes appear by themselves. Cameras (go2rtc `/`), Seerr, Radarr, Sonarr and Bazarr are hidden by default
   (`HIDDEN` in `server/pcapi.py`). Only the tiles are hidden: the routes and services keep running.
-  API-only routes (backends used by another page, like the Cat cams page's `/rec`, `/music`, `/ptz` and
-  `/detect`) are hidden on the server. To hide a new one, or to show a hidden one, edit
+  API-only routes (backends used by another page or app screen: the Cat cams page's `/rec`, `/music`, `/ptz`
+  and `/detect`, and the app Vitals tab's `/vitals`) are hidden on the server. To hide a new one, or to show a
+  hidden one, edit
   `~/.config/pc-control/routes.json`; it is read live, so there's no restart and no app rebuild:
   `{"/new-api": {"hidden": true}, ":7878": {"hidden": false}, "jellyfin": {"hidden": true}}`
   (keys are the path for the main HTTPS host, or `":<port>"` for other ports; you can also set `name`, `icon`
   (a Material Community icon name), `subtitle` and `kind` (`"api"` hides a route)).
   **Cat cams** is the exception: it opens the app's own cams player (below), not the browser.
-- **Vitals**: CPU, temperatures, RAM, GPU, network, disks and battery from `/vitals/api`. It polls only while the
-  tab is visible, and processes are sampled only when you switch them on.
+- **Vitals**: everything the old web page showed, natively: live CPU with per-core bars and load, a history
+  graph for CPU, memory, CPU temperature, GPU and network (RX/TX), memory and swap, CPU/nvme/PCH/wifi
+  temperatures, GPU utilisation/memory/temperature/power, per-interface network rates, disk usage plus read/write
+  I/O, battery, and a process list with filtering and sortable columns (name, PID, user, threads, GPU memory,
+  RSS, CPU). It polls `/vitals/api` every second only while the tab is visible, re-reads the 5 minute history
+  when it comes back, and samples processes only when you switch them on. The old HTML dashboard is gone; the
+  API stays for the app and the Telegram `/vitals` snapshot.
 - **Root**: the approval inbox. Each request shows the exact command and the reason, with **Approve
   (fingerprint)** and **Deny** buttons. Below it is the history, with exit codes and output.
 - **Health**: the home server at a glance, from one `GET /pc/api/health` call (each source has a ~2 s budget,

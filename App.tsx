@@ -16,9 +16,10 @@ import { askNotificationPermission, registerPush } from './src/lib/push';
 import { pendingList, startRootStore, useRootStore } from './src/lib/rootStore';
 import AgentRuleScreen from './src/screens/AgentRuleScreen';
 import AgentViewScreen from './src/screens/AgentViewScreen';
+import HealthScreen from './src/screens/HealthScreen';
 import RootScreen from './src/screens/RootScreen';
 import RoutesScreen from './src/screens/RoutesScreen';
-import ServicesScreen from './src/screens/ServicesScreen';
+import ServiceDetailScreen from './src/screens/ServiceDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import VitalsScreen from './src/screens/VitalsScreen';
 import { radius, space, useTheme } from './src/theme';
@@ -55,11 +56,12 @@ const linking: LinkingOptions<any> = {
           Routes: 'routes',
           Vitals: 'vitals',
           Root: 'root/:requestId?',
-          Services: 'services',
+          Health: 'health',
           Settings: 'settings',
         },
       },
       Cams: 'cams',
+      ServiceDetail: 'service/:unit',
     },
   },
 };
@@ -68,7 +70,7 @@ const ICONS: Record<string, [string, string]> = {
   Routes: ['view-grid', 'view-grid-outline'],
   Vitals: ['heart-pulse', 'heart-pulse'],
   Root: ['shield-key', 'shield-key-outline'],
-  Services: ['cog-play', 'cog-play-outline'],
+  Health: ['server-network', 'server-network'],
   Settings: ['tune-variant', 'tune-variant'],
 };
 
@@ -110,11 +112,14 @@ export default function App() {
       <SystemInsetsProvider>
         <NavigationContainer ref={navRef} theme={navTheme} linking={linking}>
           <StatusBar style={t.dark ? 'light' : 'dark'} />
-          <Stack.Navigator screenOptions={{ headerShown: false }}>
+          {/* 'fade' is 150 ms on Android (react-native-screens' rns_fade_* anims); the old slide was ~300 ms.
+              animationDuration only applies on iOS, where it shortens the same fade. */}
+          <Stack.Navigator screenOptions={{ headerShown: false, animation: 'fade', animationDuration: 150 }}>
             <Stack.Screen name="Tabs" component={Tabs} />
             {/* loaded on first open: react-native-webrtc stays out of app start */}
-            <Stack.Screen name="AgentView" component={AgentViewScreen} options={{ animation: 'slide_from_right' }} />
-            <Stack.Screen name="AgentRule" component={AgentRuleScreen} options={{ animation: 'slide_from_right' }} />
+            <Stack.Screen name="AgentView" component={AgentViewScreen} />
+            <Stack.Screen name="AgentRule" component={AgentRuleScreen} />
+            <Stack.Screen name="ServiceDetail" component={ServiceDetailScreen} />
             <Stack.Screen
               name="Cams"
               getComponent={() => {
@@ -127,7 +132,6 @@ export default function App() {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 return require('./src/screens/CamsScreen').default;
               }}
-              options={{ animation: 'slide_from_right' }}
             />
           </Stack.Navigator>
           <OtaPrompt />
@@ -147,6 +151,10 @@ function Tabs() {
       initialRouteName={waiting ? 'Root' : 'Routes'}
       screenOptions={({ route }) => ({
         headerShown: false,
+        // Tabs switch instantly (v7's default is already 'none', but don't let a preset turn animation on), and a
+        // blurred tab stops re-rendering (Root's store updates, etc.) until it is focused again.
+        animation: 'none',
+        freezeOnBlur: true,
         tabBarActiveTintColor: t.accent,
         tabBarInactiveTintColor: t.textFaint,
         tabBarStyle: { backgroundColor: t.card, borderTopColor: t.border },
@@ -163,7 +171,7 @@ function Tabs() {
         component={RootScreen}
         options={{ tabBarBadge: waiting || undefined, tabBarBadgeStyle: { backgroundColor: t.warn, color: '#1A1300', fontWeight: '800' } }}
       />
-      <Tab.Screen name="Services" component={ServicesScreen} />
+      <Tab.Screen name="Health" component={HealthScreen} />
       <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
   );

@@ -24,7 +24,15 @@ The app has five tabs:
   tab is visible, and processes are sampled only when you switch them on.
 - **Root**: the approval inbox. Each request shows the exact command and the reason, with **Approve
   (fingerprint)** and **Deny** buttons. Below it is the history, with exit codes and output.
-- **Services**: your systemd user units with their status and logs, and a restart button.
+- **Health**: the home server at a glance, from one `GET /pc/api/health` call (each source has a ~2 s budget,
+  runs concurrently, and only its own section goes unavailable if it is down). Problems first (a service
+  failed/inactive, a disk under 10% free, a Radarr/Sonarr import needing action, a stalled torrent), then the
+  systemd user units with status dots (tap one for its logs and restart), active qBittorrent downloads with
+  down/up speed plus the Radarr/Sonarr queue counts, active Jellyfin streams (direct play or transcode), and
+  SSD/HDD free/total bars. It polls every ~5 s only while the tab is visible, with pull-to-refresh. A pc-api
+  watcher checks enabled long-running units every 60 s and sends one `service_down` push after two bad checks,
+  then one recovery push. Radarr/Sonarr API keys come from their `config.xml`, Jellyfin's from
+  `~/tools/localagent/.jellyfin-key`; none are logged or returned.
 - **Settings**: root-approval enrollment, **Notifications** (where each kind of notification goes: Telegram,
   the app, or both), push status with **Test app** / **Test Telegram** buttons, the server URL, and **App
   updates** (APK releases + over-the-air JS updates).
@@ -108,6 +116,7 @@ settings live on the laptop in `~/.local/share/pc-control/notify-settings.json`.
 | Download problems | Seerr (failed), Radarr/Sonarr (manual interaction), import-watch | on | on |
 | Qwen downloads finished | qBittorrent hook `notify_done.py` | on | off |
 | Backups & system alerts | config-backup, kernel-fix-watch, rec-digest | on | on |
+| Service down | pc-api watcher (enabled long-running user units) | on | on |
 | Root approvals | rootd via pc-api | off | on |
 | Command results | rootd via pc-api | off | on |
 | Other messages | anything else sent to `/pc/api/notify` | off | on |

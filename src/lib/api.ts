@@ -147,3 +147,69 @@ export type Vitals = {
   procs: Proc[] | null;
   hist: { t: number; cpu: number; mem: number; temp: number; gpu: number; rx: number; tx: number }[];
 };
+
+export type HealthProblem = {
+  kind: 'service' | 'source' | 'downloads' | 'stalled' | 'arr' | 'disk' | string;
+  severity: 'bad' | 'warn';
+  title: string;
+  detail?: string;
+  unit?: string;
+};
+
+export type HealthDownload = {
+  id: string;
+  name: string;
+  torrent: string;
+  category: string;
+  state: 'downloading' | 'stalled' | 'metadata' | 'queued' | 'checking' | 'moving';
+  progress: number;
+  speed: number;
+  upspeed?: number;
+  eta: number | null;
+  size: number;
+  done: number;
+};
+
+export type ArrQueue = {
+  available: boolean;
+  error?: string;
+  queue?: number;
+  needs_action?: number;
+  items?: { title: string; state: string; reason: string }[];
+};
+
+export type JellyfinStream = {
+  user: string;
+  title: string;
+  subtitle?: string;
+  method: 'direct' | 'direct_stream' | 'transcode' | string;
+  paused?: boolean;
+  device?: string;
+  progress?: number | null;
+};
+
+export type HealthDisk = { mount: string; kind: string; used: number; total: number; pct: number };
+
+export type Health = {
+  ts: number;
+  problems: HealthProblem[];
+  services: {
+    available: boolean;
+    error?: string;
+    units?: Service[];
+    counts?: { running: number; failed: number; inactive: number; other: number };
+  };
+  downloads: {
+    available: boolean;
+    error?: string;
+    qbt?: 'ok' | 'down' | 'auth';
+    total?: { count: number; downloading: number; progress: number | null; speed: number; upspeed: number; eta: number | null; size: number; done: number };
+    items?: HealthDownload[];
+    stalled?: number;
+    stalled_items?: string[];
+  };
+  radarr: ArrQueue;
+  sonarr: ArrQueue;
+  jellyfin: { available: boolean; error?: string; streams?: JellyfinStream[] };
+  disks: { available: boolean; error?: string; disks?: HealthDisk[] };
+};

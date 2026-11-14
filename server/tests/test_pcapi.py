@@ -367,6 +367,33 @@ class HookTests(unittest.TestCase):
         self.assertIsNone(pcapi.Notify.fetch_poster("https://evil.example/x.jpg"))
         self.assertIsNone(pcapi.Notify.fetch_poster("http://image.tmdb.org/x.jpg"))
 
+    def test_seerr_jellyfin_link(self):
+        pcapi.CONFIG["seerr_url"] = "https://seerr.example"
+        pcapi.CONFIG["jellyfin_public_url"] = "http://host.ts.net:8096/"
+        self.addCleanup(pcapi.CONFIG.pop, "seerr_url")
+        self.addCleanup(pcapi.CONFIG.pop, "jellyfin_public_url", None)
+        pcapi.CONFIG.pop("jellyfin_server_id", None)
+        jid = "0123456789abcdef0123456789abcdef"
+        sid = "fedcba9876543210fedcba9876543210"
+        p = {"notification_type": "MEDIA_AVAILABLE", "event": "Movie Request Now Available",
+             "media": {"media_type": "movie", "tmdbId": "438631", "jellyfinId": jid}}
+        self.assertEqual(pcapi.map_hook("seerr", p)["link"],
+                         f"http://host.ts.net:8096/web/#/details?id={jid}")
+        pcapi.CONFIG["jellyfin_server_id"] = sid
+        self.addCleanup(pcapi.CONFIG.pop, "jellyfin_server_id")
+        self.assertEqual(pcapi.map_hook("seerr", p)["link"],
+                         f"http://host.ts.net:8096/web/#/details?id={jid}&serverId={sid}")
+        pcapi.CONFIG["jellyfin_server_id"] = "not-hex"
+        self.assertEqual(pcapi.map_hook("seerr", p)["link"],
+                         f"http://host.ts.net:8096/web/#/details?id={jid}")
+        for bad in ("", "xyz", "a" * 31, 123):
+            q = dict(p, media=dict(p["media"], jellyfinId=bad))
+            self.assertEqual(pcapi.map_hook("seerr", q)["link"], "https://seerr.example/movie/438631")
+        f = dict(p, notification_type="MEDIA_FAILED")
+        self.assertEqual(pcapi.map_hook("seerr", f)["link"], "https://seerr.example/movie/438631")
+        pcapi.CONFIG.pop("jellyfin_public_url")
+        self.assertEqual(pcapi.map_hook("seerr", p)["link"], "https://seerr.example/movie/438631")
+
 
 # ---------------------------------------------------------------- downloads + live progress
 

@@ -695,9 +695,17 @@ def map_hook(source, p):
         body = "\n".join(x for x in (clip(p.get("subject"), 200), clip(p.get("message"), 400)) if x)
         out = {"category": cat, "title": title, "body": body}
         media = p.get("media") or {}
-        base = str(CONFIG.get("seerr_url") or "").rstrip("/")     # Seerr's public URL, from pcapi.json
-        if base and media.get("media_type") in ("movie", "tv") and str(media.get("tmdbId", "")).isdigit():
-            out["link"] = f"{base}/{media['media_type']}/{media['tmdbId']}"
+        jf = str(CONFIG.get("jellyfin_public_url") or "").rstrip("/")   # Jellyfin's public URL, from pcapi.json
+        jf_id = media.get("jellyfinId")
+        if (nt == "MEDIA_AVAILABLE" and jf and isinstance(jf_id, str)
+                and re.fullmatch(r"[0-9a-fA-F]{32}", jf_id)):
+            out["link"] = f"{jf}/web/#/details?id={jf_id}"
+            sid = str(CONFIG.get("jellyfin_server_id") or "")
+            if re.fullmatch(r"[0-9a-fA-F]{32}", sid): out["link"] += f"&serverId={sid}"
+        else:
+            base = str(CONFIG.get("seerr_url") or "").rstrip("/")     # Seerr's public URL, from pcapi.json
+            if base and media.get("media_type") in ("movie", "tv") and str(media.get("tmdbId", "")).isdigit():
+                out["link"] = f"{base}/{media['media_type']}/{media['tmdbId']}"
         if p.get("image"): out["image_url"] = p["image"]
         return out
     return None

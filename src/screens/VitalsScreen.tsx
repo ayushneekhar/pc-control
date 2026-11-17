@@ -1,7 +1,7 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useRef, useState } from 'react';
 import { AppState, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
-import { Banner, Bar, Card, Icon, Mono, Screen, Section } from '../components/ui';
+import { Banner, Bar, Card, Icon, Mono, Screen, Section, StatusDot } from '../components/ui';
 import { get, Proc, Vitals } from '../lib/api';
 import { bytes, rate } from '../lib/format';
 import { space, useTheme } from '../theme';
@@ -60,8 +60,8 @@ function Metric({
   const t = useTheme();
   return (
     <Card style={{ flex: 1, gap: space(2), padding: space(3.5) }}>
-      <Text style={{ color: t.textDim, fontSize: 12, fontWeight: '700', letterSpacing: 0.4 }}>{label}</Text>
-      <Text style={{ color: valueColor ?? t.text, fontSize: 22, fontWeight: '800', letterSpacing: -0.4 }}>{value}</Text>
+      <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500' }}>{label}</Text>
+      <Text style={{ color: valueColor ?? t.text, fontSize: 22, fontWeight: '500', letterSpacing: -0.3, fontVariant: ['tabular-nums'] }}>{value}</Text>
       {pct != null ? <Bar pct={pct} color={color} height={5} /> : null}
       {sub ? (
         <Text style={{ color: t.textFaint, fontSize: 12 }} numberOfLines={1}>
@@ -80,7 +80,7 @@ function Metric({
 
 function tempColor(t: ReturnType<typeof useTheme>, c?: number | null) {
   if (c == null) return t.textDim;
-  return c >= 85 ? t.bad : c >= 70 ? t.warn : t.ok;
+  return c >= 85 ? t.bad : c >= 70 ? t.warn : t.text;
 }
 
 function upFor(secs: number) {
@@ -200,8 +200,8 @@ export default function VitalsScreen() {
       subtitle={
         v ? (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: live ? t.ok : t.bad }} />
-            <Text style={{ color: t.textDim, fontSize: 14 }}>
+            <StatusDot tone={live ? 'ok' : 'bad'} />
+            <Text style={{ color: t.textDim, fontSize: 12.5 }}>
               {live ? `Up ${upFor(v.uptime)} · live` : 'Disconnected, retrying…'}
             </Text>
           </View>
@@ -214,14 +214,14 @@ export default function VitalsScreen() {
           <Card style={{ gap: space(3) }}>
             <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: space(3) }}>
               <View style={{ flex: 1 }}>
-                <Text style={{ color: t.textDim, fontSize: 13, fontWeight: '600' }}>CPU</Text>
-                <Text style={{ color: t.text, fontSize: 44, fontWeight: '800', letterSpacing: -1.5 }}>
+                <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500' }}>CPU</Text>
+                <Text style={{ color: t.text, fontSize: 40, fontWeight: '500', letterSpacing: -1, fontVariant: ['tabular-nums'] }}>
                   {Math.round(v.cpu)}
-                  <Text style={{ fontSize: 22, color: t.textDim }}>%</Text>
+                  <Text style={{ fontSize: 20, color: t.textDim }}>%</Text>
                 </Text>
               </View>
               <View style={{ alignItems: 'flex-end' }}>
-                <Text style={{ color: t.textDim, fontSize: 13 }}>{v.percpu.length} threads</Text>
+                <Text style={{ color: t.textDim, fontSize: 12.5 }}>{v.percpu.length} threads</Text>
                 <Text style={{ color: t.textFaint, fontSize: 12 }}>
                   {v.freq != null ? `${(v.freq / 1000).toFixed(2)} GHz` : '–'}
                 </Text>
@@ -246,15 +246,15 @@ export default function VitalsScreen() {
 
           <View style={st.row}>
             <Metric
-              label="MEMORY"
+              label="Memory"
               value={`${Math.round(v.mem.pct)}%`}
               pct={v.mem.pct}
-              color={t.ok}
+              color={t.text}
               sub={`${bytes(v.mem.used)} / ${bytes(v.mem.total)} · swap ${Math.round(v.swap.pct)}%`}
               values={hist.map((h) => h.mem)}
             />
             <Metric
-              label="CPU TEMP"
+              label="CPU temp"
               value={cpuTemp == null ? '–' : `${Math.round(cpuTemp)}°C`}
               valueColor={tempColor(t, cpuTemp)}
               color={tempColor(t, cpuTemp)}
@@ -281,10 +281,10 @@ export default function VitalsScreen() {
               values={hist.map((h) => h.gpu)}
             />
             <Metric
-              label="BATTERY"
+              label="Battery"
               value={v.bat ? `${Math.round(v.bat.pct)}%` : '–'}
               pct={v.bat?.pct}
-              color={v.bat && v.bat.pct < 20 && !v.bat.plugged ? t.bad : t.ok}
+              color={v.bat && v.bat.pct < 20 && !v.bat.plugged ? t.bad : t.text}
               sub={v.bat ? (v.bat.plugged ? 'Plugged in' : 'On battery') : 'No battery'}
               footer={`Disk read ${rate(v.disk_io.r)} · write ${rate(v.disk_io.w)}`}
             />
@@ -293,8 +293,8 @@ export default function VitalsScreen() {
           <Section label="Network">
             <Card style={{ gap: space(3) }}>
               <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: space(3) }}>
-                <Text style={{ color: t.text, fontSize: 18, fontWeight: '800' }}>↓ {rate(rx)}</Text>
-                <Text style={{ color: t.textDim, fontSize: 15, fontWeight: '700' }}>↑ {rate(tx)}</Text>
+                <Text style={{ color: t.text, fontSize: 18, fontWeight: '500', fontVariant: ['tabular-nums'] }}>↓ {rate(rx)}</Text>
+                <Text style={{ color: t.textDim, fontSize: 15, fontWeight: '500', fontVariant: ['tabular-nums'] }}>↑ {rate(tx)}</Text>
                 <Text style={{ color: t.textFaint, fontSize: 12, flex: 1, textAlign: 'right' }} numberOfLines={1}>
                   {activeNics.length ? activeNics.map(([n]) => n).join(', ') : 'idle'}
                 </Text>
@@ -311,7 +311,7 @@ export default function VitalsScreen() {
                     <Text style={{ color: t.text, fontFamily: t.mono, fontSize: 13, flex: 1 }} numberOfLines={1}>
                       {n}
                     </Text>
-                    <Icon name="arrow-down" size={14} color={t.ok} />
+                    <Icon name="arrow-down" size={14} color={t.textDim} />
                     <Text style={{ color: t.textDim, fontSize: 13, width: 86 }}>{rate(x.rx)}</Text>
                     <Icon name="arrow-up" size={14} color={t.textDim} />
                     <Text style={{ color: t.textDim, fontSize: 13, width: 86 }}>{rate(x.tx)}</Text>
@@ -337,7 +337,7 @@ export default function VitalsScreen() {
                         {bytes(d.used)} / {bytes(d.total)}
                       </Text>
                     </View>
-                    <Bar pct={d.pct} color={d.pct > 90 ? t.bad : t.ok} />
+                    <Bar pct={d.pct} />
                   </View>
                 ))
               ) : (
@@ -348,7 +348,7 @@ export default function VitalsScreen() {
 
           <Section
             label="Processes"
-            right={<Switch value={procs} onValueChange={toggleProcs} trackColor={{ true: t.textDim, false: t.border }} thumbColor={t.dark ? '#ECEFF5' : '#FFFFFF'} />}
+            right={<Switch value={procs} onValueChange={toggleProcs} trackColor={{ true: t.accent, false: t.border }} thumbColor={t.onMedia} />}
           >
             {procs ? (
               v.procs ? (
@@ -363,7 +363,7 @@ export default function VitalsScreen() {
                         placeholderTextColor={t.textFaint}
                         autoCapitalize="none"
                         autoCorrect={false}
-                        selectionColor={t.textDim}
+                        selectionColor={t.accent}
                         style={[st.input, { color: t.text }]}
                       />
                     </View>
@@ -378,10 +378,10 @@ export default function VitalsScreen() {
                         <Pressable
                           key={s.k}
                           onPress={() => chooseSort(s.k)}
-                          android_ripple={{ color: t.cardAlt }}
-                          style={[st.chip, { borderColor: on ? t.textDim : t.border, backgroundColor: on ? t.cardAlt : 'transparent' }]}
+                          android_ripple={{ color: t.ripple }}
+                          style={[st.chip, { borderColor: on ? t.accent : t.border, backgroundColor: on ? t.accentSoft : 'transparent' }]}
                         >
-                          <Text style={{ color: on ? t.text : t.textDim, fontSize: 12, fontWeight: '700' }}>
+                          <Text style={{ color: on ? t.accent : t.textDim, fontSize: 12, fontWeight: '500' }}>
                             {s.label}
                             {on ? (sortD < 0 ? ' ▾' : ' ▴') : ''}
                           </Text>
@@ -399,10 +399,10 @@ export default function VitalsScreen() {
                           <Text style={{ color: t.text, fontSize: 13, fontWeight: '600', flex: 1 }} numberOfLines={1}>
                             {p.name}
                           </Text>
-                          <Text style={{ color: p.cpu > 50 ? t.bad : t.text, fontSize: 13, fontWeight: '700', width: 58, textAlign: 'right' }}>
+                          <Text style={{ color: p.cpu > 50 ? t.bad : t.text, fontSize: 13, fontWeight: '500', width: 58, textAlign: 'right', fontVariant: ['tabular-nums'] }}>
                             {p.cpu.toFixed(1)}%
                           </Text>
-                          <Text style={{ color: t.textDim, fontSize: 12, width: 68, textAlign: 'right' }}>{bytes(p.rss, 0)}</Text>
+                          <Text style={{ color: t.textDim, fontSize: 12, width: 68, textAlign: 'right', fontVariant: ['tabular-nums'] }}>{bytes(p.rss, 0)}</Text>
                         </View>
                         <Text style={{ color: t.textFaint, fontSize: 11.5 }} numberOfLines={1}>
                           PID {p.pid} · {p.user || '–'} · {p.thr ?? '–'} thr

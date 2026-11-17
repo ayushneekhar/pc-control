@@ -142,11 +142,9 @@ function Enrollment() {
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <View style={[st.iconWrap, { backgroundColor: enrolledHere && serverEnrolled !== false ? t.okSoft : t.cardAlt }]}>
-          <Icon name="fingerprint" size={24} color={enrolledHere && serverEnrolled !== false ? t.ok : t.textDim} />
-        </View>
+        <Icon name="fingerprint" size={22} color={enrolledHere && serverEnrolled !== false ? t.ok : t.textDim} />
         <View style={{ flex: 1 }}>
-          <Text style={{ color: t.text, fontWeight: '700', fontSize: 16 }}>Root approvals</Text>
+          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Root approvals</Text>
           <Text style={{ color: t.textDim, fontSize: 13 }}>
             {enrolledHere
               ? serverEnrolled === false
@@ -175,8 +173,8 @@ function Enrollment() {
             On the laptop, run this in a terminal (or the installer asks for it), and type the code below when asked:
           </Text>
           <Mono style={{ backgroundColor: t.cardAlt, padding: space(3), borderRadius: radius.md }}>sudo rootd-admin enroll</Mono>
-          <View style={[st.code, { backgroundColor: t.accentSoft, borderColor: t.accent }]}>
-            <Text selectable style={{ color: t.accent, fontFamily: t.mono, fontSize: 26, fontWeight: '700', letterSpacing: 1.5 }}>
+          <View style={[st.code, { backgroundColor: t.accentSoft }]}>
+            <Text selectable style={{ color: t.accent, fontFamily: t.mono, fontSize: 26, fontWeight: '600', letterSpacing: 1.5 }}>
               {phase.code}
             </Text>
           </View>
@@ -294,11 +292,9 @@ function Push() {
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <View style={[st.iconWrap, { backgroundColor: registered && notifs ? t.accentSoft : t.cardAlt }]}>
-          <Icon name="bell-badge-outline" size={22} color={registered && notifs ? t.accent : t.textDim} />
-        </View>
+        <Icon name="bell-badge-outline" size={22} color={registered && notifs ? t.accent : t.textDim} />
         <View style={{ flex: 1 }}>
-          <Text style={{ color: t.text, fontWeight: '700', fontSize: 16 }}>Push notifications</Text>
+          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Push notifications</Text>
           <Text style={{ color: t.textDim, fontSize: 13 }}>{subtitle}</Text>
         </View>
         {registered && notifs ? <Pill tone="ok" icon="check" label="On" /> : null}
@@ -372,17 +368,15 @@ function NotificationPrefs() {
       onValueChange={onChange}
       accessibilityLabel={label}
       trackColor={{ true: dim ? t.border : t.accent, false: t.cardAlt }}
-      thumbColor={on ? (dim ? t.textFaint : '#fff') : t.textFaint}
+      thumbColor={on ? (dim ? t.textFaint : t.onMedia) : t.textFaint}
     />
   );
   return (
     <Card style={{ gap: space(1), paddingHorizontal: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3), paddingHorizontal: space(1), marginBottom: space(2) }}>
-        <View style={[st.iconWrap, { backgroundColor: t.accentSoft }]}>
-          <Icon name="bell-cog-outline" size={22} color={t.accent} />
-        </View>
+        <Icon name="bell-cog-outline" size={22} color={t.accent} />
         <View style={{ flex: 1 }}>
-          <Text style={{ color: t.text, fontWeight: '700', fontSize: 16 }}>Where notifications go</Text>
+          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Where notifications go</Text>
           <Text style={{ color: t.textDim, fontSize: 13 }}>Per category: the Qwen bot on Telegram, this app, or both.</Text>
         </View>
       </View>
@@ -404,9 +398,9 @@ function NotificationPrefs() {
       </View>
 
       <View style={[st.colHead, { borderBottomColor: t.border }]}>
-        <Text style={{ flex: 1, color: t.textFaint, fontSize: 11.5, fontWeight: '700', letterSpacing: 0.6 }}>CATEGORY</Text>
-        <Text style={[st.col, { color: t.textFaint }]}>TELEGRAM</Text>
-        <Text style={[st.col, { color: t.textFaint }]}>APP</Text>
+        <Text style={{ flex: 1, color: t.textDim, fontSize: 11.5, fontWeight: '500' }}>Category</Text>
+        <Text style={[st.col, { color: t.textDim }]}>Telegram</Text>
+        <Text style={[st.col, { color: t.textDim }]}>App</Text>
       </View>
       {s.categories.map((c, i) => (
         <View key={c.id} style={[st.catRow, i < s.categories.length - 1 && { borderBottomColor: t.border, borderBottomWidth: StyleSheet.hairlineWidth }]}>
@@ -472,11 +466,9 @@ function LiveProgress() {
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <View style={[st.iconWrap, { backgroundColor: good ? t.accentSoft : t.cardAlt }]}>
-          <Icon name="progress-download" size={22} color={good ? t.accent : t.textDim} />
-        </View>
+        <Icon name="progress-download" size={22} color={good ? t.accent : t.textDim} />
         <View style={{ flex: 1 }}>
-          <Text style={{ color: t.text, fontWeight: '700', fontSize: 16 }}>Live download progress</Text>
+          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Live download progress</Text>
           <Text style={{ color: t.textDim, fontSize: 13 }}>
             {live.running ? 'Showing now' : live.supported ? 'Status bar chip + Now Bar while something downloads' : 'A progress notification while something downloads'}
           </Text>
@@ -567,7 +559,7 @@ function Row({ ok, label, fix }: { ok: boolean; label: string; fix?: { label: st
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
       <Icon name={ok ? 'check-circle' : 'alert-circle-outline'} size={18} color={ok ? t.ok : t.warn} />
-      <Text style={{ color: t.text, flex: 1, fontSize: 14 }}>{label}</Text>
+      <Text style={{ color: t.text, flex: 1, fontSize: 13.5 }}>{label}</Text>
       {fix ? <Button label={fix.label} compact kind="subtle" onPress={fix.onPress} /> : null}
     </View>
   );
@@ -626,6 +618,7 @@ function Server() {
         onSubmitEditing={save}
         placeholder={DEFAULT_SERVER}
         placeholderTextColor={t.textFaint}
+        selectionColor={t.accent}
         style={[st.input, { color: t.text, backgroundColor: t.cardAlt, borderColor: t.border, fontFamily: t.mono }]}
       />
       <View style={{ flexDirection: 'row', gap: space(2) }}>
@@ -666,12 +659,11 @@ export default function SettingsScreen() {
 }
 
 const st = StyleSheet.create({
-  iconWrap: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
-  code: { borderRadius: radius.md, borderWidth: 1, paddingVertical: space(4), alignItems: 'center' },
+  code: { borderRadius: radius.md, paddingVertical: space(4), alignItems: 'center' },
   masters: { flexDirection: 'row', borderRadius: radius.md, padding: space(2), gap: space(2), marginBottom: space(2) },
   master: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space(2), paddingLeft: space(1) },
   colHead: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: space(1), paddingBottom: space(1), borderBottomWidth: StyleSheet.hairlineWidth },
-  col: { width: 64, textAlign: 'center', fontSize: 10.5, fontWeight: '700', letterSpacing: 0.4 },
+  col: { width: 64, textAlign: 'center', fontSize: 11, fontWeight: '500' },
   colCell: { width: 64, alignItems: 'center' },
   catRow: { flexDirection: 'row', alignItems: 'center', gap: space(3), paddingVertical: space(3), paddingHorizontal: space(1) },
   input: { borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: space(3), height: 46, fontSize: 14 },

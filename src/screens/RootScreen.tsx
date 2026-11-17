@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PcNative } from '../../modules/pc-native';
-import { Banner, Button, Card, Empty, Icon, KV, Mono, Pill, Screen, Section } from '../components/ui';
+import { Banner, Button, Card, Empty, Icon, KV, List, Mono, Pill, Screen, Section, StatusDot } from '../components/ui';
 import { ApiError, get, RootRequest } from '../lib/api';
 import { commandLine, decide } from '../lib/approve';
 import { clock, duration } from '../lib/format';
@@ -34,7 +34,7 @@ function statusPill(r: RootRequest) {
 function ArgvList({ argv }: { argv: string[] }) {
   const t = useTheme();
   return (
-    <View style={[st.argv, { backgroundColor: t.cardAlt, borderColor: t.border }]}>
+    <View style={[st.argv, { backgroundColor: t.cardAlt }]}>
       {argv.map((a, i) => (
         <View key={i} style={st.argRow}>
           <Text style={[st.argIdx, { color: t.textFaint, fontFamily: t.mono }]}>{i}</Text>
@@ -78,20 +78,20 @@ function PendingCard({ req, onOpen, decision }: { req: RootRequest; onOpen: () =
   const [showArgs, setShowArgs] = useState(false);
   const pending = req.status === 'pending';
   return (
-    <Card style={{ gap: space(3), borderColor: pending ? t.warn : t.border, borderWidth: pending ? 1 : StyleSheet.hairlineWidth }}>
+    <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
         <Icon name="shield-key-outline" size={20} color={pending ? t.warn : t.accent} />
-        <Text style={{ color: t.text, fontWeight: '700', fontSize: 16, flex: 1 }} numberOfLines={2}>
+        <Text style={{ color: t.text, fontWeight: '600', fontSize: 16, flex: 1 }} numberOfLines={2}>
           {req.reason || 'Root command'}
         </Text>
         {pending ? <Pill tone={left < 30 ? 'bad' : 'warn'} icon="timer-sand" label={`${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`} /> : statusPill(req)}
       </View>
-      <Pressable onPress={() => setShowArgs((v) => !v)} style={[st.cmd, { backgroundColor: t.cardAlt, borderColor: t.border }]}>
+      <Pressable onPress={() => setShowArgs((v) => !v)} style={[st.cmd, { backgroundColor: t.cardAlt }]}>
         <Mono style={{ fontSize: 14 }}>
-          <Text style={{ color: t.bad, fontWeight: '700' }}># </Text>
+          <Text style={{ color: t.textFaint, fontWeight: '400' }}># </Text>
           {commandLine(req.argv)}
         </Mono>
-        <Text style={{ color: t.accent, fontSize: 12.5, marginTop: 6, fontWeight: '600' }}>
+        <Text style={{ color: t.accent, fontSize: 12.5, marginTop: 6, fontWeight: '500' }}>
           {showArgs ? 'Hide' : 'Show'} {req.argv.length} argument{req.argv.length === 1 ? '' : 's'} exactly
         </Text>
       </Pressable>
@@ -105,7 +105,7 @@ function PendingCard({ req, onOpen, decision }: { req: RootRequest; onOpen: () =
         <View style={{ flexDirection: 'row', gap: space(2) }}>
           <Button
             label="Deny"
-            kind="danger"
+            kind="subtle"
             icon="close"
             style={{ flex: 1 }}
             busy={decision.busy === req.id + 'deny'}
@@ -114,7 +114,7 @@ function PendingCard({ req, onOpen, decision }: { req: RootRequest; onOpen: () =
           />
           <Button
             label="Approve"
-            kind="ok"
+            kind="primary"
             icon="fingerprint"
             style={{ flex: 1.4 }}
             busy={decision.busy === req.id + 'approve'}
@@ -152,9 +152,9 @@ function Detail({ id, onClose, decision }: { id: string | null; onClose: () => v
   const r = req ? { ...req, ...(live && live.status !== req.status ? live : {}) } : live ?? null;
   return (
     <Modal visible={!!id} animationType="slide" onRequestClose={onClose} transparent statusBarTranslucent navigationBarTranslucent>
-      <View style={[st.sheetWrap, { backgroundColor: 'rgba(0,0,0,0.45)' }]}>
+      <View style={[st.sheetWrap, { backgroundColor: t.overlay }]}>
         <Pressable style={{ flex: 1 }} onPress={onClose} />
-        <View style={[st.sheet, { backgroundColor: t.bg, paddingBottom: insets.bottom + space(4), borderColor: t.border }]}>
+        <View style={[st.sheet, { backgroundColor: t.bg, paddingBottom: insets.bottom + space(4) }]}>
           <View style={[st.grabber, { backgroundColor: t.border }]} />
           <ScrollView contentContainerStyle={{ gap: space(3), padding: space(4) }}>
             {!r && !err ? <Text style={{ color: t.textDim }}>Loading…</Text> : null}
@@ -162,7 +162,7 @@ function Detail({ id, onClose, decision }: { id: string | null; onClose: () => v
             {r ? (
               <>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
-                  <Text style={{ color: t.text, fontSize: 20, fontWeight: '800', flex: 1 }} numberOfLines={2}>
+                  <Text style={{ color: t.text, fontSize: 20, fontWeight: '600', flex: 1 }} numberOfLines={2}>
                     {r.reason || 'Root command'}
                   </Text>
                   {statusPill(r)}
@@ -170,9 +170,9 @@ function Detail({ id, onClose, decision }: { id: string | null; onClose: () => v
                 <ArgvList argv={r.argv} />
                 {r.status === 'pending' ? (
                   <View style={{ flexDirection: 'row', gap: space(2) }}>
-                    <Button label="Deny" kind="danger" icon="close" style={{ flex: 1 }} disabled={!!decision.busy}
+                    <Button label="Deny" kind="subtle" icon="close" style={{ flex: 1 }} disabled={!!decision.busy}
                       busy={decision.busy === r.id + 'deny'} onPress={() => decision.run(r, 'deny')} />
-                    <Button label="Approve" kind="ok" icon="fingerprint" style={{ flex: 1.4 }} disabled={!!decision.busy}
+                    <Button label="Approve" kind="primary" icon="fingerprint" style={{ flex: 1.4 }} disabled={!!decision.busy}
                       busy={decision.busy === r.id + 'approve'} onPress={() => decision.run(r, 'approve')} />
                   </View>
                 ) : null}
@@ -202,10 +202,10 @@ function Output({ title, text, tone }: { title: string; text: string; tone?: 'ba
   const t = useTheme();
   return (
     <View style={{ gap: space(1) }}>
-      <Text style={{ color: tone === 'bad' ? t.bad : t.textFaint, fontSize: 12, fontWeight: '700', letterSpacing: 0.8 }}>
-        {title.toUpperCase()}
+      <Text style={{ color: tone === 'bad' ? t.bad : t.textDim, fontSize: 12.5, fontWeight: '500' }}>
+        {title === 'stdout' ? 'Stdout' : title === 'stderr' ? 'Stderr' : title}
       </Text>
-      <ScrollView horizontal style={[st.out, { backgroundColor: t.cardAlt, borderColor: t.border }]}>
+      <ScrollView horizontal style={[st.out, { backgroundColor: t.cardAlt }]}>
         <Mono style={{ fontSize: 12 }}>{text.length > 60000 ? text.slice(0, 30000) + '\n…\n' + text.slice(-30000) : text}</Mono>
       </ScrollView>
     </View>
@@ -252,21 +252,24 @@ export default function RootScreen() {
   const waiting = pending.filter((r) => r.status === 'pending').length;
 
   const status =
-    store.rootd === 'ok' ? (
-      <Pill tone={store.live ? 'ok' : 'warn'} label={store.live ? 'rootd · live' : 'rootd · polling'} />
-    ) : store.rootd === 'not_installed' ? (
-      <Pill tone="dim" label="rootd not installed" />
-    ) : store.rootd === 'down' ? (
-      <Pill tone="bad" label="rootd not running" />
-    ) : (
-      <Pill tone="dim" label="connecting…" />
-    );
+    store.rootd === 'ok'
+      ? { tone: store.live ? ('ok' as const) : ('warn' as const), label: store.live ? 'rootd live' : 'rootd polling' }
+      : store.rootd === 'not_installed'
+        ? { tone: 'faint' as const, label: 'rootd not installed' }
+        : store.rootd === 'down'
+          ? { tone: 'bad' as const, label: 'rootd not running' }
+          : { tone: 'faint' as const, label: 'Connecting…' };
 
   return (
     <>
       <Screen
         title="Root"
-        subtitle={<View style={{ marginTop: 6 }}>{status}</View>}
+        subtitle={
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <StatusDot tone={status.tone} />
+            <Text style={{ color: t.textDim, fontSize: 12.5 }}>{status.label}</Text>
+          </View>
+        }
         right={waiting ? <Pill tone="warn" icon="bell-ring-outline" label={`${waiting} waiting`} /> : undefined}
         refreshing={refreshing}
         onRefresh={async () => {
@@ -311,12 +314,12 @@ export default function RootScreen() {
           {histErr ? <Text style={{ color: t.textDim, paddingHorizontal: space(1) }}>{histErr}</Text> : null}
           {history && history.length === 0 ? <Text style={{ color: t.textFaint, paddingHorizontal: space(1) }}>No commands yet.</Text> : null}
           {history && history.length > 0 ? (
-            <Card style={{ padding: 0 }}>
+            <List>
               {history.map((h, i) => (
                 <Pressable
                   key={h.id}
                   onPress={() => setOpen(h.id)}
-                  android_ripple={{ color: t.accentSoft }}
+                  android_ripple={{ color: t.ripple }}
                   style={[st.histRow, i > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.border }]}
                 >
                   <View style={{ flex: 1, gap: 3 }}>
@@ -331,7 +334,7 @@ export default function RootScreen() {
                   {statusPill(h)}
                 </Pressable>
               ))}
-            </Card>
+            </List>
           ) : null}
         </Section>
       </Screen>
@@ -341,13 +344,13 @@ export default function RootScreen() {
 }
 
 const st = StyleSheet.create({
-  argv: { borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, paddingVertical: space(2), paddingHorizontal: space(3), gap: 4 },
+  argv: { borderRadius: radius.md, paddingVertical: space(2), paddingHorizontal: space(3), gap: 4 },
   argRow: { flexDirection: 'row', gap: space(3), alignItems: 'flex-start' },
   argIdx: { width: 18, textAlign: 'right', fontSize: 12, lineHeight: 19 },
-  cmd: { borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, padding: space(3) },
+  cmd: { borderRadius: radius.md, padding: space(3) },
   histRow: { flexDirection: 'row', alignItems: 'center', gap: space(3), paddingHorizontal: space(4), paddingVertical: space(3) },
   sheetWrap: { flex: 1, justifyContent: 'flex-end' },
-  sheet: { maxHeight: '88%', borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: StyleSheet.hairlineWidth },
+  sheet: { maxHeight: '88%', borderTopLeftRadius: 24, borderTopRightRadius: 24 },
   grabber: { width: 40, height: 4, borderRadius: 2, alignSelf: 'center', marginTop: 10 },
-  out: { borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, padding: space(3), maxHeight: 320 },
+  out: { borderRadius: radius.md, padding: space(3), maxHeight: 320 },
 });

@@ -1,7 +1,7 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, AppState, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
-import { Banner, Card, Empty, Icon, Pill, Screen } from '../components/ui';
+import { Banner, Card, Empty, Icon, Pill, Screen, Segmented } from '../components/ui';
 import {
   actionLabel,
   AgentRule,
@@ -27,33 +27,6 @@ const ACTION_ICONS: Record<AgentRule['action'], string> = {
   hide: 'eye-off-outline',
   block: 'cancel',
 };
-
-function Segmented({ value, onChange }: { value: Tab; onChange: (t: Tab) => void }) {
-  const t = useTheme();
-  const items: { id: Tab; label: string; icon: string }[] = [
-    { id: 'urls', label: 'URLs', icon: 'link-variant' },
-    { id: 'rules', label: 'Rules', icon: 'filter-variant' },
-  ];
-  return (
-    <View style={[st.seg, { backgroundColor: t.cardAlt }]} accessibilityRole="tablist">
-      {items.map((x) => {
-        const on = value === x.id;
-        return (
-          <Pressable
-            key={x.id}
-            onPress={() => onChange(x.id)}
-            accessibilityRole="tab"
-            accessibilityState={{ selected: on }}
-            style={[st.segBtn, on && { backgroundColor: t.card }]}
-          >
-            <Icon name={x.icon} size={15} color={on ? t.text : t.textDim} />
-            <Text style={{ color: on ? t.text : t.textDim, fontWeight: '700', fontSize: 13 }}>{x.label}</Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
-}
 
 export default function AgentViewScreen() {
   const t = useTheme();
@@ -187,10 +160,10 @@ export default function AgentViewScreen() {
       <Card style={{ gap: space(3) }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
           <View style={{ flex: 1, gap: 2 }}>
-            <Text style={{ color: t.text, fontSize: 16, fontWeight: '700' }}>
+            <Text style={{ color: t.text, fontSize: 16, fontWeight: '600' }}>
               {state?.enabled ? 'Filtering on' : 'Filtering off'}
             </Text>
-            <Text style={{ color: t.textDim, fontSize: 13 }}>
+            <Text style={{ color: t.textDim, fontSize: 12.5 }}>
               {state?.enabled ? 'Enabled rules change what agents receive.' : 'Agents get the real sites; rules are kept.'}
             </Text>
           </View>
@@ -199,22 +172,30 @@ export default function AgentViewScreen() {
             onValueChange={toggleFilter}
             disabled={!state || busy}
             trackColor={{ true: t.accent, false: t.border }}
-            thumbColor={t.dark ? '#ECEFF5' : '#FFFFFF'}
+            thumbColor={t.onMedia}
           />
         </View>
       </Card>
 
-      <Segmented value={tab} onChange={setTab} />
+      <Segmented
+        value={tab}
+        onChange={setTab}
+        options={[
+          { id: 'urls', label: 'URLs', icon: 'link-variant' },
+          { id: 'rules', label: 'Rules', icon: 'filter-variant' },
+        ]}
+      />
 
       {tab === 'urls' ? (
         <>
-          <View style={[st.search, { backgroundColor: t.card, borderColor: t.border }]}>
+          <View style={[st.search, { backgroundColor: t.card }]}>
             <Icon name="magnify" size={18} color={t.textFaint} />
             <TextInput
               value={q}
               onChangeText={setQ}
               placeholder="Search URLs"
               placeholderTextColor={t.textFaint}
+              selectionColor={t.accent}
               style={{ flex: 1, color: t.text, fontSize: 15, paddingVertical: 0 }}
               autoCapitalize="none"
               autoCorrect={false}
@@ -247,10 +228,10 @@ export default function AgentViewScreen() {
               <Card key={u.url} onPress={() => editUrl(u)} style={{ gap: space(2) }}>
                 <View style={{ flexDirection: 'row', gap: space(2), alignItems: 'flex-start' }}>
                   <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={{ color: t.text, fontSize: 15.5, fontWeight: '700' }} numberOfLines={1}>
+                    <Text style={{ color: t.text, fontSize: 15, fontWeight: '500' }} numberOfLines={1}>
                       {host || u.host}
                     </Text>
-                    <Text style={{ color: t.textDim, fontSize: 13, fontFamily: t.mono }} numberOfLines={2}>
+                    <Text style={{ color: t.textDim, fontSize: 12.5, fontFamily: t.mono }} numberOfLines={2}>
                       {path}
                     </Text>
                   </View>
@@ -282,14 +263,12 @@ export default function AgentViewScreen() {
               <View style={st.ruleTop}>
                 <Pressable
                   onPress={() => nav.navigate('AgentRule', { ruleId: rule.id })}
-                  android_ripple={{ color: t.accentSoft }}
+                  android_ripple={{ color: t.ripple }}
                   style={({ pressed }) => [st.ruleMain, pressed && { opacity: 0.85 }]}
                 >
-                  <View style={[st.ruleIcon, { backgroundColor: t.cardAlt }]}>
-                    <Icon name={ACTION_ICONS[rule.action]} size={19} color={t.textDim} />
-                  </View>
+                  <Icon name={ACTION_ICONS[rule.action]} size={20} color={t.textDim} />
                   <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '700' }} numberOfLines={1}>
+                    <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '500' }} numberOfLines={1}>
                       {rule.name || rule.match}
                     </Text>
                     <Text style={{ color: t.textFaint, fontSize: 12, fontFamily: t.mono }} numberOfLines={1}>
@@ -302,7 +281,7 @@ export default function AgentViewScreen() {
                   value={rule.enabled}
                   onValueChange={(v) => toggleRule(rule, v)}
                   trackColor={{ true: t.accent, false: t.border }}
-                  thumbColor={t.dark ? '#ECEFF5' : '#FFFFFF'}
+                  thumbColor={t.onMedia}
                 />
               </View>
               <View style={[st.ruleActions, { borderTopColor: t.border }]}>
@@ -338,28 +317,16 @@ export default function AgentViewScreen() {
 }
 
 const st = StyleSheet.create({
-  seg: { flexDirection: 'row', padding: 3, borderRadius: 99, gap: 2 },
-  segBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
-    height: 36,
-    borderRadius: 99,
-  },
   search: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: space(2),
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: space(3),
     height: 44,
   },
   ruleTop: { flexDirection: 'row', alignItems: 'center', gap: space(2), paddingRight: space(3) },
   ruleMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space(3), padding: space(4) },
-  ruleIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   ruleActions: {
     flexDirection: 'row',
     alignItems: 'center',

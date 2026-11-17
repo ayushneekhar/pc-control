@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Modal, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Banner, Button, Card, Icon, Mono, Screen, Section } from '../components/ui';
+import { Banner, Button, Card, Icon, Mono, Screen, Section, Segmented } from '../components/ui';
 import {
   AgentAction,
   AgentRule,
@@ -270,7 +270,7 @@ export default function AgentRuleScreen() {
     previewLoaded.current = false;
   };
 
-  const typography = { color: t.text, backgroundColor: t.cardAlt, borderColor: t.border, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.md, paddingHorizontal: space(3), paddingVertical: space(2.5), fontSize: 14 };
+  const typography = { color: t.text, backgroundColor: t.cardAlt, borderRadius: radius.sm, paddingHorizontal: space(3), paddingVertical: space(2.5), fontSize: 14 };
   const { host, path } = splitUrl(ruleUrl);
   const title = rule ? 'Edit rule' : 'New rule';
   const shownMatch = !draft
@@ -293,7 +293,7 @@ export default function AgentRuleScreen() {
       >
       {ruleUrl ? (
         <Card style={{ gap: 2 }}>
-          <Text style={{ color: t.textFaint, fontSize: 12, fontWeight: '700', letterSpacing: 0.6 }}>URL</Text>
+          <Text style={{ color: t.textDim, fontSize: 12, fontWeight: '500' }}>Url</Text>
           <Mono style={{ fontSize: 12 }}>{ruleUrl}</Mono>
         </Card>
       ) : null}
@@ -316,12 +316,10 @@ export default function AgentRuleScreen() {
             {ACTIONS.map((a) => (
               <Card key={a.id} onPress={() => chooseAction(a.id)} style={{ gap: space(2) }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-                  <View style={[st.actionIcon, { backgroundColor: t.cardAlt }]}>
-                    <Icon name={a.icon} size={22} color={t.textDim} />
-                  </View>
+                  <Icon name={a.icon} size={22} color={t.textDim} />
                   <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={{ color: t.text, fontSize: 15.5, fontWeight: '700' }}>{a.title}</Text>
-                    <Text style={{ color: t.textDim, fontSize: 13, lineHeight: 18 }}>{a.body}</Text>
+                    <Text style={{ color: t.text, fontSize: 15.5, fontWeight: '500' }}>{a.title}</Text>
+                    <Text style={{ color: t.textDim, fontSize: 12.5, lineHeight: 18 }}>{a.body}</Text>
                   </View>
                   {busy === a.id ? <Icon name="progress-clock" size={20} color={t.textFaint} /> : <Icon name="chevron-right" size={22} color={t.textFaint} />}
                 </View>
@@ -340,14 +338,14 @@ export default function AgentRuleScreen() {
             <Card style={{ gap: space(3) }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
                 <View style={{ flex: 1 }}>
-                  <Text style={{ color: t.text, fontSize: 15, fontWeight: '700' }}>{ACTION_NAMES[draft.action]}</Text>
+                  <Text style={{ color: t.text, fontSize: 15, fontWeight: '500' }}>{ACTION_NAMES[draft.action]}</Text>
                   <Text style={{ color: t.textDim, fontSize: 12.5 }}>{ruleUrl ? host : rule.match}</Text>
                 </View>
                 <Switch
                   value={draft.enabled}
                   onValueChange={(v) => patch({ enabled: v })}
                   trackColor={{ true: t.accent, false: t.border }}
-                  thumbColor={t.dark ? '#ECEFF5' : '#FFFFFF'}
+                  thumbColor={t.onMedia}
                 />
               </View>
               <View style={{ gap: 6 }}>
@@ -367,21 +365,20 @@ export default function AgentRuleScreen() {
 
           <Section label="Match">
             <Card style={{ gap: space(3) }}>
-              <View style={{ flexDirection: 'row', gap: space(2) }}>
-                {(['exact', 'site', 'custom'] as MatchMode[]).map((m) => {
-                  const on = draft.matchMode === m;
-                  const label = m === 'exact' ? 'Exact URL' : m === 'site' ? 'Whole site' : 'Custom';
-                  return (
-                    <Pressable
-                      key={m}
-                      onPress={() => patch({ matchMode: m, customMatchType: m === 'exact' ? 'regex' : m === 'site' ? 'glob' : draft.customMatchType })}
-                      style={[st.choice, { backgroundColor: on ? t.cardAlt : 'transparent', borderColor: on ? t.border : t.border }]}
-                    >
-                      <Text style={{ color: on ? t.text : t.textDim, fontSize: 12.5, fontWeight: '700' }}>{label}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
+              <Segmented
+                value={draft.matchMode}
+                onChange={(m) =>
+                  patch({
+                    matchMode: m,
+                    customMatchType: m === 'exact' ? 'regex' : m === 'site' ? 'glob' : draft.customMatchType,
+                  })
+                }
+                options={[
+                  { id: 'exact', label: 'Exact URL' },
+                  { id: 'site', label: 'Whole site' },
+                  { id: 'custom', label: 'Custom' },
+                ]}
+              />
               <TextInput
                 value={shownMatch}
                 onChangeText={(v) => patch({ matchMode: 'custom', customMatch: v, customMatchType: shownMatchType })}
@@ -392,20 +389,14 @@ export default function AgentRuleScreen() {
                 autoCorrect={false}
               />
               {draft.matchMode === 'custom' ? (
-                <View style={{ flexDirection: 'row', gap: space(2) }}>
-                  {(['glob', 'regex'] as MatchType[]).map((m) => {
-                    const on = draft.customMatchType === m;
-                    return (
-                      <Pressable
-                        key={m}
-                        onPress={() => patch({ customMatchType: m })}
-                        style={[st.choice, { backgroundColor: on ? t.cardAlt : 'transparent', borderColor: t.border }]}
-                      >
-                        <Text style={{ color: on ? t.text : t.textDim, fontSize: 12.5, fontWeight: '700' }}>{m}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
+                <Segmented
+                  value={draft.customMatchType}
+                  onChange={(m) => patch({ customMatchType: m })}
+                  options={[
+                    { id: 'glob', label: 'Glob' },
+                    { id: 'regex', label: 'Regex' },
+                  ]}
+                />
               ) : (
                 <Text style={{ color: t.textFaint, fontSize: 12, lineHeight: 17 }}>
                   {draft.matchMode === 'exact'
@@ -446,7 +437,6 @@ export default function AgentRuleScreen() {
                     label="Preview"
                     icon="eye-outline"
                     kind="subtle"
-                    compact
                     disabled={!draft.html.trim()}
                     style={{ flex: 1 }}
                     onPress={() => openPreview(draft.html, 'Edited HTML')}
@@ -457,7 +447,6 @@ export default function AgentRuleScreen() {
                     label="Preview original"
                     icon="eye-outline"
                     kind="subtle"
-                    compact
                     busy={busy === 'original-preview'}
                     style={{ flex: 1 }}
                     onPress={previewOriginal}
@@ -466,7 +455,6 @@ export default function AgentRuleScreen() {
                     label="Reset to original"
                     icon="history"
                     kind="subtle"
-                    compact
                     busy={busy === 'original'}
                     style={{ flex: 1 }}
                     onPress={resetOriginal}
@@ -519,7 +507,7 @@ export default function AgentRuleScreen() {
                         patch({ replacements: draft.replacements.map((p, j) => (j === i ? { ...p, regex: v } : p)) })
                       }
                       trackColor={{ true: t.accent, false: t.border }}
-                      thumbColor={t.dark ? '#ECEFF5' : '#FFFFFF'}
+                      thumbColor={t.onMedia}
                     />
                     <Pressable
                       onPress={() => patch({ replacements: draft.replacements.filter((_, j) => j !== i) })}
@@ -583,11 +571,11 @@ export default function AgentRuleScreen() {
                     <Pressable
                       key={m.id}
                       onPress={() => patch({ blockMode: m.id })}
-                      style={[st.radioRow, { backgroundColor: on ? t.cardAlt : 'transparent', borderColor: t.border }]}
+                      style={[st.radioRow, { backgroundColor: on ? t.cardAlt : 'transparent' }]}
                     >
                       <Icon name={on ? 'radiobox-marked' : 'radiobox-blank'} size={20} color={on ? t.text : t.textFaint} />
                       <View style={{ flex: 1, gap: 1 }}>
-                        <Text style={{ color: t.text, fontSize: 14, fontWeight: '700' }}>{m.title}</Text>
+                        <Text style={{ color: t.text, fontSize: 14, fontWeight: '500' }}>{m.title}</Text>
                         <Text style={{ color: t.textDim, fontSize: 12.5 }}>{m.body}</Text>
                       </View>
                     </Pressable>
@@ -629,7 +617,7 @@ export default function AgentRuleScreen() {
                 <Icon name="close" size={24} color={t.text} />
               </Pressable>
               <View style={{ flex: 1 }}>
-                <Text style={{ color: t.text, fontSize: 17, fontWeight: '800' }}>Preview</Text>
+                <Text style={{ color: t.text, fontSize: 17, fontWeight: '600' }}>Preview</Text>
                 <Text style={{ color: t.textDim, fontSize: 12 }} numberOfLines={1}>
                   {preview.label} · {host}
                 </Text>
@@ -685,7 +673,7 @@ export default function AgentRuleScreen() {
                   Navigation is disabled in the preview.
                 </Text>
               ) : null}
-              <Button label="Close preview" kind="subtle" compact onPress={closePreview} />
+              <Button label="Close preview" kind="subtle" onPress={closePreview} />
             </View>
           </View>
         </Modal>
@@ -695,8 +683,6 @@ export default function AgentRuleScreen() {
 }
 
 const st = StyleSheet.create({
-  actionIcon: { width: 42, height: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
-  choice: { flex: 1, alignItems: 'center', justifyContent: 'center', height: 38, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth },
   previewClose: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', marginLeft: -space(2) },
-  radioRow: { flexDirection: 'row', alignItems: 'center', gap: space(3), padding: space(3), borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth },
+  radioRow: { flexDirection: 'row', alignItems: 'center', gap: space(3), padding: space(3), borderRadius: radius.md },
 });

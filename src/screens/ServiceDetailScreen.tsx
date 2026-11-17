@@ -1,7 +1,7 @@
 import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
 import { useCallback, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { Banner, Button, Card, KV, Mono, Pill, Screen } from '../components/ui';
+import { Banner, Button, Card, KV, Mono, Pill, Screen, StatusDot } from '../components/ui';
 import { get, post, Service } from '../lib/api';
 import { bytes } from '../lib/format';
 import { radius, space, useTheme } from '../theme';
@@ -84,20 +84,30 @@ export default function ServiceDetailScreen() {
     );
   }
 
-  const failed = svc?.active === 'failed';
-  const color = failed ? t.bad : svc?.active === 'active' ? t.ok : t.textFaint;
+  const tone = svc?.active === 'failed' ? 'bad' : svc?.active === 'active' ? 'ok' : 'faint';
 
   return (
-    <Screen title={name} subtitle={svc?.description} onBack={() => nav.goBack()}>
+    <Screen
+      title={name}
+      subtitle={
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <StatusDot tone={tone} />
+          <Text style={{ color: t.textDim, fontSize: 12.5 }}>
+            {svc?.active || 'unknown'}
+            {svc?.enabled ? ` · ${svc.enabled}` : ''}
+          </Text>
+        </View>
+      }
+      onBack={() => nav.goBack()}
+    >
       {err ? <Banner tone="bad" title="Restart failed">{err}</Banner> : null}
       {logs?.[0]?.startsWith('(') && logs.length === 1 ? <Banner tone="warn" title="Can't load logs">{logs[0]}</Banner> : null}
 
       <Card style={{ gap: space(3) }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-          <View style={[st.dot, { backgroundColor: color }]} />
           <View style={{ flex: 1 }}>
-            <Text style={{ color, fontSize: 15, fontWeight: '800' }}>{svc?.active || 'unknown'}</Text>
-            <Text style={{ color: t.textFaint, fontSize: 12.5 }}>{svc?.sub || ''}</Text>
+            <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }}>{svc?.active || 'unknown'}</Text>
+            <Text style={{ color: t.textDim, fontSize: 12.5 }}>{svc?.sub || svc?.description || ''}</Text>
           </View>
           <Pill label={svc?.enabled || 'static'} tone={svc?.enabled === 'enabled' ? 'ok' : 'dim'} />
         </View>
@@ -112,21 +122,20 @@ export default function ServiceDetailScreen() {
       </Card>
 
       <Card style={{ gap: space(2) }}>
-        <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '700' }}>Recent logs</Text>
-        <ScrollView horizontal style={[st.logs, { backgroundColor: t.cardAlt, borderColor: t.border }]}>
+        <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500' }}>Recent logs</Text>
+        <ScrollView horizontal style={[st.logs, { backgroundColor: t.cardAlt }]}>
           <Mono style={{ fontSize: 11 }}>{logs ? logs.join('\n') || '(no log lines)' : 'Loading logs…'}</Mono>
         </ScrollView>
       </Card>
 
       <View style={{ flexDirection: 'row', gap: space(2) }}>
-        <Button label="Refresh logs" kind="subtle" icon="refresh" compact style={{ flex: 1 }} onPress={loadLogs} />
-        <Button label="Restart" kind="ok" icon="restart" compact style={{ flex: 1 }} busy={busy} onPress={restart} />
+        <Button label="Refresh logs" kind="subtle" icon="refresh" style={{ flex: 1 }} onPress={loadLogs} />
+        <Button label="Restart" kind="primary" icon="restart" style={{ flex: 1 }} busy={busy} onPress={restart} />
       </View>
     </Screen>
   );
 }
 
 const st = StyleSheet.create({
-  dot: { width: 11, height: 11, borderRadius: 6 },
-  logs: { borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, padding: space(3), maxHeight: 320 },
+  logs: { borderRadius: radius.md, padding: space(3), maxHeight: 320 },
 });

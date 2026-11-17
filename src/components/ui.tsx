@@ -13,14 +13,17 @@ import {
   ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { radius, space, Theme, useTheme } from '../theme';
+import { radius, screenPad, space, Theme, useTheme } from '../theme';
 
 export type IconName = React.ComponentProps<typeof MaterialCommunityIcons>['name'];
 
+/** Monochrome outline glyphs only; a filled name falls back to its -outline sibling when there is one. */
 export function Icon({ name, size = 20, color }: { name: string; size?: number; color?: string }) {
   const t = useTheme();
-  const n = (name in MaterialCommunityIcons.glyphMap ? name : 'web') as IconName;
-  return <MaterialCommunityIcons name={n} size={size} color={color ?? t.text} />;
+  const outline = `${name}-outline`;
+  const usable = outline in MaterialCommunityIcons.glyphMap ? outline : name;
+  const n = (usable in MaterialCommunityIcons.glyphMap ? usable : 'web') as IconName;
+  return <MaterialCommunityIcons name={n} size={size} color={color ?? t.textDim} />;
 }
 
 export function Screen({
@@ -51,8 +54,7 @@ export function Screen({
           <Icon name="arrow-left" size={24} color={t.text} />
         </Pressable>
       ) : null}
-      <View style={{ flex: 1 }}>
-        <Text style={[styles.title, { color: t.text }]}>{title}</Text>
+      <View style={{ flex: 1, gap: 2 }}>
         {subtitle ? (
           typeof subtitle === 'string' ? (
             <Text style={[styles.subtitle, { color: t.textDim }]}>{subtitle}</Text>
@@ -60,6 +62,7 @@ export function Screen({
             subtitle
           )
         ) : null}
+        <Text style={[styles.title, { color: t.text }]}>{title}</Text>
       </View>
       {right}
     </View>
@@ -89,7 +92,7 @@ export function Screen({
       }
     >
       {header}
-      <View style={{ paddingHorizontal: space(4), gap: space(3) }}>{children}</View>
+      <View style={{ paddingHorizontal: screenPad, gap: space(3) }}>{children}</View>
     </ScrollView>
   );
 }
@@ -106,13 +109,13 @@ export function Card({
   onLongPress?: () => void;
 }) {
   const t = useTheme();
-  const base = [styles.card, { backgroundColor: t.card, borderColor: t.border }, style];
+  const base = [styles.card, { backgroundColor: t.card }, style];
   if (!onPress && !onLongPress) return <View style={base}>{children}</View>;
   return (
     <Pressable
       onPress={onPress}
       onLongPress={onLongPress}
-      android_ripple={{ color: t.accentSoft, foreground: true }}
+      android_ripple={{ color: t.ripple, foreground: true }}
       style={({ pressed }) => [...base, { overflow: 'hidden' }, pressed && { opacity: 0.9 }]}
     >
       {children}
@@ -120,12 +123,140 @@ export function Card({
   );
 }
 
+export function List({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
+  const t = useTheme();
+  return <View style={[styles.list, { backgroundColor: t.card }, style]}>{children}</View>;
+}
+
+export function ListRow({
+  leading,
+  icon,
+  title,
+  subtitle,
+  value,
+  trailing,
+  right,
+  onPress,
+  onLongPress,
+  last = false,
+  danger = false,
+  chevron,
+}: {
+  leading?: ReactNode;
+  icon?: string;
+  title: string;
+  subtitle?: ReactNode;
+  value?: ReactNode;
+  trailing?: ReactNode;
+  right?: ReactNode;
+  onPress?: () => void;
+  onLongPress?: () => void;
+  last?: boolean;
+  danger?: boolean;
+  chevron?: boolean;
+}) {
+  const t = useTheme();
+  const showChevron = chevron ?? (!!onPress && trailing == null && value == null && right == null);
+  const body = (
+    <>
+      {leading}
+      {icon ? <Icon name={icon} size={20} color={danger ? t.bad : t.textDim} /> : null}
+      <View style={{ flex: 1, gap: 1 }}>
+        <Text style={[styles.rowTitle, { color: danger ? t.bad : t.text }]} numberOfLines={1}>
+          {title}
+        </Text>
+        {subtitle != null ? (
+          typeof subtitle === 'string' ? (
+            <Text style={[styles.rowSubtitle, { color: t.textFaint }]} numberOfLines={1}>
+              {subtitle}
+            </Text>
+          ) : (
+            subtitle
+          )
+        ) : null}
+      </View>
+      {right}
+      {trailing != null ? (
+        typeof trailing === 'string' || typeof trailing === 'number' ? (
+          <Text style={[styles.rowValue, { color: t.textDim }]}>{trailing}</Text>
+        ) : (
+          trailing
+        )
+      ) : null}
+      {showChevron ? <Text style={[styles.chevron, { color: t.textFaint }]}>›</Text> : null}
+    </>
+  );
+  if (!onPress && !onLongPress)
+    return (
+      <View style={[styles.row, !last && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.border }]}>
+        {body}
+      </View>
+    );
+  return (
+    <Pressable
+      onPress={onPress}
+      onLongPress={onLongPress}
+      android_ripple={{ color: t.ripple, foreground: true }}
+      style={({ pressed }) => [
+        styles.row,
+        !last && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.border },
+        pressed && { opacity: 0.82 },
+      ]}
+    >
+      {body}
+    </Pressable>
+  );
+}
+
+export type StatItem = { label: string; value: ReactNode; unit?: string };
+
+export function StatStrip({ items, onPress }: { items: StatItem[]; onPress?: () => void }) {
+  const t = useTheme();
+  const body = (
+    <View style={{ flexDirection: 'row' }}>
+      {items.map((it, i) => (
+        <View
+          key={`${it.label}-${i}`}
+          style={[
+            { flex: 1, paddingHorizontal: space(4), gap: 2 },
+            i > 0 && { borderLeftWidth: StyleSheet.hairlineWidth, borderLeftColor: t.border },
+          ]}
+        >
+          <Text style={[styles.statLabel, { color: t.textFaint }]} numberOfLines={1}>
+            {it.label}
+          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 1 }}>
+            {typeof it.value === 'string' || typeof it.value === 'number' ? (
+              <Text style={[styles.statValue, { color: t.text }]}>{it.value}</Text>
+            ) : (
+              it.value
+            )}
+            {it.unit ? <Text style={[styles.statUnit, { color: t.textDim }]}>{it.unit}</Text> : null}
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+  const style = { backgroundColor: t.card, borderRadius: radius.md, paddingVertical: space(3.5), overflow: 'hidden' as const };
+  return onPress ? (
+    <Pressable
+      onPress={onPress}
+      android_ripple={{ color: t.ripple, foreground: true }}
+      style={({ pressed }) => [style, pressed && { opacity: 0.9 }]}
+    >
+      {body}
+    </Pressable>
+  ) : (
+    <View style={style}>{body}</View>
+  );
+}
+
 export function Section({ label, right, children }: { label: string; right?: ReactNode; children?: ReactNode }) {
   const t = useTheme();
   return (
     <View style={{ gap: space(2), marginTop: space(2) }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space(1) }}>
-        <Text style={[styles.section, { color: t.textFaint, flex: 1 }]}>{label.toUpperCase()}</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space(0.5) }}>
+        <Text style={[styles.section, { color: t.textDim, flex: 1 }]}>{label}</Text>
         {right}
       </View>
       {children}
@@ -133,7 +264,7 @@ export function Section({ label, right, children }: { label: string; right?: Rea
   );
 }
 
-type Tone = 'ok' | 'warn' | 'bad' | 'accent' | 'dim';
+export type Tone = 'ok' | 'warn' | 'bad' | 'accent' | 'dim' | 'faint';
 
 function toneColors(t: Theme, tone: Tone) {
   switch (tone) {
@@ -145,18 +276,84 @@ function toneColors(t: Theme, tone: Tone) {
       return [t.bad, t.badSoft];
     case 'accent':
       return [t.accent, t.accentSoft];
+    case 'faint':
+      return [t.textFaint, t.cardAlt];
     default:
       return [t.textDim, t.cardAlt];
   }
 }
 
-export function Pill({ label, tone = 'dim', icon }: { label: string; tone?: Tone; icon?: string }) {
+export function StatusDot({ tone = 'faint', size = 7 }: { tone?: Tone; size?: number }) {
+  const t = useTheme();
+  const [fg] = toneColors(t, tone);
+  return <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: fg }} />;
+}
+
+export function StatusRing({ tone = 'ok', icon }: { tone?: Tone; icon?: string }) {
+  const t = useTheme();
+  const [fg] = toneColors(t, tone);
+  return (
+    <View style={[styles.ring, { borderColor: fg }]}>
+      <Icon name={icon ?? (tone === 'bad' ? 'alert-outline' : tone === 'warn' ? 'alert-outline' : 'check')} size={18} color={fg} />
+    </View>
+  );
+}
+
+export function Pill({
+  label,
+  tone = 'dim',
+  icon,
+  dot = false,
+}: {
+  label: string;
+  tone?: Tone;
+  icon?: string;
+  dot?: boolean;
+}) {
   const t = useTheme();
   const [fg, bg] = toneColors(t, tone);
   return (
     <View style={[styles.pill, { backgroundColor: bg }]}>
-      {icon ? <Icon name={icon} size={13} color={fg} /> : <View style={[styles.dot, { backgroundColor: fg }]} />}
-      <Text style={[styles.pillText, { color: fg }]}>{label}</Text>
+      {icon ? <Icon name={icon} size={13} color={fg} /> : dot ? <StatusDot tone={tone} size={6} /> : null}
+      <Text style={[styles.pillText, { color: fg }]} numberOfLines={1}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+export function Segmented<T extends string>({
+  options,
+  value,
+  onChange,
+  style,
+}: {
+  options: { id: T; label: string; icon?: string }[];
+  value: T;
+  onChange: (id: T) => void;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const t = useTheme();
+  return (
+    <View style={[styles.segmented, { backgroundColor: t.card }, style]} accessibilityRole="tablist">
+      {options.map((o) => {
+        const on = o.id === value;
+        return (
+          <Pressable
+            key={o.id}
+            onPress={() => onChange(o.id)}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: on }}
+            android_ripple={{ color: t.ripple, borderless: false }}
+            style={[styles.segment, on && { backgroundColor: t.cardAlt }]}
+          >
+            {o.icon ? <Icon name={o.icon} size={15} color={on ? t.text : t.textDim} /> : null}
+            <Text style={[styles.segmentText, { color: on ? t.text : t.textDim }]} numberOfLines={1}>
+              {o.label}
+            </Text>
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
@@ -182,27 +379,31 @@ export function Button({
 }) {
   const t = useTheme();
   const map = {
-    primary: [t.accent, t.dark ? '#0B0D12' : '#FFFFFF', 'transparent'],
-    ok: [t.ok, t.dark ? '#06210F' : '#FFFFFF', 'transparent'],
-    danger: [t.badSoft, t.bad, 'transparent'],
-    subtle: [t.cardAlt, t.text, t.border],
-    ghost: ['transparent', t.accent, 'transparent'],
+    primary: [t.accent, t.onAccent],
+    ok: [t.accent, t.onAccent],
+    danger: [t.badSoft, t.bad],
+    subtle: [t.cardAlt, t.text],
+    ghost: ['transparent', t.accent],
   } as const;
-  const [bg, fg, border] = map[kind];
+  const [bg, fg] = map[kind];
   const off = disabled || busy;
   return (
     <Pressable
       onPress={onPress}
       disabled={off}
-      android_ripple={{ color: 'rgba(127,127,127,0.25)', foreground: true }}
+      android_ripple={{ color: t.ripple, foreground: true }}
       style={({ pressed }) => [
         styles.button,
         compact && styles.buttonCompact,
-        { backgroundColor: bg, borderColor: border, opacity: off ? 0.5 : pressed ? 0.85 : 1 },
+        { backgroundColor: bg, opacity: off ? 0.45 : pressed ? 0.85 : 1, overflow: 'hidden' },
         style,
       ]}
     >
-      {busy ? <ActivityIndicator size="small" color={fg} /> : icon ? <Icon name={icon} size={compact ? 16 : 19} color={fg} /> : null}
+      {busy ? (
+        <ActivityIndicator size="small" color={fg} />
+      ) : icon ? (
+        <Icon name={icon} size={compact ? 16 : 19} color={fg} />
+      ) : null}
       <Text style={[styles.buttonText, compact && { fontSize: 13.5 }, { color: fg }]}>{label}</Text>
     </Pressable>
   );
@@ -215,7 +416,7 @@ export function Banner({ tone = 'warn', icon, title, children }: { tone?: Tone; 
     <View style={[styles.banner, { backgroundColor: bg }]}>
       <Icon name={icon ?? (tone === 'bad' ? 'alert-octagon' : tone === 'ok' ? 'check-circle' : 'information')} size={20} color={fg} />
       <View style={{ flex: 1, gap: 4 }}>
-        <Text style={{ color: fg, fontWeight: '700', fontSize: 14.5 }}>{title}</Text>
+        <Text style={{ color: fg, fontWeight: '600', fontSize: 14.5 }}>{title}</Text>
         {typeof children === 'string' ? <Text style={{ color: t.textDim, fontSize: 13.5, lineHeight: 19 }}>{children}</Text> : children}
       </View>
     </View>
@@ -264,7 +465,13 @@ export function KV({ k, v, mono }: { k: string; v: ReactNode; mono?: boolean }) 
     <View style={styles.kv}>
       <Text style={{ color: t.textDim, fontSize: 13.5 }}>{k}</Text>
       {typeof v === 'string' || typeof v === 'number' ? (
-        <Text selectable style={{ color: t.text, fontSize: 13.5, fontFamily: mono ? t.mono : undefined, flexShrink: 1, textAlign: 'right' }}>
+        <Text
+          selectable
+          style={[
+            { color: t.text, fontSize: 13.5, fontFamily: mono ? t.mono : undefined, flexShrink: 1, textAlign: 'right' },
+            !mono && { fontVariant: ['tabular-nums'] },
+          ]}
+        >
           {v}
         </Text>
       ) : (
@@ -274,9 +481,9 @@ export function KV({ k, v, mono }: { k: string; v: ReactNode; mono?: boolean }) 
   );
 }
 
-export function Bar({ pct, color, height = 6 }: { pct: number; color?: string; height?: number }) {
+export function Bar({ pct, color, height = 4 }: { pct: number; color?: string; height?: number }) {
   const t = useTheme();
-  const c = color ?? (pct > 90 ? t.bad : pct > 70 ? t.warn : t.accent);
+  const c = color ?? (pct > 85 ? t.warn : t.text);
   return (
     <View style={{ height, borderRadius: height, backgroundColor: t.cardAlt, overflow: 'hidden' }}>
       <View style={{ width: `${Math.max(0, Math.min(100, pct))}%`, height, borderRadius: height, backgroundColor: c }} />
@@ -285,29 +492,56 @@ export function Bar({ pct, color, height = 6 }: { pct: number; color?: string; h
 }
 
 export const styles = StyleSheet.create({
-  header: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: space(5), paddingBottom: space(4), gap: space(3) },
+  header: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: screenPad, paddingBottom: space(4), gap: space(3) },
   back: { width: 36, height: 40, alignItems: 'center', justifyContent: 'center', marginLeft: -space(2) },
-  title: { fontSize: 30, fontWeight: '800', letterSpacing: -0.6 },
-  subtitle: { fontSize: 14, marginTop: 2 },
-  card: { borderRadius: radius.lg, borderWidth: StyleSheet.hairlineWidth, padding: space(4) },
-  section: { fontSize: 12, fontWeight: '700', letterSpacing: 0.8 },
-  pill: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 3.5, borderRadius: 99, alignSelf: 'flex-start' },
-  pillText: { fontSize: 12, fontWeight: '700' },
-  dot: { width: 6, height: 6, borderRadius: 3 },
+  title: { fontSize: 30, fontWeight: '600', letterSpacing: -0.5 },
+  subtitle: { fontSize: 12.5, marginTop: 2 },
+  card: { borderRadius: radius.md, padding: space(4) },
+  list: { borderRadius: radius.md, overflow: 'hidden' },
+  section: { fontSize: 12.5, fontWeight: '500' },
+  row: {
+    minHeight: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space(3.5),
+    paddingHorizontal: space(4),
+    paddingVertical: space(2.5),
+  },
+  rowTitle: { fontSize: 15, fontWeight: '500' },
+  rowSubtitle: { fontSize: 12.5 },
+  rowValue: { fontSize: 13.5, fontVariant: ['tabular-nums'] },
+  chevron: { fontSize: 20, fontWeight: '400', marginTop: -2 },
+  statLabel: { fontSize: 11.5 },
+  statValue: { fontSize: 20, fontWeight: '500', fontVariant: ['tabular-nums'] },
+  statUnit: { fontSize: 12 },
+  ring: { width: 38, height: 38, borderRadius: 19, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
+  pill: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 4, borderRadius: radius.pill, alignSelf: 'flex-start' },
+  pillText: { fontSize: 12, fontWeight: '500' },
+  segmented: { flexDirection: 'row', padding: 3, borderRadius: radius.sm, gap: 2 },
+  segment: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    height: 36,
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    overflow: 'hidden',
+  },
+  segmentText: { fontSize: 13, fontWeight: '500' },
   button: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
     paddingHorizontal: space(4),
-    height: 46,
-    borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
-    overflow: 'hidden',
+    height: 44,
+    borderRadius: radius.sm,
   },
-  buttonCompact: { height: 36, paddingHorizontal: space(3), borderRadius: radius.sm + 2 },
-  buttonText: { fontSize: 15, fontWeight: '700' },
-  banner: { flexDirection: 'row', gap: space(3), padding: space(4), borderRadius: radius.lg, alignItems: 'flex-start' },
+  buttonCompact: { height: 36, paddingHorizontal: space(3), borderRadius: 10 },
+  buttonText: { fontSize: 15, fontWeight: '600' },
+  banner: { flexDirection: 'row', gap: space(3), padding: space(4), borderRadius: radius.md, alignItems: 'flex-start' },
   empty: { alignItems: 'center', gap: space(2), paddingVertical: space(8), paddingHorizontal: space(6) },
   emptyIcon: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', marginBottom: space(1) },
   kv: { flexDirection: 'row', justifyContent: 'space-between', gap: space(4), paddingVertical: 5 },

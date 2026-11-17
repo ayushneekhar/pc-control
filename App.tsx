@@ -22,7 +22,7 @@ import RoutesScreen from './src/screens/RoutesScreen';
 import ServiceDetailScreen from './src/screens/ServiceDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import VitalsScreen from './src/screens/VitalsScreen';
-import { radius, space, useTheme } from './src/theme';
+import { radius, screenPad, space, useTheme } from './src/theme';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -67,12 +67,14 @@ const linking: LinkingOptions<any> = {
 };
 
 const ICONS: Record<string, [string, string]> = {
-  Routes: ['view-grid', 'view-grid-outline'],
-  Vitals: ['heart-pulse', 'heart-pulse'],
+  Routes: ['home-variant', 'home-variant-outline'],
+  Vitals: ['chart-line', 'chart-line'],
   Root: ['shield-key', 'shield-key-outline'],
-  Health: ['server-network', 'server-network'],
-  Settings: ['tune-variant', 'tune-variant'],
+  Health: ['server', 'server'],
+  Settings: ['cog', 'cog-outline'],
 };
+
+const TAB_LABEL: Record<string, string> = { Routes: 'Home', Vitals: 'Vitals', Root: 'Root', Health: 'Services', Settings: 'Settings' };
 
 export default function App() {
   const t = useTheme();
@@ -144,6 +146,7 @@ export default function App() {
 /** The five tabs (the root stack's first screen). */
 function Tabs() {
   const t = useTheme();
+  const insets = useSafeAreaInsets();
   const store = useRootStore();
   const waiting = pendingList(store).filter((r) => r.status === 'pending').length;
   return (
@@ -155,12 +158,21 @@ function Tabs() {
         // blurred tab stops re-rendering (Root's store updates, etc.) until it is focused again.
         animation: 'none',
         freezeOnBlur: true,
-        tabBarActiveTintColor: t.accent,
+        tabBarLabel: TAB_LABEL[route.name] ?? route.name,
+        tabBarActiveTintColor: t.text,
         tabBarInactiveTintColor: t.textFaint,
-        tabBarStyle: { backgroundColor: t.card, borderTopColor: t.border },
-        tabBarLabelStyle: { fontSize: 11.5, fontWeight: '600' },
-        tabBarIcon: ({ focused, color, size }) => (
-          <Icon name={ICONS[route.name][focused ? 0 : 1]} size={size - 1} color={color} />
+        tabBarStyle: {
+          backgroundColor: t.bg,
+          borderTopColor: t.border,
+          height: 68 + insets.bottom,
+          paddingTop: 6,
+          paddingBottom: insets.bottom,
+        },
+        tabBarLabelStyle: { fontSize: 11, fontWeight: '500' },
+        tabBarIcon: ({ focused }) => (
+          <View style={[st.tabIcon, focused && { backgroundColor: t.accentSoft }]}>
+            <Icon name={ICONS[route.name][focused ? 0 : 1]} size={20} color={focused ? t.accent : t.textFaint} />
+          </View>
         ),
       })}
     >
@@ -169,7 +181,7 @@ function Tabs() {
       <Tab.Screen
         name="Root"
         component={RootScreen}
-        options={{ tabBarBadge: waiting || undefined, tabBarBadgeStyle: { backgroundColor: t.warn, color: '#1A1300', fontWeight: '800' } }}
+        options={{ tabBarBadge: waiting || undefined, tabBarBadgeStyle: { backgroundColor: t.warn, color: t.bg, fontWeight: '600' } }}
       />
       <Tab.Screen name="Health" component={HealthScreen} />
       <Tab.Screen name="Settings" component={SettingsScreen} />
@@ -185,10 +197,10 @@ function OtaPrompt() {
   if (!updateOffered(ota)) return null;
   const busy = ota.phase === 'downloading';
   return (
-    <View style={[st.prompt, { bottom: insets.bottom + 64, backgroundColor: t.card, borderColor: t.border }]}>
+    <View style={[st.prompt, { bottom: insets.bottom + 64, backgroundColor: t.card }]}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
         <Icon name="cloud-download-outline" size={20} color={t.accent} />
-        <Text style={{ color: t.text, fontWeight: '700', fontSize: 15, flex: 1 }}>App update available</Text>
+        <Text style={{ color: t.text, fontWeight: '600', fontSize: 15, flex: 1 }}>App update available</Text>
       </View>
       <Text style={{ color: t.textDim, fontSize: 13 }}>
         {busy
@@ -206,14 +218,14 @@ function OtaPrompt() {
 }
 
 const st = StyleSheet.create({
+  tabIcon: { width: 64, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   prompt: {
     position: 'absolute',
-    left: space(4),
-    right: space(4),
+    left: screenPad,
+    right: screenPad,
     padding: space(4),
     gap: space(3),
-    borderRadius: radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.md,
     elevation: 8,
   },
 });

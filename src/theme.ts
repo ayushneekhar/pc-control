@@ -11,6 +11,7 @@ export type Theme = {
   textFaint: string;
   accent: string;
   accentSoft: string;
+  onAccent: string;
   ok: string;
   okSoft: string;
   warn: string;
@@ -18,51 +19,78 @@ export type Theme = {
   bad: string;
   badSoft: string;
   mono: string;
+  /** Dimmed backdrop behind sheets and dialogs. */
+  overlay: string;
+  /** Feed/camera surfaces and their overlays (always dark, both themes). */
+  media: string;
+  onMedia: string;
+  onMediaDim: string;
+  mediaChip: string;
+  mediaChipBorder: string;
+  /** Neutral press highlight. */
+  ripple: string;
 };
 
 const dark: Theme = {
   dark: true,
-  bg: '#0B0D12',
-  card: '#151922',
-  cardAlt: '#1C2130',
-  border: '#262C3B',
-  text: '#ECEFF5',
-  textDim: '#A3ABBD',
-  textFaint: '#6B7387',
-  accent: '#7C9CFF',
-  accentSoft: 'rgba(124,156,255,0.14)',
-  ok: '#4ADE80',
-  okSoft: 'rgba(74,222,128,0.13)',
-  warn: '#FBBF24',
-  warnSoft: 'rgba(251,191,36,0.14)',
-  bad: '#F87171',
-  badSoft: 'rgba(248,113,113,0.14)',
+  bg: '#000000',
+  card: '#141414',
+  cardAlt: '#1F1F1F',
+  border: '#262626',
+  text: '#F5F5F5',
+  textDim: '#A8A8A8',
+  textFaint: '#707070',
+  accent: '#3DDC97',
+  accentSoft: 'rgba(61,220,151,0.16)',
+  onAccent: '#000000',
+  ok: '#3DDC97',
+  okSoft: 'rgba(61,220,151,0.16)',
+  warn: '#F2B544',
+  warnSoft: 'rgba(242,181,68,0.15)',
+  bad: '#F2685A',
+  badSoft: 'rgba(242,104,90,0.15)',
   mono: 'monospace',
+  overlay: 'rgba(0,0,0,0.55)',
+  media: '#000000',
+  onMedia: '#FFFFFF',
+  onMediaDim: 'rgba(255,255,255,0.72)',
+  mediaChip: 'rgba(0,0,0,0.55)',
+  mediaChipBorder: 'rgba(255,255,255,0.18)',
+  ripple: 'rgba(255,255,255,0.08)',
 };
 
 const light: Theme = {
   dark: false,
-  bg: '#F4F5F8',
+  bg: '#F4F4F4',
   card: '#FFFFFF',
-  cardAlt: '#F0F2F7',
-  border: '#E3E6EE',
-  text: '#121620',
-  textDim: '#525B70',
-  textFaint: '#8A92A6',
-  accent: '#3D63E0',
-  accentSoft: 'rgba(61,99,224,0.10)',
-  ok: '#15A34A',
-  okSoft: 'rgba(21,163,74,0.10)',
-  warn: '#C27C00',
-  warnSoft: 'rgba(194,124,0,0.11)',
-  bad: '#DC2626',
-  badSoft: 'rgba(220,38,38,0.09)',
+  cardAlt: '#EBEBEB',
+  border: '#E2E2E2',
+  text: '#111111',
+  textDim: '#555555',
+  textFaint: '#8A8A8A',
+  accent: '#159A63',
+  accentSoft: 'rgba(21,154,99,0.12)',
+  onAccent: '#000000',
+  ok: '#159A63',
+  okSoft: 'rgba(21,154,99,0.12)',
+  warn: '#B87800',
+  warnSoft: 'rgba(184,120,0,0.14)',
+  bad: '#D2392B',
+  badSoft: 'rgba(210,57,43,0.12)',
   mono: 'monospace',
+  overlay: 'rgba(0,0,0,0.45)',
+  media: '#000000',
+  onMedia: '#FFFFFF',
+  onMediaDim: 'rgba(255,255,255,0.72)',
+  mediaChip: 'rgba(0,0,0,0.55)',
+  mediaChipBorder: 'rgba(255,255,255,0.18)',
+  ripple: 'rgba(0,0,0,0.08)',
 };
 
 export function useTheme(): Theme {
   return useColorScheme() === 'light' ? light : dark;
 }
 
-export const radius = { sm: 8, md: 14, lg: 20 };
+export const radius = { sm: 12, md: 16, lg: 16, pill: 999 };
 export const space = (n: number) => n * 4;
+export const screenPad = 18;

@@ -1,7 +1,7 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useRef, useState } from 'react';
 import { AppState, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
-import { Banner, Bar, Card, Icon, Mono, Screen, Section, StatusDot } from '../components/ui';
+import { Banner, Bar, Card, Icon, List, ListRow, Mono, Screen, Section, StatusDot } from '../components/ui';
 import { get, Proc, Vitals } from '../lib/api';
 import { bytes, rate } from '../lib/format';
 import { space, useTheme } from '../theme';
@@ -61,7 +61,14 @@ function Metric({
   return (
     <Card style={{ flex: 1, gap: space(2), padding: space(3.5) }}>
       <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500' }}>{label}</Text>
-      <Text style={{ color: valueColor ?? t.text, fontSize: 22, fontWeight: '500', letterSpacing: -0.3, fontVariant: ['tabular-nums'] }}>{value}</Text>
+      <Text
+        style={{ color: valueColor ?? t.text, fontSize: 22, fontWeight: '500', letterSpacing: -0.3, fontVariant: ['tabular-nums'] }}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.7}
+      >
+        {value}
+      </Text>
       {pct != null ? <Bar pct={pct} color={color} height={5} /> : null}
       {sub ? (
         <Text style={{ color: t.textFaint, fontSize: 12 }} numberOfLines={1}>
@@ -172,12 +179,10 @@ export default function VitalsScreen() {
     }, []),
   );
 
-  const cpuTemp = v?.temps?.cpu;
   const nics = Object.entries(v?.nics ?? {});
   const rx = nics.reduce((a, [, n]) => a + n.rx, 0);
   const tx = nics.reduce((a, [, n]) => a + n.tx, 0);
   const activeNics = nics.filter(([, n]) => n.rx + n.tx > 1024);
-  const otherTemps = Object.entries(v?.temps ?? {}).filter(([k, c]) => k !== 'cpu' && c != null);
   const allProcs = v?.procs ?? [];
   const query = q.trim().toLowerCase();
   const filtered = allProcs.filter(
@@ -185,6 +190,9 @@ export default function VitalsScreen() {
   );
   const sorted = filtered.slice().sort((a, b) => sortD * procCompare(a, b, sortK));
   const shown = sorted.slice(0, query ? 100 : 40);
+  const temps = Object.entries(v?.temps ?? {})
+    .filter(([, c]) => c != null)
+    .sort(([a], [b]) => (a === 'cpu' ? -1 : b === 'cpu' ? 1 : a.localeCompare(b))) as [string, number][];
 
   const chooseSort = (k: ProcSort) => {
     if (k === sortK) setSortD((d) => (d === -1 ? 1 : -1));
@@ -215,7 +223,7 @@ export default function VitalsScreen() {
             <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: space(3) }}>
               <View style={{ flex: 1 }}>
                 <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500' }}>CPU</Text>
-                <Text style={{ color: t.text, fontSize: 40, fontWeight: '500', letterSpacing: -1, fontVariant: ['tabular-nums'] }}>
+                <Text style={{ color: t.text, fontSize: 44, fontWeight: '500', letterSpacing: -1.5, fontVariant: ['tabular-nums'] }}>
                   {Math.round(v.cpu)}
                   <Text style={{ fontSize: 20, color: t.textDim }}>%</Text>
                 </Text>
@@ -247,23 +255,18 @@ export default function VitalsScreen() {
           <View style={st.row}>
             <Metric
               label="Memory"
-              value={`${Math.round(v.mem.pct)}%`}
+              value={`${(v.mem.used / 1024 ** 3).toFixed(1)} / ${(v.mem.total / 1024 ** 3).toFixed(0)} GB`}
               pct={v.mem.pct}
               color={t.text}
-              sub={`${bytes(v.mem.used)} / ${bytes(v.mem.total)} · swap ${Math.round(v.swap.pct)}%`}
+              sub={`${Math.round(v.mem.pct)}% used`}
               values={hist.map((h) => h.mem)}
             />
             <Metric
-              label="CPU temp"
-              value={cpuTemp == null ? '–' : `${Math.round(cpuTemp)}°C`}
-              valueColor={tempColor(t, cpuTemp)}
-              color={tempColor(t, cpuTemp)}
-              sub={
-                otherTemps.length
-                  ? otherTemps.map(([k, c]) => `${k} ${Math.round(c as number)}°`).join(' · ')
-                  : 'No other sensors'
-              }
-              values={hist.map((h) => h.temp)}
+              label="Swap"
+              value={`${(v.swap.used / 1024 ** 3).toFixed(1)} / ${(v.swap.total / 1024 ** 3).toFixed(0)} GB`}
+              pct={v.swap.pct}
+              color={t.text}
+              sub={`${Math.round(v.swap.pct)}% used`}
             />
           </View>
 
@@ -273,22 +276,59 @@ export default function VitalsScreen() {
               value={v.gpu ? `${Math.round(v.gpu.util)}%` : '–'}
               pct={v.gpu?.util}
               color={t.textDim}
-              sub={
-                v.gpu
-                  ? `${Math.round(v.gpu.temp)}° · ${(v.gpu.mem_used / 1024).toFixed(1)}/${(v.gpu.mem_total / 1024).toFixed(0)} GB · ${v.gpu.power.toFixed(0)} W`
-                  : 'Not available'
-              }
+              sub={v.gpu ? `${Math.round(v.gpu.temp)}° · ${v.gpu.power.toFixed(0)} W` : 'Not available'}
               values={hist.map((h) => h.gpu)}
             />
             <Metric
-              label="Battery"
-              value={v.bat ? `${Math.round(v.bat.pct)}%` : '–'}
-              pct={v.bat?.pct}
-              color={v.bat && v.bat.pct < 20 && !v.bat.plugged ? t.bad : t.text}
-              sub={v.bat ? (v.bat.plugged ? 'Plugged in' : 'On battery') : 'No battery'}
-              footer={`Disk read ${rate(v.disk_io.r)} · write ${rate(v.disk_io.w)}`}
+              label="VRAM"
+              value={
+                v.gpu
+                  ? `${(v.gpu.mem_used / 1024).toFixed(1)} / ${(v.gpu.mem_total / 1024).toFixed(0)} GB`
+                  : '–'
+              }
+              pct={v.gpu && v.gpu.mem_total ? (v.gpu.mem_used / v.gpu.mem_total) * 100 : undefined}
+              color={t.textDim}
+              sub={v.gpu && v.gpu.mem_total ? `${Math.round((v.gpu.mem_used / v.gpu.mem_total) * 100)}% used` : 'Not available'}
             />
           </View>
+
+          {temps.length ? (
+            <Section label="Temperatures">
+              <List>
+                {temps.map(([name, c], i) => (
+                  <ListRow
+                    key={name}
+                    title={name === 'cpu' ? 'CPU' : name === 'gpu' ? 'GPU' : name === 'nvme' ? 'NVMe' : name}
+                    trailing={
+                      <Text
+                        style={{
+                          color: tempColor(t, c),
+                          fontSize: 15,
+                          fontWeight: '500',
+                          fontVariant: ['tabular-nums'],
+                        }}
+                      >
+                        {Math.round(c)}°
+                      </Text>
+                    }
+                    last={i === temps.length - 1}
+                  />
+                ))}
+              </List>
+            </Section>
+          ) : null}
+
+          <Section label="Power">
+            <List>
+              <ListRow
+                title="Battery"
+                subtitle={v.bat ? (v.bat.plugged ? 'Plugged in' : 'On battery') : 'No battery'}
+                trailing={v.bat ? `${Math.round(v.bat.pct)}%` : '–'}
+                last={false}
+              />
+              <ListRow title="Disk I/O" trailing={`↓ ${rate(v.disk_io.r)} · ↑ ${rate(v.disk_io.w)}`} last />
+            </List>
+          </Section>
 
           <Section label="Network">
             <Card style={{ gap: space(3) }}>
@@ -428,7 +468,7 @@ export default function VitalsScreen() {
                 </Card>
               )
             ) : (
-              <Text style={{ color: t.textFaint, paddingHorizontal: space(1), fontSize: 13 }}>
+              <Text style={{ color: t.textFaint, fontSize: 13 }}>
                 Off. Sampling processes costs a little CPU on the laptop.
               </Text>
             )}

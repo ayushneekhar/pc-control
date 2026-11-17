@@ -227,11 +227,27 @@ export function StatStrip({ items, onPress }: { items: StatItem[]; onPress?: () 
           </Text>
           <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 1 }}>
             {typeof it.value === 'string' || typeof it.value === 'number' ? (
-              <Text style={[styles.statValue, { color: t.text }]}>{it.value}</Text>
+              <Text
+                style={[styles.statValue, { color: t.text }]}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.7}
+              >
+                {it.value}
+              </Text>
             ) : (
               it.value
             )}
-            {it.unit ? <Text style={[styles.statUnit, { color: t.textDim }]}>{it.unit}</Text> : null}
+            {it.unit ? (
+              <Text
+                style={[styles.statUnit, { color: t.textDim }]}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.7}
+              >
+                {it.unit}
+              </Text>
+            ) : null}
           </View>
         </View>
       ))}
@@ -493,7 +509,7 @@ export function Bar({ pct, color, height = 4 }: { pct: number; color?: string; h
 
 export const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: screenPad, paddingBottom: space(4), gap: space(3) },
-  back: { width: 36, height: 40, alignItems: 'center', justifyContent: 'center', marginLeft: -space(2) },
+  back: { width: 36, height: 40, alignItems: 'center', justifyContent: 'center' },
   title: { fontSize: 30, fontWeight: '600', letterSpacing: -0.5 },
   subtitle: { fontSize: 12.5, marginTop: 2 },
   card: { borderRadius: radius.md, padding: space(4) },
@@ -510,7 +526,7 @@ export const styles = StyleSheet.create({
   rowTitle: { fontSize: 15, fontWeight: '500' },
   rowSubtitle: { fontSize: 12.5 },
   rowValue: { fontSize: 13.5, fontVariant: ['tabular-nums'] },
-  chevron: { fontSize: 20, fontWeight: '400', marginTop: -2 },
+  chevron: { fontSize: 20, fontWeight: '400' },
   statLabel: { fontSize: 11.5 },
   statValue: { fontSize: 20, fontWeight: '500', fontVariant: ['tabular-nums'] },
   statUnit: { fontSize: 12 },

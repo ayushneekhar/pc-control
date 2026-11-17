@@ -10,7 +10,7 @@ import { clock, duration } from '../lib/format';
 import { pendingList, reconnectRootStore, useRootStore } from '../lib/rootStore';
 import { showArg } from '../lib/rootPayload';
 import { useNow } from '../lib/useNow';
-import { radius, space, useTheme } from '../theme';
+import { radius, screenPad, space, useTheme } from '../theme';
 
 const STATUS: Record<RootRequest['status'], { label: string; tone: 'ok' | 'warn' | 'bad' | 'accent' | 'dim'; icon: string }> = {
   pending: { label: 'Waiting', tone: 'warn', icon: 'clock-outline' },
@@ -156,7 +156,7 @@ function Detail({ id, onClose, decision }: { id: string | null; onClose: () => v
         <Pressable style={{ flex: 1 }} onPress={onClose} />
         <View style={[st.sheet, { backgroundColor: t.bg, paddingBottom: insets.bottom + space(4) }]}>
           <View style={[st.grabber, { backgroundColor: t.border }]} />
-          <ScrollView contentContainerStyle={{ gap: space(3), padding: space(4) }}>
+          <ScrollView contentContainerStyle={{ gap: space(3), paddingHorizontal: screenPad, paddingVertical: space(4) }}>
             {!r && !err ? <Text style={{ color: t.textDim }}>Loading…</Text> : null}
             {err && !r ? <Banner tone="bad" title="Couldn't load this request">{err}</Banner> : null}
             {r ? (
@@ -189,7 +189,7 @@ function Detail({ id, onClose, decision }: { id: string | null; onClose: () => v
               </>
             ) : null}
           </ScrollView>
-          <View style={{ paddingHorizontal: space(4) }}>
+          <View style={{ paddingHorizontal: screenPad }}>
             <Button label="Close" kind="subtle" onPress={onClose} />
           </View>
         </View>
@@ -311,8 +311,8 @@ export default function RootScreen() {
         </Section>
 
         <Section label="History">
-          {histErr ? <Text style={{ color: t.textDim, paddingHorizontal: space(1) }}>{histErr}</Text> : null}
-          {history && history.length === 0 ? <Text style={{ color: t.textFaint, paddingHorizontal: space(1) }}>No commands yet.</Text> : null}
+          {histErr ? <Text style={{ color: t.textDim, }}>{histErr}</Text> : null}
+          {history && history.length === 0 ? <Text style={{ color: t.textFaint, paddingHorizontal: space(2) }}>No commands yet.</Text> : null}
           {history && history.length > 0 ? (
             <List>
               {history.map((h, i) => (

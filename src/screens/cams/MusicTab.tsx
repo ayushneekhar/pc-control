@@ -4,7 +4,7 @@
 // nothing newer was drawn, and a command's answer takes its sequence number when it arrives.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { Banner, Button, Icon } from '../../components/ui';
+import { Banner, Button, Icon, List, ListRow, Section } from '../../components/ui';
 import { serverUrl } from '../../lib/api';
 import { radius, space, useTheme } from '../../theme';
 
@@ -248,7 +248,7 @@ export function MusicTab({
         />
         <Button label="Play" icon="play" busy={playing} disabled={!url.trim()} onPress={() => play(url.trim())} />
       </View>
-      <Text style={{ color: t.textFaint, fontSize: 12, marginTop: -space(1) }}>Or in YouTube: Share → PC Control.</Text>
+      <Text style={{ color: t.textFaint, fontSize: 12 }}>Or in YouTube: Share → PC Control.</Text>
       {err ? <Banner tone="bad" title={err} /> : null}
 
       <View style={[st_.card, { backgroundColor: t.card }]}>
@@ -316,26 +316,27 @@ export function MusicTab({
       </View>
 
       {recent.length ? (
-        <View style={{ gap: 6 }}>
-          <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500', marginLeft: 2 }}>Recent</Text>
-          {recent.map((r) => {
-            const cur = active && s?.url === r.url;
-            return (
-              <Pressable
-                key={r.id || r.url}
-                onPress={() => play(r.url)}
-                android_ripple={{ color: t.ripple }}
-                style={[st_.rec, { backgroundColor: cur ? t.accentSoft : t.card }]}
-              >
-                <Icon name={cur ? 'volume-high' : 'play'} size={16} color={cur ? t.accent : t.textDim} />
-                <Text style={{ color: t.text, fontSize: 14.5, flex: 1 }} numberOfLines={1}>
-                  {r.title || r.url}
-                </Text>
-                {r.live ? <Text style={{ color: t.accent, fontSize: 11, fontWeight: '500' }}>Live</Text> : null}
-              </Pressable>
-            );
-          })}
-        </View>
+        <Section label="Recent">
+          <List>
+            {recent.map((r, i) => {
+              const cur = active && s?.url === r.url;
+              return (
+                <ListRow
+                  key={r.id || r.url}
+                  leading={<Icon name={cur ? 'volume-high' : 'play'} size={20} color={cur ? t.accent : t.textDim} />}
+                  title={r.title || r.url}
+                  trailing={
+                    r.live ? (
+                      <Text style={{ color: t.accent, fontSize: 11, fontWeight: '500' }}>Live</Text>
+                    ) : undefined
+                  }
+                  last={i === recent.length - 1}
+                  onPress={() => play(r.url)}
+                />
+              );
+            })}
+          </List>
+        </Section>
       ) : null}
     </View>
   );
@@ -371,7 +372,7 @@ function VolumeSlider({ value, disabled, onChange }: { value: number; disabled: 
         style={{
           position: 'absolute',
           left: `${pct}%`,
-          marginLeft: -10,
+          transform: [{ translateX: -10 }],
           width: 20,
           height: 20,
           borderRadius: 10,
@@ -387,13 +388,4 @@ const st_ = StyleSheet.create({
   card: { gap: 10, padding: space(4), borderRadius: radius.md },
   dot: { width: 8, height: 8, borderRadius: 4 },
   mute: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  rec: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    minHeight: 48,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: radius.sm,
-  },
 });

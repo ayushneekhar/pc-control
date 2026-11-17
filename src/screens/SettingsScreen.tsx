@@ -372,8 +372,8 @@ function NotificationPrefs() {
     />
   );
   return (
-    <Card style={{ gap: space(1), paddingHorizontal: space(3) }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3), paddingHorizontal: space(1), marginBottom: space(2) }}>
+    <Card style={{ gap: space(1), paddingHorizontal: 0 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3), paddingHorizontal: space(4), marginBottom: space(2) }}>
         <Icon name="bell-cog-outline" size={22} color={t.accent} />
         <View style={{ flex: 1 }}>
           <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Where notifications go</Text>
@@ -422,7 +422,7 @@ function NotificationPrefs() {
         </View>
       ))}
       {!s.masters.telegram || !s.masters.app ? (
-        <Text style={{ color: t.textFaint, fontSize: 12.5, paddingHorizontal: space(1), paddingTop: space(2) }}>
+        <Text style={{ color: t.textFaint, fontSize: 12.5, paddingHorizontal: space(4), paddingTop: space(2) }}>
           A channel that is all off ignores its per-category switches (shown greyed).
         </Text>
       ) : null}
@@ -660,11 +660,11 @@ export default function SettingsScreen() {
 
 const st = StyleSheet.create({
   code: { borderRadius: radius.md, paddingVertical: space(4), alignItems: 'center' },
-  masters: { flexDirection: 'row', borderRadius: radius.md, padding: space(2), gap: space(2), marginBottom: space(2) },
+  masters: { flexDirection: 'row', borderRadius: radius.md, padding: space(2), gap: space(2), marginHorizontal: space(3), marginBottom: space(2) },
   master: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space(2), paddingLeft: space(1) },
-  colHead: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: space(1), paddingBottom: space(1), borderBottomWidth: StyleSheet.hairlineWidth },
+  colHead: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: space(4), paddingBottom: space(1), borderBottomWidth: StyleSheet.hairlineWidth },
   col: { width: 64, textAlign: 'center', fontSize: 11, fontWeight: '500' },
   colCell: { width: 64, alignItems: 'center' },
-  catRow: { flexDirection: 'row', alignItems: 'center', gap: space(3), paddingVertical: space(3), paddingHorizontal: space(1) },
+  catRow: { flexDirection: 'row', alignItems: 'center', gap: space(3), paddingVertical: space(3), paddingHorizontal: space(4) },
   input: { borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: space(3), height: 46, fontSize: 14 },
 });

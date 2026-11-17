@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Modal, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Banner, Button, Card, Icon, Mono, Screen, Section, Segmented } from '../components/ui';
+import { Banner, Button, Card, Icon, List, ListRow, Mono, Screen, Section, Segmented } from '../components/ui';
 import {
   AgentAction,
   AgentRule,
@@ -22,7 +22,7 @@ import {
   updateAgentRule,
   urlFromMatch,
 } from '../lib/agentview';
-import { radius, space, useTheme } from '../theme';
+import { radius, screenPad, space, useTheme } from '../theme';
 
 type Params = { url?: string; ruleId?: string };
 
@@ -313,20 +313,26 @@ export default function AgentRuleScreen() {
       {!loading && !rule && params.url ? (
         <>
           <Section label="Action">
-            {ACTIONS.map((a) => (
-              <Card key={a.id} onPress={() => chooseAction(a.id)} style={{ gap: space(2) }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-                  <Icon name={a.icon} size={22} color={t.textDim} />
-                  <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={{ color: t.text, fontSize: 15.5, fontWeight: '500' }}>{a.title}</Text>
-                    <Text style={{ color: t.textDim, fontSize: 12.5, lineHeight: 18 }}>{a.body}</Text>
-                  </View>
-                  {busy === a.id ? <Icon name="progress-clock" size={20} color={t.textFaint} /> : <Icon name="chevron-right" size={22} color={t.textFaint} />}
-                </View>
-              </Card>
-            ))}
+            <List>
+              {ACTIONS.map((a, i) => (
+                <ListRow
+                  key={a.id}
+                  icon={a.icon}
+                  title={a.title}
+                  subtitle={a.body}
+                  trailing={
+                    busy === a.id ? (
+                      <Icon name="progress-clock" size={20} color={t.textFaint} />
+                    ) : undefined
+                  }
+                  chevron={busy !== a.id}
+                  last={i === ACTIONS.length - 1}
+                  onPress={() => chooseAction(a.id)}
+                />
+              ))}
+            </List>
           </Section>
-          <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18, paddingHorizontal: space(1) }}>
+          <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
             The rule is created immediately with agentview&apos;s from-url match and inserted above the others.
           </Text>
         </>
@@ -469,56 +475,63 @@ export default function AgentRuleScreen() {
               {draft.replacements.length === 0 ? (
                 <Text style={{ color: t.textDim, fontSize: 13 }}>No pairs yet.</Text>
               ) : null}
-              {draft.replacements.map((pair, i) => (
-                <Card key={i} style={{ gap: space(3) }}>
-                  <View style={{ gap: 6 }}>
-                    <Text style={{ color: t.textDim, fontSize: 12.5 }}>Find</Text>
-                    <TextInput
-                      value={pair.find}
-                      onChangeText={(v) =>
-                        patch({ replacements: draft.replacements.map((p, j) => (j === i ? { ...p, find: v } : p)) })
-                      }
-                      placeholder="Text or regex"
-                      placeholderTextColor={t.textFaint}
-                      style={[typography, { fontFamily: t.mono, fontSize: 12.5 }]}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                    />
-                  </View>
-                  <View style={{ gap: 6 }}>
-                    <Text style={{ color: t.textDim, fontSize: 12.5 }}>Replace with</Text>
-                    <TextInput
-                      value={pair.replace}
-                      onChangeText={(v) =>
-                        patch({ replacements: draft.replacements.map((p, j) => (j === i ? { ...p, replace: v } : p)) })
-                      }
-                      placeholder="Replacement"
-                      placeholderTextColor={t.textFaint}
-                      style={[typography, { fontFamily: t.mono, fontSize: 12.5 }]}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                    />
-                  </View>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
-                    <Text style={{ color: t.textDim, fontSize: 13, flex: 1 }}>Regular expression</Text>
-                    <Switch
-                      value={pair.regex}
-                      onValueChange={(v) =>
-                        patch({ replacements: draft.replacements.map((p, j) => (j === i ? { ...p, regex: v } : p)) })
-                      }
-                      trackColor={{ true: t.accent, false: t.border }}
-                      thumbColor={t.onMedia}
-                    />
-                    <Pressable
-                      onPress={() => patch({ replacements: draft.replacements.filter((_, j) => j !== i) })}
-                      hitSlop={8}
-                      accessibilityLabel="Remove pair"
+              {draft.replacements.length ? (
+                <List>
+                  {draft.replacements.map((pair, i) => (
+                    <View
+                      key={i}
+                      style={[st.formRow, i > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.border }]}
                     >
-                      <Icon name="trash-can-outline" size={20} color={t.bad} />
-                    </Pressable>
-                  </View>
-                </Card>
-              ))}
+                      <View style={{ gap: 6 }}>
+                        <Text style={{ color: t.textDim, fontSize: 12.5 }}>Find</Text>
+                        <TextInput
+                          value={pair.find}
+                          onChangeText={(v) =>
+                            patch({ replacements: draft.replacements.map((p, j) => (j === i ? { ...p, find: v } : p)) })
+                          }
+                          placeholder="Text or regex"
+                          placeholderTextColor={t.textFaint}
+                          style={[typography, { fontFamily: t.mono, fontSize: 12.5 }]}
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                        />
+                      </View>
+                      <View style={{ gap: 6 }}>
+                        <Text style={{ color: t.textDim, fontSize: 12.5 }}>Replace with</Text>
+                        <TextInput
+                          value={pair.replace}
+                          onChangeText={(v) =>
+                            patch({ replacements: draft.replacements.map((p, j) => (j === i ? { ...p, replace: v } : p)) })
+                          }
+                          placeholder="Replacement"
+                          placeholderTextColor={t.textFaint}
+                          style={[typography, { fontFamily: t.mono, fontSize: 12.5 }]}
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                        />
+                      </View>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
+                        <Text style={{ color: t.textDim, fontSize: 13, flex: 1 }}>Regular expression</Text>
+                        <Switch
+                          value={pair.regex}
+                          onValueChange={(v) =>
+                            patch({ replacements: draft.replacements.map((p, j) => (j === i ? { ...p, regex: v } : p)) })
+                          }
+                          trackColor={{ true: t.accent, false: t.border }}
+                          thumbColor={t.onMedia}
+                        />
+                        <Pressable
+                          onPress={() => patch({ replacements: draft.replacements.filter((_, j) => j !== i) })}
+                          hitSlop={8}
+                          accessibilityLabel="Remove pair"
+                        >
+                          <Icon name="trash-can-outline" size={20} color={t.bad} />
+                        </Pressable>
+                      </View>
+                    </View>
+                  ))}
+                </List>
+              ) : null}
               <Button
                 label="Add pair"
                 icon="plus"
@@ -533,26 +546,33 @@ export default function AgentRuleScreen() {
               {draft.selectors.length === 0 ? (
                 <Text style={{ color: t.textDim, fontSize: 13 }}>No selectors yet.</Text>
               ) : null}
-              {draft.selectors.map((sel, i) => (
-                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
-                  <TextInput
-                    value={sel}
-                    onChangeText={(v) => patch({ selectors: draft.selectors.map((s, j) => (j === i ? v : s)) })}
-                    placeholder=".ad-banner"
-                    placeholderTextColor={t.textFaint}
-                    style={[typography, { flex: 1, fontFamily: t.mono, fontSize: 12.5 }]}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                  />
-                  <Pressable
-                    onPress={() => patch({ selectors: draft.selectors.filter((_, j) => j !== i) })}
-                    hitSlop={8}
-                    accessibilityLabel="Remove selector"
-                  >
-                    <Icon name="trash-can-outline" size={20} color={t.bad} />
-                  </Pressable>
-                </View>
-              ))}
+              {draft.selectors.length ? (
+                <List>
+                  {draft.selectors.map((sel, i) => (
+                    <View
+                      key={i}
+                      style={[st.selectorRow, i > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.border }]}
+                    >
+                      <TextInput
+                        value={sel}
+                        onChangeText={(v) => patch({ selectors: draft.selectors.map((s, j) => (j === i ? v : s)) })}
+                        placeholder=".ad-banner"
+                        placeholderTextColor={t.textFaint}
+                        style={[typography, { flex: 1, fontFamily: t.mono, fontSize: 12.5 }]}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                      />
+                      <Pressable
+                        onPress={() => patch({ selectors: draft.selectors.filter((_, j) => j !== i) })}
+                        hitSlop={8}
+                        accessibilityLabel="Remove selector"
+                      >
+                        <Icon name="trash-can-outline" size={20} color={t.bad} />
+                      </Pressable>
+                    </View>
+                  ))}
+                </List>
+              ) : null}
               <Button label="Add selector" icon="plus" kind="subtle" onPress={() => patch({ selectors: [...draft.selectors, ''] })} />
             </Section>
           ) : null}
@@ -607,7 +627,7 @@ export default function AgentRuleScreen() {
                 flexDirection: 'row',
                 alignItems: 'center',
                 gap: space(2),
-                paddingHorizontal: space(4),
+                paddingHorizontal: screenPad,
                 paddingVertical: space(3),
                 borderBottomWidth: StyleSheet.hairlineWidth,
                 borderBottomColor: t.border,
@@ -661,7 +681,7 @@ export default function AgentRuleScreen() {
             <View
               style={{
                 gap: space(2),
-                paddingHorizontal: space(4),
+                paddingHorizontal: screenPad,
                 paddingTop: space(3),
                 paddingBottom: insets.bottom + space(3),
                 borderTopWidth: StyleSheet.hairlineWidth,
@@ -683,6 +703,8 @@ export default function AgentRuleScreen() {
 }
 
 const st = StyleSheet.create({
-  previewClose: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', marginLeft: -space(2) },
+  previewClose: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
   radioRow: { flexDirection: 'row', alignItems: 'center', gap: space(3), padding: space(3), borderRadius: radius.md },
+  formRow: { gap: space(3), padding: space(4) },
+  selectorRow: { flexDirection: 'row', alignItems: 'center', gap: space(2), paddingHorizontal: space(4), paddingVertical: space(3) },
 });

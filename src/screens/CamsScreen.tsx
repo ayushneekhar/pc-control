@@ -35,13 +35,13 @@ import { serverUrl } from '../lib/api';
 import { CamLink, LinkKind, LinkState } from '../lib/cams/link';
 import { CAM_MIC_STREAM, CamId, CAMS, HD_STREAM, HD_WAIT_MS, LAPTOP_MIC_STREAM, NAMES, TALK_STREAM, WEB_PATH } from '../lib/cams/config';
 import { parseSightingTarget } from '../lib/cams/replay';
-import { radius, space, useTheme } from '../theme';
+import { radius, screenPad, space, useTheme } from '../theme';
 import { MusicTab } from './cams/MusicTab';
 import { ReplayTab } from './cams/ReplayTab';
 
 export type CamsTab = 'live' | 'replay' | 'music';
 export type CamsParams =
-  | { tab?: CamsTab; share?: string; shareId?: number; cam?: string; ts?: string | number }
+  | { tab?: CamsTab; tabRequest?: number; share?: string; shareId?: number; cam?: string; ts?: string | number }
   | undefined;
 const TABS: { id: CamsTab; label: string; icon: string }[] = [
   { id: 'live', label: 'Live', icon: 'access-point' },
@@ -492,6 +492,11 @@ export default function CamsScreen() {
   const [hd] = useState(hdSupport);
   const webrtcOk = !!NativeModules.WebRTCModule;
   const [tab, setTab] = useState<CamsTab>(params?.tab ?? 'live');
+  useEffect(() => {
+    if (!params?.tab || !params?.tabRequest) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTab(params.tab);
+  }, [params?.tab, params?.tabRequest]);
   // a YouTube link shared into the app (App.tsx navigates here with it): the Music tab plays it once
   const [shared, setShared] = useState<string | null>(params?.share ?? null);
   const shareId = params?.shareId;
@@ -778,7 +783,7 @@ export default function CamsScreen() {
   const talkSecs = talkSince ? Math.max(0, Math.floor((now - talkSince) / 1000)) : 0;
   const talkLive = mic.state.phase === 'live';
   const big = focus ? links[focus].state : null;
-  const thumbW = (win.width - space(4) * 2 - space(2.5)) / 2;
+  const thumbW = (win.width - screenPad * 2 - space(2.5)) / 2;
   const showBar = tab === 'live' || listen || talk !== 'off';
 
   return (
@@ -818,7 +823,7 @@ export default function CamsScreen() {
 
       <ScrollView
         keyboardShouldPersistTaps="handled"
-        contentContainerStyle={{ padding: space(4), paddingBottom: (showBar ? 110 : space(6)) + insets.bottom, gap: space(3) }}
+        contentContainerStyle={{ paddingHorizontal: screenPad, paddingVertical: space(4), paddingBottom: (showBar ? 110 : space(6)) + insets.bottom, gap: space(3) }}
       >
         {tab === 'replay' ? (
           <ReplayTab
@@ -855,7 +860,6 @@ export default function CamsScreen() {
                   disabled={!det.det || det.busy}
                   trackColor={{ true: t.accent, false: t.border }}
                   thumbColor={t.onMedia}
-                  style={{ marginVertical: -8 }}
                 />
               </Pressable>
               <Text style={{ color: t.textDim, fontSize: 12.5, flex: 1 }} numberOfLines={2}>
@@ -976,7 +980,7 @@ function StreamInfo({ s, hdDecoder }: { s: LinkState; hdDecoder: string | null }
   ].filter(Boolean);
   if (!bits.length) return null;
   return (
-    <Text style={{ color: t.textFaint, fontSize: 11.5, fontFamily: t.mono, marginTop: -space(1) }} numberOfLines={2}>
+    <Text style={{ color: t.textFaint, fontSize: 11.5, fontFamily: t.mono }} numberOfLines={2}>
       {bits.join(' · ')}
     </Text>
   );
@@ -1003,7 +1007,7 @@ const st = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: space(2),
-    paddingHorizontal: space(2),
+    paddingHorizontal: screenPad,
     paddingBottom: space(2),
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
@@ -1076,7 +1080,7 @@ const st = StyleSheet.create({
     bottom: 0,
     flexDirection: 'row',
     gap: space(2.5),
-    paddingHorizontal: space(4),
+    paddingHorizontal: screenPad,
     paddingTop: space(3),
     borderTopWidth: StyleSheet.hairlineWidth,
   },
@@ -1107,7 +1111,7 @@ const st = StyleSheet.create({
   menuBg: { flex: 1 },
   menu: {
     position: 'absolute',
-    right: space(3),
+    right: screenPad,
     minWidth: 230,
     borderRadius: radius.md,
     paddingVertical: 6,

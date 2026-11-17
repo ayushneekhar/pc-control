@@ -178,12 +178,12 @@ function Tabs() {
     >
       <Tab.Screen name="Routes" component={RoutesScreen} />
       <Tab.Screen name="Vitals" component={VitalsScreen} />
+      <Tab.Screen name="Health" component={HealthScreen} />
       <Tab.Screen
         name="Root"
         component={RootScreen}
         options={{ tabBarBadge: waiting || undefined, tabBarBadgeStyle: { backgroundColor: t.warn, color: t.bg, fontWeight: '600' } }}
       />
-      <Tab.Screen name="Health" component={HealthScreen} />
       <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
   );

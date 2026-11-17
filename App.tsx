@@ -5,6 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { Alert, AppState, StyleSheet, Text, View } from 'react-native';
 import { PcNative } from './modules/pc-native';
+import { prepareCamsOnce } from './src/lib/cams/prepare';
 import { youtubeLink } from './src/lib/cams/youtube';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SystemInsetsProvider } from './src/components/SystemInsets';
@@ -126,11 +127,7 @@ export default function App() {
               name="Cams"
               getComponent={() => {
                 // WebRTC options + crash marker, before react-native-webrtc's module is created (CamsWebrtc)
-                try {
-                  PcNative?.camsPrepare();
-                } catch {
-                  // defaults
-                }
+                prepareCamsOnce();
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 return require('./src/screens/CamsScreen').default;
               }}

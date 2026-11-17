@@ -1,6 +1,6 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { type ComponentType, useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, AppState, Image, InteractionManager, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   Banner,
   Card,
@@ -15,6 +15,7 @@ import {
 import { PcNative } from '../../modules/pc-native';
 import { get, Health, Info, Route, serverUrl, Vitals } from '../lib/api';
 import { CAMS, CamId, NAMES } from '../lib/cams/config';
+import { prepareCamsOnce } from '../lib/cams/prepare';
 import { rate } from '../lib/format';
 import { DownloadsReply } from '../lib/live';
 import { space, useTheme } from '../theme';
@@ -133,6 +134,64 @@ function CameraTile({
   );
 }
 
+function CamTile({
+  cam,
+  live,
+  active,
+  frames,
+  failedCams,
+  style,
+}: {
+  cam: (typeof CAMS)[number];
+  live: LiveTileModule | null;
+  active: boolean;
+  frames: Partial<Record<CamId, string>>;
+  failedCams: Partial<Record<CamId, boolean>>;
+  style?: object;
+}) {
+  const poster = frames[cam.id] ?? null;
+  const failed = !!failedCams[cam.id];
+  if (!live) return <CameraTile name={cam.name} uri={poster} failed={failed} style={style} />;
+  const Live = live.LiveTile;
+  return <Live stream={cam.id} label={cam.name} poster={poster} posterFailed={failed} active={active} style={style} />;
+}
+
+type LiveTileProps = {
+  stream: string;
+  label: string;
+  poster: string | null;
+  posterFailed: boolean;
+  active: boolean;
+  style?: object;
+};
+type LiveTileModule = {
+  LiveTile: ComponentType<LiveTileProps>;
+  stopHomeLive: () => void;
+};
+
+function useLazyLiveTile() {
+  const [mod, setMod] = useState<LiveTileModule | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const task = InteractionManager.runAfterInteractions(() => {
+      if (cancelled) return;
+      prepareCamsOnce();
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const m = require('../components/LiveTile') as LiveTileModule;
+        if (!cancelled) setMod(m);
+      } catch {
+        /* keep the snapshots */
+      }
+    });
+    return () => {
+      cancelled = true;
+      task.cancel();
+    };
+  }, []);
+  return mod;
+}
+
 function StatusLine({ tone, label }: { tone: 'ok' | 'warn' | 'bad' | 'faint'; label: string }) {
   const t = useTheme();
   return (
@@ -160,6 +219,9 @@ export default function RoutesScreen() {
   const framesRef = useRef<Partial<Record<CamId, string>>>({});
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [appActive, setAppActive] = useState(AppState.currentState === 'active');
+  const live = useLazyLiveTile();
 
   const load = useCallback(async () => {
     const [i, v, h, r, d, dl] = await Promise.all([
@@ -183,12 +245,21 @@ export default function RoutesScreen() {
     framesRef.current = frames;
   }, [frames]);
 
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => setAppActive(st === 'active'));
+    return () => sub.remove();
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
+      setFocused(true);
       load();
       setTick((n) => n + 1);
       const id = setInterval(() => setTick((n) => n + 1), 3000);
-      return () => clearInterval(id);
+      return () => {
+        setFocused(false);
+        clearInterval(id);
+      };
     }, [load]),
   );
 
@@ -220,6 +291,14 @@ export default function RoutesScreen() {
     };
   }, [tick]);
 
+  const openCams = useCallback(
+    (params?: { tab?: 'replay' | 'music'; tabRequest?: number }) => {
+      live?.stopHomeLive();
+      nav.navigate('Cams', params);
+    },
+    [live, nav],
+  );
+  const liveActive = focused && appActive;
   const latest = lastSighting(det);
   const problems = health?.problems?.length ?? 0;
   const offline = loaded && !info && !vitals && !routes;
@@ -280,38 +359,23 @@ export default function RoutesScreen() {
         label="Cameras"
         right={
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-            <Pressable onPress={() => nav.navigate('Cams', { tab: 'replay', tabRequest: Date.now() })} hitSlop={8}>
+            <Pressable onPress={() => openCams({ tab: 'replay', tabRequest: Date.now() })} hitSlop={8}>
               <Text style={{ color: t.textFaint, fontSize: 12.5 }}>Replay</Text>
             </Pressable>
             <Text style={{ color: t.textFaint, fontSize: 12.5 }}>·</Text>
-            <Pressable onPress={() => nav.navigate('Cams', { tab: 'music', tabRequest: Date.now() })} hitSlop={8}>
+            <Pressable onPress={() => openCams({ tab: 'music', tabRequest: Date.now() })} hitSlop={8}>
               <Text style={{ color: t.textFaint, fontSize: 12.5 }}>Music</Text>
             </Pressable>
           </View>
         }
       >
-        <Card onPress={() => nav.navigate('Cams')} style={{ padding: 0 }}>
+        <Card onPress={() => openCams()} style={{ padding: 0 }}>
           <View style={st.camWall}>
             <View style={{ flexDirection: 'row', gap: 2, flex: 1 }}>
-              <CameraTile
-                name={CAMS[0].name}
-                uri={frames[CAMS[0].id] ?? null}
-                failed={!!failedCams[CAMS[0].id]}
-                style={{ flex: 2 }}
-              />
+              <CamTile cam={CAMS[0]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 2 }} />
               <View style={{ flex: 1, gap: 2 }}>
-                <CameraTile
-                  name={CAMS[1].name}
-                  uri={frames[CAMS[1].id] ?? null}
-                  failed={!!failedCams[CAMS[1].id]}
-                  style={{ flex: 1 }}
-                />
-                <CameraTile
-                  name={CAMS[2].name}
-                  uri={frames[CAMS[2].id] ?? null}
-                  failed={!!failedCams[CAMS[2].id]}
-                  style={{ flex: 1 }}
-                />
+                <CamTile cam={CAMS[1]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 1 }} />
+                <CamTile cam={CAMS[2]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 1 }} />
               </View>
             </View>
           </View>

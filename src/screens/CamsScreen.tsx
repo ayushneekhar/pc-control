@@ -32,9 +32,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PcNative } from '../../modules/pc-native';
 import { Banner, Button, Icon } from '../components/ui';
 import { serverUrl } from '../lib/api';
-import { CamLink, LinkKind, LinkState } from '../lib/cams/link';
+import { LinkState } from '../lib/cams/link';
 import { CAM_MIC_STREAM, CamId, CAMS, HD_STREAM, HD_WAIT_MS, LAPTOP_MIC_STREAM, NAMES, TALK_STREAM, WEB_PATH } from '../lib/cams/config';
 import { parseSightingTarget } from '../lib/cams/replay';
+import { useLiveCam } from '../lib/cams/useLiveCam';
 import { radius, screenPad, space, useTheme } from '../theme';
 import { MusicTab } from './cams/MusicTab';
 import { ReplayTab } from './cams/ReplayTab';
@@ -75,57 +76,6 @@ function hdSupport(): { ok: boolean; why: string; decoder: string | null } {
 }
 
 // ---------------------------------------------------------------- hooks
-
-const IDLE: LinkState = {
-  phase: 'stopped',
-  fps: 0,
-  codec: null,
-  decoder: null,
-  size: null,
-  bufferMs: null,
-  rttMs: null,
-  everPlayed: false,
-  error: null,
-  retryIn: null,
-  attempt: 0,
-};
-
-/** A CamLink that runs while `src` is set. Returns its state and (video) stream. */
-function useLink(
-  src: string | null,
-  kind: LinkKind,
-  opts?: { firstFrameMs?: number; maxAttempts?: number; onState?: (s: LinkState) => void },
-) {
-  const [state, setState] = useState<LinkState>(IDLE);
-  const [stream, setStream] = useState<Stream | null>(null);
-  const cb = useRef(opts?.onState);
-  useEffect(() => {
-    cb.current = opts?.onState;
-  });
-  const firstFrameMs = opts?.firstFrameMs;
-  const maxAttempts = opts?.maxAttempts;
-  useEffect(() => {
-    if (!src) return;
-    const l = new CamLink({
-      base: serverUrl(),
-      src,
-      kind,
-      onState: (s) => {
-        setState(s);
-        cb.current?.(s);
-      },
-      onStream: (s) => setStream(s as Stream | null),
-      firstFrameMs,
-      maxAttempts,
-    });
-    l.start();
-    return () => {
-      l.stop();
-      setStream(null);
-    };
-  }, [src, kind, firstFrameMs, maxAttempts]);
-  return src ? { state, stream } : { state: IDLE, stream: null };
-}
 
 /** True while this screen is focused and the app is in the foreground. */
 function useActive(onInactive: () => void) {
@@ -564,10 +514,10 @@ export default function CamsScreen() {
   const run = active && webrtcOk && tab === 'live';
   const audioRun = active && webrtcOk;
   const links = {
-    cat: useLink(run ? 'cat' : null, 'video'),
-    cat2: useLink(run ? 'cat2' : null, 'video'),
+    cat: useLiveCam(run ? 'cat' : null, 'video'),
+    cat2: useLiveCam(run ? 'cat2' : null, 'video'),
     // HD gets one try with a deadline, then SD; SD retries forever
-    cat3: useLink(run ? (cat3Hd ? HD_STREAM : 'cat3') : null, 'video', {
+    cat3: useLiveCam(run ? (cat3Hd ? HD_STREAM : 'cat3') : null, 'video', {
       firstFrameMs: cat3Hd ? HD_WAIT_MS : undefined,
       maxAttempts: cat3Hd ? 2 : undefined,
       onState: (s) => {
@@ -578,15 +528,15 @@ export default function CamsScreen() {
       },
     }),
   };
-  useLink(audioRun && camMic ? CAM_MIC_STREAM : null, 'audio', {
+  useLiveCam(audioRun && camMic ? CAM_MIC_STREAM : null, 'audio', {
     onState: (s) => {
       if (s.phase !== 'retrying' || s.attempt <= 2) return;
       setCamMic(false);
       showToast(`Cam's mic didn't connect (${s.error ?? 'error'}).`, 3500);
     },
   });
-  const ear = useLink(audioRun && listen ? LAPTOP_MIC_STREAM : null, 'audio');
-  const mic = useLink(audioRun && talk !== 'off' ? TALK_STREAM : null, 'talk', {
+  const ear = useLiveCam(audioRun && listen ? LAPTOP_MIC_STREAM : null, 'audio');
+  const mic = useLiveCam(audioRun && talk !== 'off' ? TALK_STREAM : null, 'talk', {
     maxAttempts: 2,
     onState: (s) => {
       if (s.phase !== 'error') return;

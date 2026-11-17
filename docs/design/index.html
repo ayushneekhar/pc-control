@@ -1,0 +1,139 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0E0E0D;--s1:#161614;--s2:#1E1E1B;--line:#2A2925;--tx:#EEECE6;--dim:#A3A097;--faint:#6E6B63;--ok:#6DBE83;--warn:#E2A640;--bad:#E8664F}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#232320;font-family:Inter,Roboto,sans-serif;color:var(--tx);display:flex;gap:36px;padding:36px;align-items:flex-start}
+.ph{width:384px;height:832px;background:var(--bg);border-radius:30px;overflow:hidden;position:relative;border:1px solid #3a3934;display:flex;flex-direction:column}
+.sb{height:34px;display:flex;justify-content:space-between;padding:10px 22px 0;font-size:12.5px;color:var(--dim);font-weight:500}
+.body{flex:1;padding:8px 18px 0;overflow:hidden}
+.host{font-size:12.5px;color:var(--dim);display:flex;align-items:center;gap:7px;margin-top:10px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block}
+h1{font-size:30px;font-weight:600;letter-spacing:-.6px;margin:4px 0 18px}
+.mono{font-family:'JetBrains Mono',monospace;font-feature-settings:"tnum"}
+.strip{display:grid;grid-template-columns:repeat(3,1fr);background:var(--s1);border-radius:16px;padding:14px 0;margin-bottom:22px}
+.strip div{padding:0 16px;border-left:1px solid var(--line)}.strip div:first-child{border:0}
+.k{font-size:11.5px;color:var(--faint);margin-bottom:3px}.v{font-size:20px;font-weight:500}
+.v small{font-size:12px;color:var(--dim);margin-left:1px}
+.lbl{font-size:12.5px;color:var(--dim);font-weight:500;margin:0 2px 8px;display:flex;justify-content:space-between}
+.cam{border-radius:16px;overflow:hidden;background:var(--s1);margin-bottom:22px}
+.cams{display:grid;grid-template-columns:2fr 1fr;grid-template-rows:1fr 1fr;gap:2px;height:170px}
+.cams div{background:#2b2a26 center/cover;position:relative}
+.cams div:first-child{grid-row:span 2}
+.cams span{position:absolute;left:8px;bottom:7px;font-size:11px;background:rgba(0,0,0,.55);padding:2px 7px;border-radius:6px;color:#ddd}
+.camfoot{display:flex;justify-content:space-between;padding:12px 14px;font-size:13.5px}
+.camfoot b{font-weight:600}.camfoot em{font-style:normal;color:var(--dim);font-size:12.5px}
+.list{background:var(--s1);border-radius:16px;overflow:hidden;margin-bottom:22px}
+.row{display:flex;align-items:center;gap:14px;padding:13px 14px;border-top:1px solid var(--line)}
+.row:first-child{border:0}
+.ic{width:20px;height:20px;color:var(--dim);flex:none}
+.rt{flex:1}.rt b{display:block;font-size:15px;font-weight:500}.rt i{font-style:normal;font-size:12.5px;color:var(--faint)}
+.chev{color:var(--faint);font-size:18px}
+.badge{font-size:12px;color:var(--warn);font-weight:500}
+.tabs{height:72px;border-top:1px solid var(--line);display:flex;justify-content:space-around;align-items:center;padding-bottom:6px;background:var(--bg)}
+.tab{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:11px;color:var(--faint);width:64px}
+.tab svg{width:22px;height:22px}
+.tab.on{color:var(--tx)}.tab.on .pillbg{background:var(--s2)}
+.pillbg{padding:3px 16px;border-radius:12px}
+.big{display:flex;align-items:baseline;gap:6px;margin-bottom:4px}
+.big .v{font-size:44px;font-weight:500;letter-spacing:-1.5px}
+.bar{height:4px;background:var(--s2);border-radius:2px;overflow:hidden;margin:8px 0 2px}.bar i{display:block;height:100%;background:var(--tx)}
+.bar.w i{background:var(--warn)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.tile{background:var(--s1);border-radius:16px;padding:14px}
+.spark{display:block;width:100%;height:46px;margin-top:6px}
+.sum{display:flex;align-items:center;gap:12px;background:var(--s1);border-radius:16px;padding:16px;margin-bottom:22px}
+.sum b{font-size:16px;font-weight:600;display:block}.sum i{font-style:normal;font-size:12.5px;color:var(--dim)}
+.ring{width:38px;height:38px;border-radius:50%;border:2px solid var(--ok);display:grid;place-items:center;color:var(--ok)}
+.svc .rt b{font-size:14.5px}.meta{font-size:12px;color:var(--faint);text-align:right}
+.seg{display:flex;background:var(--s1);border-radius:10px;padding:3px;margin-bottom:16px;font-size:13px}
+.seg span{flex:1;text-align:center;padding:6px;color:var(--dim);border-radius:8px}.seg .on{background:var(--s2);color:var(--tx);font-weight:500}
+</style></head><body>
+
+<!-- HOME -->
+<div class="ph"><div class="sb"><span>18:24</span><span>5G · 82%</span></div>
+<div class="body">
+ <div class="host"><span class="dot"></span>hp-pavilion · up 10 days</div>
+ <h1>Home</h1>
+ <div class="strip">
+  <div><div class="k">CPU</div><div class="v mono">13<small>%</small></div></div>
+  <div><div class="k">Memory</div><div class="v mono">8.5<small>/16G</small></div></div>
+  <div><div class="k">Temp</div><div class="v mono">71<small>°C</small></div></div>
+ </div>
+ <div class="lbl"><span>Cameras</span><span style="color:var(--faint)">Replay · Music</span></div>
+ <div class="cam"><div class="cams">
+  <div style="background-image:url(c1.jpg)"><span>Living room</span></div>
+  <div style="background-image:url(c2.jpg)"><span>Hall</span></div>
+  <div style="background-image:url(c3.jpg)"><span>Bowl</span></div></div>
+  <div class="camfoot"><b>3 live</b><em>Last cat seen 14 min ago</em></div></div>
+ <div class="lbl"><span>Open</span></div>
+ <div class="list">
+  <div class="row"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg><div class="rt"><b>Jellyfin</b><i>Movies &amp; TV</i></div><span class="chev">›</span></div>
+  <div class="row"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg><div class="rt"><b>Agent view</b><i>What agents fetch</i></div><span class="chev">›</span></div>
+  <div class="row"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 19h16"/></svg><div class="rt"><b>Downloads</b><i>2 active · 4.1 MB/s</i></div><span class="badge mono">63%</span></div>
+ </div>
+</div>
+<div class="tabs">
+ <div class="tab on"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 11 12 4l8 7v9H4z"/></svg></span>Home</div>
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span>Vitals</div>
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="5" rx="1.5"/><rect x="4" y="14" width="16" height="5" rx="1.5"/></svg></span>Services</div>
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 5 6v5c0 5 3 8 7 10 4-2 7-5 7-10V6z"/></svg></span>Root</div>
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg></span>Settings</div>
+</div></div>
+
+<!-- VITALS -->
+<div class="ph"><div class="sb"><span>18:24</span><span>5G · 82%</span></div>
+<div class="body">
+ <div class="host"><span class="dot"></span>Live · every 2 s</div>
+ <h1>Vitals</h1>
+ <div class="tile" style="margin-bottom:10px">
+  <div class="k">CPU · 12 threads · 2.3 GHz</div>
+  <div class="big"><span class="v mono">13</span><span class="mono" style="color:var(--dim)">%</span><span style="flex:1"></span><span class="mono" style="color:var(--dim);font-size:13px">load 1.97</span></div>
+  <svg class="spark" viewBox="0 0 300 46" preserveAspectRatio="none"><polyline fill="none" stroke="#EEECE6" stroke-width="1.6" points="0,34 20,30 40,36 60,28 80,31 100,22 120,27 140,33 160,25 180,18 200,26 220,30 240,24 260,29 280,27 300,31"/></svg>
+ </div>
+ <div class="grid2">
+  <div class="tile"><div class="k">Memory</div><div class="v mono">8.5<small> / 16 GB</small></div><div class="bar"><i style="width:53%"></i></div></div>
+  <div class="tile"><div class="k">Swap</div><div class="v mono">3.7<small> / 4 GB</small></div><div class="bar w"><i style="width:93%"></i></div></div>
+  <div class="tile"><div class="k">GPU · GTX 1650</div><div class="v mono">16<small>%</small></div><div class="bar"><i style="width:16%"></i></div></div>
+  <div class="tile"><div class="k">VRAM</div><div class="v mono">0.9<small> / 4 GB</small></div><div class="bar"><i style="width:22%"></i></div></div>
+ </div>
+ <div class="lbl" style="margin-top:14px"><span>Temperatures</span></div>
+ <div class="list">
+  <div class="row"><div class="rt"><b>CPU</b></div><span class="mono" style="font-size:15px">71°</span></div>
+  <div class="row"><div class="rt"><b>GPU</b></div><span class="mono" style="font-size:15px">63°</span></div>
+  <div class="row"><div class="rt"><b>NVMe</b></div><span class="mono" style="font-size:15px">45°</span></div>
+ </div>
+</div>
+<div class="tabs">
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 11 12 4l8 7v9H4z"/></svg></span>Home</div>
+ <div class="tab on"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span>Vitals</div>
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="5" rx="1.5"/><rect x="4" y="14" width="16" height="5" rx="1.5"/></svg></span>Services</div>
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 5 6v5c0 5 3 8 7 10 4-2 7-5 7-10V6z"/></svg></span>Root</div>
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg></span>Settings</div>
+</div></div>
+
+<!-- SERVICES -->
+<div class="ph"><div class="sb"><span>18:24</span><span>5G · 82%</span></div>
+<div class="body">
+ <div class="host"><span class="dot"></span>Checked 6 s ago</div>
+ <h1>Services</h1>
+ <div class="sum"><div class="ring">✓</div><div><b>All 24 running</b><i>No restarts in the last 24 h</i></div></div>
+ <div class="seg"><span class="on">All</span><span>Media</span><span>Cams</span><span>Agents</span></div>
+ <div class="list svc">
+  <div class="row"><span class="dot"></span><div class="rt"><b>Jellyfin</b><i>:8096 · 412 MB</i></div><div class="meta mono">10 d</div></div>
+  <div class="row"><span class="dot"></span><div class="rt"><b>qBittorrent</b><i>2 downloading</i></div><div class="meta mono">10 d</div></div>
+  <div class="row"><span class="dot" style="background:var(--warn)"></span><div class="rt"><b>Radarr</b><i>1 import blocked</i></div><div class="meta mono">10 d</div></div>
+  <div class="row"><span class="dot"></span><div class="rt"><b>Sonarr</b><i>:8989 · 188 MB</i></div><div class="meta mono">10 d</div></div>
+  <div class="row"><span class="dot"></span><div class="rt"><b>Cat detection</b><i>GPU · 2 fps × 3</i></div><div class="meta mono">6 d</div></div>
+  <div class="row"><span class="dot"></span><div class="rt"><b>Recording</b><i>24 h rolling · 41 GB</i></div><div class="meta mono">10 d</div></div>
+ </div>
+</div>
+<div class="tabs">
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 11 12 4l8 7v9H4z"/></svg></span>Home</div>
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span>Vitals</div>
+ <div class="tab on"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="5" rx="1.5"/><rect x="4" y="14" width="16" height="5" rx="1.5"/></svg></span>Services</div>
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 5 6v5c0 5 3 8 7 10 4-2 7-5 7-10V6z"/></svg></span>Root</div>
+ <div class="tab"><span class="pillbg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg></span>Settings</div>
+</div></div>
+</body></html>

@@ -285,10 +285,11 @@ const DIRS: { dir: string; icon: string; area: object }[] = [
 ];
 
 function PtzPad({ size, onClose, ptz }: { size: number; onClose: () => void; ptz: ReturnType<typeof usePtz> }) {
+  const t = useTheme();
   const [on, setOn] = useState<string | null>(null);
   const cell = size / 3;
   return (
-    <View style={[st.pad, { width: size, height: size, borderRadius: size / 2 }]}>
+    <View style={[st.pad, { width: size, height: size, borderRadius: size / 2, backgroundColor: t.mediaChip, borderColor: t.mediaChipBorder }]}>
       {DIRS.map((d) => (
         <Pressable
           key={d.dir}
@@ -301,23 +302,24 @@ function PtzPad({ size, onClose, ptz }: { size: number; onClose: () => void; ptz
             setOn(null);
             ptz.stop();
           }}
-          style={[st.padBtn, { width: cell, height: cell, borderRadius: cell / 2 }, d.area, on === d.dir && st.padOn]}
+          style={[st.padBtn, { width: cell, height: cell, borderRadius: cell / 2 }, d.area, on === d.dir && { backgroundColor: t.accent }]}
         >
-          <Icon name={d.icon} size={cell * 0.62} color={on === d.dir ? '#0B1530' : '#fff'} />
+          <Icon name={d.icon} size={cell * 0.62} color={on === d.dir ? t.onAccent : t.onMedia} />
         </Pressable>
       ))}
       <Pressable
         onPress={onClose}
         accessibilityLabel="Close pan / tilt"
-        style={[st.padBtn, st.padClose, { width: cell * 0.8, height: cell * 0.8, borderRadius: cell, top: cell * 1.1, left: cell * 1.1 }]}
+        style={[st.padBtn, { width: cell * 0.8, height: cell * 0.8, borderRadius: cell, top: cell * 1.1, left: cell * 1.1, backgroundColor: t.ripple }]}
       >
-        <Icon name="close" size={cell * 0.38} color="#fff" />
+        <Icon name="close" size={cell * 0.38} color={t.onMedia} />
       </Pressable>
     </View>
   );
 }
 
 function Chip({ icon, on, onPress, label, text }: { icon: string; on?: boolean; onPress: () => void; label: string; text?: string }) {
+  const t = useTheme();
   return (
     <Pressable
       onPress={onPress}
@@ -326,26 +328,28 @@ function Chip({ icon, on, onPress, label, text }: { icon: string; on?: boolean; 
       hitSlop={4}
       style={({ pressed }) => [
         st.chip,
+        { backgroundColor: t.mediaChip, borderColor: t.mediaChipBorder },
         text ? { width: undefined, paddingHorizontal: 12 } : null,
-        on && st.chipOn,
+        on && { backgroundColor: t.accent, borderColor: t.accent },
         pressed && { opacity: 0.8 },
       ]}
     >
-      <Icon name={icon} size={20} color={on ? '#0B1530' : '#fff'} />
-      {text ? <Text style={{ color: on ? '#0B1530' : '#fff', fontWeight: '700', fontSize: 13 }}>{text}</Text> : null}
+      <Icon name={icon} size={20} color={on ? t.onAccent : t.onMedia} />
+      {text ? <Text style={{ color: on ? t.onAccent : t.onMedia, fontWeight: '500', fontSize: 13 }}>{text}</Text> : null}
     </Pressable>
   );
 }
 
 function IconBtn({ icon, onPress, label, busy }: { icon: string; onPress: () => void; label: string; busy?: boolean }) {
+  const t = useTheme();
   return (
     <Pressable
       onPress={onPress}
       accessibilityLabel={label}
       hitSlop={2}
-      style={({ pressed }) => [st.ib, pressed && { backgroundColor: 'rgba(255,255,255,0.18)' }]}
+      style={({ pressed }) => [st.ib, pressed && { backgroundColor: t.ripple }]}
     >
-      {busy ? <ActivityIndicator size="small" color="#fff" /> : <Icon name={icon} size={22} color="#fff" />}
+      {busy ? <ActivityIndicator size="small" color={t.onMedia} /> : <Icon name={icon} size={22} color={t.onMedia} />}
     </Pressable>
   );
 }
@@ -370,9 +374,9 @@ function Badge({ s, mode }: { s: LinkState; mode?: string }) {
   const b = badgeOf(s, mode);
   const dot = b.tone === 'ok' ? t.ok : b.tone === 'slow' ? t.warn : t.bad;
   return (
-    <View style={[st.badge, b.tone === 'bad' && { backgroundColor: 'rgba(127,29,29,0.65)' }]}>
+    <View style={[st.badge, { backgroundColor: t.mediaChip }]}>
       <View style={[st.badgeDot, { backgroundColor: dot }]} />
-      <Text style={[st.badgeText, b.tone === 'bad' && { color: '#FECACA' }]} numberOfLines={1}>
+      <Text style={[st.badgeText, { color: t.onMediaDim }]} numberOfLines={1}>
         {b.text}
       </Text>
     </View>
@@ -392,19 +396,20 @@ type CardProps = {
 };
 
 function CamCard({ name, link, mode, compact, fullscreen, onPress, children, style }: CardProps) {
+  const t = useTheme();
   const { state, stream } = link;
   const showMsg = !stream || state.fps === 0;
   return (
-    <Pressable onPress={onPress} style={[fullscreen ? st.fsCard : st.card, compact && st.cardCompact, style]}>
+    <Pressable onPress={onPress} style={[fullscreen ? st.fsCard : st.card, { backgroundColor: t.media }, compact && st.cardCompact, style]}>
       {stream ? <RTCView streamURL={stream.toURL()} objectFit="contain" zOrder={0} style={StyleSheet.absoluteFill} /> : null}
       {showMsg && !compact ? (
         <View style={st.msg} pointerEvents="none">
           {state.phase === 'error' ? (
-            <Icon name="video-off-outline" size={28} color="rgba(255,255,255,0.6)" />
+            <Icon name="video-off-outline" size={28} color={t.onMediaDim} />
           ) : (
-            <ActivityIndicator color="rgba(255,255,255,0.7)" />
+            <ActivityIndicator color={t.onMediaDim} />
           )}
-          <Text style={st.msgText}>
+          <Text style={[st.msgText, { color: t.onMediaDim }]}>
             {state.phase === 'retrying'
               ? `${state.error ?? 'Disconnected'} · retrying in ${state.retryIn}s`
               : state.phase === 'error'
@@ -418,7 +423,7 @@ function CamCard({ name, link, mode, compact, fullscreen, onPress, children, sty
         </View>
       ) : null}
       <View style={[st.tl, compact && { top: 5, left: 7, right: 7 }]} pointerEvents="none">
-        <Text style={[st.name, compact && { fontSize: 12 }]} numberOfLines={1}>
+        <Text style={[st.name, { color: t.onMedia, textShadowColor: t.media }, compact && { fontSize: 12 }]} numberOfLines={1}>
           {name}
         </Text>
         {!compact ? <Badge s={state} mode={mode} /> : null}
@@ -446,33 +451,24 @@ function ActButton({
   onPressOut?: () => void;
 }) {
   const t = useTheme();
-  const bg =
-    state === 'talking'
-      ? '#B91C1C'
-      : state === 'on'
-        ? t.dark
-          ? 'rgba(6,78,59,0.8)'
-          : '#D1FAE5'
-        : state === 'blocked'
-          ? t.warnSoft
-          : t.card;
-  const icBg = state === 'talking' ? '#fff' : state === 'on' ? t.ok : t.cardAlt;
-  const icFg = state === 'talking' ? '#B91C1C' : state === 'on' ? '#052E22' : t.textDim;
-  const fg = state === 'talking' ? '#fff' : t.text;
-  const fg2 = state === 'talking' ? '#FECACA' : state === 'on' ? (t.dark ? '#A7F3D0' : '#065F46') : t.textDim;
+  const bg = state === 'talking' ? t.bad : state === 'on' ? t.okSoft : state === 'blocked' ? t.warnSoft : t.card;
+  const icBg = state === 'talking' ? t.onMedia : state === 'on' ? t.ok : t.cardAlt;
+  const icFg = state === 'talking' ? t.bad : state === 'on' ? t.onAccent : t.textDim;
+  const fg = state === 'talking' ? t.onMedia : t.text;
+  const fg2 = state === 'talking' ? t.onMediaDim : state === 'on' ? t.ok : t.textDim;
   return (
     <Pressable
       onPress={onPress}
       onPressIn={onPressIn}
       onPressOut={onPressOut}
-      android_ripple={{ color: 'rgba(127,127,127,0.2)', foreground: true }}
-      style={[st.act, { backgroundColor: bg, borderColor: state === 'off' ? t.border : 'transparent' }]}
+      android_ripple={{ color: t.ripple, foreground: true }}
+      style={[st.act, { backgroundColor: bg, borderColor: state === 'off' || state === 'busy' ? t.border : 'transparent' }]}
     >
       <View style={[st.actIc, { backgroundColor: icBg }]}>
         {state === 'busy' ? <ActivityIndicator size="small" color={icFg} /> : <Icon name={icon} size={22} color={icFg} />}
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={{ color: fg, fontWeight: '700', fontSize: 15 }} numberOfLines={1}>
+        <Text style={{ color: fg, fontWeight: '500', fontSize: 15 }} numberOfLines={1}>
           {t1}
         </Text>
         <Text style={{ color: fg2, fontSize: 12 }} numberOfLines={1}>
@@ -769,7 +765,7 @@ export default function CamsScreen() {
   if (full) {
     const c = CAMS.find((x) => x.id === full)!;
     return (
-      <View style={{ flex: 1, backgroundColor: '#000' }}>
+      <View style={{ flex: 1, backgroundColor: t.media }}>
         <CamCard id={c.id} name={c.name} link={links[c.id]} mode={c.id === 'cat3' ? cat3Mode : undefined} fullscreen>
           {cardButtons(c.id, true)}
         </CamCard>
@@ -792,7 +788,7 @@ export default function CamsScreen() {
         <Pressable onPress={() => nav.goBack()} hitSlop={8} accessibilityLabel="Back" style={st.hBtn}>
           <Icon name="arrow-left" size={24} color={t.text} />
         </Pressable>
-        <View style={[st.seg, { backgroundColor: t.cardAlt }]} accessibilityRole="tablist">
+        <View style={[st.seg, { backgroundColor: t.card }]} accessibilityRole="tablist">
           {TABS.map((x) => {
             const on = tab === x.id;
             return (
@@ -801,14 +797,14 @@ export default function CamsScreen() {
                 onPress={() => setTab(x.id)}
                 accessibilityRole="tab"
                 accessibilityState={{ selected: on }}
-                style={[st.segBtn, on && { backgroundColor: t.card }]}
+                style={[st.segBtn, on && { backgroundColor: t.cardAlt }]}
               >
                 {x.id === 'live' && on ? (
-                  <View style={[st.liveDot, { backgroundColor: liveCount ? '#EF4444' : t.textFaint }]} />
+                  <View style={[st.liveDot, { backgroundColor: liveCount ? t.ok : t.textFaint }]} />
                 ) : (
                   <Icon name={x.icon} size={15} color={on ? t.text : t.textDim} />
                 )}
-                <Text style={{ color: on ? t.text : t.textDim, fontWeight: '700', fontSize: 13 }} numberOfLines={1}>
+                <Text style={{ color: on ? t.text : t.textDim, fontWeight: '500', fontSize: 13 }} numberOfLines={1}>
                   {x.id === 'live' && on ? `${x.label} ${liveCount}/${CAMS.length}` : x.label}
                 </Text>
               </Pressable>
@@ -848,25 +844,21 @@ export default function CamsScreen() {
                 disabled={!det.det || det.busy}
                 style={[
                   st.detTog,
-                  {
-                    backgroundColor: det.det?.enabled ? t.okSoft : t.card,
-                    borderColor: det.det?.enabled ? t.ok + '66' : t.border,
-                    opacity: det.det ? 1 : 0.5,
-                  },
+                  { backgroundColor: det.det?.enabled ? t.accentSoft : t.card, opacity: det.det ? 1 : 0.5 },
                 ]}
               >
-                <Icon name="cctv" size={18} color={det.det?.enabled ? t.ok : t.textDim} />
-                <Text style={{ color: det.det?.enabled ? t.text : t.textDim, fontWeight: '700', fontSize: 14 }}>Cat alerts</Text>
+                <Icon name="cctv" size={18} color={det.det?.enabled ? t.accent : t.textDim} />
+                <Text style={{ color: det.det?.enabled ? t.text : t.textDim, fontWeight: '500', fontSize: 14 }}>Cat alerts</Text>
                 <Switch
                   value={!!det.det?.enabled}
                   onValueChange={(v) => det.toggle(v)}
                   disabled={!det.det || det.busy}
-                  trackColor={{ true: t.ok, false: t.border }}
-                  thumbColor={t.dark ? '#ECEFF5' : '#FFFFFF'}
+                  trackColor={{ true: t.accent, false: t.border }}
+                  thumbColor={t.onMedia}
                   style={{ marginVertical: -8 }}
                 />
               </Pressable>
-              <Text style={{ color: t.textDim, fontSize: 13, flex: 1 }} numberOfLines={2}>
+              <Text style={{ color: t.textDim, fontSize: 12.5, flex: 1 }} numberOfLines={2}>
                 {det.line}
               </Text>
             </View>
@@ -921,7 +913,7 @@ export default function CamsScreen() {
 
       {/* Listen / Talk (on Replay / Music only while one of them is on, like the page) */}
       {showBar ? (
-        <View style={[st.bar, { paddingBottom: insets.bottom + space(3), backgroundColor: t.bg + 'F2', borderTopColor: t.border }]}>
+        <View style={[st.bar, { paddingBottom: insets.bottom + space(3), backgroundColor: t.bg, borderTopColor: t.border }]}>
           <ActButton
             state={!listen ? 'off' : ear.state.phase === 'live' ? 'on' : ear.state.phase === 'error' ? 'blocked' : 'busy'}
             icon={listen ? 'volume-high' : 'volume-off'}
@@ -955,15 +947,15 @@ export default function CamsScreen() {
       <Toast toast={toast} bottom={insets.bottom + (showBar ? 96 : 24)} />
 
       <Modal visible={menu} transparent animationType="fade" onRequestClose={() => setMenu(false)}>
-        <Pressable style={st.menuBg} onPress={() => setMenu(false)}>
-          <View style={[st.menu, { top: insets.top + 52, backgroundColor: t.card, borderColor: t.border }]}>
+        <Pressable style={[st.menuBg, { backgroundColor: t.overlay }]} onPress={() => setMenu(false)}>
+          <View style={[st.menu, { top: insets.top + 52, backgroundColor: t.card }]}>
             {[
               { icon: 'web', label: 'Open the web page', run: () => openWeb(tab === 'live' ? '' : '#' + tab) },
               { icon: 'shield-check-outline', label: safeMode ? 'Leave safe mode' : 'Safe mode (WebRTC defaults)', run: toggleSafe },
             ].map((m) => (
-              <Pressable key={m.label} onPress={m.run} android_ripple={{ color: t.accentSoft }} style={st.menuItem}>
+              <Pressable key={m.label} onPress={m.run} android_ripple={{ color: t.ripple }} style={st.menuItem}>
                 <Icon name={m.icon} size={20} color={t.textDim} />
-                <Text style={{ color: t.text, fontSize: 15 }}>{m.label}</Text>
+                <Text style={{ color: t.text, fontSize: 15, fontWeight: '500' }}>{m.label}</Text>
               </Pressable>
             ))}
           </View>
@@ -996,11 +988,11 @@ function Toast({ toast, bottom }: { toast: ReturnType<typeof useToast>; bottom: 
   const a = toast.msg.action;
   return (
     <Animated.View
-      style={[st.toast, { bottom, opacity: toast.op, backgroundColor: t.dark ? '#262B33' : '#1F2430' }]}
+      style={[st.toast, { bottom, opacity: toast.op, backgroundColor: t.card }]}
       pointerEvents="box-none"
     >
-      <Icon name="information-outline" size={18} color="#8AB4FF" />
-      <Text style={{ color: '#ECEEF1', fontSize: 14, flexShrink: 1 }}>{toast.msg.text}</Text>
+      <Icon name="information-outline" size={18} color={t.accent} />
+      <Text style={{ color: t.text, fontSize: 13.5, flexShrink: 1 }}>{toast.msg.text}</Text>
       {a ? <Button label={a.label} kind="ghost" compact onPress={a.run} /> : null}
     </Animated.View>
   );
@@ -1016,15 +1008,15 @@ const st = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   hBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 22 },
-  seg: { flex: 1, flexDirection: 'row', padding: 3, borderRadius: 99, gap: 2 },
+  seg: { flex: 1, flexDirection: 'row', padding: 3, borderRadius: radius.sm, gap: 2 },
   segBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 5,
-    height: 34,
-    borderRadius: 99,
+    height: 36,
+    borderRadius: 10,
     paddingHorizontal: 6,
   },
   liveDot: { width: 8, height: 8, borderRadius: 4 },
@@ -1036,20 +1028,17 @@ const st = StyleSheet.create({
     height: 42,
     paddingLeft: 12,
     paddingRight: 4,
-    borderRadius: 99,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.pill,
   },
-  card: { aspectRatio: 16 / 9, borderRadius: radius.lg, overflow: 'hidden', backgroundColor: '#000' },
+  card: { aspectRatio: 16 / 9, borderRadius: radius.lg, overflow: 'hidden' },
   cardCompact: { borderRadius: radius.md },
-  fsCard: { flex: 1, backgroundColor: '#000' },
+  fsCard: { flex: 1 },
   msg: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 16 },
-  msgText: { color: 'rgba(255,255,255,0.7)', fontSize: 13, textAlign: 'center' },
+  msgText: { fontSize: 13, textAlign: 'center' },
   tl: { position: 'absolute', top: 10, left: 12, right: 150, flexDirection: 'row', alignItems: 'center', gap: 8 },
   name: {
-    color: '#fff',
-    fontWeight: '700',
+    fontWeight: '500',
     fontSize: 15,
-    textShadowColor: 'rgba(0,0,0,0.7)',
     textShadowRadius: 3,
     textShadowOffset: { width: 0, height: 1 },
     flexShrink: 1,
@@ -1060,11 +1049,10 @@ const st = StyleSheet.create({
     gap: 6,
     height: 22,
     paddingHorizontal: 8,
-    borderRadius: 99,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: radius.pill,
   },
   badgeDot: { width: 7, height: 7, borderRadius: 4 },
-  badgeText: { color: 'rgba(255,255,255,0.8)', fontSize: 11, fontFamily: 'monospace' },
+  badgeText: { fontSize: 11, fontVariant: ['tabular-nums'] },
   tr: { position: 'absolute', top: 4, right: 4, flexDirection: 'row', gap: 2 },
   ib: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   bl: { position: 'absolute', bottom: 8, left: 8, flexDirection: 'row', gap: 6 },
@@ -1076,16 +1064,11 @@ const st = StyleSheet.create({
     gap: 6,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(20,23,28,0.62)',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.18)',
   },
-  chipOn: { backgroundColor: '#8AB4FF', borderColor: 'transparent' },
   padWrap: { position: 'absolute', right: 10, bottom: 10 },
-  pad: { backgroundColor: 'rgba(15,17,21,0.6)', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.2)' },
+  pad: { borderWidth: StyleSheet.hairlineWidth },
   padBtn: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
-  padOn: { backgroundColor: '#8AB4FF' },
-  padClose: { backgroundColor: 'rgba(255,255,255,0.12)' },
   bar: {
     position: 'absolute',
     left: 0,
@@ -1104,7 +1087,7 @@ const st = StyleSheet.create({
     gap: 12,
     height: 60,
     paddingHorizontal: 12,
-    borderRadius: 18,
+    borderRadius: radius.md,
     borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
   },
@@ -1118,7 +1101,7 @@ const st = StyleSheet.create({
     gap: 10,
     paddingVertical: 10,
     paddingHorizontal: 14,
-    borderRadius: 14,
+    borderRadius: radius.md,
     elevation: 6,
   },
   menuBg: { flex: 1 },
@@ -1127,7 +1110,6 @@ const st = StyleSheet.create({
     right: space(3),
     minWidth: 230,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
     paddingVertical: 6,
     elevation: 10,
     overflow: 'hidden',

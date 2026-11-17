@@ -14,8 +14,6 @@ import { radius, space, useTheme } from '../../theme';
 import { RecPlayer } from './RecPlayer';
 import { ReplayEngine, ReplayView } from './replayEngine';
 
-const LANE = 'rgba(138,180,255,';
-const CAT = '#FBBF24';
 const tzOff = () => -new Date().getTimezoneOffset() * 60;
 const fHM = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const fHMS = (t: number) =>
@@ -121,7 +119,7 @@ export function ReplayTab({
                 <Pressable
                   key={c}
                   onPress={() => (isBig ? eng.togglePlay() : eng.setBig(c))}
-                  style={[s.tile, box(c), { borderRadius: isBig ? radius.lg : radius.md }]}
+                  style={[s.tile, box(c), { borderRadius: isBig ? radius.lg : radius.md, backgroundColor: t.media }]}
                 >
                   {v.sources[c] ? (
                     <RecPlayer
@@ -135,22 +133,22 @@ export function ReplayTab({
                     />
                   ) : null}
                   {tile.msg ? (
-                    <View style={s.tmsg} pointerEvents="none">
-                      <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: isBig ? 14 : 12, textAlign: 'center' }}>{tile.msg}</Text>
+                    <View style={[s.tmsg, { backgroundColor: t.mediaChip }]} pointerEvents="none">
+                      <Text style={{ color: t.onMediaDim, fontSize: isBig ? 14 : 12, textAlign: 'center' }}>{tile.msg}</Text>
                     </View>
                   ) : null}
-                  <Text style={[s.tname, !isBig && { fontSize: 12, top: 6, left: 9 }]} numberOfLines={1} pointerEvents="none">
+                  <Text style={[s.tname, { color: t.onMedia, textShadowColor: t.media }, !isBig && { fontSize: 12, top: 6, left: 9 }]} numberOfLines={1} pointerEvents="none">
                     {tile.label}
                   </Text>
-                  {tile.spin ? <ActivityIndicator style={s.spin} size="small" color="#fff" /> : null}
+                  {tile.spin ? <ActivityIndicator style={s.spin} size="small" color={t.onMedia} /> : null}
                   {isBig && !playing && !tile.msg ? (
-                    <View style={s.paused} pointerEvents="none">
-                      <Icon name="play" size={30} color="#fff" />
+                    <View style={[s.paused, { backgroundColor: t.mediaChip }]} pointerEvents="none">
+                      <Icon name="play" size={30} color={t.onMedia} />
                     </View>
                   ) : null}
                   {isBig ? (
                     <Pressable onPress={snapshot} accessibilityLabel="Save this frame" hitSlop={4} style={s.snapBtn}>
-                      {snapBusy ? <ActivityIndicator size="small" color="#fff" /> : <Icon name="camera-outline" size={22} color="#fff" />}
+                      {snapBusy ? <ActivityIndicator size="small" color={t.onMedia} /> : <Icon name="camera-outline" size={22} color={t.onMedia} />}
                     </Pressable>
                   ) : null}
                 </Pressable>
@@ -162,7 +160,7 @@ export function ReplayTab({
       {/* clock */}
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={{ color: t.text, fontFamily: t.mono, fontSize: 26, fontWeight: '700', letterSpacing: -0.5 }}>
+          <Text style={{ color: t.text, fontFamily: t.mono, fontSize: 26, fontWeight: '500', letterSpacing: -0.5 }}>
             {T ? fHMS(T) : '--:--:--'}
           </Text>
           <Text style={{ color: t.textDim, fontSize: 12 }} numberOfLines={1}>
@@ -176,7 +174,7 @@ export function ReplayTab({
       </View>
 
       {/* timeline */}
-      <View style={[s.tl, { backgroundColor: t.card, borderColor: t.border }]}>
+      <View style={[s.tl, { backgroundColor: t.card }]}>
         <View
           style={{ height: 40, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.border }}
           onLayout={(e) => {
@@ -223,7 +221,7 @@ export function ReplayTab({
           accessibilityLabel={playing ? 'Pause' : 'Play'}
           style={[s.play, { backgroundColor: t.accent }]}
         >
-          <Icon name={playing ? 'pause' : 'play'} size={28} color="#0B1530" />
+          <Icon name={playing ? 'pause' : 'play'} size={28} color={t.onAccent} />
         </Pressable>
         <RoundBtn label="+10s" onPress={() => eng.skip(10)} />
         <RoundBtn label="+1m" onPress={() => eng.skip(60)} />
@@ -241,13 +239,10 @@ export function ReplayTab({
         <Pressable
           disabled={!lastS}
           onPress={() => eng.lastSighting()}
-          style={[
-            s.seen,
-            { backgroundColor: lastS ? 'rgba(251,191,36,0.1)' : t.card, borderColor: lastS ? 'rgba(251,191,36,0.35)' : t.border },
-          ]}
+          style={[s.seen, { backgroundColor: lastS ? t.warnSoft : t.card }]}
         >
-          <Icon name="cat" size={18} color={lastS ? CAT : t.textDim} />
-          <Text style={{ color: lastS ? (t.dark ? '#FDE68A' : '#92400E') : t.textDim, fontWeight: '600', flex: 1 }} numberOfLines={1}>
+          <Icon name="cat" size={18} color={lastS ? t.warn : t.textDim} />
+          <Text style={{ color: lastS ? t.warn : t.textDim, fontWeight: '500', flex: 1 }} numberOfLines={1}>
             {lastS
               ? `Last seen: ${NAMES[lastS.cam]}, ${fHM(lastS.ts)}`
               : v?.detOn === false
@@ -273,9 +268,9 @@ export function ReplayTab({
                 <Pressable
                   key={`${x.cam}${x.start}`}
                   onPress={() => eng.jumpTo(x.cam, x.start)}
-                  style={[s.visit, { borderColor: cur ? CAT : t.border, backgroundColor: cur ? 'rgba(251,191,36,0.12)' : t.card }]}
+                  style={[s.visit, { borderColor: cur ? t.warn : t.border, backgroundColor: cur ? t.warnSoft : t.card }]}
                 >
-                  <Text style={{ color: t.text, fontWeight: '700', fontSize: 13 }}>{fHM(x.start)}</Text>
+                  <Text style={{ color: t.text, fontWeight: '500', fontSize: 13, fontVariant: ['tabular-nums'] }}>{fHM(x.start)}</Text>
                   <Text style={{ color: t.textDim, fontSize: 12 }}>
                     {SHORT[x.cam as RecCam]}
                     {x.end - x.start >= 60 ? ` · ${Math.round((x.end - x.start) / 60)} min` : ''}
@@ -378,7 +373,7 @@ function Overview({
       {REC_CAMS.map((c, i) => (
         <View
           key={c}
-          style={{ position: 'absolute', left: pad, top: 4 + i * 7, width: w, height: 5, backgroundColor: 'rgba(127,127,127,0.12)' }}
+          style={{ position: 'absolute', left: pad, top: 4 + i * 7, width: w, height: 5, backgroundColor: t.cardAlt }}
         >
           {(idx[c]?.spans ?? []).map((sp) => (
             <View
@@ -388,7 +383,8 @@ function Overview({
                 left: X(sp[0]) - pad,
                 width: Math.max(1, X(spanEnd(sp)) - X(sp[0])),
                 height: 5,
-                backgroundColor: LANE + '0.65)',
+                backgroundColor: t.textDim,
+                opacity: 0.55,
               }}
             />
           ))}
@@ -403,7 +399,7 @@ function Overview({
             top: 4 + REC_CAMS.indexOf(v.cam as RecCam) * 7,
             width: Math.max(2, X(v.end) - X(v.start) + 2),
             height: 5,
-            backgroundColor: CAT,
+            backgroundColor: t.warn,
           }}
         />
       ))}
@@ -417,7 +413,7 @@ function Overview({
               top: 1.5,
               height: 24,
               borderWidth: 1.5,
-              borderColor: 'rgba(138,180,255,0.9)',
+              borderColor: t.text,
               borderRadius: 4,
             }}
           />
@@ -457,11 +453,11 @@ function Ribbon({
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
       {X(now - DAY) > 0 ? (
-        <View style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: X(now - DAY), backgroundColor: 'rgba(0,0,0,0.25)' }} />
+        <View style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: X(now - DAY), backgroundColor: t.media, opacity: 0.25 }} />
       ) : null}
       {X(now) < width ? (
         <View
-          style={{ position: 'absolute', left: Math.max(0, X(now)), top: 0, bottom: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.25)' }}
+          style={{ position: 'absolute', left: Math.max(0, X(now)), top: 0, bottom: 0, right: 0, backgroundColor: t.media, opacity: 0.25 }}
         />
       ) : null}
       {at.map((x) => {
@@ -475,7 +471,7 @@ function Ribbon({
                 top: 20,
                 width: 1,
                 height: 80,
-                backgroundColor: 'rgba(127,127,127,0.18)',
+                backgroundColor: t.border,
               }}
             />
             <Text
@@ -505,7 +501,7 @@ function Ribbon({
                 left: 0,
                 right: 0,
                 bottom: 0,
-                backgroundColor: 'rgba(127,127,127,0.08)',
+                backgroundColor: t.cardAlt,
                 borderRadius: 4,
               }}
             />
@@ -521,7 +517,8 @@ function Ribbon({
                     borderRadius: 3,
                     left: Math.max(-4, X(sp[0])),
                     width: Math.max(0.5, Math.min(width + 4, X(spanEnd(sp))) - Math.max(-4, X(sp[0]))),
-                    backgroundColor: LANE + (c === big ? '0.95)' : '0.3)'),
+                    backgroundColor: t.textDim,
+                    opacity: c === big ? 0.95 : 0.3,
                   }}
                 />
               ))}
@@ -537,11 +534,11 @@ function Ribbon({
                     borderRadius: 2,
                     left: X(x.ts) - 2,
                     width: Math.max(4, 20 / spp),
-                    backgroundColor: CAT,
+                    backgroundColor: t.warn,
                   }}
                 />
               ))}
-            <View style={[s.lane, { backgroundColor: t.dark ? 'rgba(20,23,28,0.85)' : 'rgba(255,255,255,0.85)' }]}>
+            <View style={[s.lane, { backgroundColor: t.card }]}>
               <Text style={{ fontSize: 10, fontWeight: '600', color: t.text }}>{SHORT[c]}</Text>
             </View>
           </View>
@@ -555,7 +552,7 @@ function Ribbon({
 
 const s = StyleSheet.create({
   err: { padding: space(3), borderRadius: radius.md, fontSize: 14 },
-  tile: { position: 'absolute', overflow: 'hidden', backgroundColor: '#000' },
+  tile: { position: 'absolute', overflow: 'hidden' },
   tmsg: {
     position: 'absolute',
     top: 0,
@@ -565,17 +562,14 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     padding: 12,
-    backgroundColor: 'rgba(11,13,16,0.8)',
   },
   tname: {
     position: 'absolute',
     top: 10,
     left: 12,
     right: 44,
-    color: '#fff',
-    fontWeight: '700',
+    fontWeight: '500',
     fontSize: 15,
-    textShadowColor: 'rgba(0,0,0,0.7)',
     textShadowRadius: 3,
   },
   spin: { position: 'absolute', top: 10, right: 52 },
@@ -590,7 +584,6 @@ const s = StyleSheet.create({
     borderRadius: 32,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.45)',
   },
   snapBtn: {
     position: 'absolute',
@@ -602,7 +595,7 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  tl: { borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden' },
+  tl: { borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden' },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 6 },
   play: { width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center' },
   rb: {
@@ -632,8 +625,7 @@ const s = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     paddingHorizontal: 12,
-    borderRadius: 99,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.pill,
   },
   visit: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, borderWidth: 1, alignItems: 'center' },
   lane: { position: 'absolute', left: 3, top: 1.5, height: 12, paddingHorizontal: 5, borderRadius: 4, justifyContent: 'center' },

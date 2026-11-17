@@ -244,21 +244,21 @@ export function MusicTab({
           keyboardType="url"
           returnKeyType="go"
           onSubmitEditing={() => url.trim() && play(url.trim())}
-          style={[st_.input, { color: t.text, backgroundColor: t.card, borderColor: t.border }]}
+          style={[st_.input, { color: t.text, backgroundColor: t.card }]}
         />
         <Button label="Play" icon="play" busy={playing} disabled={!url.trim()} onPress={() => play(url.trim())} />
       </View>
       <Text style={{ color: t.textFaint, fontSize: 12, marginTop: -space(1) }}>Or in YouTube: Share → PC Control.</Text>
       {err ? <Banner tone="bad" title={err} /> : null}
 
-      <View style={[st_.card, { backgroundColor: t.card, borderColor: t.border }]}>
+      <View style={[st_.card, { backgroundColor: t.card }]}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           <View style={[st_.dot, { backgroundColor: tone }]} />
-          <Text style={{ color: tone, fontWeight: '700', fontSize: 13 }}>
+          <Text style={{ color: tone, fontWeight: '500', fontSize: 13 }}>
             {up ? STATES[st] || st : loaded ? 'Music service offline' : 'Connecting…'}
           </Text>
           {st === 'loading' ? <ActivityIndicator size="small" color={t.warn} /> : null}
-          <Text style={{ marginLeft: 'auto', color: t.textDim, fontFamily: t.mono, fontSize: 13 }}>{pos}</Text>
+          <Text style={{ marginLeft: 'auto', color: t.textDim, fontSize: 13, fontVariant: ['tabular-nums'] }}>{pos}</Text>
         </View>
         <Text
           style={{ color: title ? t.text : t.textDim, fontSize: 17, fontWeight: title ? '600' : '500', lineHeight: 22 }}
@@ -277,7 +277,6 @@ export function MusicTab({
             label={st === 'paused' ? 'Resume' : 'Pause'}
             icon={st === 'paused' ? 'play' : 'pause'}
             kind="subtle"
-            compact
             style={{ flex: 1 }}
             disabled={!active}
             onPress={() => cmd(st === 'paused' ? 'resume' : 'pause')}
@@ -286,7 +285,6 @@ export function MusicTab({
             label="Stop"
             icon="stop"
             kind="subtle"
-            compact
             style={{ flex: 1 }}
             disabled={!active && st !== 'error'}
             onPress={() => cmd('stop')}
@@ -295,7 +293,6 @@ export function MusicTab({
             label="Loop"
             icon="repeat"
             kind={s?.loop ? 'primary' : 'subtle'}
-            compact
             style={{ flex: 1 }}
             disabled={!up}
             onPress={() => cmd('loop', { loop: !s?.loop })}
@@ -303,7 +300,7 @@ export function MusicTab({
         </View>
       </View>
 
-      <View style={[st_.card, { flexDirection: 'row', alignItems: 'center', backgroundColor: t.card, borderColor: t.border }]}>
+      <View style={[st_.card, { flexDirection: 'row', alignItems: 'center', backgroundColor: t.card }]}>
         <Pressable
           disabled={!hasVol}
           onPress={() => cmd('mute', { muted: !s?.muted })}
@@ -313,28 +310,28 @@ export function MusicTab({
           <Icon name={s?.muted ? 'volume-off' : 'volume-high'} size={20} color={s?.muted ? t.accent : t.text} />
         </Pressable>
         <VolumeSlider value={shownVol} disabled={!hasVol} onChange={onVol} />
-        <Text style={{ width: 46, textAlign: 'right', color: t.text, fontFamily: t.mono, fontSize: 15 }}>
+        <Text style={{ width: 46, textAlign: 'right', color: t.text, fontSize: 15, fontWeight: '500', fontVariant: ['tabular-nums'] }}>
           {hasVol || vol != null ? `${shownVol}%` : '--'}
         </Text>
       </View>
 
       {recent.length ? (
         <View style={{ gap: 6 }}>
-          <Text style={{ color: t.textFaint, fontSize: 12, fontWeight: '700', letterSpacing: 0.8, marginLeft: 2 }}>RECENT</Text>
+          <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500', marginLeft: 2 }}>Recent</Text>
           {recent.map((r) => {
             const cur = active && s?.url === r.url;
             return (
               <Pressable
                 key={r.id || r.url}
                 onPress={() => play(r.url)}
-                android_ripple={{ color: t.accentSoft }}
-                style={[st_.rec, { backgroundColor: t.card, borderColor: cur ? t.accent : t.border }]}
+                android_ripple={{ color: t.ripple }}
+                style={[st_.rec, { backgroundColor: cur ? t.accentSoft : t.card }]}
               >
                 <Icon name={cur ? 'volume-high' : 'play'} size={16} color={cur ? t.accent : t.textDim} />
-                <Text style={{ color: t.text, fontSize: 14, flex: 1 }} numberOfLines={1}>
+                <Text style={{ color: t.text, fontSize: 14.5, flex: 1 }} numberOfLines={1}>
                   {r.title || r.url}
                 </Text>
-                {r.live ? <Text style={{ color: t.textDim, fontSize: 11, fontWeight: '800' }}>LIVE</Text> : null}
+                {r.live ? <Text style={{ color: t.accent, fontSize: 11, fontWeight: '500' }}>Live</Text> : null}
               </Pressable>
             );
           })}
@@ -386,8 +383,8 @@ function VolumeSlider({ value, disabled, onChange }: { value: number; disabled: 
 }
 
 const st_ = StyleSheet.create({
-  input: { flex: 1, height: 46, paddingHorizontal: 14, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, fontSize: 15 },
-  card: { gap: 10, padding: space(4), borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth },
+  input: { flex: 1, height: 46, paddingHorizontal: 14, borderRadius: radius.sm, fontSize: 15 },
+  card: { gap: 10, padding: space(4), borderRadius: radius.md },
   dot: { width: 8, height: 8, borderRadius: 4 },
   mute: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   rec: {
@@ -397,7 +394,6 @@ const st_ = StyleSheet.create({
     minHeight: 48,
     paddingVertical: 8,
     paddingHorizontal: 12,
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.sm,
   },
 });

@@ -8,30 +8,42 @@ import { space, useTheme } from '../theme';
 
 type Hist = Vitals['hist'][number];
 
-function Spark({
-  series,
-  max,
-  height = 38,
-}: {
-  series: { values: (number | null | undefined)[]; color: string } | { values: (number | null | undefined)[]; color: string }[];
-  max?: number;
-  height?: number;
-}) {
+type SparkSeries = { values: (number | null | undefined)[]; color: string };
+
+function Spark({ series, max, height = 36 }: { series: SparkSeries | SparkSeries[]; max?: number; height?: number }) {
+  const t = useTheme();
   const list = Array.isArray(series) ? series : [series];
-  const sliced = list.map((s) => s.values.slice(-90));
-  const n = Math.max(0, ...sliced.map((s) => s.length));
+  const [width, setWidth] = useState(0);
+  const gap = 2;
+  const bar = 2;
+  const count = width > 0 ? Math.min(40, Math.max(1, Math.floor((width + gap) / (bar + gap)))) : 0;
+  const rowHeight = Math.floor((height - gap * (list.length - 1)) / list.length);
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'flex-end', height, gap: 1 }}>
-      {Array.from({ length: n }).map((_, i) => (
-        <View key={i} style={{ flex: 1, height, flexDirection: 'row', alignItems: 'flex-end', gap: 1 }}>
-          {sliced.map((vals, si) => {
-            const v = vals[i - (n - vals.length)];
+    <View
+      onLayout={(e) => setWidth(e.nativeEvent.layout.width)}
+      style={{ height, gap, justifyContent: 'center' }}
+    >
+      {count
+        ? list.map((s, si) => {
+            const vals = s.values.slice(-count);
             const m = max ?? Math.max(1, ...vals.filter((x): x is number => x != null));
-            const h = v == null ? 0 : Math.max(1, (Math.min(v, m) / m) * (height - 2));
-            return <View key={si} style={{ flex: 1, height: h, backgroundColor: list[si].color, borderRadius: 1, opacity: 0.9 }} />;
-          })}
-        </View>
-      ))}
+            return (
+              <View key={si} style={{ height: rowHeight, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'flex-end', gap }}>
+                {vals.map((v, i) => (
+                  <View
+                    key={i}
+                    style={{
+                      width: bar,
+                      height: v == null ? 0 : Math.max(2, (Math.min(v, m) / m) * rowHeight),
+                      borderRadius: 1,
+                      backgroundColor: i === vals.length - 1 && v != null ? t.text : s.color,
+                    }}
+                  />
+                ))}
+              </View>
+            );
+          })
+        : null}
     </View>
   );
 }
@@ -43,6 +55,7 @@ function Metric({
   sub,
   pct,
   color,
+  sparkColor,
   values,
   max = 100,
   footer,
@@ -53,29 +66,37 @@ function Metric({
   sub?: string;
   pct?: number;
   color: string;
+  sparkColor?: string;
   values?: (number | null | undefined)[];
   max?: number;
   footer?: string;
 }) {
   const t = useTheme();
+  const over = pct != null && pct > 85;
   return (
     <Card style={{ flex: 1, gap: space(2), padding: space(3.5) }}>
       <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500' }}>{label}</Text>
       <Text
-        style={{ color: valueColor ?? t.text, fontSize: 22, fontWeight: '500', letterSpacing: -0.3, fontVariant: ['tabular-nums'] }}
+        style={{
+          color: over ? t.warn : valueColor ?? t.text,
+          fontSize: 22,
+          fontWeight: '500',
+          letterSpacing: -0.3,
+          fontVariant: ['tabular-nums'],
+        }}
         numberOfLines={1}
         adjustsFontSizeToFit
         minimumFontScale={0.7}
       >
         {value}
       </Text>
-      {pct != null ? <Bar pct={pct} color={color} height={5} /> : null}
+      {pct != null ? <Bar pct={pct} color={over ? t.warn : color} height={5} /> : null}
       {sub ? (
-        <Text style={{ color: t.textFaint, fontSize: 12 }} numberOfLines={1}>
+        <Text style={{ color: over && sub.includes('%') ? t.warn : t.textFaint, fontSize: 12 }} numberOfLines={1}>
           {sub}
         </Text>
       ) : null}
-      {values ? <Spark series={{ values, color }} max={max} height={30} /> : null}
+      {values ? <Spark series={{ values, color: sparkColor ?? t.textDim }} max={max} height={36} /> : null}
       {footer ? (
         <Text style={{ color: t.textFaint, fontSize: 11.5 }} numberOfLines={1}>
           {footer}
@@ -236,14 +257,14 @@ export default function VitalsScreen() {
               </View>
             </View>
             <Spark series={{ values: hist.map((h) => h.cpu), color: t.textDim }} max={100} />
-            <View style={{ flexDirection: 'row', gap: 3, height: 26, alignItems: 'flex-end' }}>
+            <View style={{ flexDirection: 'row', gap: 3, height: 6, alignItems: 'flex-end' }}>
               {v.percpu.map((c, i) => (
-                <View key={i} style={{ flex: 1, height: 26, backgroundColor: t.cardAlt, borderRadius: 3, justifyContent: 'flex-end', overflow: 'hidden' }}>
+                <View key={i} style={{ flex: 1, height: 6, backgroundColor: t.cardAlt, borderRadius: 3, justifyContent: 'flex-end', overflow: 'hidden' }}>
                   <View
                     style={{
-                      height: `${Math.max(4, c)}%`,
-                      backgroundColor: c > 85 ? t.bad : c > 60 ? t.warn : t.textDim,
-                      opacity: 0.85,
+                      height: Math.max(1, (Math.min(100, c) / 100) * 6),
+                      backgroundColor: c > 60 ? t.warn : t.textDim,
+                      borderRadius: 3,
                     }}
                   />
                 </View>
@@ -341,8 +362,8 @@ export default function VitalsScreen() {
               </View>
               <Spark
                 series={[
-                  { values: hist.map((h) => h.rx), color: t.ok },
-                  { values: hist.map((h) => h.tx), color: t.textDim },
+                  { values: hist.map((h) => h.rx), color: t.textDim },
+                  { values: hist.map((h) => h.tx), color: t.textFaint },
                 ]}
               />
               {nics.length ? (

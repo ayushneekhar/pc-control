@@ -2,7 +2,7 @@ import Constants from 'expo-constants';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, AppState, Linking, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { KeyInfo, PcNative } from '../../modules/pc-native';
-import { Banner, Button, Card, Icon, KV, Mono, Pill, Screen, Section } from '../components/ui';
+import { Banner, Button, Card, Icon, KV, Mono, Pill, Screen, Section, StatusDot } from '../components/ui';
 import { ApiError, DEFAULT_SERVER, get, Info, post, serverUrl } from '../lib/api';
 import { ApkRelease, APK_URLS, binaryTarget, clearOtaRecovery, latestApk, otaRecovery, otaSnapshot } from '../lib/ota';
 import { applyOta, checkOta, useOta } from '../lib/otaStore';
@@ -638,8 +638,21 @@ function Server() {
 }
 
 export default function SettingsScreen() {
+  const t = useTheme();
+  const version = Constants.expoConfig?.version ?? '?';
+  const otaVersion = otaSnapshot().otaVersion;
   return (
-    <Screen title="Settings">
+    <Screen
+      title="Settings"
+      subtitle={
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <StatusDot tone="ok" />
+          <Text style={{ color: t.textDim, fontSize: 12.5 }}>
+            v{version} · OTA {otaVersion}
+          </Text>
+        </View>
+      }
+    >
       <Section label="Root approvals">
         <Enrollment />
       </Section>

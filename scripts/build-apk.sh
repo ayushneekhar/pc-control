@@ -9,8 +9,11 @@ cd "$(dirname "$0")/.."
 ENVF="$HOME/.config/pc-control/keystore.env"
 [ -f "$ENVF" ] || { echo "missing $ENVF (see README: release keystore)" >&2; exit 1; }
 set -a; . "$ENVF"; set +a
-export JAVA_HOME="$HOME/tools/jdk-21" ANDROID_HOME="$HOME/tools/android-sdk"
-export ANDROID_SDK_ROOT="$ANDROID_HOME" PATH="$JAVA_HOME/bin:$PATH" NODE_ENV=production
+# Use the toolchain already in the environment when set (CI), else the laptop's paths.
+export JAVA_HOME="${JAVA_HOME:-$HOME/tools/jdk-21}"
+export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/tools/android-sdk}}"
+export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+export PATH="$JAVA_HOME/bin:$PATH" NODE_ENV=production
 
 if [ "${1:-}" = "--bump" ]; then
   node -e '

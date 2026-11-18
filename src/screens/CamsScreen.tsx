@@ -14,6 +14,7 @@ import {
   Animated,
   AppState,
   BackHandler,
+  GestureResponderEvent,
   Linking,
   Modal,
   NativeModules,
@@ -27,9 +28,10 @@ import {
   Vibration,
   View,
 } from 'react-native';
-import { RTCRtpReceiver, RTCView } from 'react-native-webrtc';
+import { RTCRtpReceiver } from 'react-native-webrtc';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PcNative } from '../../modules/pc-native';
+import { PinchZoom, type PinchZoomHandle } from '../components/PinchZoom';
 import { Banner, Button, Icon } from '../components/ui';
 import { serverUrl } from '../lib/api';
 import { LinkState } from '../lib/cams/link';
@@ -38,6 +40,7 @@ import { parseSightingTarget } from '../lib/cams/replay';
 import { useLiveCam } from '../lib/cams/useLiveCam';
 import { radius, screenPad, space, useTheme } from '../theme';
 import { MusicTab } from './cams/MusicTab';
+import { LivePlayer } from './cams/LivePlayer';
 import { ReplayTab } from './cams/ReplayTab';
 
 export type CamsTab = 'live' | 'replay' | 'music';
@@ -345,13 +348,48 @@ type CardProps = {
   style?: object;
 };
 
-function CamCard({ name, link, mode, compact, fullscreen, onPress, children, style }: CardProps) {
+function CamCard({ id, name, link, mode, compact, fullscreen, onPress, children, style }: CardProps) {
   const t = useTheme();
   const { state, stream } = link;
   const showMsg = !stream || state.fps === 0;
+  const zoom = useRef<PinchZoomHandle | null>(null);
+  const lastTap = useRef<{ x: number; y: number; t: number } | null>(null);
+  const streamURL = stream ? stream.toURL() : null;
+  useEffect(() => {
+    lastTap.current = null;
+  }, [id, fullscreen, streamURL]);
+
+  const tap = (x: number, y: number, now: number) => {
+    const prev = lastTap.current;
+    if (prev && now - prev.t < 280 && Math.hypot(x - prev.x, y - prev.y) < 30) {
+      lastTap.current = null;
+      zoom.current?.toggleAt(x, y);
+      return;
+    }
+    lastTap.current = { x, y, t: now };
+  };
+
+  const onCardPress = (e: GestureResponderEvent) => {
+    if (!fullscreen) {
+      onPress?.();
+      return;
+    }
+    const { locationX: x, locationY: y, timestamp: now } = e.nativeEvent;
+    tap(x, y, now);
+  };
+
   return (
-    <Pressable onPress={onPress} style={[fullscreen ? st.fsCard : st.card, { backgroundColor: t.media }, compact && st.cardCompact, style]}>
-      {stream ? <RTCView streamURL={stream.toURL()} objectFit="contain" zOrder={0} style={StyleSheet.absoluteFill} /> : null}
+    <Pressable onPress={onCardPress} style={[fullscreen ? st.fsCard : st.card, { backgroundColor: t.media }, compact && st.cardCompact, style]}>
+      {streamURL ? (
+        <PinchZoom
+          ref={zoom}
+          resetKey={`${id}:${fullscreen ? 'full' : compact ? 'thumb' : 'card'}:${streamURL}`}
+          style={StyleSheet.absoluteFill}
+          onTap={(x, y, now) => fullscreen && tap(x, y, now)}
+        >
+          <LivePlayer streamURL={streamURL} style={StyleSheet.absoluteFill} />
+        </PinchZoom>
+      ) : null}
       {showMsg && !compact ? (
         <View style={st.msg} pointerEvents="none">
           {state.phase === 'error' ? (

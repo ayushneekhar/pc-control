@@ -268,49 +268,6 @@ export default function HealthScreen() {
         </Card>
       ) : null}
 
-      {h?.services.available && units.length ? (
-        <Segmented
-          value={filter}
-          onChange={setFilter}
-          options={[
-            { id: 'all', label: 'All' },
-            { id: 'media', label: 'Media' },
-            { id: 'cams', label: 'Cams' },
-            { id: 'agents', label: 'Agents' },
-          ]}
-        />
-      ) : null}
-
-      {h ? (
-        !h.services.available ? (
-          <Unavailable label="Services" error={h.services.error} />
-        ) : (
-          <List>
-            {shownUnits.length ? (
-              shownUnits.map((s, i) => {
-                const tn = tone(s);
-                return (
-                  <ListRow
-                    key={s.unit}
-                    leading={<StatusDot tone={tn === 'dim' ? 'faint' : tn} />}
-                    title={pretty(s.unit)}
-                    subtitle={s.description}
-                    trailing={s.active === 'active' ? since(s.since) : statusLabel(s)}
-                    chevron
-                    last={i === shownUnits.length - 1}
-                    onPress={() => nav.navigate('ServiceDetail', { service: s })}
-                  />
-                );
-              })
-            ) : (
-              <View style={{ padding: space(4) }}>
-                <Text style={{ color: t.textFaint, fontSize: 13 }}>No services in this group.</Text>
-              </View>
-            )}
-          </List>
-        )
-      ) : null}
-
       <Section label="Downloads">
         {!dl?.available ? (
           <Unavailable label="Downloads" error={dl?.error} />
@@ -439,6 +396,49 @@ export default function HealthScreen() {
           </Card>
         )}
       </Section>
+
+      {h?.services.available && units.length ? (
+        <Segmented
+          value={filter}
+          onChange={setFilter}
+          options={[
+            { id: 'all', label: 'All' },
+            { id: 'media', label: 'Media' },
+            { id: 'cams', label: 'Cams' },
+            { id: 'agents', label: 'Agents' },
+          ]}
+        />
+      ) : null}
+
+      {h ? (
+        !h.services.available ? (
+          <Unavailable label="Services" error={h.services.error} />
+        ) : (
+          <List>
+            {shownUnits.length ? (
+              shownUnits.map((s, i) => {
+                const tn = tone(s);
+                return (
+                  <ListRow
+                    key={s.unit}
+                    leading={<StatusDot tone={tn === 'dim' ? 'faint' : tn} />}
+                    title={pretty(s.unit)}
+                    subtitle={s.description}
+                    trailing={s.active === 'active' ? since(s.since) : statusLabel(s)}
+                    chevron
+                    last={i === shownUnits.length - 1}
+                    onPress={() => nav.navigate('ServiceDetail', { service: s })}
+                  />
+                );
+              })
+            ) : (
+              <View style={{ padding: space(4) }}>
+                <Text style={{ color: t.textFaint, fontSize: 13 }}>No services in this group.</Text>
+              </View>
+            )}
+          </List>
+        )
+      ) : null}
     </Screen>
   );
 }

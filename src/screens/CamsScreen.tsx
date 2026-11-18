@@ -28,7 +28,7 @@ import {
   Vibration,
   View,
 } from 'react-native';
-import { RTCRtpReceiver } from 'react-native-webrtc';
+import { RTCRtpReceiver, RTCView } from 'react-native-webrtc';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PcNative } from '../../modules/pc-native';
 import { PinchZoom, type PinchZoomHandle } from '../components/PinchZoom';
@@ -42,6 +42,10 @@ import { radius, screenPad, space, useTheme } from '../theme';
 import { MusicTab } from './cams/MusicTab';
 import { LivePlayer } from './cams/LivePlayer';
 import { ReplayTab } from './cams/ReplayTab';
+
+// Live cam video: the TextureView renderer (pinch-to-zoom) stays off until it renders on device. RTCView is the
+// known-good path; replay keeps PinchZoom.
+const USE_ZOOMABLE_LIVE = false;
 
 export type CamsTab = 'live' | 'replay' | 'music';
 export type CamsParams =
@@ -381,14 +385,18 @@ function CamCard({ id, name, link, mode, compact, fullscreen, onPress, children,
   return (
     <Pressable onPress={onCardPress} style={[fullscreen ? st.fsCard : st.card, { backgroundColor: t.media }, compact && st.cardCompact, style]}>
       {streamURL ? (
-        <PinchZoom
-          ref={zoom}
-          resetKey={`${id}:${fullscreen ? 'full' : compact ? 'thumb' : 'card'}:${streamURL}`}
-          style={StyleSheet.absoluteFill}
-          onTap={(x, y, now) => fullscreen && tap(x, y, now)}
-        >
-          <LivePlayer streamURL={streamURL} style={StyleSheet.absoluteFill} />
-        </PinchZoom>
+        USE_ZOOMABLE_LIVE ? (
+          <PinchZoom
+            ref={zoom}
+            resetKey={`${id}:${fullscreen ? 'full' : compact ? 'thumb' : 'card'}:${streamURL}`}
+            style={StyleSheet.absoluteFill}
+            onTap={(x, y, now) => fullscreen && tap(x, y, now)}
+          >
+            <LivePlayer streamURL={streamURL} style={StyleSheet.absoluteFill} />
+          </PinchZoom>
+        ) : (
+          <RTCView streamURL={streamURL} objectFit="contain" zOrder={0} style={StyleSheet.absoluteFill} />
+        )
       ) : null}
       {showMsg && !compact ? (
         <View style={st.msg} pointerEvents="none">

@@ -43,9 +43,9 @@ import { MusicTab } from './cams/MusicTab';
 import { LivePlayer } from './cams/LivePlayer';
 import { ReplayTab } from './cams/ReplayTab';
 
-// Live cam video: the TextureView renderer (pinch-to-zoom) stays off until it renders on device. RTCView is the
-// known-good path; replay keeps PinchZoom.
-const USE_ZOOMABLE_LIVE = false;
+// Live cam video: TextureView renderer, so PinchZoom can scale/pan it (the background-drawable crash is fixed in
+// pc-native's LivePlayerView). Flip to false to fall back to RTCView.
+const USE_ZOOMABLE_LIVE = true;
 
 export type CamsTab = 'live' | 'replay' | 'music';
 export type CamsParams =

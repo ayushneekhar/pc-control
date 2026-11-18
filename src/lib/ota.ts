@@ -76,15 +76,30 @@ export function otaSnapshot() {
   };
 }
 
-/** GET a small JSON file from GitHub (no auth; 10 s timeout) -> [status, body]. Throws one clean message offline. */
-async function getText(url: string, what: string): Promise<[number, string]> {
+/** GET a small JSON file from GitHub (no auth; 10 s timeout) -> [status, body]. Throws one clean message that
+ *  says which host failed, whether it timed out or was a network error, and keeps the underlying error. */
+async function getText(url: string, what: string, timeoutMs = 10000): Promise<[number, string]> {
+  const host = url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('/')[0];
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 10000);
+  const started = Date.now();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const r = await fetch(url, { signal: ctrl.signal, headers: { 'Cache-Control': 'no-cache', Accept: 'application/json' } });
     return [r.status, await r.text()];
   } catch (e) {
-    throw new Error((e as Error)?.name === 'AbortError' ? `Couldn't check for ${what} (timed out)` : `Couldn't check for ${what} (offline?)`);
+    const elapsed = Date.now() - started;
+    const err = e as Error;
+    // RN's fetch abort does not always surface as name 'AbortError' (it can be 'TypeError: Aborted' or a plain
+    // 'Network request failed'), so trust the signal we aborted ourselves.
+    const timedOut = err?.name === 'AbortError' || ctrl.signal.aborted;
+    const detail = `${err?.name || 'Error'}: ${err?.message || String(e)}`;
+    // logcat's ReactNativeJS line: name, message, URL and how long it took, for adb debugging
+    console.warn(`[ota] GET ${url} failed after ${elapsed} ms (${timedOut ? 'timed out' : 'network error'}): ${detail}`);
+    throw new Error(
+      timedOut
+        ? `Couldn't check for ${what} (timed out after ${Math.round(timeoutMs / 1000)} s via ${host})`
+        : `Couldn't check for ${what} (network error via ${host}: ${detail})`,
+    );
   } finally {
     clearTimeout(t);
   }

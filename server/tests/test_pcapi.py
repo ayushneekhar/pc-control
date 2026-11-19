@@ -832,3 +832,180 @@ class ServiceWatcherTests(unittest.TestCase):
         w = pcapi.ServiceWatcher(self.n, list_fn=lambda: (_ for _ in ()).throw(OSError("systemctl down")))
         with self.assertRaises(OSError):
             w.check()
+
+
+# ---------------------------------------------------------------- torrent VPN (qBittorrent -> Proton)
+
+class FakeVpnQbt:
+    def __init__(self, listen=28655):
+        self.prefs = {"listen_port": listen, "current_network_interface": "", "upnp": True}
+        self.calls = []
+
+    def preferences(self): return dict(self.prefs)
+
+    def set_preferences(self, p):
+        self.calls.append(dict(p))
+        self.prefs.update(p)
+        return {}
+
+
+class FakeNatPmp:
+    def __init__(self, external=None, fail=False):
+        self.calls, self.external, self.fail = [], external, fail
+
+    def request(self, opcode, internal, suggested=0, lifetime=60):
+        self.calls.append((opcode, internal, suggested, lifetime))
+        if self.fail: raise OSError("no NAT-PMP gateway")
+        self.assert_lifetime = lifetime
+        return {"internal": internal, "external": self.external or internal, "lifetime": lifetime}
+
+
+class VpnTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.conf = os.path.join(self.dir, "pcapi.json")
+        self.notif = FakeNotifier()
+        self.qbt = FakeVpnQbt()
+        self.net = FakeNatPmp()
+        self.ip_calls = []
+        self.v = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net,
+                                  ip_fetcher=lambda: (self.ip_calls.append(1), "203.0.113.9")[1])
+        self.v._iface_exists = lambda: True
+        self.v._handshake_age = lambda: 5
+
+    def test_enable_sets_interface_keeps_natpmp_for_both_protocols_and_persists(self):
+        st = self.v.set_enabled(True)
+        self.assertTrue(st["enabled"])
+        self.assertEqual(self.qbt.prefs["current_network_interface"], "proton0")
+        self.assertFalse(self.qbt.prefs["upnp"])
+        self.assertEqual({c[0] for c in self.net.calls}, {0, 2})
+        self.assertEqual({c[3] for c in self.net.calls}, {60})
+        self.assertEqual((st["forwarded_port"], st["qbt_interface"]), (28655, "proton0"))
+        with open(self.conf) as f: self.assertTrue(json.load(f)["torrent_vpn_enabled"])
+
+    def test_public_port_change_moves_qbt_and_disable_restores_previous_port(self):
+        self.net.external = 40000
+        st = self.v.set_enabled(True)
+        self.assertEqual((st["forwarded_port"], self.qbt.prefs["listen_port"]), (40000, 40000))
+        self.assertTrue(all(c[1] == c[2] for c in self.net.calls))       # suggested == internal
+        st = self.v.set_enabled(False)
+        self.assertEqual(self.qbt.prefs["current_network_interface"], "")
+        self.assertEqual(self.qbt.prefs["listen_port"], 28655)
+        self.assertEqual((st["forwarded_port"], st["qbt_interface"], st["enabled"]), (None, "", False))
+        with open(self.conf) as f: self.assertFalse(json.load(f)["torrent_vpn_enabled"])
+
+    def test_restart_while_enabled_keeps_the_real_previous_port(self):
+        self.net.external = 40000
+        self.v.set_enabled(True)
+        self.assertEqual(self.qbt.prefs["listen_port"], 40000)
+        v2 = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net)
+        v2._iface_exists = lambda: True
+        v2._handshake_age = lambda: 5
+        v2._enable_locked(persist=False)
+        self.assertEqual(v2.previous_port, 28655)                       # not the forwarded port
+        v2.set_enabled(False)
+        self.assertEqual(self.qbt.prefs["listen_port"], 28655)
+
+    def test_natpmp_failure_is_reported_but_enabling_still_binds_the_kill_switch(self):
+        self.net.fail = True
+        self.v._handshake_age = lambda: None       # `wg` unreadable: fall back to NAT-PMP health
+        st = self.v.set_enabled(True)
+        self.assertTrue(st["enabled"])
+        self.assertFalse(st["tunnel_up"])
+        self.assertIn("NAT-PMP", st["last_error"])
+        self.assertEqual(self.qbt.prefs["current_network_interface"], "proton0")
+
+    def test_public_ip_is_cached_for_ten_minutes_and_only_from_the_tunnel(self):
+        self.v.set_enabled(True)
+        self.v._refresh_public_ip_locked()
+        self.v._refresh_public_ip_locked()
+        self.assertEqual(len(self.ip_calls), 1)
+        self.assertEqual(self.v.status()["public_ip"], "203.0.113.9")
+        self.v._ip_at = 0
+        self.v._refresh_public_ip_locked()
+        self.assertEqual(len(self.ip_calls), 2)
+        self.v._iface_exists = lambda: False
+        self.v._ip_at = 0
+        self.v._refresh_public_ip_locked()
+        self.assertEqual(len(self.ip_calls), 2)
+
+    def test_one_down_alert_after_three_minutes_and_one_recovery(self):
+        self.v.set_enabled(True)
+        self.v._iface_exists = lambda: False
+        self.v.natpmp_ok = False
+        self.v._unhealthy_since = time.time() - pcapi.VPN_ALERT_AFTER - 1
+        self.v._status_check_locked()
+        self.assertEqual(len(self.notif.calls), 1)
+        self.assertEqual(self.notif.calls[0][0], "vpn_down")
+        self.assertIn("down", self.notif.calls[0][1].lower())
+        self.v._status_check_locked()
+        self.assertEqual(len(self.notif.calls), 1)                       # one alert per outage
+        self.v._iface_exists = lambda: True
+        self.v._handshake_age = lambda: 5
+        self.v.natpmp_ok = True
+        self.v._status_check_locked()
+        self.assertEqual(len(self.notif.calls), 2)
+        self.assertIn("back up", self.notif.calls[1][1].lower())
+        self.v._status_check_locked()
+        self.assertEqual(len(self.notif.calls), 2)                       # recovery is sent once
+
+    def test_health_exposes_vpn_and_reports_it_down(self):
+        class FakeVpn:
+            def status(self):
+                return {"enabled": True, "tunnel_up": False, "forwarded_port": None,
+                        "qbt_interface": "proton0", "public_ip": None, "last_error": "no NAT-PMP gateway"}
+        saved, pcapi.VPN = pcapi.VPN, FakeVpn()
+        try:
+            sources = HealthTests().sources()
+            sources["vpn"] = pcapi.vpn_health
+            r = pcapi.health_report(sources=sources, timeout=1)
+        finally:
+            pcapi.VPN = saved
+        self.assertTrue(r["vpn"]["available"])
+        problem = next(p for p in r["problems"] if p["kind"] == "vpn")
+        self.assertEqual(problem["title"], "Torrent VPN is down")
+        self.assertIn("NAT-PMP", problem["detail"])
+
+
+class VpnHttpTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = pcapi.ALLOWED_LOGINS, pcapi.VPN
+        pcapi.ALLOWED_LOGINS = {"me@example.com"}
+        cls.api = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        threading.Thread(target=cls.api.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.api.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.api.shutdown()
+        pcapi.ALLOWED_LOGINS, pcapi.VPN = cls.saved
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.qbt = FakeVpnQbt()
+        self.v = pcapi.VpnManager(FakeNotifier(), qbt=self.qbt, conf_file=os.path.join(self.dir, "pcapi.json"),
+                                  net=FakeNatPmp())
+        self.v._iface_exists = lambda: True
+        self.v._handshake_age = lambda: 5
+        pcapi.VPN = self.v
+
+    def call(self, method, path, body=None, headers=None):
+        import urllib.request, urllib.error
+        req = urllib.request.Request(self.url + path, method=method,
+                                     headers={"Content-Type": "application/json", **(headers or {})},
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.load(e)
+
+    def test_get_and_post_same_auth_as_other_write_endpoints(self):
+        self.assertEqual(self.call("GET", "/pc/api/vpn")[0], 200)
+        self.assertEqual(self.call("POST", "/pc/api/vpn", {"enabled": True},
+                                   {"Tailscale-User-Login": "x@evil.com"})[0], 403)
+        self.assertEqual(self.call("POST", "/pc/api/vpn", {"enabled": "yes"})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/vpn", {"enabled": True})[0], 200)
+        self.assertTrue(self.call("GET", "/pc/api/vpn")[1]["enabled"])
+        self.assertEqual(self.call("POST", "/pc/api/vpn", {"enabled": False})[0], 200)
+        self.assertFalse(self.call("GET", "/pc/api/vpn")[1]["enabled"])

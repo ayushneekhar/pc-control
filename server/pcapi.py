@@ -31,6 +31,8 @@ POST /pc/api/notify/test              {channel: telegram|app}: a labelled test m
 GET  /pc/api/notify/image/<id>        a notification's picture (the app fetches it for a big-picture notification)
 GET  /pc/api/downloads                active qBittorrent downloads (all categories) for the app's live progress
                                       notification: {enabled, qbt, downloads: [...], total: {...}}. Read-only.
+GET  /pc/api/vpn                      {enabled, tunnel_up, forwarded_port, qbt_interface, public_ip, last_error}
+POST /pc/api/vpn                      {enabled: bool}: route qBittorrent through Proton WireGuard (or back).
 POST /pc/api/downloads/started        {hash?, title?}: "a download just started" (the Qwen bot calls it): wakes the
                                       phone's live progress (FCM "downloads") if that category is on
 POST /pc/api/hook/radarr|sonarr|seerr webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
@@ -51,7 +53,7 @@ pc-api is NOT a security boundary for root: it runs as the agent's user, so it i
 by rootd. Only the phone's signature releases a command. The tailnet identity check below just keeps
 other tailnet nodes/users away from the service controls.
 """
-import base64, glob, json, os, queue, secrets, re, socket, subprocess, sys, threading, time, urllib.error, urllib.parse
+import base64, glob, ipaddress, json, os, queue, secrets, re, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -73,6 +75,26 @@ def load_json(p, default):
 
 
 CONFIG = load_json(os.path.join(CONF_DIR, "pcapi.json"), {})
+PCAPI_CONF = os.path.join(CONF_DIR, "pcapi.json")
+
+
+def save_config(updates, path=None):
+    """Merge a few settings into ~/.config/pc-control/pcapi.json (mode 600) without dropping the rest."""
+    path = path or PCAPI_CONF
+    current = load_json(path, {})
+    if not isinstance(current, dict): current = {}
+    current.update(updates)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f: json.dump(current, f, indent=1)
+        os.replace(tmp, path)
+    except Exception:
+        try: os.remove(tmp)
+        except OSError: pass
+        raise
+    if os.path.abspath(path) == os.path.abspath(PCAPI_CONF): CONFIG.update(updates)
 
 
 def tailnet_owner():
@@ -374,6 +396,8 @@ CATEGORIES = [
      "server-outline"),
     ("service_down", "Service down", "A long-running user service stopped or failed, and when it recovers.", True, True,
      "server-off"),
+    ("vpn_down", "Torrent VPN down", "qBittorrent lost its Proton VPN route or its forwarded port, and when it recovers.",
+     True, True, "shield-off-outline"),
     ("root", "Root approvals", "A root command is waiting for your fingerprint.", False, True, "shield-key-outline"),
     ("results", "Command results", "An approved root command finished or failed.", False, True, "console"),
     ("other", "Other messages", "Anything else sent to /pc/api/notify.", False, True, "message-outline"),
@@ -827,8 +851,8 @@ class Downloads:
         return out
 
     # ---- qBittorrent
-    def qbt(self, method, timeout=8, **params):
-        data = urllib.parse.urlencode(params).encode()
+    def qbt(self, method, timeout=8, get=False, **params):
+        data = None if get else urllib.parse.urlencode(params).encode()
         for attempt in (0, 1):
             if self.opener is None:
                 import http.cookiejar
@@ -840,12 +864,20 @@ class Downloads:
                 if not any("SID" in c.name for c in jar): raise PermissionError("qBittorrent login failed")
                 self.opener = op
             try:
-                with self.opener.open(f"{self.url}/api/v2/{method}", data, timeout=timeout) as r: return json.load(r)
+                with self.opener.open(f"{self.url}/api/v2/{method}", data, timeout=timeout) as r:
+                    raw = r.read()
+                return json.loads(raw) if raw.strip() else {}
             except urllib.error.HTTPError as e:
                 self.opener = None
                 if e.code in (401, 403) and attempt == 0: continue      # session expired (qBittorrent restarted)
                 raise
         raise PermissionError("qBittorrent login failed")
+
+    def preferences(self, timeout=8):
+        return self.qbt("app/preferences", get=True, timeout=timeout)
+
+    def set_preferences(self, prefs, timeout=8):
+        return self.qbt("app/setPreferences", timeout=timeout, json=json.dumps(prefs))
 
     def active(self, timeout=8):
         """-> {"qbt": "ok"|"down"|"auth", "downloads": [...], "total": {...}}. Cached ~1.5 s (one phone polls ~3 s)."""
@@ -895,6 +927,298 @@ class Downloads:
 
 
 DOWNLOADS = None
+
+
+# ---------------------------------------------------------------- torrent VPN (qBittorrent -> Proton WireGuard)
+
+VPN_INTERFACE = os.environ.get("PCAPI_VPN_INTERFACE", "proton0")
+VPN_SOURCE_IP4 = "10.2.0.2"
+VPN_DEFAULT_PORT = 28655
+VPN_NATPMP_GATEWAY = os.environ.get("PCAPI_NATPMP_GATEWAY", "10.2.0.1")
+VPN_NATPMP_PORT = int(os.environ.get("PCAPI_NATPMP_PORT", "5351"))
+VPN_HANDSHAKE_MAX = 180          # s, a WireGuard handshake older than this means the tunnel is down
+VPN_RENEW = 45                   # s, NAT-PMP mappings are requested with a 60 s lifetime
+VPN_ALERT_AFTER = 180            # s unhealthy before one vpn_down alert
+VPN_IP_INTERVAL = 600            # s between public-IP lookups
+
+
+class NatPmpError(Exception):
+    def __init__(self, result, message=""):
+        super().__init__(message or f"NAT-PMP result {result}")
+        self.result = result
+
+
+class NatPmp:
+    """Minimal RFC 6886 NAT-PMP client (UDP, addr 10.2.0.1:5351). bound to 10.2.0.2 so the gateway maps the
+    Proton tunnel address, never the normal LAN one. request(0) = UDP, request(2) = TCP."""
+
+    def __init__(self, gateway=VPN_NATPMP_GATEWAY, port=VPN_NATPMP_PORT, bind=VPN_SOURCE_IP4, timeout=1.5):
+        self.gateway, self.port, self.bind, self.timeout = gateway, port, bind, timeout
+
+    def request(self, opcode, internal, suggested=0, lifetime=60):
+        if opcode not in (0, 2): raise ValueError("opcode must be 0 (UDP) or 2 (TCP)")
+        req = struct.pack("!BBHHI", 0, opcode, int(suggested) & 0xffff, int(internal) & 0xffff,
+                          max(0, min(int(lifetime), 0xffffffff)))
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.bind((self.bind, 0))
+            s.settimeout(self.timeout)
+            s.sendto(req, (self.gateway, self.port))
+            data, _ = s.recvfrom(128)
+        finally:
+            s.close()
+        if len(data) < 16:
+            raise NatPmpError(-1, "short NAT-PMP reply")
+        version, op, result = struct.unpack("!BBH", data[:4])
+        if version != 0 or op != 128 + opcode:
+            raise NatPmpError(-1, "bad NAT-PMP reply")
+        if result:
+            raise NatPmpError(result, f"NAT-PMP refused the mapping (result {result})")
+        _, internal_port, external_port, life = struct.unpack("!IHHI", data[4:16])
+        return {"internal": internal_port, "external": external_port, "lifetime": life}
+
+
+def fetch_public_ip(source=VPN_SOURCE_IP4, host="ifconfig.me", timeout=4):
+    """The public IP as seen through proton0: a plain HTTP request whose socket is bound to 10.2.0.2."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.settimeout(timeout)
+        s.bind((source, 0))
+        s.connect((host, 80))
+        s.sendall(b"GET /ip HTTP/1.1\r\nHost: ifconfig.me\r\nConnection: close\r\nUser-Agent: pc-control\r\n\r\n")
+        data = b""
+        while len(data) < 8192:
+            chunk = s.recv(4096)
+            if not chunk: break
+            data += chunk
+    finally:
+        s.close()
+    body = data.split(b"\r\n\r\n", 1)[-1].decode("ascii", "ignore").strip()
+    return str(ipaddress.ip_address(body))
+
+
+class VpnManager:
+    """qBittorrent -> Proton WireGuard only, switchable from the app.
+
+    enabled: qBittorrent's outgoing interface is proton0 (libtorrent binds to it, so a down tunnel leaks nothing)
+    and a NAT-PMP mapping for the public port is kept alive (UDP + TCP, renewed every ~45 s). disabled: the
+    interface goes back to automatic and the listen port returns to the stored one. State lives in pcapi.json.
+    """
+
+    def __init__(self, notify, qbt=None, conf_file=None, net=None, ip_fetcher=None,
+                 renew=VPN_RENEW, check_interval=15, alert_after=VPN_ALERT_AFTER):
+        self.notify = notify
+        self.qbt = qbt
+        self.conf_file = conf_file or PCAPI_CONF
+        self.net = net or NatPmp()
+        self.ip_fetcher = ip_fetcher or fetch_public_ip
+        self.renew, self.interval, self.alert_after = renew, check_interval, alert_after
+        self.lock = threading.RLock()
+        self.stop = threading.Event()
+        conf = load_json(self.conf_file, {})
+        if not isinstance(conf, dict): conf = {}
+        self.enabled = bool(conf.get("torrent_vpn_enabled", False))
+        self.previous_port = self._port(conf.get("torrent_vpn_previous_port"), VPN_DEFAULT_PORT)
+        self.forwarded_port = None
+        self.public_ip = None
+        self.last_error = None
+        self.qbt_interface = ""
+        self.natpmp_ok = False
+        self._qbt_listen_port = None
+        self._ip_at = 0.0
+        self._next_renew = 0.0
+        self._unhealthy_since = None
+        self._alerted = False
+        self._started_enabled = False
+
+    @staticmethod
+    def _port(value, default):
+        try:
+            p = int(value)
+            return p if 1 <= p <= 65535 else default
+        except (TypeError, ValueError):
+            return default
+
+    # ---- tunnel / qBittorrent
+    def _iface_exists(self):
+        return os.path.exists(f"/sys/class/net/{VPN_INTERFACE}")
+
+    def _handshake_age(self):
+        """Seconds since the newest handshake, or None when `wg` can't be read (pc-api is not root)."""
+        try:
+            p = subprocess.run(["wg", "show", VPN_INTERFACE, "latest-handshakes"],
+                               capture_output=True, text=True, timeout=3)
+            if p.returncode != 0: return None
+            stamps = [int(line.split()[1]) for line in p.stdout.splitlines()
+                      if len(line.split()) >= 2 and line.split()[1].isdigit()]
+            newest = max(stamps, default=0)
+            if newest <= 0: return None
+            return max(0.0, time.time() - newest)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+
+    def _tunnel_up(self):
+        if not self._iface_exists(): return False
+        age = self._handshake_age()
+        if age is not None: return age <= VPN_HANDSHAKE_MAX
+        return self.natpmp_ok
+
+    def _notify(self, title, body):
+        fn = getattr(self.notify, "send_async", None) or getattr(self.notify, "send", None)
+        if fn:
+            try: fn("vpn_down", title, body)
+            except Exception as e: print(f"vpn: notify failed: {type(e).__name__}", file=sys.stderr, flush=True)
+
+    def _set_qbt_port(self, port):
+        port = self._port(port, 0)
+        if not port or port == self._qbt_listen_port: return
+        self.qbt.set_preferences({"listen_port": port})
+        self._qbt_listen_port = port
+
+    # ---- state changes
+    def _enable_locked(self, persist=True):
+        if not self.qbt: raise RuntimeError("qBittorrent client is not configured")
+        prefs = self.qbt.preferences()
+        if isinstance(prefs, dict):
+            current = self._port(prefs.get("listen_port"), 0)
+            self._qbt_listen_port = current or None
+            if persist: self.previous_port = current or self.previous_port
+        self.qbt.set_preferences({"current_network_interface": VPN_INTERFACE, "upnp": False})
+        self.qbt_interface = VPN_INTERFACE
+        self.enabled = True
+        self._unhealthy_since, self._alerted = None, False
+        self._next_renew = 0.0
+        if persist:
+            save_config({"torrent_vpn_enabled": True, "torrent_vpn_previous_port": self.previous_port},
+                        self.conf_file)
+
+    def _disable_locked(self):
+        if self.qbt:
+            self.qbt.set_preferences({"current_network_interface": "", "listen_port": self.previous_port})
+        self.qbt_interface = ""
+        self._qbt_listen_port = None
+        self.enabled = False
+        self.forwarded_port = None
+        self.public_ip = None
+        self.natpmp_ok = False
+        self.last_error = None
+        self._unhealthy_since, self._alerted = None, False
+        save_config({"torrent_vpn_enabled": False}, self.conf_file)
+
+    def set_enabled(self, enabled):
+        with self.lock:
+            if enabled == self.enabled:
+                if enabled: self._renew_locked()
+                return self._status_locked()
+            if enabled:
+                self._enable_locked()
+                self._renew_locked()
+            else:
+                self._disable_locked()
+            return self._status_locked()
+
+    # ---- NAT-PMP mapping (both protocols, public port -> qBittorrent's listen port)
+    def _map(self, internal):
+        udp = self.net.request(0, internal, internal, 60)
+        tcp = self.net.request(2, internal, internal, 60)
+        return udp, tcp
+
+    def _renew_locked(self):
+        try:
+            internal = self._port(self.forwarded_port or self.previous_port, VPN_DEFAULT_PORT)
+            external = internal
+            for _ in range(3):
+                udp, _tcp = self._map(internal)
+                external = self._port(udp.get("external"), internal)
+                if external == internal: break
+                self._set_qbt_port(external)
+                internal = external
+            self._set_qbt_port(external)
+            self.forwarded_port = external
+            self.natpmp_ok = True
+            self.last_error = None
+            self._next_renew = time.time() + self.renew
+        except Exception as e:
+            self.natpmp_ok = False
+            self.forwarded_port = None
+            self.last_error = clip(f"{type(e).__name__}: {e}", 240)
+            self._next_renew = time.time() + 15
+
+    def _refresh_public_ip_locked(self):
+        now = time.time()
+        if now - self._ip_at < VPN_IP_INTERVAL: return
+        self._ip_at = now
+        if not self._iface_exists() or not self.natpmp_ok: return
+        try:
+            ip = self.ip_fetcher()
+            if ip: self.public_ip = str(ip)
+        except Exception:
+            pass
+
+    def _status_check_locked(self):
+        healthy = self._iface_exists() and self.natpmp_ok
+        age = self._handshake_age() if healthy else None
+        if healthy and age is not None and age > VPN_HANDSHAKE_MAX: healthy = False
+        now = time.time()
+        if healthy:
+            self._unhealthy_since = None
+            if self._alerted:
+                self._alerted = False
+                self._notify("Torrent VPN back up", "qBittorrent is routed through Proton again.")
+            return
+        if self._unhealthy_since is None:
+            self._unhealthy_since = now
+        elif not self._alerted and now - self._unhealthy_since >= self.alert_after:
+            self._alerted = True
+            why = self.last_error or ("proton0 is not up" if not self._iface_exists()
+                                      else "Proton's NAT-PMP gateway is not answering")
+            self._notify("Torrent VPN down", f"qBittorrent is not routed through Proton. {why}")
+
+    # ---- status / loop
+    def _status_locked(self):
+        return {"enabled": self.enabled,
+                "tunnel_up": self._tunnel_up() if self.enabled else False,
+                "forwarded_port": self.forwarded_port if self.enabled else None,
+                "qbt_interface": self.qbt_interface if self.enabled else "",
+                "public_ip": self.public_ip if self.enabled else None,
+                "last_error": self.last_error}
+
+    def status(self):
+        with self.lock:
+            return self._status_locked()
+
+    def start(self):
+        threading.Thread(target=self.loop, daemon=True, name="torrent-vpn").start()
+        return self
+
+    def loop(self):
+        while not self.stop.is_set():
+            try:
+                with self.lock:
+                    if self.enabled:
+                        if not self._started_enabled:
+                            self._started_enabled = True
+                            try:
+                                self._enable_locked(persist=False)
+                            except Exception as e:
+                                self._started_enabled = False      # qBittorrent may still be starting; retry
+                                self.last_error = clip(f"{type(e).__name__}: {e}", 240)
+                        if time.time() >= self._next_renew: self._renew_locked()
+                        self._refresh_public_ip_locked()
+                        self._status_check_locked()
+                    else:
+                        self._started_enabled = False
+            except Exception as e:
+                print(f"vpn: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            self.stop.wait(self.interval)
+
+
+def vpn_health():
+    return VPN.status() if VPN else {"enabled": False, "tunnel_up": False, "forwarded_port": None,
+                                     "qbt_interface": "", "public_ip": None, "last_error": None}
+
+
+VPN = None
 
 
 # ---------------------------------------------------------------- health overview (/pc/api/health)
@@ -1035,6 +1359,7 @@ def health_sources(timeout=HEALTH_TIMEOUT):
         "sonarr": lambda: arr_queue("tv-sonarr", timeout),
         "jellyfin": lambda: jellyfin_streams(timeout),
         "disks": health_disks,
+        "vpn": vpn_health,
     }
 
 
@@ -1073,6 +1398,7 @@ def health_report(sources=None, timeout=HEALTH_TIMEOUT):
     sonarr = _health_section(raw, "sonarr")
     jellyfin = _health_section(raw, "jellyfin")
     disks = _health_section(raw, "disks")
+    vpn = _health_section(raw, "vpn")
 
     if services["available"]:
         counts = {"running": 0, "failed": 0, "inactive": 0, "other": 0}
@@ -1095,6 +1421,11 @@ def health_report(sources=None, timeout=HEALTH_TIMEOUT):
     source_problem("Sonarr", sonarr)
     source_problem("Jellyfin", jellyfin)
     source_problem("Disks", disks)
+    if "vpn" in raw:
+        source_problem("VPN", vpn)
+        if vpn["available"] and vpn.get("enabled") and not vpn.get("tunnel_up"):
+            problems.append({"kind": "vpn", "severity": "warn", "title": "Torrent VPN is down",
+                             "detail": vpn.get("last_error") or "qBittorrent is not routed through Proton"})
 
     if services["available"]:
         for s in services.get("units") or []:
@@ -1134,7 +1465,7 @@ def health_report(sources=None, timeout=HEALTH_TIMEOUT):
                                  "detail": f"{d.get('mount')}: {human_size(total - used)} free of {human_size(total)}"})
 
     return {"ts": int(time.time()), "problems": problems, "services": services, "downloads": downloads,
-            "radarr": radarr, "sonarr": sonarr, "jellyfin": jellyfin, "disks": disks}
+            "radarr": radarr, "sonarr": sonarr, "jellyfin": jellyfin, "disks": disks, "vpn": vpn}
 
 
 # ---------------------------------------------------------------- app crash reports
@@ -1497,6 +1828,7 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/downloads":
                 return self.send_json(200, {**DOWNLOADS.active(), "enabled": NOTIFY.wants("live")["app"],
                                             "ts": int(time.time())})
+            if path == "/api/vpn": return self.send_json(200, VPN.status())
         elif method == "POST":
             m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
             if m: return self.hook(m.group(1))
@@ -1538,6 +1870,13 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/downloads/started":
                 if b.get("hash") and b.get("title"): DOWNLOADS.remember(str(b["hash"]), str(b["title"]))
                 return self.send_json(200, {"ok": True, "app": NOTIFY.live_kick(clip(b.get("source") or "", 20))})
+            if path == "/api/vpn":
+                if not isinstance(b.get("enabled"), bool):
+                    return self.send_json(400, {"error": "enabled must be true or false"})
+                try:
+                    return self.send_json(200, VPN.set_enabled(b["enabled"]))
+                except Exception as e:
+                    return self.send_json(502, {"error": clip(f"qBittorrent did not take the change: {e}", 240)})
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
@@ -1636,10 +1975,11 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER
+    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER, VPN
     PUSH = Push()
     NOTIFY = Notify(PUSH)
     DOWNLOADS = Downloads()
+    VPN = VpnManager(NOTIFY, qbt=DOWNLOADS).start()
     hook_secret()
     HUB = Hub()
     WATCHER = ServiceWatcher(NOTIFY).start()

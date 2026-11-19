@@ -222,4 +222,14 @@ export type Health = {
   sonarr: ArrQueue;
   jellyfin: { available: boolean; error?: string; streams?: JellyfinStream[] };
   disks: { available: boolean; error?: string; disks?: HealthDisk[] };
+  vpn?: VpnState & { available?: boolean; error?: string };
+};
+
+export type VpnState = {
+  enabled: boolean;
+  tunnel_up: boolean;
+  forwarded_port: number | null;
+  qbt_interface: string;
+  public_ip: string | null;
+  last_error: string | null;
 };

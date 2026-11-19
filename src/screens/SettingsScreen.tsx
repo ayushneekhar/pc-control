@@ -1,12 +1,12 @@
 import Constants from 'expo-constants';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Linking, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Animated, AppState, Linking, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { KeyInfo, PcNative } from '../../modules/pc-native';
 import { Banner, Button, Card, Icon, KV, Mono, Pill, Screen, Section, StatusDot } from '../components/ui';
-import { ApiError, DEFAULT_SERVER, get, Info, post, serverUrl } from '../lib/api';
+import { ApiError, DEFAULT_SERVER, get, Info, post, serverUrl, VpnState } from '../lib/api';
 import { ApkRelease, APK_URLS, binaryTarget, clearOtaRecovery, latestApk, otaRecovery, otaSnapshot } from '../lib/ota';
 import { applyOta, checkOta, useOta } from '../lib/otaStore';
-import { liveStatus, LiveStart, startLiveIfDownloading } from '../lib/live';
+import { liveStatus } from '../lib/live';
 import { askNotificationPermission, registerPush } from '../lib/push';
 import { reconnectRootStore, useRootStore } from '../lib/rootStore';
 import { keyFingerprint } from '../lib/rootPayload';
@@ -25,6 +25,90 @@ function useAppActiveTick() {
     return () => s.remove();
   }, []);
   return tick;
+}
+
+/** qBittorrent -> Proton WireGuard only. The switch is optimistic: it rolls back if pc-api rejects the change. */
+function TorrentVpn() {
+  const t = useTheme();
+  const tick = useAppActiveTick();
+  const [s, setS] = useState<VpnState | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [pending, setPending] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setS(await get<VpnState>('/pc/api/vpn'));
+      setErr(null);
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }, []);
+
+  useEffect(() => {
+    // one check on mount, then every 8 s while Settings is open
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    refresh();
+    const iv = setInterval(refresh, 8000);
+    return () => clearInterval(iv);
+  }, [refresh, tick]);
+
+  const toggle = async (v: boolean) => {
+    if (busy) return;
+    const before = s;
+    setPending(v);
+    setBusy(true);
+    try {
+      setS(await post<VpnState>('/pc/api/vpn', { enabled: v }));
+      setErr(null);
+    } catch (e) {
+      setS(before);
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+      setPending(null);
+    }
+  };
+
+  const enabled = pending ?? s?.enabled ?? false;
+  const down = enabled && s != null && !s.tunnel_up;
+  const status = busy ? (enabled ? 'Turning on…' : 'Turning off…') : !enabled ? 'Off' : down ? 'Tunnel down' : 'Connected via Proton SG';
+  const dot = down ? 'warn' : enabled ? 'ok' : 'faint';
+
+  return (
+    <Card style={{ gap: space(3) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
+        <Icon name="shield-lock-outline" size={22} color={down ? t.warn : enabled ? t.accent : t.textDim} />
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Torrent VPN</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <StatusDot tone={dot} />
+            <Text style={{ color: t.textDim, fontSize: 13 }}>{status}</Text>
+          </View>
+        </View>
+        <Switch
+          value={enabled}
+          onValueChange={toggle}
+          disabled={!s || busy}
+          accessibilityLabel="Route qBittorrent through Proton VPN"
+          trackColor={{ true: t.accent, false: t.cardAlt }}
+          thumbColor={enabled ? t.onAccent : t.textFaint}
+        />
+      </View>
+
+      {err ? <Banner tone="bad" title="Torrent VPN">{err}</Banner> : null}
+      {s?.last_error ? <Text style={{ color: t.warn, fontSize: 12.5, lineHeight: 18 }}>{s.last_error}</Text> : null}
+
+      <View>
+        <KV k="Forwarded port" v={enabled ? (s?.forwarded_port ?? 'Waiting for NAT-PMP…') : '—'} mono={enabled && s?.forwarded_port != null} />
+        <KV k="VPN public IP" v={enabled ? (s?.public_ip ?? '—') : '—'} mono={enabled && !!s?.public_ip} />
+      </View>
+
+      <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
+        Only qBittorrent goes through Proton (WireGuard, Singapore P2P). Tailscale, Jellyfin, Seerr, cams and browsing stay on the normal connection.
+      </Text>
+    </Card>
+  );
 }
 
 function Enrollment() {
@@ -216,8 +300,6 @@ function Enrollment() {
   );
 }
 
-type TestState = { kind: 'idle' } | { kind: 'busy' } | { kind: 'done'; ok: boolean; text: string };
-
 function Push() {
   const t = useTheme();
   const tick = useAppActiveTick();
@@ -225,18 +307,6 @@ function Push() {
   const [status, setStatus] = useState(() => PcNative?.pushStatus() ?? { available: false, token: null, error: null });
   const [server, setServer] = useState<{ configured: boolean; registered?: boolean } | null>(null);
   const [registering, setRegistering] = useState(false);
-  const [test, setTest] = useState<TestState>({ kind: 'idle' });
-  const [tgTest, setTgTest] = useState<TestState>({ kind: 'idle' });
-
-  const sendTgTest = async () => {
-    setTgTest({ kind: 'busy' });
-    try {
-      await post('/pc/api/notify/test', { channel: 'telegram' });
-      setTgTest({ kind: 'done', ok: true, text: 'Sent to the Qwen bot chat.' });
-    } catch (e) {
-      setTgTest({ kind: 'done', ok: false, text: (e as Error).message });
-    }
-  };
 
   const refresh = useCallback(async () => {
     if (!PcNative) return;
@@ -268,19 +338,6 @@ function Push() {
       ]);
   };
 
-  const sendTest = async () => {
-    setTest({ kind: 'busy' });
-    try {
-      const r = await post<{ sent: number; results: { ok: boolean; error: string | null }[] }>('/pc/api/push/test', {
-        token: status.token,
-      });
-      const err = r.results.find((x) => !x.ok)?.error;
-      setTest(r.sent ? { kind: 'done', ok: true, text: 'Sent. It should arrive in a few seconds.' } : { kind: 'done', ok: false, text: `FCM refused it: ${err ?? 'no phones registered'}` });
-    } catch (e) {
-      setTest({ kind: 'done', ok: false, text: (e as Error).message });
-    }
-  };
-
   const registered = !!status.token && server?.registered === true;
   const subtitle = !status.available
     ? 'This build has no Firebase config'
@@ -303,12 +360,6 @@ function Push() {
       <Row ok={registered} label="FCM token registered" fix={registered || registering ? undefined : { label: 'Retry', onPress: refresh }} />
       <Row ok={server?.configured === true} label="FCM set up on the laptop" />
       {!registered && status.error ? <Text style={{ color: t.textFaint, fontSize: 12.5 }}>{status.error}</Text> : null}
-      <View style={{ flexDirection: 'row', gap: space(2) }}>
-        <Button label="Test app" icon="cellphone-message" kind="subtle" style={{ flex: 1 }} busy={test.kind === 'busy'} disabled={!registered} onPress={sendTest} />
-        <Button label="Test Telegram" icon="send-outline" kind="subtle" style={{ flex: 1 }} busy={tgTest.kind === 'busy'} onPress={sendTgTest} />
-      </View>
-      {tgTest.kind === 'done' ? <Text style={{ color: tgTest.ok ? t.ok : t.bad, fontSize: 13 }}>{tgTest.text}</Text> : null}
-      {test.kind === 'done' ? <Text style={{ color: test.ok ? t.ok : t.bad, fontSize: 13 }}>{test.text}</Text> : null}
       <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
         App notifications are delivered by Firebase Cloud Messaging. Only the notification text goes through Google, e.g. “Root approval needed” and the reason, never the command; pictures are fetched from the laptop over the tailnet. Approving still happens here, with your fingerprint.
       </Text>
@@ -355,6 +406,13 @@ function NotificationPrefs() {
   const setCat = (id: string, ch: Channel, v: boolean) =>
     s && save({ categories: { [id]: { [ch]: v } } }, { ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, [ch]: v } : c)) });
 
+  const [open, setOpen] = useState(false);
+  const [catHeight, setCatHeight] = useState(0);
+  const [anim] = useState(() => new Animated.Value(0));
+  useEffect(() => {
+    Animated.timing(anim, { toValue: open ? 1 : 0, duration: 220, useNativeDriver: false }).start();
+  }, [open, anim]);
+
   if (!s)
     return (
       <Card>
@@ -373,13 +431,33 @@ function NotificationPrefs() {
   );
   return (
     <Card style={{ gap: space(1), paddingHorizontal: 0 }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3), paddingHorizontal: space(4), marginBottom: space(2) }}>
+      <Pressable
+        onPress={() => setOpen((v) => !v)}
+        accessibilityRole="button"
+        accessibilityLabel="Show or hide notification categories"
+        accessibilityState={{ expanded: open }}
+        style={({ pressed }) => [
+          { flexDirection: 'row', alignItems: 'center', gap: space(3), paddingHorizontal: space(4), marginBottom: space(2) },
+          pressed && { opacity: 0.8 },
+        ]}
+      >
         <Icon name="bell-cog-outline" size={22} color={t.accent} />
         <View style={{ flex: 1 }}>
           <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Where notifications go</Text>
-          <Text style={{ color: t.textDim, fontSize: 13 }}>Per category: the Qwen bot on Telegram, this app, or both.</Text>
+          <Text style={{ color: t.textDim, fontSize: 13 }}>
+            {open ? 'Per category: the Qwen bot on Telegram, this app, or both.' : 'Masters below. Tap to choose per category.'}
+          </Text>
         </View>
-      </View>
+        <Animated.View
+          style={{
+            transform: [
+              { rotate: anim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] }) },
+            ],
+          }}
+        >
+          <Icon name="chevron-down" size={22} color={t.textDim} />
+        </Animated.View>
+      </Pressable>
       {err ? <Banner tone="bad" title="Notification settings">{err}</Banner> : null}
 
       <View style={[st.masters, { backgroundColor: t.cardAlt }]}>
@@ -397,71 +475,52 @@ function NotificationPrefs() {
         ))}
       </View>
 
-      <View style={[st.colHead, { borderBottomColor: t.border }]}>
-        <Text style={{ flex: 1, color: t.textDim, fontSize: 11.5, fontWeight: '500' }}>Category</Text>
-        <Text style={[st.col, { color: t.textDim }]}>Telegram</Text>
-        <Text style={[st.col, { color: t.textDim }]}>App</Text>
-      </View>
-      {s.categories.map((c, i) => (
-        <View key={c.id} style={[st.catRow, i < s.categories.length - 1 && { borderBottomColor: t.border, borderBottomWidth: StyleSheet.hairlineWidth }]}>
-          <Icon name={c.icon} size={20} color={c.telegram || c.app ? t.text : t.textFaint} />
-          <View style={{ flex: 1, paddingRight: space(1) }}>
-            <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600' }}>{c.label}</Text>
-            <Text style={{ color: t.textFaint, fontSize: 12, lineHeight: 16 }}>{c.description}</Text>
+      <Animated.View style={{ height: anim.interpolate({ inputRange: [0, 1], outputRange: [0, catHeight] }), opacity: anim, overflow: 'hidden' }}>
+        <View onLayout={(e) => setCatHeight(e.nativeEvent.layout.height)}>
+          <View style={[st.colHead, { borderBottomColor: t.border }]}>
+            <Text style={{ flex: 1, color: t.textDim, fontSize: 11.5, fontWeight: '500' }}>Category</Text>
+            <Text style={[st.col, { color: t.textDim }]}>Telegram</Text>
+            <Text style={[st.col, { color: t.textDim }]}>App</Text>
           </View>
-          <View style={st.colCell}>
-            {(c.channels ?? ['telegram', 'app']).includes('telegram') ? (
-              sw(c.telegram, !s.masters.telegram, (v) => setCat(c.id, 'telegram', v), `${c.label} on Telegram`)
-            ) : (
-              <Text style={{ color: t.textFaint, fontSize: 16 }} accessibilityLabel={`${c.label}: app only`}>
-                –
-              </Text>
-            )}
-          </View>
-          <View style={st.colCell}>{sw(c.app, !s.masters.app, (v) => setCat(c.id, 'app', v), `${c.label} in the app`)}</View>
+          {s.categories.map((c, i) => (
+            <View key={c.id} style={[st.catRow, i < s.categories.length - 1 && { borderBottomColor: t.border, borderBottomWidth: StyleSheet.hairlineWidth }]}>
+              <Icon name={c.icon} size={20} color={c.telegram || c.app ? t.text : t.textFaint} />
+              <View style={{ flex: 1, paddingRight: space(1) }}>
+                <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600' }}>{c.label}</Text>
+                <Text style={{ color: t.textFaint, fontSize: 12, lineHeight: 16 }}>{c.description}</Text>
+              </View>
+              <View style={st.colCell}>
+                {(c.channels ?? ['telegram', 'app']).includes('telegram') ? (
+                  sw(c.telegram, !s.masters.telegram, (v) => setCat(c.id, 'telegram', v), `${c.label} on Telegram`)
+                ) : (
+                  <Text style={{ color: t.textFaint, fontSize: 16 }} accessibilityLabel={`${c.label}: app only`}>
+                    –
+                  </Text>
+                )}
+              </View>
+              <View style={st.colCell}>{sw(c.app, !s.masters.app, (v) => setCat(c.id, 'app', v), `${c.label} in the app`)}</View>
+            </View>
+          ))}
+          {!s.masters.telegram || !s.masters.app ? (
+            <Text style={{ color: t.textFaint, fontSize: 12.5, paddingHorizontal: space(4), paddingTop: space(2) }}>
+              A channel that is all off ignores its per-category switches (shown greyed).
+            </Text>
+          ) : null}
         </View>
-      ))}
-      {!s.masters.telegram || !s.masters.app ? (
-        <Text style={{ color: t.textFaint, fontSize: 12.5, paddingHorizontal: space(4), paddingTop: space(2) }}>
-          A channel that is all off ignores its per-category switches (shown greyed).
-        </Text>
-      ) : null}
+      </Animated.View>
     </Card>
   );
 }
 
-const LIVE_RESULT: Record<LiveStart, string> = {
-  started: 'Started: look at the status bar.',
-  running: 'Already showing.',
-  none: 'Nothing is downloading right now. It starts by itself when a download begins.',
-  off: '“Live download progress” is off above (App column).',
-  refused: 'Android didn’t start it. Check that notifications and the “Live download progress” channel are on.',
-  unavailable: 'This build has no live progress.',
-  unreachable: 'Can’t reach the laptop. Is Tailscale connected?',
-};
-
-/** Live download progress: Android 16 Live Updates (status bar chip + Samsung Now Bar) status and a manual start. */
+/** Live download progress: Android 16 Live Updates (status bar chip + Samsung Now Bar) status. */
 function LiveProgress() {
   const t = useTheme();
   const tick = useAppActiveTick();
   const [live, setLive] = useState(() => liveStatus());
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => setLive(liveStatus()), [tick]);
   if (!live) return null;
 
-  const showNow = async () => {
-    setBusy(true);
-    const r = await startLiveIfDownloading();
-    setMsg(LIVE_RESULT[r]);
-    setLive(liveStatus());
-    setBusy(false);
-  };
-  const stop = () => {
-    PcNative?.liveStop();
-    setTimeout(() => setLive(liveStatus()), 500);
-  };
   const good = live.channelEnabled && (!live.supported || live.canPromote);
   return (
     <Card style={{ gap: space(3) }}>
@@ -483,11 +542,6 @@ function LiveProgress() {
         </Text>
       )}
       <Row ok={live.channelEnabled} label="“Live download progress” channel on" fix={live.channelEnabled ? undefined : { label: 'Open', onPress: () => PcNative?.openNotificationSettings() }} />
-      <View style={{ flexDirection: 'row', gap: space(2) }}>
-        <Button label="Show now" icon="play-outline" kind="subtle" style={{ flex: 1 }} busy={busy} disabled={live.running} onPress={showNow} />
-        {live.running ? <Button label="Stop" icon="stop" kind="subtle" style={{ flex: 1 }} onPress={stop} /> : null}
-      </View>
-      {msg ? <Text style={{ color: t.textDim, fontSize: 13 }}>{msg}</Text> : null}
       <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
         No background connection: the laptop sends a push when a download starts, then the app checks every few seconds while the screen is on and stops when nothing is downloading. On Samsung, if it doesn’t appear in the Now Bar, turn on Developer options → “Live notifications for all apps”.
       </Text>
@@ -571,10 +625,8 @@ function Server() {
   const [info, setInfo] = useState<Info | null>(null);
   const [who, setWho] = useState<{ login: string | null } | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
   const test = useCallback(async () => {
-    setBusy(true);
     setErr(null);
     try {
       const [i, w] = await Promise.all([get<Info>('/pc/api/info'), get<{ login: string | null }>('/pc/api/whoami')]);
@@ -584,11 +636,10 @@ function Server() {
       setInfo(null);
       setErr((e as Error).message);
     }
-    setBusy(false);
   }, []);
 
   useEffect(() => {
-    // one connection test on mount (shows a spinner, then the result)
+    // automatic connection check on mount; Save runs it again
     // eslint-disable-next-line react-hooks/set-state-in-effect
     test();
   }, [test]);
@@ -605,7 +656,6 @@ function Server() {
     test();
   };
 
-
   return (
     <Card style={{ gap: space(3) }}>
       <Text style={{ color: t.textDim, fontSize: 13 }}>Laptop address (tailnet)</Text>
@@ -621,10 +671,7 @@ function Server() {
         selectionColor={t.accent}
         style={[st.input, { color: t.text, backgroundColor: t.cardAlt, borderColor: t.border, fontFamily: t.mono }]}
       />
-      <View style={{ flexDirection: 'row', gap: space(2) }}>
-        <Button label="Save" kind="subtle" style={{ flex: 1 }} onPress={save} disabled={url.trim().replace(/\/+$/, '') === serverUrl()} />
-        <Button label="Test" kind="subtle" icon="lan-connect" style={{ flex: 1 }} busy={busy} onPress={test} />
-      </View>
+      <Button label="Save" kind="subtle" onPress={save} disabled={url.trim().replace(/\/+$/, '') === serverUrl()} />
       {err ? <Banner tone="bad" title="Can't reach the laptop">{err}</Banner> : null}
       {info ? (
         <View>
@@ -653,6 +700,9 @@ export default function SettingsScreen() {
         </View>
       }
     >
+      <Section label="Network">
+        <TorrentVpn />
+      </Section>
       <Section label="Root approvals">
         <Enrollment />
       </Section>

@@ -952,6 +952,25 @@ class VpnTests(unittest.TestCase):
         self.v._refresh_public_ip_locked()
         self.assertEqual(len(self.ip_calls), 2)
 
+    def test_public_ip_retries_until_natpmp_and_the_fetch_succeed(self):
+        self.net.fail = True
+        self.v.set_enabled(True)
+        self.v._refresh_public_ip_locked()
+        self.assertEqual((self.v.public_ip, self.v._ip_at, len(self.ip_calls)), (None, 0, 0))
+
+        attempts = []
+        def flaky():
+            attempts.append(1)
+            if len(attempts) == 1: raise OSError("temporary")
+            return "203.0.113.9"
+
+        self.v.natpmp_ok = True
+        self.v.ip_fetcher = flaky
+        self.v._refresh_public_ip_locked()
+        self.assertEqual((self.v.public_ip, self.v._ip_at, len(attempts)), (None, 0, 1))
+        self.v._refresh_public_ip_locked()
+        self.assertEqual((self.v.public_ip, len(attempts)), ("203.0.113.9", 2))
+
     def test_one_down_alert_after_three_minutes_and_one_recovery(self):
         self.v.set_enabled(True)
         self.v._iface_exists = lambda: False

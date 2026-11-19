@@ -1089,6 +1089,7 @@ class VpnManager:
         self.enabled = True
         self._unhealthy_since, self._alerted = None, False
         self._next_renew = 0.0
+        self._ip_at = 0.0
         if persist:
             save_config({"torrent_vpn_enabled": True, "torrent_vpn_previous_port": self.previous_port},
                         self.conf_file)
@@ -1147,14 +1148,16 @@ class VpnManager:
 
     def _refresh_public_ip_locked(self):
         now = time.time()
-        if now - self._ip_at < VPN_IP_INTERVAL: return
-        self._ip_at = now
+        # A known IP is refreshed every 10 min; until the first success, retry on each loop tick.
+        if self.public_ip is not None and now - self._ip_at < VPN_IP_INTERVAL: return
         if not self._iface_exists() or not self.natpmp_ok: return
         try:
             ip = self.ip_fetcher()
-            if ip: self.public_ip = str(ip)
         except Exception:
-            pass
+            return
+        if ip:
+            self.public_ip = str(ip)
+            self._ip_at = now
 
     def _status_check_locked(self):
         healthy = self._iface_exists() and self.natpmp_ok

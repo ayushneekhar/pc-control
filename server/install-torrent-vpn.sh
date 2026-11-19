@@ -3,7 +3,7 @@
 #
 # Run by Ayush (never by pc-api):  sudo ~/code/pc-control/server/install-torrent-vpn.sh [proton.conf]
 #
-# It installs wireguard-tools, turns the user's Proton WireGuard conf into /etc/wireguard/proton.conf with:
+# It installs wireguard-tools, turns the user's Proton WireGuard conf into /etc/wireguard/proton0.conf with:
 #   - the DNS line removed (the system resolver must never change),
 #   - WireGuard routes in their own table (51820), never the main table,
 #   - policy rules that send only 10.2.0.2 / 2a07:b944::2:2 through that table.
@@ -17,7 +17,7 @@ TABLE=51820
 SRC_IP4=10.2.0.2
 SRC_IP6=2a07:b944::2:2
 RULE_PRIO=5000
-DST=/etc/wireguard/proton.conf
+DST=/etc/wireguard/proton0.conf
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -47,7 +47,7 @@ command -v wg-quick >/dev/null 2>&1 || die "wg-quick is still missing after inst
 command -v wg >/dev/null 2>&1 || die "wg is still missing after installing wireguard-tools"
 
 install -d -m 0700 /etc/wireguard
-TMP="$(mktemp /etc/wireguard/.proton.conf.XXXXXX)"
+TMP="$(mktemp /etc/wireguard/.proton0.conf.XXXXXX)"
 trap 'rm -f "$TMP"' EXIT
 
 # Build the root config: drop anything that would change DNS, routing or hooks, then add ours.

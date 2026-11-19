@@ -950,14 +950,15 @@ class NatPmpError(Exception):
 
 class NatPmp:
     """Minimal RFC 6886 NAT-PMP client (UDP, addr 10.2.0.1:5351). bound to 10.2.0.2 so the gateway maps the
-    Proton tunnel address, never the normal LAN one. request(0) = UDP, request(2) = TCP."""
+    Proton tunnel address, never the normal LAN one. request(1) = UDP, request(2) = TCP."""
 
     def __init__(self, gateway=VPN_NATPMP_GATEWAY, port=VPN_NATPMP_PORT, bind=VPN_SOURCE_IP4, timeout=1.5):
         self.gateway, self.port, self.bind, self.timeout = gateway, port, bind, timeout
 
     def request(self, opcode, internal, suggested=0, lifetime=60):
-        if opcode not in (0, 2): raise ValueError("opcode must be 0 (UDP) or 2 (TCP)")
-        req = struct.pack("!BBHHI", 0, opcode, int(suggested) & 0xffff, int(internal) & 0xffff,
+        if opcode not in (1, 2): raise ValueError("opcode must be 1 (UDP) or 2 (TCP)")
+        # version, opcode, reserved, internal port, suggested external port, lifetime
+        req = struct.pack("!BBHHHI", 0, opcode, 0, int(internal) & 0xffff, int(suggested) & 0xffff,
                           max(0, min(int(lifetime), 0xffffffff)))
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -1119,7 +1120,7 @@ class VpnManager:
 
     # ---- NAT-PMP mapping (both protocols, public port -> qBittorrent's listen port)
     def _map(self, internal):
-        udp = self.net.request(0, internal, internal, 60)
+        udp = self.net.request(1, internal, internal, 60)
         tcp = self.net.request(2, internal, internal, 60)
         return udp, tcp
 

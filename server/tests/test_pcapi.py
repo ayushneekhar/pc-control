@@ -1,6 +1,7 @@
 """pc-api route classification (API-only routes hidden server-side, overridable via routes.json)."""
-import json, os, sys, tempfile, threading, time, unittest, urllib.parse
+import json, os, struct, sys, tempfile, threading, time, unittest, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pcapi  # noqa: E402
@@ -849,6 +850,28 @@ class FakeVpnQbt:
         return {}
 
 
+class NatPmpTests(unittest.TestCase):
+    def test_mapping_request_uses_the_rfc6886_wire_format(self):
+        sent = []
+
+        class Sock:
+            def __init__(self, *a): pass
+            def bind(self, addr): pass
+            def settimeout(self, timeout): pass
+            def sendto(self, data, addr): sent.append((data, addr))
+            def recvfrom(self, n):
+                return struct.pack("!BBHIHHI", 0, 129, 0, 0, 43124, 43124, 60), ("10.2.0.1", 5351)
+            def close(self): pass
+
+        with mock.patch.object(pcapi.socket, "socket", Sock):
+            r = pcapi.NatPmp().request(1, 28655, 28655, 60)
+        self.assertEqual(sent[0][0], struct.pack("!BBHHHI", 0, 1, 0, 28655, 28655, 60))
+        self.assertEqual(sent[0][1], ("10.2.0.1", 5351))
+        self.assertEqual(r, {"internal": 43124, "external": 43124, "lifetime": 60})
+        with self.assertRaises(ValueError):
+            pcapi.NatPmp().request(0, 28655)
+
+
 class FakeNatPmp:
     def __init__(self, external=None, fail=False):
         self.calls, self.external, self.fail = [], external, fail
@@ -878,7 +901,7 @@ class VpnTests(unittest.TestCase):
         self.assertTrue(st["enabled"])
         self.assertEqual(self.qbt.prefs["current_network_interface"], "proton0")
         self.assertFalse(self.qbt.prefs["upnp"])
-        self.assertEqual({c[0] for c in self.net.calls}, {0, 2})
+        self.assertEqual({c[0] for c in self.net.calls}, {1, 2})
         self.assertEqual({c[3] for c in self.net.calls}, {60})
         self.assertEqual((st["forwarded_port"], st["qbt_interface"]), (28655, "proton0"))
         with open(self.conf) as f: self.assertTrue(json.load(f)["torrent_vpn_enabled"])

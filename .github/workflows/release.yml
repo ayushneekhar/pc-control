@@ -1,0 +1,141 @@
+# Native release on GitHub Actions: same build + publish as scripts/release-apk.sh, but signing material
+# comes from repository secrets instead of ~/.config/pc-control/. Run it on the branch you want to release.
+name: Release APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: Release notes (optional)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PCC_KEYSTORE_BASE64: ${{ secrets.PCC_KEYSTORE_BASE64 }}
+      PCC_KEY_ALIAS: ${{ secrets.PCC_KEY_ALIAS }}
+      PCC_STORE_PASSWORD: ${{ secrets.PCC_STORE_PASSWORD }}
+      PCC_KEY_PASSWORD: ${{ secrets.PCC_KEY_PASSWORD }}
+      OTA_SIGNING_KEY_PEM: ${{ secrets.OTA_SIGNING_KEY_PEM }}
+      # Optional: without it the CI APK builds without FCM push, like a laptop build without the file.
+      GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+      CCACHE_COMPRESS: "true"
+      CCACHE_COMPRESSLEVEL: "6"
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_SLOPPINESS: "time_macros,include_file_mtime,include_file_ctime"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Validate required secrets
+        run: |
+          missing=0
+          for name in PCC_KEYSTORE_BASE64 PCC_KEY_ALIAS PCC_STORE_PASSWORD PCC_KEY_PASSWORD OTA_SIGNING_KEY_PEM; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required repository secret: $name"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Locate the JDK 17 toolchain
+        run: |
+          if [ -x "${JAVA_HOME_17_X64:-}/bin/javac" ]; then
+            echo "JDK17=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          else
+            echo "::warning::JDK 17 not found; Gradle may try to provision a Java 17 toolchain."
+          fi
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager --install \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.1.12297006" \
+            "cmake;3.22.1" >/dev/null
+
+      - name: Install ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: release-apk-${{ runner.os }}-${{ hashFiles('yarn.lock', 'package.json') }}
+          max-size: 2G
+
+      - name: Cache Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile --network-timeout 600000
+
+      - name: Restore signing material from secrets
+        run: |
+          umask 077
+          DIR="$HOME/.config/pc-control"
+          mkdir -p "$DIR"
+          printf '%s' "$PCC_KEYSTORE_BASE64" | base64 --decode > "$DIR/release.jks"
+          printf '%s\n' "$OTA_SIGNING_KEY_PEM" > "$DIR/ota-signing-key.pem"
+          {
+            printf 'PCC_KEYSTORE=%q\n' "$DIR/release.jks"
+            printf 'PCC_KEY_ALIAS=%q\n' "$PCC_KEY_ALIAS"
+            printf 'PCC_STORE_PASSWORD=%q\n' "$PCC_STORE_PASSWORD"
+            printf 'PCC_KEY_PASSWORD=%q\n' "$PCC_KEY_PASSWORD"
+          } > "$DIR/keystore.env"
+          chmod 600 "$DIR/release.jks" "$DIR/ota-signing-key.pem" "$DIR/keystore.env"
+          if [ -n "${GOOGLE_SERVICES_JSON:-}" ]; then
+            printf '%s\n' "$GOOGLE_SERVICES_JSON" > "$DIR/google-services.json"
+            chmod 600 "$DIR/google-services.json"
+          fi
+          # Fail now, without printing anything, if the keystore/password/alias don't match.
+          keytool -list -keystore "$DIR/release.jks" -storepass "$PCC_STORE_PASSWORD" -alias "$PCC_KEY_ALIAS" >/dev/null
+
+      - name: Fail early if the release tag exists
+        run: |
+          VERSION=$(node -p 'require("./app.json").expo.version')
+          REPO=$(node -p 'require("./app.json").expo.extra.github.repo')
+          if gh release view "v$VERSION" -R "$REPO" >/dev/null 2>&1; then
+            echo "::error::Release v$VERSION already exists; bump the version in app.json before releasing."
+            exit 1
+          fi
+
+      - name: Compute the bundled OTA version
+        run: |
+          OTA=$(( $(node -p 'require("./scripts/ota/ota-bundle-version.json").android') + 1 ))
+          echo "EXPO_PUBLIC_BUNDLED_OTA_VERSION=$OTA" >> "$GITHUB_ENV"
+
+      - name: Build, sign and publish the release
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          scripts/release-apk.sh "$NOTES"
+
+      - name: Push the OTA counter bump
+        run: git push origin "HEAD:${{ github.ref_name }}"

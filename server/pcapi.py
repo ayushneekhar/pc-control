@@ -33,6 +33,8 @@ GET  /pc/api/downloads                active qBittorrent downloads (all categori
                                       notification: {enabled, qbt, downloads: [...], total: {...}}. Read-only.
 GET  /pc/api/vpn                      {enabled, tunnel_up, forwarded_port, qbt_interface, public_ip, last_error}
 POST /pc/api/vpn                      {enabled: bool}: route qBittorrent through Proton WireGuard (or back).
+GET  /pc/api/agent                    {engine, claude_active, gemini_active, available, switching, options}
+POST /pc/api/agent                    {engine: "claude"|"gemini"}: detached switch via systemd-run --user (202)
 POST /pc/api/downloads/started        {hash?, title?}: "a download just started" (the Qwen bot calls it): wakes the
                                       phone's live progress (FCM "downloads") if that category is on
 POST /pc/api/hook/radarr|sonarr|seerr webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
@@ -1227,6 +1229,136 @@ def vpn_health():
 VPN = None
 
 
+# ---------------------------------------------------------------- always-on PC agent switch (/pc/api/agent)
+
+AGENT_SWITCH = os.environ.get("PCAPI_AGENT_SWITCH", os.path.join(HOME, "remote-pc", "bin", "agent-switch"))
+AGENT_OPTIONS = (
+    {"id": "claude", "label": "Claude", "model": "Opus 5.5"},
+    {"id": "gemini", "label": "Gemini", "model": "Gemini 4 Neon"},
+)
+AGENT_ENGINES = frozenset(o["id"] for o in AGENT_OPTIONS)
+AGENT_SWITCH_TTL = 35.0          # s, how long switching=True stays set while waiting for the target unit
+
+
+class AgentManager:
+    """Switch the always-on PC agent between Claude (pc-agent.service) and Gemini (gemini-agent.service)
+    via ~/remote-pc/bin/agent-switch. Switches launch detached via `systemd-run --user --collect --quiet`
+    so they outlive the request even if the calling agent itself is being stopped."""
+
+    def __init__(self, script=None, run_fn=None, clock=time.monotonic, switch_ttl=AGENT_SWITCH_TTL):
+        self.script = script
+        self.run_fn = run_fn
+        self.clock = clock
+        self.switch_ttl = switch_ttl
+        self.lock = threading.Lock()
+        self._switch_target = None
+        self._switch_until = 0.0
+
+    def _script_path(self):
+        p = self.script if self.script is not None else AGENT_SWITCH
+        return os.path.abspath(os.path.expanduser(p))
+
+    def _is_available(self, path):
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+
+    def _run(self, argv, timeout=5):
+        fn = self.run_fn or subprocess.run
+        return fn(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+
+    @staticmethod
+    def _options():
+        return [dict(o) for o in AGENT_OPTIONS]
+
+    def _unavailable(self):
+        return {
+            "engine": "claude",
+            "claude_active": False,
+            "gemini_active": False,
+            "available": False,
+            "switching": False,
+            "options": self._options(),
+        }
+
+    def status(self, timeout=5):
+        path = self._script_path()
+        if not self._is_available(path):
+            with self.lock:
+                self._switch_target = None
+                self._switch_until = 0.0
+            return self._unavailable()
+        try:
+            r = self._run([path, "status"], timeout=timeout)
+        except FileNotFoundError:
+            with self.lock:
+                self._switch_target = None
+                self._switch_until = 0.0
+            return self._unavailable()
+        if r.returncode != 0:
+            raise RuntimeError(clip((r.stderr or r.stdout or f"exit {r.returncode}").strip(), 200))
+        try:
+            d = json.loads(r.stdout or "{}")
+        except ValueError as e:
+            raise RuntimeError(f"bad agent-switch JSON: {e}")
+        if not isinstance(d, dict):
+            raise RuntimeError("agent-switch JSON must be an object")
+        engine = d.get("engine") if d.get("engine") in AGENT_ENGINES else "claude"
+        claude_active = bool(d.get("claude_active", False))
+        gemini_active = bool(d.get("gemini_active", False))
+        now = self.clock()
+        with self.lock:
+            switching = False
+            if self._switch_target is not None:
+                target = self._switch_target
+                target_active = claude_active if target == "claude" else gemini_active
+                other_active = gemini_active if target == "claude" else claude_active
+                if (target_active and not other_active) or now >= self._switch_until:
+                    self._switch_target = None
+                    self._switch_until = 0.0
+                else:
+                    switching = True
+        return {
+            "engine": engine,
+            "claude_active": claude_active,
+            "gemini_active": gemini_active,
+            "available": True,
+            "switching": switching,
+            "options": self._options(),
+        }
+
+    def switch(self, engine, timeout=10):
+        if not isinstance(engine, str) or engine not in AGENT_ENGINES:
+            return 400, {"error": "engine must be 'claude' or 'gemini'"}
+        path = self._script_path()
+        if not self._is_available(path):
+            return 503, {"error": "agent-switch is not installed"}
+        argv = ["systemd-run", "--user", "--collect", "--quiet", path, engine]
+        try:
+            r = self._run(argv, timeout=timeout)
+        except Exception as e:
+            return 502, {"error": clip(f"agent switch failed: {e}", 240)}
+        if r.returncode != 0:
+            detail = (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+            return 502, {"error": clip(f"agent switch failed: {detail}", 240)}
+        with self.lock:
+            self._switch_target = engine
+            self._switch_until = self.clock() + self.switch_ttl
+        return 202, {
+            "engine": engine,
+            "claude_active": False,
+            "gemini_active": False,
+            "available": True,
+            "switching": True,
+            "options": self._options(),
+        }
+
+
+def agent_health(timeout=None):
+    return AGENT.status(timeout=HEALTH_TIMEOUT if timeout is None else timeout)
+
+
+AGENT = AgentManager()
+
+
 # ---------------------------------------------------------------- health overview (/pc/api/health)
 
 HEALTH_TIMEOUT = 2.0        # seconds, shared by all sources (they run concurrently)
@@ -1366,6 +1498,7 @@ def health_sources(timeout=HEALTH_TIMEOUT):
         "jellyfin": lambda: jellyfin_streams(timeout),
         "disks": health_disks,
         "vpn": vpn_health,
+        "agent": lambda: agent_health(timeout),
     }
 
 
@@ -1405,6 +1538,7 @@ def health_report(sources=None, timeout=HEALTH_TIMEOUT):
     jellyfin = _health_section(raw, "jellyfin")
     disks = _health_section(raw, "disks")
     vpn = _health_section(raw, "vpn")
+    agent = _health_section(raw, "agent")
 
     if services["available"]:
         counts = {"running": 0, "failed": 0, "inactive": 0, "other": 0}
@@ -1432,6 +1566,8 @@ def health_report(sources=None, timeout=HEALTH_TIMEOUT):
         if vpn["available"] and vpn.get("enabled") and not vpn.get("tunnel_up"):
             problems.append({"kind": "vpn", "severity": "warn", "title": "Torrent VPN is down",
                              "detail": vpn.get("last_error") or "qBittorrent is not routed through Proton"})
+    if "agent" in raw and not agent["available"] and agent.get("error"):
+        source_problem("Agent", agent)
 
     if services["available"]:
         for s in services.get("units") or []:
@@ -1471,7 +1607,8 @@ def health_report(sources=None, timeout=HEALTH_TIMEOUT):
                                  "detail": f"{d.get('mount')}: {human_size(total - used)} free of {human_size(total)}"})
 
     return {"ts": int(time.time()), "problems": problems, "services": services, "downloads": downloads,
-            "radarr": radarr, "sonarr": sonarr, "jellyfin": jellyfin, "disks": disks, "vpn": vpn}
+            "radarr": radarr, "sonarr": sonarr, "jellyfin": jellyfin, "disks": disks, "vpn": vpn,
+            "agent": agent}
 
 
 # ---------------------------------------------------------------- app crash reports
@@ -1835,6 +1972,11 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(200, {**DOWNLOADS.active(), "enabled": NOTIFY.wants("live")["app"],
                                             "ts": int(time.time())})
             if path == "/api/vpn": return self.send_json(200, VPN.status())
+            if path == "/api/agent":
+                try:
+                    return self.send_json(200, AGENT.status())
+                except Exception as e:
+                    return self.send_json(502, {"error": clip(f"agent status failed: {e}", 240)})
         elif method == "POST":
             m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
             if m: return self.hook(m.group(1))
@@ -1883,6 +2025,8 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json(200, VPN.set_enabled(b["enabled"]))
                 except Exception as e:
                     return self.send_json(502, {"error": clip(f"qBittorrent did not take the change: {e}", 240)})
+            if path == "/api/agent":
+                return self.send_json(*AGENT.switch(b.get("engine")))
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))

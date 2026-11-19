@@ -1069,3 +1069,217 @@ class VpnHttpTests(unittest.TestCase):
         self.assertTrue(self.call("GET", "/pc/api/vpn")[1]["enabled"])
         self.assertEqual(self.call("POST", "/pc/api/vpn", {"enabled": False})[0], 200)
         self.assertFalse(self.call("GET", "/pc/api/vpn")[1]["enabled"])
+
+
+class AgentTests(unittest.TestCase):
+    def _make_script(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "agent-switch")
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(p, 0o755)
+        return p
+
+    def test_missing_script_reports_unavailable_claude_and_rejects_switch(self):
+        missing = os.path.join(tempfile.mkdtemp(), "agent-switch")
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return pcapi.subprocess.CompletedProcess(argv, 0, "", "")
+
+        mgr = pcapi.AgentManager(script=missing, run_fn=fake_run)
+        st = mgr.status()
+        self.assertEqual(st["engine"], "claude")
+        self.assertFalse(st["claude_active"])
+        self.assertFalse(st["gemini_active"])
+        self.assertFalse(st["available"])
+        self.assertFalse(st["switching"])
+        self.assertEqual(st["options"], [
+            {"id": "claude", "label": "Claude", "model": "Opus 5.5"},
+            {"id": "gemini", "label": "Gemini", "model": "Gemini 4 Neon"},
+        ])
+        code, body = mgr.switch("gemini")
+        self.assertEqual(code, 503)
+        self.assertIn("error", body)
+        self.assertEqual(calls, [])
+
+    def test_status_and_detached_switch_lifecycle(self):
+        script = self._make_script()
+        now = [100.0]
+        state = {"engine": "claude", "claude_active": True, "gemini_active": False}
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append((argv, kw))
+            if argv[-1] == "status":
+                return pcapi.subprocess.CompletedProcess(argv, 0, json.dumps(state), "")
+            return pcapi.subprocess.CompletedProcess(argv, 0, "", "")
+
+        mgr = pcapi.AgentManager(script=script, run_fn=fake_run, clock=lambda: now[0], switch_ttl=30.0)
+        st = mgr.status()
+        self.assertEqual((st["engine"], st["claude_active"], st["gemini_active"], st["available"], st["switching"]),
+                         ("claude", True, False, True, False))
+        self.assertEqual(calls[-1][0], [os.path.abspath(script), "status"])
+
+        code, res = mgr.switch("gemini")
+        self.assertEqual(code, 202)
+        self.assertEqual((res["engine"], res["available"], res["switching"]), ("gemini", True, True))
+        self.assertEqual(calls[-1][0], ["systemd-run", "--user", "--collect", "--quiet", os.path.abspath(script), "gemini"])
+
+        # Still transitioning: target unit not active yet
+        self.assertTrue(mgr.status()["switching"])
+
+        # Target unit active and old unit stopped -> switching clears
+        state.update({"engine": "gemini", "claude_active": False, "gemini_active": True})
+        done = mgr.status()
+        self.assertEqual((done["engine"], done["claude_active"], done["gemini_active"], done["switching"]),
+                         ("gemini", False, True, False))
+
+        # Switching flag expires after TTL even if unit never flips
+        code, _ = mgr.switch("claude")
+        self.assertEqual(code, 202)
+        self.assertTrue(mgr.status()["switching"])
+        now[0] += 31.0
+        self.assertFalse(mgr.status()["switching"])
+
+    def test_rejects_unknown_engines_and_reports_subprocess_errors(self):
+        script = self._make_script()
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return pcapi.subprocess.CompletedProcess(argv, 1, "", "systemd bus down")
+
+        mgr = pcapi.AgentManager(script=script, run_fn=fake_run)
+        for bad in ("gpt", "", None, 42, ["claude"]):
+            code, body = mgr.switch(bad)
+            self.assertEqual(code, 400)
+            self.assertIn("error", body)
+        self.assertEqual(calls, [])
+
+        code, body = mgr.switch("claude")
+        self.assertEqual(code, 502)
+        self.assertIn("systemd bus down", body["error"])
+        with self.assertRaises(RuntimeError):
+            mgr.status()
+
+    def test_health_includes_agent_section(self):
+        script = self._make_script()
+        mgr = pcapi.AgentManager(
+            script=script,
+            run_fn=lambda argv, **kw: pcapi.subprocess.CompletedProcess(
+                argv, 0, json.dumps({"engine": "gemini", "claude_active": False, "gemini_active": True}), ""),
+        )
+        saved, pcapi.AGENT = pcapi.AGENT, mgr
+        try:
+            sources = HealthTests().sources()
+            sources["agent"] = pcapi.agent_health
+            r = pcapi.health_report(sources=sources, timeout=1)
+        finally:
+            pcapi.AGENT = saved
+        self.assertTrue(r["agent"]["available"])
+        self.assertEqual(r["agent"]["engine"], "gemini")
+        self.assertTrue(r["agent"]["gemini_active"])
+        self.assertFalse(any(p["title"] == "Agent unavailable" for p in r["problems"]))
+
+        # Missing script should not raise a health problem
+        missing = os.path.join(tempfile.mkdtemp(), "agent-switch")
+        saved, pcapi.AGENT = pcapi.AGENT, pcapi.AgentManager(script=missing)
+        try:
+            sources = HealthTests().sources()
+            sources["agent"] = pcapi.agent_health
+            r2 = pcapi.health_report(sources=sources, timeout=1)
+        finally:
+            pcapi.AGENT = saved
+        self.assertFalse(r2["agent"]["available"])
+        self.assertEqual(r2["agent"]["engine"], "claude")
+        self.assertFalse(any(p["title"] == "Agent unavailable" for p in r2["problems"]))
+
+    def test_uses_subprocess_run_with_detached_systemd_run_args(self):
+        script = self._make_script()
+        mgr = pcapi.AgentManager(script=script)
+        with mock.patch.object(pcapi.subprocess, "run") as mrun:
+            mrun.return_value = pcapi.subprocess.CompletedProcess([], 0, "", "")
+            code, res = mgr.switch("claude")
+        self.assertEqual((code, res["engine"], res["switching"]), (202, "claude", True))
+        mrun.assert_called_once_with(
+            ["systemd-run", "--user", "--collect", "--quiet", os.path.abspath(script), "claude"],
+            stdin=pcapi.subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
+        )
+
+
+class AgentHttpTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = pcapi.ALLOWED_LOGINS, pcapi.AGENT
+        pcapi.ALLOWED_LOGINS = {"me@example.com"}
+        cls.api = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        threading.Thread(target=cls.api.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.api.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.api.shutdown()
+        cls.api.server_close()
+        pcapi.ALLOWED_LOGINS, pcapi.AGENT = cls.saved
+
+    def setUp(self):
+        d = tempfile.mkdtemp()
+        self.script = os.path.join(d, "agent-switch")
+        with open(self.script, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(self.script, 0o755)
+        self.calls = []
+        self.state = {"engine": "claude", "claude_active": True, "gemini_active": False}
+
+        def fake_run(argv, **kw):
+            self.calls.append(argv)
+            if argv[-1] == "status":
+                return pcapi.subprocess.CompletedProcess(argv, 0, json.dumps(self.state), "")
+            return pcapi.subprocess.CompletedProcess(argv, 0, "", "")
+
+        pcapi.AGENT = pcapi.AgentManager(script=self.script, run_fn=fake_run)
+
+    def call(self, method, path, body=None, headers=None):
+        import urllib.request, urllib.error
+        req = urllib.request.Request(self.url + path, method=method,
+                                     headers={"Content-Type": "application/json", **(headers or {})},
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.load(e)
+
+    def test_get_and_post_auth_validation_and_detached_switch(self):
+        # Auth checks mirror /pc/api/vpn
+        self.assertEqual(self.call("GET", "/pc/api/agent", headers={"Tailscale-User-Login": "x@evil.com"})[0], 403)
+        self.assertEqual(self.call("POST", "/pc/api/agent", {"engine": "gemini"},
+                                   {"Tailscale-User-Login": "x@evil.com"})[0], 403)
+        self.assertEqual(self.call("POST", "/pc/api/agent", {"engine": "gemini"},
+                                   {"X-Forwarded-For": "100.64.0.9"})[0], 403)
+
+        # GET returns full status + options
+        code, r = self.call("GET", "/pc/api/agent", headers={"Tailscale-User-Login": "me@example.com"})
+        self.assertEqual(code, 200)
+        self.assertEqual((r["engine"], r["claude_active"], r["gemini_active"], r["available"], r["switching"]),
+                         ("claude", True, False, True, False))
+        self.assertEqual([o["id"] for o in r["options"]], ["claude", "gemini"])
+
+        # Unknown engine rejected with 400
+        self.assertEqual(self.call("POST", "/pc/api/agent", {"engine": "unknown"})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/agent", {})[0], 400)
+
+        # Valid POST returns 202 and invokes detached systemd-run
+        code, r = self.call("POST", "/pc/api/agent", {"engine": "gemini"})
+        self.assertEqual(code, 202)
+        self.assertEqual((r["engine"], r["switching"], r["available"]), ("gemini", True, True))
+        self.assertEqual(self.calls[-1],
+                         ["systemd-run", "--user", "--collect", "--quiet", os.path.abspath(self.script), "gemini"])
+
+        # Subsequent GET reflects switching until gemini_active flips True
+        code, r = self.call("GET", "/pc/api/agent")
+        self.assertEqual((code, r["switching"]), (200, True))
+        self.state.update({"engine": "gemini", "claude_active": False, "gemini_active": True})
+        code, r = self.call("GET", "/pc/api/agent")
+        self.assertEqual((code, r["engine"], r["gemini_active"], r["switching"]), (200, "gemini", True, False))

@@ -59,6 +59,21 @@ const TABS: { id: CamsTab; label: string; icon: string }[] = [
 
 type Stream = { toURL(): string };
 
+const DEFAULT_VIDEO_ASPECT = 16 / 9;
+
+/** LinkState.size looks like "1280×720" (stats) or "1280x720"; fall back to 16:9 until the first frame. */
+function videoAspect(size: string | null): number {
+  const m = /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/i.exec(size ?? '');
+  if (!m) return DEFAULT_VIDEO_ASPECT;
+  const w = Number(m[1]), h = Number(m[2]);
+  return w > 0 && h > 0 ? w / h : DEFAULT_VIDEO_ASPECT;
+}
+
+/** The largest box with this aspect that fits inside the available area (letterbox/pillarbox). */
+function containBox(w: number, h: number, aspect: number) {
+  return w / h > aspect ? { w: h * aspect, h } : { w, h: w / aspect };
+}
+
 // ---------------------------------------------------------------- capability check (once)
 
 function hdSupport(): { ok: boolean; why: string; decoder: string | null } {
@@ -358,7 +373,11 @@ function CamCard({ id, name, link, mode, compact, fullscreen, onPress, children,
   const showMsg = !stream || state.fps === 0;
   const zoom = useRef<PinchZoomHandle | null>(null);
   const lastTap = useRef<{ x: number; y: number; t: number } | null>(null);
+  const [area, setArea] = useState({ w: 0, h: 0 });
   const streamURL = stream ? stream.toURL() : null;
+  // The native renderer fills its view and center-crops to the view aspect, so the view itself must be the
+  // video's aspect ratio. The card stays fixed; the bars around the box are just its t.media background.
+  const box = area.w > 0 && area.h > 0 ? containBox(area.w, area.h, videoAspect(state.size)) : null;
   useEffect(() => {
     lastTap.current = null;
   }, [id, fullscreen, streamURL]);
@@ -383,7 +402,14 @@ function CamCard({ id, name, link, mode, compact, fullscreen, onPress, children,
   };
 
   return (
-    <Pressable onPress={onCardPress} style={[fullscreen ? st.fsCard : st.card, { backgroundColor: t.media }, compact && st.cardCompact, style]}>
+    <Pressable
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        setArea((old) => (old.w === width && old.h === height ? old : { w: width, h: height }));
+      }}
+      onPress={onCardPress}
+      style={[fullscreen ? st.fsCard : st.card, { backgroundColor: t.media }, compact && st.cardCompact, style]}
+    >
       {streamURL ? (
         USE_ZOOMABLE_LIVE ? (
           <PinchZoom
@@ -392,7 +418,14 @@ function CamCard({ id, name, link, mode, compact, fullscreen, onPress, children,
             style={StyleSheet.absoluteFill}
             onTap={(x, y, now) => fullscreen && tap(x, y, now)}
           >
-            <LivePlayer streamURL={streamURL} style={StyleSheet.absoluteFill} />
+            <View
+              pointerEvents="none"
+              style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }]}
+            >
+              <View style={box ? { width: box.w, height: box.h } : StyleSheet.absoluteFill}>
+                <LivePlayer streamURL={streamURL} style={StyleSheet.absoluteFill} />
+              </View>
+            </View>
           </PinchZoom>
         ) : (
           <RTCView streamURL={streamURL} objectFit="contain" zOrder={0} style={StyleSheet.absoluteFill} />
@@ -1032,7 +1065,7 @@ const st = StyleSheet.create({
   },
   card: { aspectRatio: 16 / 9, borderRadius: radius.lg, overflow: 'hidden' },
   cardCompact: { borderRadius: radius.md },
-  fsCard: { flex: 1 },
+  fsCard: { flex: 1, overflow: 'hidden' },
   msg: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 16 },
   msgText: { fontSize: 13, textAlign: 'center' },
   tl: { position: 'absolute', top: 10, left: 12, right: 150, flexDirection: 'row', alignItems: 'center', gap: 8 },

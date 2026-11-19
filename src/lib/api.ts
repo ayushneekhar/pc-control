@@ -223,6 +223,7 @@ export type Health = {
   jellyfin: { available: boolean; error?: string; streams?: JellyfinStream[] };
   disks: { available: boolean; error?: string; disks?: HealthDisk[] };
   vpn?: VpnState & { available?: boolean; error?: string };
+  agent?: AgentState & { error?: string };
 };
 
 export type VpnState = {
@@ -233,3 +234,23 @@ export type VpnState = {
   public_ip: string | null;
   last_error: string | null;
 };
+
+export type AgentEngine = 'claude' | 'gemini';
+
+export type AgentOption = {
+  id: AgentEngine;
+  label: string;
+  model: string;
+};
+
+export type AgentState = {
+  engine: AgentEngine;
+  claude_active: boolean;
+  gemini_active: boolean;
+  available: boolean;
+  switching: boolean;
+  options: AgentOption[];
+};
+
+export const getAgent = () => get<AgentState>('/pc/api/agent');
+export const setAgent = (engine: AgentEngine) => post<AgentState>('/pc/api/agent', { engine });

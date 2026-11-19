@@ -864,8 +864,8 @@ class NatPmpTests(unittest.TestCase):
             def close(self): pass
 
         with mock.patch.object(pcapi.socket, "socket", Sock):
-            r = pcapi.NatPmp().request(1, 28655, 28655, 60)
-        self.assertEqual(sent[0][0], struct.pack("!BBHHHI", 0, 1, 0, 28655, 28655, 60))
+            r = pcapi.NatPmp().request(1, 0, 1, 60)
+        self.assertEqual(sent[0][0], struct.pack("!BBHHHI", 0, 1, 0, 0, 1, 60))
         self.assertEqual(sent[0][1], ("10.2.0.1", 5351))
         self.assertEqual(r, {"internal": 43124, "external": 43124, "lifetime": 60})
         with self.assertRaises(ValueError):
@@ -873,14 +873,18 @@ class NatPmpTests(unittest.TestCase):
 
 
 class FakeNatPmp:
-    def __init__(self, external=None, fail=False):
-        self.calls, self.external, self.fail = [], external, fail
+    def __init__(self, external=None, fail=False, result=None, udp=None, tcp=None):
+        self.calls, self.external, self.fail, self.result = [], external, fail, result
+        self.udp, self.tcp = udp, tcp
 
     def request(self, opcode, internal, suggested=0, lifetime=60):
         self.calls.append((opcode, internal, suggested, lifetime))
         if self.fail: raise OSError("no NAT-PMP gateway")
+        if self.result is not None: raise pcapi.NatPmpError(self.result)
+        external = self.external
+        if external is None: external = self.udp if opcode == 1 else self.tcp
         self.assert_lifetime = lifetime
-        return {"internal": internal, "external": self.external or internal, "lifetime": lifetime}
+        return {"internal": internal, "external": external or 28655, "lifetime": lifetime}
 
 
 class VpnTests(unittest.TestCase):
@@ -902,6 +906,7 @@ class VpnTests(unittest.TestCase):
         self.assertEqual(self.qbt.prefs["current_network_interface"], "proton0")
         self.assertFalse(self.qbt.prefs["upnp"])
         self.assertEqual({c[0] for c in self.net.calls}, {1, 2})
+        self.assertEqual({(c[1], c[2]) for c in self.net.calls}, {(0, 1)})   # Proton: internal 0, suggest 1
         self.assertEqual({c[3] for c in self.net.calls}, {60})
         self.assertEqual((st["forwarded_port"], st["qbt_interface"]), (28655, "proton0"))
         with open(self.conf) as f: self.assertTrue(json.load(f)["torrent_vpn_enabled"])
@@ -910,7 +915,7 @@ class VpnTests(unittest.TestCase):
         self.net.external = 40000
         st = self.v.set_enabled(True)
         self.assertEqual((st["forwarded_port"], self.qbt.prefs["listen_port"]), (40000, 40000))
-        self.assertTrue(all(c[1] == c[2] for c in self.net.calls))       # suggested == internal
+        self.assertTrue(all(c[1] == 0 and c[2] == 1 for c in self.net.calls))
         st = self.v.set_enabled(False)
         self.assertEqual(self.qbt.prefs["current_network_interface"], "")
         self.assertEqual(self.qbt.prefs["listen_port"], 28655)
@@ -928,6 +933,19 @@ class VpnTests(unittest.TestCase):
         self.assertEqual(v2.previous_port, 28655)                       # not the forwarded port
         v2.set_enabled(False)
         self.assertEqual(self.qbt.prefs["listen_port"], 28655)
+
+    def test_udp_and_tcp_mismatch_uses_the_udp_port(self):
+        self.v.net = FakeNatPmp(udp=50000, tcp=50001)
+        st = self.v.set_enabled(True)
+        self.assertEqual(st["forwarded_port"], 50000)
+        self.assertEqual(self.qbt.prefs["listen_port"], 50000)
+
+    def test_natpmp_result_4_backs_off_for_sixty_seconds(self):
+        self.net.result = 4
+        self.v.set_enabled(True)
+        self.assertFalse(self.v.natpmp_ok)
+        self.assertIn("4", self.v.last_error)
+        self.assertGreaterEqual(self.v._next_renew, time.time() + 55)
 
     def test_natpmp_failure_is_reported_but_enabling_still_binds_the_kill_switch(self):
         self.net.fail = True

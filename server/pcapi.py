@@ -940,6 +940,7 @@ VPN_HANDSHAKE_MAX = 180          # s, a WireGuard handshake older than this mean
 VPN_RENEW = 45                   # s, NAT-PMP mappings are requested with a 60 s lifetime
 VPN_ALERT_AFTER = 180            # s unhealthy before one vpn_down alert
 VPN_IP_INTERVAL = 600            # s between public-IP lookups
+VPN_NATPMP_BACKOFF = 60          # s to wait after result 4 (out of resources)
 
 
 class NatPmpError(Exception):
@@ -1119,22 +1120,22 @@ class VpnManager:
                 self._disable_locked()
             return self._status_locked()
 
-    # ---- NAT-PMP mapping (both protocols, public port -> qBittorrent's listen port)
-    def _map(self, internal):
-        udp = self.net.request(1, internal, internal, 60)
-        tcp = self.net.request(2, internal, internal, 60)
+    # ---- NAT-PMP mapping (both protocols). Proton expects internal=0, suggested=1 and forwards the public
+    # port P to the same port P on 10.2.0.2; passing qBittorrent's port gets a new P on every request.
+    def _map(self):
+        udp = self.net.request(1, 0, 1, 60)
+        tcp = self.net.request(2, 0, 1, 60)
         return udp, tcp
 
     def _renew_locked(self):
         try:
-            internal = self._port(self.forwarded_port or self.previous_port, VPN_DEFAULT_PORT)
-            external = internal
-            for _ in range(3):
-                udp, _tcp = self._map(internal)
-                external = self._port(udp.get("external"), internal)
-                if external == internal: break
-                self._set_qbt_port(external)
-                internal = external
+            udp, tcp = self._map()
+            external = self._port(udp.get("external"), 0)
+            if not external: raise NatPmpError(-1, "NAT-PMP returned no external port")
+            tcp_external = self._port(tcp.get("external"), 0)
+            if tcp_external and tcp_external != external:
+                print(f"vpn: NAT-PMP ports differ (udp={external}, tcp={tcp_external}); using UDP",
+                      file=sys.stderr, flush=True)
             self._set_qbt_port(external)
             self.forwarded_port = external
             self.natpmp_ok = True
@@ -1144,7 +1145,8 @@ class VpnManager:
             self.natpmp_ok = False
             self.forwarded_port = None
             self.last_error = clip(f"{type(e).__name__}: {e}", 240)
-            self._next_renew = time.time() + 15
+            backoff = VPN_NATPMP_BACKOFF if isinstance(e, NatPmpError) and e.result == 4 else 15
+            self._next_renew = time.time() + backoff
 
     def _refresh_public_ip_locked(self):
         now = time.time()

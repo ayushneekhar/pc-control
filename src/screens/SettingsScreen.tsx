@@ -1,6 +1,6 @@
 import Constants from 'expo-constants';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Animated, AppState, Linking, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Animated, AppState, LayoutAnimation, Linking, Platform, Pressable, StyleSheet, Switch, Text, TextInput, UIManager, View } from 'react-native';
 import { KeyInfo, PcNative } from '../../modules/pc-native';
 import { Banner, Button, Card, Icon, KV, Mono, Pill, Screen, Section, StatusDot } from '../components/ui';
 import { ApiError, DEFAULT_SERVER, get, Info, post, serverUrl, VpnState } from '../lib/api';
@@ -25,6 +25,30 @@ function useAppActiveTick() {
     return () => s.remove();
   }, []);
   return tick;
+}
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+function Toggle({ value, onValueChange, label, disabled, dim = false }: {
+  value: boolean;
+  onValueChange: (v: boolean) => void;
+  label: string;
+  disabled?: boolean;
+  dim?: boolean;
+}) {
+  const t = useTheme();
+  return (
+    <Switch
+      value={value}
+      onValueChange={onValueChange}
+      disabled={disabled}
+      accessibilityLabel={label}
+      trackColor={{ true: dim ? t.border : t.accent, false: t.cardAlt }}
+      thumbColor={value ? (dim ? t.textFaint : t.onMedia) : t.textFaint}
+    />
+  );
 }
 
 /** qBittorrent -> Proton WireGuard only. The switch is optimistic: it rolls back if pc-api rejects the change. */
@@ -72,13 +96,19 @@ function TorrentVpn() {
 
   const enabled = pending ?? s?.enabled ?? false;
   const down = enabled && s != null && !s.tunnel_up;
-  const status = busy ? (enabled ? 'Turning on…' : 'Turning off…') : !enabled ? 'Off' : down ? 'Tunnel down' : 'Connected via Proton SG';
-  const dot = down ? 'warn' : enabled ? 'ok' : 'faint';
+  const noPort = enabled && s != null && s.tunnel_up && s.forwarded_port == null;
+  const status = busy
+    ? enabled ? 'Turning on…' : 'Turning off…'
+    : !enabled ? 'Off'
+    : down ? 'Tunnel down'
+    : noPort ? 'Connected, no forwarded port'
+    : 'Connected via Proton SG';
+  const dot = down || noPort ? 'warn' : enabled ? 'ok' : 'faint';
 
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <Icon name="shield-lock-outline" size={22} color={down ? t.warn : enabled ? t.accent : t.textDim} />
+        <Icon name="shield-lock-outline" size={22} color={down || noPort ? t.warn : enabled ? t.accent : t.textDim} />
         <View style={{ flex: 1 }}>
           <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Torrent VPN</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -86,18 +116,11 @@ function TorrentVpn() {
             <Text style={{ color: t.textDim, fontSize: 13 }}>{status}</Text>
           </View>
         </View>
-        <Switch
-          value={enabled}
-          onValueChange={toggle}
-          disabled={!s || busy}
-          accessibilityLabel="Route qBittorrent through Proton VPN"
-          trackColor={{ true: t.accent, false: t.cardAlt }}
-          thumbColor={enabled ? t.onAccent : t.textFaint}
-        />
+        <Toggle value={enabled} onValueChange={toggle} disabled={!s || busy} label="Route qBittorrent through Proton VPN" />
       </View>
 
       {err ? <Banner tone="bad" title="Torrent VPN">{err}</Banner> : null}
-      {s?.last_error ? <Text style={{ color: t.warn, fontSize: 12.5, lineHeight: 18 }}>{s.last_error}</Text> : null}
+      {s?.last_error ? <Text style={{ color: down ? t.warn : t.textFaint, fontSize: 12.5, lineHeight: 18 }}>{s.last_error}</Text> : null}
 
       <View>
         <KV k="Forwarded port" v={enabled ? (s?.forwarded_port ?? 'Waiting for NAT-PMP…') : '—'} mono={enabled && s?.forwarded_port != null} />
@@ -300,27 +323,38 @@ function Enrollment() {
   );
 }
 
-function Push() {
+/** One warning only when something blocks notifications; a healthy setup adds no card. */
+function NotificationHealth() {
   const t = useTheme();
   const tick = useAppActiveTick();
   const [notifs, setNotifs] = useState(() => PcNative?.notificationsEnabled() ?? false);
-  const [status, setStatus] = useState(() => PcNative?.pushStatus() ?? { available: false, token: null, error: null });
+  const [push, setPush] = useState(() => PcNative?.pushStatus() ?? { available: false, token: null, error: null });
   const [server, setServer] = useState<{ configured: boolean; registered?: boolean } | null>(null);
-  const [registering, setRegistering] = useState(false);
+  const [live, setLive] = useState(() => liveStatus());
+  const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!PcNative) return;
-    setRegistering(true);
-    setNotifs(PcNative.notificationsEnabled());
-    await registerPush();
-    const s = PcNative.pushStatus();
-    setStatus(s);
+    setBusy(true);
     try {
-      setServer(await get<{ configured: boolean; registered?: boolean }>(`/pc/api/push/status?token=${encodeURIComponent(s.token ?? '')}`));
-    } catch {
-      setServer(null);
+      const allowed = PcNative.notificationsEnabled();
+      setNotifs(allowed);
+      setLive(liveStatus());
+      if (!allowed) {
+        setServer(null);
+        return;
+      }
+      await registerPush();
+      const st = PcNative.pushStatus();
+      setPush(st);
+      try {
+        setServer(await get<{ configured: boolean; registered?: boolean }>(`/pc/api/push/status?token=${encodeURIComponent(st.token ?? '')}`));
+      } catch {
+        setServer(null);
+      }
+    } finally {
+      setBusy(false);
     }
-    setRegistering(false);
   }, []);
 
   useEffect(() => {
@@ -330,40 +364,53 @@ function Push() {
   }, [refresh, tick]);
 
   const allow = async () => {
-    if (await askNotificationPermission()) setNotifs(true);
-    else
-      Alert.alert('Notifications are off', 'pc-control needs notifications to tell you about root requests.', [
-        { text: 'Not now', style: 'cancel' },
-        { text: 'Open settings', onPress: () => PcNative?.openNotificationSettings() },
-      ]);
+    if (await askNotificationPermission()) {
+      await refresh();
+      return;
+    }
+    Alert.alert('Notifications are off', 'pc-control needs notifications to tell you about root requests.', [
+      { text: 'Not now', style: 'cancel' },
+      { text: 'Open settings', onPress: () => PcNative?.openNotificationSettings() },
+    ]);
   };
 
-  const registered = !!status.token && server?.registered === true;
-  const subtitle = !status.available
-    ? 'This build has no Firebase config'
-    : registering && !registered
-      ? 'Registering with the laptop…'
-      : registered
-        ? 'Registered with the laptop'
-        : 'Not registered';
+  const registered = !!push.token && server?.registered === true;
+  const problem = !notifs
+    ? {
+        title: 'Notifications are off',
+        body: 'Root approvals and results will not reach this phone.',
+        fix: 'Allow',
+        run: allow,
+      }
+    : !registered
+      ? {
+          title: 'Push notifications are not connected',
+          body: push.error ?? 'This phone is not registered with the laptop yet.',
+          fix: 'Retry',
+          run: refresh,
+        }
+      : live && !live.channelEnabled
+        ? {
+            title: 'Live download progress is off',
+            body: 'Turn the “Live download progress” notification channel back on.',
+            fix: 'Open settings',
+            run: () => PcNative?.openNotificationSettings(),
+          }
+        : null;
+
+  if (!problem) return null;
   return (
-    <Card style={{ gap: space(3) }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <Icon name="bell-badge-outline" size={22} color={registered && notifs ? t.accent : t.textDim} />
-        <View style={{ flex: 1 }}>
-          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Push notifications</Text>
-          <Text style={{ color: t.textDim, fontSize: 13 }}>{subtitle}</Text>
-        </View>
-        {registered && notifs ? <Pill tone="ok" icon="check" label="On" /> : null}
-      </View>
-      <Row ok={notifs} label="Notifications allowed" fix={notifs ? undefined : { label: 'Allow', onPress: allow }} />
-      <Row ok={registered} label="FCM token registered" fix={registered || registering ? undefined : { label: 'Retry', onPress: refresh }} />
-      <Row ok={server?.configured === true} label="FCM set up on the laptop" />
-      {!registered && status.error ? <Text style={{ color: t.textFaint, fontSize: 12.5 }}>{status.error}</Text> : null}
-      <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-        App notifications are delivered by Firebase Cloud Messaging. Only the notification text goes through Google, e.g. “Root approval needed” and the reason, never the command; pictures are fetched from the laptop over the tailnet. Approving still happens here, with your fingerprint.
-      </Text>
-    </Card>
+    <Banner tone="warn" title={problem.title}>
+      <Text style={{ color: t.textDim, fontSize: 13.5, lineHeight: 19 }}>{problem.body}</Text>
+      <Button
+        label={problem.fix}
+        compact
+        kind="subtle"
+        busy={busy && problem.fix === 'Retry'}
+        style={{ alignSelf: 'flex-start', marginTop: 8 }}
+        onPress={problem.run}
+      />
+    </Banner>
   );
 }
 
@@ -407,11 +454,20 @@ function NotificationPrefs() {
     s && save({ categories: { [id]: { [ch]: v } } }, { ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, [ch]: v } : c)) });
 
   const [open, setOpen] = useState(false);
-  const [catHeight, setCatHeight] = useState(0);
   const [anim] = useState(() => new Animated.Value(0));
   useEffect(() => {
     Animated.timing(anim, { toValue: open ? 1 : 0, duration: 220, useNativeDriver: false }).start();
   }, [open, anim]);
+
+  const toggleOpen = () => {
+    LayoutAnimation.configureNext({
+      duration: 220,
+      create: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity },
+      update: { type: LayoutAnimation.Types.easeInEaseOut },
+      delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity },
+    });
+    setOpen((v) => !v);
+  };
 
   if (!s)
     return (
@@ -421,18 +477,12 @@ function NotificationPrefs() {
     );
 
   const sw = (on: boolean, dim: boolean, onChange: (v: boolean) => void, label: string) => (
-    <Switch
-      value={on}
-      onValueChange={onChange}
-      accessibilityLabel={label}
-      trackColor={{ true: dim ? t.border : t.accent, false: t.cardAlt }}
-      thumbColor={on ? (dim ? t.textFaint : t.onMedia) : t.textFaint}
-    />
+    <Toggle value={on} onValueChange={onChange} label={label} dim={dim} />
   );
   return (
     <Card style={{ gap: space(1), paddingHorizontal: 0 }}>
       <Pressable
-        onPress={() => setOpen((v) => !v)}
+        onPress={toggleOpen}
         accessibilityRole="button"
         accessibilityLabel="Show or hide notification categories"
         accessibilityState={{ expanded: open }}
@@ -475,8 +525,8 @@ function NotificationPrefs() {
         ))}
       </View>
 
-      <Animated.View style={{ height: anim.interpolate({ inputRange: [0, 1], outputRange: [0, catHeight] }), opacity: anim, overflow: 'hidden' }}>
-        <View onLayout={(e) => setCatHeight(e.nativeEvent.layout.height)}>
+      {open ? (
+        <View>
           <View style={[st.colHead, { borderBottomColor: t.border }]}>
             <Text style={{ flex: 1, color: t.textDim, fontSize: 11.5, fontWeight: '500' }}>Category</Text>
             <Text style={[st.col, { color: t.textDim }]}>Telegram</Text>
@@ -507,44 +557,7 @@ function NotificationPrefs() {
             </Text>
           ) : null}
         </View>
-      </Animated.View>
-    </Card>
-  );
-}
-
-/** Live download progress: Android 16 Live Updates (status bar chip + Samsung Now Bar) status. */
-function LiveProgress() {
-  const t = useTheme();
-  const tick = useAppActiveTick();
-  const [live, setLive] = useState(() => liveStatus());
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => setLive(liveStatus()), [tick]);
-  if (!live) return null;
-
-  const good = live.channelEnabled && (!live.supported || live.canPromote);
-  return (
-    <Card style={{ gap: space(3) }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <Icon name="progress-download" size={22} color={good ? t.accent : t.textDim} />
-        <View style={{ flex: 1 }}>
-          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Live download progress</Text>
-          <Text style={{ color: t.textDim, fontSize: 13 }}>
-            {live.running ? 'Showing now' : live.supported ? 'Status bar chip + Now Bar while something downloads' : 'A progress notification while something downloads'}
-          </Text>
-        </View>
-        {live.running ? <Pill tone="ok" icon="download" label="Live" /> : null}
-      </View>
-      {live.supported ? (
-        <Row ok={live.canPromote} label="Live notifications allowed" fix={live.canPromote ? undefined : { label: 'Allow', onPress: () => PcNative?.openLiveSettings() }} />
-      ) : (
-        <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-          Android {live.sdk >= 35 ? '15' : live.sdk >= 34 ? '14' : 'version ' + live.sdk} has no Live Updates, so this shows as a normal ongoing progress notification. Android 16 puts it in the status bar chip and the Now Bar.
-        </Text>
-      )}
-      <Row ok={live.channelEnabled} label="“Live download progress” channel on" fix={live.channelEnabled ? undefined : { label: 'Open', onPress: () => PcNative?.openNotificationSettings() }} />
-      <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-        No background connection: the laptop sends a push when a download starts, then the app checks every few seconds while the screen is on and stops when nothing is downloading. On Samsung, if it doesn’t appear in the Now Bar, turn on Developer options → “Live notifications for all apps”.
-      </Text>
+      ) : null}
     </Card>
   );
 }
@@ -605,17 +618,6 @@ function Updates() {
         JS-only changes arrive over the air, signed by the laptop and only for this exact build. Native changes need a new APK.
       </Text>
     </Card>
-  );
-}
-
-function Row({ ok, label, fix }: { ok: boolean; label: string; fix?: { label: string; onPress: () => void } }) {
-  const t = useTheme();
-  return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
-      <Icon name={ok ? 'check-circle' : 'alert-circle-outline'} size={18} color={ok ? t.ok : t.warn} />
-      <Text style={{ color: t.text, flex: 1, fontSize: 13.5 }}>{label}</Text>
-      {fix ? <Button label={fix.label} compact kind="subtle" onPress={fix.onPress} /> : null}
-    </View>
   );
 }
 
@@ -707,9 +709,8 @@ export default function SettingsScreen() {
         <Enrollment />
       </Section>
       <Section label="Notifications">
+        <NotificationHealth />
         <NotificationPrefs />
-        <LiveProgress />
-        <Push />
       </Section>
       <Section label="Connection">
         <Server />

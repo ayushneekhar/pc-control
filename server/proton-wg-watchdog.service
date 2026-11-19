@@ -1,5 +1,5 @@
 [Unit]
-Description=Restart Proton WireGuard tunnel (wg-quick@proton0) when handshake stalls
+Description=Restart Proton WireGuard tunnel (wg-quick@proton0) when handshake stalls or gateway is unreachable
 After=network-online.target
 
 [Service]
@@ -9,7 +9,7 @@ UMask=0077
 RuntimeDirectory=proton-wg-watchdog
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-# Hardening that does not break wg (netlink), systemctl (/run/systemd/private) or logger (/dev/log):
+# Hardening that does not break wg (netlink), ping (ICMP), systemctl (/run/systemd/private) or logger (/dev/log):
 ProtectSystem=full
 ProtectHome=yes
 PrivateTmp=yes

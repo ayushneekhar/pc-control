@@ -8,7 +8,7 @@
 #   - WireGuard routes in their own table (51820), never the main table,
 #   - policy rules that send only 10.2.0.2 / 2a07:b944::2:2 through that table.
 # The interface is named proton0, which is what pc-api and qBittorrent bind to.
-# Also installs and enables proton-wg-watchdog.timer via install-proton-wg-watchdog.sh.
+# Also installs and enables proton-wg-watchdog.path via install-proton-wg-watchdog.sh.
 #
 # Idempotent: safe to re-run after editing the user's conf. The PrivateKey is never printed.
 set -euo pipefail
@@ -105,5 +105,5 @@ Verify:
   curl -4 --interface $IFACE ifconfig.me; echo
   curl -4 ifconfig.me; echo          # should still be your normal public IP
   sudo wg show $IFACE latest-handshakes
-  systemctl list-timers proton-wg-watchdog.timer
+  systemctl status proton-wg-watchdog.path
 EOF

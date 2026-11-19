@@ -1,29 +1,41 @@
 #!/bin/bash
 # Self-healing watchdog for the Proton WireGuard tunnel (wg-quick@proton0).
 #
-# Runs as root via proton-wg-watchdog.timer. If wg-quick@proton0 is active and
-# the newest peer handshake is older than STALE_SECONDS (180s), or has never
-# completed (0) after the unit has been active for more than STALE_SECONDS,
-# logs via logger and restarts wg-quick@proton0.
+# Runs as root via proton-wg-watchdog.path (triggered when pc-api writes
+# /run/proton-wg-kick/kick after a failed NAT-PMP renewal). Never trusts the
+# kick blindly: if wg-quick@proton0 is inactive, exits without doing anything.
+# Restarts wg-quick@proton0 if EITHER:
+#   (a) the newest peer handshake is older than STALE_SECONDS (180s), or has
+#       never completed (0) after the unit has been active > STALE_SECONDS, OR
+#   (b) the tunnel gateway (WG_GATEWAY, default 10.2.0.1) does not answer
+#       `ping -c 3 -W 2 -I proton0 10.2.0.1` AND the newest handshake is older
+#       than PING_STALE_SECONDS (60s) (or never completed after > 60s active).
 #
 # Rate-limited to at most one restart per MIN_RESTART_INTERVAL (300s) using a
 # state file under STATE_DIR (/run/proton-wg-watchdog). WireGuard keys are
-# never printed or logged. Does nothing when the unit is inactive.
+# never printed or logged.
 set -euo pipefail
 
 WG_IFACE="${WG_IFACE:-proton0}"
 WG_UNIT="${WG_UNIT:-wg-quick@${WG_IFACE}}"
+WG_GATEWAY="${WG_GATEWAY:-10.2.0.1}"
 STALE_SECONDS="${STALE_SECONDS:-180}"
+PING_STALE_SECONDS="${PING_STALE_SECONDS:-60}"
 MIN_RESTART_INTERVAL="${MIN_RESTART_INTERVAL:-300}"
 STATE_DIR="${STATE_DIR:-/run/proton-wg-watchdog}"
 STATE_FILE="${STATE_DIR}/last-restart"
 WG_BIN="${WG_BIN:-wg}"
+PING_BIN="${PING_BIN:-ping}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 LOGGER_BIN="${LOGGER_BIN:-logger}"
 LOG_TAG="proton-wg-watchdog"
 
 log() {
   "$LOGGER_BIN" -t "$LOG_TAG" -- "$*"
+}
+
+gateway_answers() {
+  "$PING_BIN" -c 3 -W 2 -I "$WG_IFACE" "$WG_GATEWAY" >/dev/null 2>&1
 }
 
 now_epoch() {
@@ -87,12 +99,15 @@ reason=""
 
 if [ "$newest_hs" -gt 0 ]; then
   age=$(( now - newest_hs ))
-  if [ "$age" -le "$STALE_SECONDS" ]; then
+  if [ "$age" -gt "$STALE_SECONDS" ]; then
+    reason="latest handshake ${age}s ago (threshold ${STALE_SECONDS}s)"
+  elif [ "$age" -gt "$PING_STALE_SECONDS" ] && ! gateway_answers; then
+    reason="gateway ${WG_GATEWAY} unreachable via ${WG_IFACE} and latest handshake ${age}s ago (threshold ${PING_STALE_SECONDS}s)"
+  else
     exit 0
   fi
-  reason="latest handshake ${age}s ago (threshold ${STALE_SECONDS}s)"
 else
-  # 0 = never handshaked; only restart if the unit has been active > STALE_SECONDS.
+  # 0 = never handshaked; measure age from when the unit became active.
   if ! active_since="$(unit_active_since_epoch)"; then
     exit 0
   fi
@@ -100,10 +115,13 @@ else
     exit 0
   fi
   active_age=$(( now - active_since ))
-  if [ "$active_age" -le "$STALE_SECONDS" ]; then
+  if [ "$active_age" -gt "$STALE_SECONDS" ]; then
+    reason="no handshake after ${active_age}s active (threshold ${STALE_SECONDS}s)"
+  elif [ "$active_age" -gt "$PING_STALE_SECONDS" ] && ! gateway_answers; then
+    reason="gateway ${WG_GATEWAY} unreachable via ${WG_IFACE} and no handshake after ${active_age}s active (threshold ${PING_STALE_SECONDS}s)"
+  else
     exit 0
   fi
-  reason="no handshake after ${active_age}s active (threshold ${STALE_SECONDS}s)"
 fi
 
 # Rate-limit: never restart more than once per MIN_RESTART_INTERVAL seconds.

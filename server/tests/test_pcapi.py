@@ -891,12 +891,16 @@ class VpnTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.conf = os.path.join(self.dir, "pcapi.json")
+        self.kick_dir = os.path.join(self.dir, "kick")
+        os.makedirs(self.kick_dir)
+        self.kick = os.path.join(self.kick_dir, "kick")
         self.notif = FakeNotifier()
         self.qbt = FakeVpnQbt()
         self.net = FakeNatPmp()
         self.ip_calls = []
         self.v = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net,
-                                  ip_fetcher=lambda: (self.ip_calls.append(1), "203.0.113.9")[1])
+                                  ip_fetcher=lambda: (self.ip_calls.append(1), "203.0.113.9")[1],
+                                  kick_file=self.kick)
         self.v._iface_exists = lambda: True
         self.v._handshake_age = lambda: 5
 
@@ -926,7 +930,7 @@ class VpnTests(unittest.TestCase):
         self.net.external = 40000
         self.v.set_enabled(True)
         self.assertEqual(self.qbt.prefs["listen_port"], 40000)
-        v2 = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net)
+        v2 = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net, kick_file=self.kick)
         v2._iface_exists = lambda: True
         v2._handshake_age = lambda: 5
         v2._enable_locked(persist=False)
@@ -1026,6 +1030,63 @@ class VpnTests(unittest.TestCase):
         self.assertEqual(problem["title"], "Torrent VPN is down")
         self.assertIn("NAT-PMP", problem["detail"])
 
+    def test_failed_natpmp_renewal_writes_kick_file_and_success_does_not(self):
+        kick_dir = os.path.join(self.dir, "env-kick")
+        os.makedirs(kick_dir)
+        kick_path = os.path.join(kick_dir, "kick")
+        with mock.patch.dict(os.environ, {"PCAPI_WG_KICK": kick_path}):
+            v = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net)
+            v._iface_exists = lambda: True
+            v._handshake_age = lambda: 5
+
+            # Successful renewal must not create the kick file.
+            v.set_enabled(True)
+            self.assertTrue(v.natpmp_ok)
+            self.assertFalse(os.path.exists(kick_path))
+
+            # Failed/timed-out renewal while enabled writes current unix time atomically.
+            self.net.fail = True
+            before = int(time.time())
+            v._renew_locked()
+            after = int(time.time())
+            self.assertFalse(v.natpmp_ok)
+            self.assertTrue(os.path.exists(kick_path))
+            self.assertFalse(os.path.exists(kick_path + ".tmp"))
+            with open(kick_path, "r", encoding="utf-8") as f:
+                ts = int(f.read().strip())
+            self.assertGreaterEqual(ts, before)
+            self.assertLessEqual(ts, after)
+
+            # A subsequent successful renewal must not write or recreate the kick file.
+            os.remove(kick_path)
+            self.net.fail = False
+            v._renew_locked()
+            self.assertTrue(v.natpmp_ok)
+            self.assertFalse(os.path.exists(kick_path))
+
+            # A failed renewal when VPN is disabled must not write the kick file.
+            v.set_enabled(False)
+            self.net.fail = True
+            v._renew_locked()
+            self.assertFalse(os.path.exists(kick_path))
+
+    def test_missing_kick_dir_never_raises_and_logs_once(self):
+        import io
+        missing_kick = os.path.join(self.dir, "does-not-exist", "kick")
+        with mock.patch.dict(os.environ, {"PCAPI_WG_KICK": missing_kick}):
+            v = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net)
+            v._iface_exists = lambda: True
+            v._handshake_age = lambda: 5
+            v.set_enabled(True)
+            self.net.fail = True
+            err = io.StringIO()
+            with mock.patch.object(sys, "stderr", err):
+                v._renew_locked()
+                v._renew_locked()
+            lines = [line for line in err.getvalue().splitlines() if "watchdog kick" in line]
+            self.assertEqual(len(lines), 1)
+            self.assertFalse(os.path.exists(missing_kick))
+
 
 class VpnHttpTests(unittest.TestCase):
     @classmethod
@@ -1045,7 +1106,7 @@ class VpnHttpTests(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.qbt = FakeVpnQbt()
         self.v = pcapi.VpnManager(FakeNotifier(), qbt=self.qbt, conf_file=os.path.join(self.dir, "pcapi.json"),
-                                  net=FakeNatPmp())
+                                  net=FakeNatPmp(), kick_file=os.path.join(self.dir, "kick"))
         self.v._iface_exists = lambda: True
         self.v._handshake_age = lambda: 5
         pcapi.VPN = self.v

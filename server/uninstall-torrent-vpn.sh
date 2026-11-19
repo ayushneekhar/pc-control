@@ -13,12 +13,13 @@ die() { echo "error: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "run with sudo: sudo $0"
 
-systemctl disable --now proton-wg-watchdog.timer 2>/dev/null || true
+systemctl disable --now proton-wg-watchdog.path 2>/dev/null || true
 systemctl stop proton-wg-watchdog.service 2>/dev/null || true
 rm -f /usr/local/sbin/proton-wg-watchdog \
       /etc/systemd/system/proton-wg-watchdog.service \
-      /etc/systemd/system/proton-wg-watchdog.timer
-rm -rf /run/proton-wg-watchdog
+      /etc/systemd/system/proton-wg-watchdog.path \
+      /etc/tmpfiles.d/proton-wg-watchdog.conf
+rm -rf /run/proton-wg-watchdog /run/proton-wg-kick
 systemctl daemon-reload
 
 systemctl disable --now wg-quick@$IFACE 2>/dev/null || true

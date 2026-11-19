@@ -37,6 +37,25 @@ if out:
 sys.exit(rc)
 """
 
+FAKE_PING_SCRIPT = """#!/usr/bin/env python3
+import json, os, sys
+
+argv = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a", encoding="utf-8") as f:
+    f.write(json.dumps({"cmd": "ping", "argv": argv}) + "\\n")
+
+expected = [
+    "-c", "3", "-W", "2",
+    "-I", os.environ.get("EXPECT_IFACE", "proton0"),
+    os.environ.get("EXPECT_GATEWAY", "10.2.0.1"),
+]
+if argv != expected:
+    sys.stderr.write(f"unexpected ping args: {argv} (expected {expected})\\n")
+    sys.exit(2)
+
+sys.exit(int(os.environ.get("FAKE_PING_RC", "0")))
+"""
+
 FAKE_SYSTEMCTL_SCRIPT = """#!/usr/bin/env python3
 import json, os, sys
 
@@ -81,10 +100,12 @@ class ProtonWgWatchdogTest(unittest.TestCase):
         os.makedirs(self.bin_dir, exist_ok=True)
 
         self.wg_bin = os.path.join(self.bin_dir, "wg")
+        self.ping_bin = os.path.join(self.bin_dir, "ping")
         self.systemctl_bin = os.path.join(self.bin_dir, "systemctl")
         self.logger_bin = os.path.join(self.bin_dir, "logger")
 
         _write_exe(self.wg_bin, FAKE_WG_SCRIPT)
+        _write_exe(self.ping_bin, FAKE_PING_SCRIPT)
         _write_exe(self.systemctl_bin, FAKE_SYSTEMCTL_SCRIPT)
         _write_exe(self.logger_bin, FAKE_LOGGER_SCRIPT)
 
@@ -108,6 +129,8 @@ class ProtonWgWatchdogTest(unittest.TestCase):
         active=True,
         wg_output="",
         wg_rc=0,
+        ping_rc=0,
+        gateway=None,
         active_enter="",
         restart_rc=0,
         use_path_override=False,
@@ -122,16 +145,25 @@ class ProtonWgWatchdogTest(unittest.TestCase):
                 "FAKE_ACTIVE": "1" if active else "0",
                 "FAKE_WG_OUTPUT": wg_output,
                 "FAKE_WG_RC": str(wg_rc),
+                "FAKE_PING_RC": str(ping_rc),
                 "FAKE_ACTIVE_ENTER": active_enter,
                 "FAKE_RESTART_RC": str(restart_rc),
             }
         )
+        if gateway is not None:
+            env["WG_GATEWAY"] = gateway
+            env["EXPECT_GATEWAY"] = gateway
+        else:
+            env.pop("WG_GATEWAY", None)
+            env.pop("EXPECT_GATEWAY", None)
+
         if use_path_override:
             env["PATH"] = self.bin_dir + os.pathsep + env.get("PATH", "")
-            for k in ("WG_BIN", "SYSTEMCTL_BIN", "LOGGER_BIN"):
+            for k in ("WG_BIN", "PING_BIN", "SYSTEMCTL_BIN", "LOGGER_BIN"):
                 env.pop(k, None)
         else:
             env["WG_BIN"] = self.wg_bin
+            env["PING_BIN"] = self.ping_bin
             env["SYSTEMCTL_BIN"] = self.systemctl_bin
             env["LOGGER_BIN"] = self.logger_bin
 
@@ -157,26 +189,75 @@ class ProtonWgWatchdogTest(unittest.TestCase):
     def _logs(self, calls):
         return [c for c in calls if c["cmd"] == "logger"]
 
-    def test_fresh_handshake_no_restart(self):
+    def _pings(self, calls):
+        return [c for c in calls if c["cmd"] == "ping"]
+
+    def test_fresh_handshake_no_restart_even_if_ping_would_fail(self):
         now = 1_700_000_500
-        # 45s old -> fresh
-        proc, calls = self._run_watchdog(now=now, wg_output=f"{FAKE_PEER_KEY}\t{now - 45}")
+        # 45s old -> fresh, does not even ping or restart
+        proc, calls = self._run_watchdog(now=now, wg_output=f"{FAKE_PEER_KEY}\t{now - 45}", ping_rc=1)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self._restarts(calls), [])
+        self.assertEqual(self._pings(calls), [])
         self.assertEqual(self._logs(calls), [])
         self.assertFalse(os.path.exists(os.path.join(self.state_dir, "last-restart")))
 
-        # Boundary: exactly 180s old -> still not older than 180s
-        proc, calls = self._run_watchdog(now=now, wg_output=f"{FAKE_PEER_KEY}\t{now - 180}")
+        # Boundary: exactly 60s old -> still not older than 60s, no ping or restart
+        proc, calls = self._run_watchdog(now=now, wg_output=f"{FAKE_PEER_KEY}\t{now - 60}", ping_rc=1)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self._restarts(calls), [])
+        self.assertEqual(self._pings(calls), [])
         self.assertEqual(self._logs(calls), [])
 
-    def test_stale_handshake_restarts_and_logs(self):
+    def test_mid_age_handshake_with_ping_success_does_not_restart(self):
         now = 1_700_000_500
-        proc, calls = self._run_watchdog(now=now, wg_output=f"{FAKE_PEER_KEY}\t{now - 181}")
+        # 61s..180s with healthy gateway ping -> no restart
+        for age in (61, 120, 180):
+            proc, calls = self._run_watchdog(now=now, wg_output=f"{FAKE_PEER_KEY}\t{now - age}", ping_rc=0)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(len(self._pings(calls)), 1)
+            self.assertEqual(self._pings(calls)[0]["argv"], ["-c", "3", "-W", "2", "-I", "proton0", "10.2.0.1"])
+            self.assertEqual(self._restarts(calls), [])
+            self.assertEqual(self._logs(calls), [])
+
+    def test_mid_age_handshake_with_ping_failure_restarts_and_logs(self):
+        now = 1_700_000_500
+        # Boundary: 61s old + ping fails -> restarts
+        proc, calls = self._run_watchdog(now=now, wg_output=f"{FAKE_PEER_KEY}\t{now - 61}", ping_rc=1)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(self._pings(calls)), 1)
+        self.assertEqual(len(self._restarts(calls)), 1)
+        self.assertEqual(self._restarts(calls)[0]["argv"], ["restart", "wg-quick@proton0"])
+        self.assertEqual(len(self._logs(calls)), 1)
+        self.assertIn("10.2.0.1", self._logs(calls)[0]["argv"][-1])
+        self.assertIn("restarting wg-quick@proton0", self._logs(calls)[0]["argv"][-1])
+
+        # Boundary: 180s old + ping fails -> restarts (after rate limit expires)
+        proc, calls = self._run_watchdog(now=now + 300, wg_output=f"{FAKE_PEER_KEY}\t{now + 300 - 180}", ping_rc=1)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(self._pings(calls)), 1)
+        self.assertEqual(len(self._restarts(calls)), 1)
+
+    def test_custom_gateway_env_var_passed_to_ping(self):
+        now = 1_700_000_800
+        proc, calls = self._run_watchdog(
+            now=now,
+            wg_output=f"{FAKE_PEER_KEY}\t{now - 90}",
+            ping_rc=1,
+            gateway="10.9.0.1",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._pings(calls)[0]["argv"], ["-c", "3", "-W", "2", "-I", "proton0", "10.9.0.1"])
+        self.assertEqual(len(self._restarts(calls)), 1)
+        self.assertIn("10.9.0.1", self._logs(calls)[0]["argv"][-1])
+
+    def test_stale_handshake_restarts_and_logs_even_if_ping_would_succeed(self):
+        now = 1_700_000_500
+        proc, calls = self._run_watchdog(now=now, wg_output=f"{FAKE_PEER_KEY}\t{now - 181}", ping_rc=0)
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
+        # Condition (a) fires directly without needing ping.
+        self.assertEqual(self._pings(calls), [])
         restarts = self._restarts(calls)
         self.assertEqual(len(restarts), 1)
         self.assertEqual(restarts[0]["argv"], ["restart", "wg-quick@proton0"])
@@ -192,25 +273,25 @@ class ProtonWgWatchdogTest(unittest.TestCase):
 
     def test_rate_limit_blocks_restarts_within_5_minutes(self):
         t0 = 1_700_001_000
-        # First stale run restarts
-        proc, calls = self._run_watchdog(now=t0, wg_output=f"{FAKE_PEER_KEY}\t{t0 - 300}")
+        # First ping-triggered failure restarts
+        proc, calls = self._run_watchdog(now=t0, wg_output=f"{FAKE_PEER_KEY}\t{t0 - 90}", ping_rc=1)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(len(self._restarts(calls)), 1)
 
-        # 60s later -> rate-limited
-        proc, calls = self._run_watchdog(now=t0 + 60, wg_output=f"{FAKE_PEER_KEY}\t{t0 - 300}")
+        # 60s later -> stale handshake is still rate-limited
+        proc, calls = self._run_watchdog(now=t0 + 60, wg_output=f"{FAKE_PEER_KEY}\t{t0 - 300}", ping_rc=1)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self._restarts(calls), [])
         self.assertEqual(len(self._logs(calls)), 1)
         self.assertIn("rate-limited", self._logs(calls)[0]["argv"][-1])
 
         # 299s later -> still rate-limited
-        proc, calls = self._run_watchdog(now=t0 + 299, wg_output=f"{FAKE_PEER_KEY}\t{t0 - 300}")
+        proc, calls = self._run_watchdog(now=t0 + 299, wg_output=f"{FAKE_PEER_KEY}\t{t0 + 299 - 90}", ping_rc=1)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self._restarts(calls), [])
 
         # 300s (5 minutes) later -> allowed again
-        proc, calls = self._run_watchdog(now=t0 + 300, wg_output=f"{FAKE_PEER_KEY}\t{t0 - 300}")
+        proc, calls = self._run_watchdog(now=t0 + 300, wg_output=f"{FAKE_PEER_KEY}\t{t0 + 300 - 90}", ping_rc=1)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(len(self._restarts(calls)), 1)
 
@@ -220,34 +301,54 @@ class ProtonWgWatchdogTest(unittest.TestCase):
             now=now,
             active=False,
             wg_output=f"{FAKE_PEER_KEY}\t{now - 999}",
+            ping_rc=1,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self._restarts(calls), [])
+        self.assertEqual(self._pings(calls), [])
         self.assertEqual(self._logs(calls), [])
         self.assertEqual([c for c in calls if c["cmd"] == "wg"], [])
         self.assertFalse(os.path.exists(self.state_dir))
 
     def test_never_handshaked_recently_started_does_nothing(self):
         now = 1_700_003_000
-        # Active for 60s -> do nothing
+        # Active for 60s -> do nothing even if ping fails
         proc, calls = self._run_watchdog(
             now=now,
             wg_output=f"{FAKE_PEER_KEY}\t0",
             active_enter=f"@{now - 60}",
+            ping_rc=1,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._pings(calls), [])
         self.assertEqual(self._restarts(calls), [])
         self.assertEqual(self._logs(calls), [])
 
-        # Boundary: active for exactly 180s -> still do nothing
+        # Boundary: active for 180s with ping succeeding -> still do nothing
         proc, calls = self._run_watchdog(
             now=now,
             wg_output=f"{FAKE_PEER_KEY}\t0",
             active_enter=f"@{now - 180}",
+            ping_rc=0,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(self._pings(calls)), 1)
         self.assertEqual(self._restarts(calls), [])
         self.assertEqual(self._logs(calls), [])
+
+    def test_never_handshaked_active_over_60s_with_ping_failure_restarts(self):
+        now = 1_700_003_500
+        proc, calls = self._run_watchdog(
+            now=now,
+            wg_output=f"{FAKE_PEER_KEY}\t0",
+            active_enter=f"@{now - 90}",
+            ping_rc=1,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(self._pings(calls)), 1)
+        self.assertEqual(len(self._restarts(calls)), 1)
+        self.assertEqual(len(self._logs(calls)), 1)
+        self.assertIn("no handshake", self._logs(calls)[0]["argv"][-1])
 
     def test_never_handshaked_active_over_180s_restarts(self):
         now = 1_700_004_000
@@ -255,23 +356,26 @@ class ProtonWgWatchdogTest(unittest.TestCase):
             now=now,
             wg_output=f"{FAKE_PEER_KEY}\t0",
             active_enter=f"@{now - 181}",
+            ping_rc=0,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._pings(calls), [])
         self.assertEqual(len(self._restarts(calls)), 1)
         self.assertEqual(len(self._logs(calls)), 1)
         self.assertIn("no handshake", self._logs(calls)[0]["argv"][-1])
 
     def test_multiple_peers_uses_newest_handshake(self):
         now = 1_700_005_000
-        # One peer stale, one peer fresh -> newest is fresh -> no restart
+        # One peer stale, one peer fresh (30s) -> newest is fresh -> no ping, no restart
         wg_out = f"{FAKE_PEER_KEY}\t{now - 500}\n{FAKE_PEER_KEY_2}\t{now - 30}\n"
-        proc, calls = self._run_watchdog(now=now, wg_output=wg_out)
+        proc, calls = self._run_watchdog(now=now, wg_output=wg_out, ping_rc=1)
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._pings(calls), [])
         self.assertEqual(self._restarts(calls), [])
 
         # Both peers stale -> restart
         wg_out = f"{FAKE_PEER_KEY}\t0\n{FAKE_PEER_KEY_2}\t{now - 250}\n"
-        proc, calls = self._run_watchdog(now=now, wg_output=wg_out)
+        proc, calls = self._run_watchdog(now=now, wg_output=wg_out, ping_rc=0)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(len(self._restarts(calls)), 1)
 
@@ -279,17 +383,20 @@ class ProtonWgWatchdogTest(unittest.TestCase):
         now = 1_700_006_000
         proc, calls = self._run_watchdog(
             now=now,
-            wg_output=f"{FAKE_PEER_KEY}\t{now - 400}",
+            wg_output=f"{FAKE_PEER_KEY}\t{now - 90}",
+            ping_rc=1,
             use_path_override=True,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(self._pings(calls)), 1)
         self.assertEqual(len(self._restarts(calls)), 1)
 
     def test_wg_failure_logs_and_exits_nonzero_without_restarting(self):
         now = 1_700_007_000
-        proc, calls = self._run_watchdog(now=now, wg_rc=1)
+        proc, calls = self._run_watchdog(now=now, wg_rc=1, ping_rc=1)
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(self._restarts(calls), [])
+        self.assertEqual(self._pings(calls), [])
         self.assertEqual(len(self._logs(calls)), 1)
 
     def test_restart_failure_still_rate_limits_next_attempt(self):
@@ -324,6 +431,9 @@ class ProtonWgWatchdogTest(unittest.TestCase):
             p = subprocess.run(["bash", "-n", path], capture_output=True, text=True, timeout=10)
             self.assertEqual(p.returncode, 0, f"bash -n failed for {name}: {p.stderr}")
 
+        # Polling timer must be completely removed.
+        self.assertFalse(os.path.exists(os.path.join(SERVER_DIR, "proton-wg-watchdog.timer")))
+
         with open(os.path.join(SERVER_DIR, "proton-wg-watchdog.service"), "r", encoding="utf-8") as f:
             svc = f.read()
         for line in (
@@ -337,14 +447,40 @@ class ProtonWgWatchdogTest(unittest.TestCase):
         ):
             self.assertIn(line, svc)
 
-        with open(os.path.join(SERVER_DIR, "proton-wg-watchdog.timer"), "r", encoding="utf-8") as f:
-            timer = f.read()
+        with open(os.path.join(SERVER_DIR, "proton-wg-watchdog.path"), "r", encoding="utf-8") as f:
+            path_unit = f.read()
         for line in (
-            "OnBootSec=2min",
-            "OnUnitActiveSec=60s",
-            "WantedBy=timers.target",
+            "PathModified=/run/proton-wg-kick/kick",
+            "Unit=proton-wg-watchdog.service",
+            "WantedBy=paths.target",
         ):
-            self.assertIn(line, timer)
+            self.assertIn(line, path_unit)
+
+        with open(os.path.join(SERVER_DIR, "proton-wg-watchdog.tmpfiles.conf"), "r", encoding="utf-8") as f:
+            tmpfiles = f.read()
+        self.assertIn("d /run/proton-wg-kick 0755 ayushlive ayushlive -", tmpfiles)
+
+        with open(os.path.join(SERVER_DIR, "install-proton-wg-watchdog.sh"), "r", encoding="utf-8") as f:
+            installer = f.read()
+        for snippet in (
+            "systemctl disable --now proton-wg-watchdog.timer",
+            "/etc/systemd/system/proton-wg-watchdog.timer",
+            "/etc/tmpfiles.d/proton-wg-watchdog.conf",
+            "systemd-tmpfiles --create",
+            "systemctl enable --now proton-wg-watchdog.path",
+        ):
+            self.assertIn(snippet, installer)
+
+        with open(os.path.join(SERVER_DIR, "uninstall-torrent-vpn.sh"), "r", encoding="utf-8") as f:
+            uninstaller = f.read()
+        for snippet in (
+            "systemctl disable --now proton-wg-watchdog.path",
+            "/etc/systemd/system/proton-wg-watchdog.path",
+            "/etc/tmpfiles.d/proton-wg-watchdog.conf",
+            "/run/proton-wg-kick",
+        ):
+            self.assertIn(snippet, uninstaller)
+        self.assertNotIn("proton-wg-watchdog.timer", uninstaller)
 
 
 if __name__ == "__main__":

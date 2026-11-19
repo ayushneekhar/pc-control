@@ -943,6 +943,7 @@ VPN_RENEW = 45                   # s, NAT-PMP mappings are requested with a 60 s
 VPN_ALERT_AFTER = 180            # s unhealthy before one vpn_down alert
 VPN_IP_INTERVAL = 600            # s between public-IP lookups
 VPN_NATPMP_BACKOFF = 60          # s to wait after result 4 (out of resources)
+VPN_WG_KICK = os.environ.get("PCAPI_WG_KICK", "/run/proton-wg-kick/kick")
 
 
 class NatPmpError(Exception):
@@ -1010,13 +1011,14 @@ class VpnManager:
     """
 
     def __init__(self, notify, qbt=None, conf_file=None, net=None, ip_fetcher=None,
-                 renew=VPN_RENEW, check_interval=15, alert_after=VPN_ALERT_AFTER):
+                 renew=VPN_RENEW, check_interval=15, alert_after=VPN_ALERT_AFTER, kick_file=None):
         self.notify = notify
         self.qbt = qbt
         self.conf_file = conf_file or PCAPI_CONF
         self.net = net or NatPmp()
         self.ip_fetcher = ip_fetcher or fetch_public_ip
         self.renew, self.interval, self.alert_after = renew, check_interval, alert_after
+        self.kick_file = kick_file
         self.lock = threading.RLock()
         self.stop = threading.Event()
         conf = load_json(self.conf_file, {})
@@ -1034,6 +1036,7 @@ class VpnManager:
         self._unhealthy_since = None
         self._alerted = False
         self._started_enabled = False
+        self._kick_missing_logged = False
 
     @staticmethod
     def _port(value, default):
@@ -1129,12 +1132,47 @@ class VpnManager:
         tcp = self.net.request(2, 0, 1, 60)
         return udp, tcp
 
-    def _renew_locked(self):
+    def _kick_watchdog_locked(self):
+        path = self.kick_file if self.kick_file is not None else os.environ.get("PCAPI_WG_KICK", VPN_WG_KICK)
+        if not path: return
+        parent = os.path.dirname(path)
+        if parent and not os.path.isdir(parent):
+            if not self._kick_missing_logged:
+                self._kick_missing_logged = True
+                print(f"vpn: watchdog kick dir missing ({parent}); skipping kick",
+                      file=sys.stderr, flush=True)
+            return
+        tmp = f"{path}.tmp"
+        fd = -1
         try:
-            udp, tcp = self._map()
-            external = self._port(udp.get("external"), 0)
-            if not external: raise NatPmpError(-1, "NAT-PMP returned no external port")
-            tcp_external = self._port(tcp.get("external"), 0)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            with os.fdopen(fd, "w") as f:
+                fd = -1
+                f.write(f"{int(time.time())}\n")
+            os.replace(tmp, path)
+            self._kick_missing_logged = False
+        except OSError as e:
+            if fd >= 0:
+                try: os.close(fd)
+                except OSError: pass
+            try: os.remove(tmp)
+            except OSError: pass
+            if not self._kick_missing_logged:
+                self._kick_missing_logged = True
+                print(f"vpn: watchdog kick failed ({path}): {type(e).__name__}: {e}",
+                      file=sys.stderr, flush=True)
+
+    def _renew_locked(self):
+        natpmp_failed = False
+        try:
+            try:
+                udp, tcp = self._map()
+                external = self._port(udp.get("external"), 0)
+                if not external: raise NatPmpError(-1, "NAT-PMP returned no external port")
+                tcp_external = self._port(tcp.get("external"), 0)
+            except Exception:
+                natpmp_failed = True
+                raise
             if tcp_external and tcp_external != external:
                 print(f"vpn: NAT-PMP ports differ (udp={external}, tcp={tcp_external}); using UDP",
                       file=sys.stderr, flush=True)
@@ -1149,6 +1187,7 @@ class VpnManager:
             self.last_error = clip(f"{type(e).__name__}: {e}", 240)
             backoff = VPN_NATPMP_BACKOFF if isinstance(e, NatPmpError) and e.result == 4 else 15
             self._next_renew = time.time() + backoff
+            if natpmp_failed and self.enabled: self._kick_watchdog_locked()
 
     def _refresh_public_ip_locked(self):
         now = time.time()

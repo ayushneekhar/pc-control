@@ -383,3 +383,126 @@ export type KeyringUnlockResult = {
 export const getKeyring = () => get<KeyringStatus>('/pc/api/keyring');
 export const unlockKeyringApi = (password: string) =>
   post<KeyringUnlockResult>('/pc/api/keyring/unlock', { password }, 35000);
+
+// ---------------------------------------------------------------- round 4
+
+export type TorrentItem = {
+  hash: string;
+  id: string;
+  name: string;
+  torrent: string;
+  category: string;
+  state: 'downloading' | 'stalled' | 'metadata' | 'queued' | 'checking' | 'moving' | 'paused' | 'stopped' | 'seeding' | 'error' | string;
+  raw_state: string;
+  paused: boolean;
+  progress: number;
+  speed: number;
+  upspeed: number;
+  eta: number | null;
+  size: number;
+  done: number;
+  seeds: number;
+  ratio: number;
+  added: number;
+};
+
+export type DownloadsAllResponse = {
+  qbt: 'ok' | 'down' | 'auth';
+  alt_speed: boolean;
+  torrents: TorrentItem[];
+  total: {
+    count: number;
+    active: number;
+    downloading: number;
+    progress: number | null;
+    speed: number;
+    upspeed: number;
+    eta: number | null;
+  };
+  radarr: ArrQueue;
+  sonarr: ArrQueue;
+  ts: number;
+};
+
+export const getDownloadsAll = () => get<DownloadsAllResponse>('/pc/api/downloads/all', 10000);
+export const pauseTorrent = (hash: string) => post<{ ok: boolean }>('/pc/api/downloads/pause', { hash });
+export const resumeTorrent = (hash: string) => post<{ ok: boolean }>('/pc/api/downloads/resume', { hash });
+export const deleteTorrent = (hash: string, deleteFiles: boolean) =>
+  post<{ ok: boolean }>('/pc/api/downloads/delete', { hash, delete_files: deleteFiles });
+export const setAltSpeed = (enabled: boolean) =>
+  post<{ ok: boolean; alt_speed: boolean }>('/pc/api/downloads/alt-speed', { enabled });
+export const addMagnet = (uri: string) =>
+  post<{ ok: boolean; already_exists: boolean; category: string }>('/pc/api/downloads/add', { uri });
+export const retryArrImport = (app: 'radarr' | 'sonarr') =>
+  post<{ ok: boolean; app: string; command_id?: number }>('/pc/api/arr/retry', { app });
+export const refreshJellyfinLibrary = () => post<{ ok: boolean }>('/pc/api/jellyfin/refresh', {});
+
+export type KbdLockState = {
+  available: boolean;
+  enabled: boolean;
+  active: string;
+};
+
+export const getKbdLock = () => get<KbdLockState>('/pc/api/kbd-lock');
+export const setKbdLock = (enabled: boolean) => post<KbdLockState>('/pc/api/kbd-lock', { enabled }, 15000);
+
+export type SeerrStatus = 'available' | 'partial' | 'grabbing' | 'requested' | 'declined' | 'none';
+
+export type SeerrSeason = {
+  seasonNumber: number;
+  name: string;
+  episodeCount: number;
+  status: SeerrStatus;
+};
+
+export type SeerrItem = {
+  id: number;
+  mediaType: 'movie' | 'tv';
+  title: string;
+  year: number | null;
+  poster: string | null;
+  overview: string;
+  status: SeerrStatus;
+  seasons?: SeerrSeason[];
+};
+
+export type SeerrRequestItem = {
+  id: number;
+  tmdbId: number;
+  mediaType: 'movie' | 'tv';
+  title: string;
+  year: number | null;
+  poster: string | null;
+  status: SeerrStatus;
+  seasons: number[];
+  requestedBy: string;
+  createdAt: string;
+};
+
+export const searchSeerr = (q: string) =>
+  get<{ results: SeerrItem[] }>(`/pc/api/seerr/search?q=${encodeURIComponent(q)}`, 15000);
+export const getSeerrDetails = (type: 'movie' | 'tv', id: number) =>
+  get<SeerrItem>(`/pc/api/seerr/details?type=${type}&id=${id}`, 15000);
+export const getSeerrRequests = () => get<{ requests: SeerrRequestItem[] }>('/pc/api/seerr/requests', 15000);
+export const createSeerrRequest = (mediaType: 'movie' | 'tv', mediaId: number, seasons?: number[] | 'all') =>
+  post<{ ok: boolean; id?: number; status?: number }>(
+    '/pc/api/seerr/request',
+    mediaType === 'tv' ? { mediaType, mediaId, seasons: seasons ?? 'all' } : { mediaType, mediaId },
+    15000,
+  );
+export const resolveMediaUrl = (url: string) => post<SeerrItem>('/pc/api/seerr/resolve', { url }, 15000);
+
+export type CodingThread = {
+  id: string;
+  title: string;
+  model: string;
+  instance: string;
+  status: string;
+  settled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export const getCodingThreads = () => get<{ threads: CodingThread[]; ts: number }>('/pc/api/agent/threads', 15000);
+export const interruptCodingThread = (threadId: string) =>
+  post<{ ok: boolean; threadId: string }>('/pc/api/agent/threads/interrupt', { threadId }, 15000);

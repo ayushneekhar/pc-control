@@ -26,8 +26,10 @@ export default function ServiceDetailScreen() {
   const [svc, setSvc] = useState<Service | undefined>(initial);
   const [logs, setLogs] = useState<string[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<'start' | 'stop' | 'restart' | null>(null);
   const name = unit.replace(/\.service$/, '');
+  const isProtected = unit === 'pc-api.service';
+  const isActive = svc?.active === 'active';
 
   const loadLogs = useCallback(async () => {
     try {
@@ -51,29 +53,37 @@ export default function ServiceDetailScreen() {
   useFocusEffect(
     useCallback(() => {
       void loadLogs();
-    }, [loadLogs]),
+      void loadStatus();
+    }, [loadLogs, loadStatus]),
   );
+
+  const runAction = async (action: 'start' | 'stop' | 'restart') => {
+    setBusyAction(action);
+    setErr(null);
+    try {
+      await post(`/pc/api/services/${encodeURIComponent(unit)}/${action}`, {});
+      setTimeout(async () => {
+        await Promise.all([loadLogs(), loadStatus()]);
+        setBusyAction(null);
+      }, 1500);
+    } catch (e) {
+      setBusyAction(null);
+      setErr((e as Error).message);
+    }
+  };
+
+  const start = () => void runAction('start');
+
+  const stop = () =>
+    Alert.alert(`Stop ${name}?`, svc?.description, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Stop', style: 'destructive', onPress: () => void runAction('stop') },
+    ]);
 
   const restart = () =>
     Alert.alert(`Restart ${name}?`, svc?.description, [
       { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Restart',
-        onPress: async () => {
-          setBusy(true);
-          setErr(null);
-          try {
-            await post(`/pc/api/services/${encodeURIComponent(unit)}/restart`, {});
-            setTimeout(async () => {
-              await Promise.all([loadLogs(), loadStatus()]);
-              setBusy(false);
-            }, 1800);
-          } catch (e) {
-            setBusy(false);
-            setErr((e as Error).message);
-          }
-        },
-      },
+      { text: 'Restart', onPress: () => void runAction('restart') },
     ]);
 
   if (!unit) {
@@ -100,7 +110,7 @@ export default function ServiceDetailScreen() {
       }
       onBack={() => nav.goBack()}
     >
-      {err ? <Banner tone="bad" title="Restart failed">{err}</Banner> : null}
+      {err ? <Banner tone="bad" title="Action failed">{err}</Banner> : null}
       {logs?.[0]?.startsWith('(') && logs.length === 1 ? <Banner tone="warn" title="Can't load logs">{logs[0]}</Banner> : null}
 
       <Card style={{ gap: space(3) }}>
@@ -128,9 +138,40 @@ export default function ServiceDetailScreen() {
         </ScrollView>
       </Card>
 
-      <View style={{ flexDirection: 'row', gap: space(2) }}>
-        <Button label="Refresh logs" kind="subtle" icon="refresh" style={{ flex: 1 }} onPress={loadLogs} />
-        <Button label="Restart" kind="primary" icon="restart" style={{ flex: 1 }} busy={busy} onPress={restart} />
+      <View style={{ gap: space(2) }}>
+        <View style={{ flexDirection: 'row', gap: space(2) }}>
+          {!isActive ? (
+            <Button
+              label="Start"
+              kind="primary"
+              icon="play"
+              style={{ flex: 1 }}
+              busy={busyAction === 'start'}
+              disabled={busyAction !== null && busyAction !== 'start'}
+              onPress={start}
+            />
+          ) : !isProtected ? (
+            <Button
+              label="Stop"
+              kind="danger"
+              icon="stop"
+              style={{ flex: 1 }}
+              busy={busyAction === 'stop'}
+              disabled={busyAction !== null && busyAction !== 'stop'}
+              onPress={stop}
+            />
+          ) : null}
+          <Button
+            label="Restart"
+            kind={isActive && isProtected ? 'primary' : 'subtle'}
+            icon="restart"
+            style={{ flex: 1 }}
+            busy={busyAction === 'restart'}
+            disabled={busyAction !== null && busyAction !== 'restart'}
+            onPress={restart}
+          />
+        </View>
+        <Button label="Refresh logs" kind="subtle" icon="refresh" onPress={loadLogs} />
       </View>
     </Screen>
   );

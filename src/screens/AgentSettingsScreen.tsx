@@ -24,15 +24,19 @@ import {
   AgentUsageAccount,
   AgentUsageResponse,
   AgentUsageWindow,
+  CodingThread,
   getAgent,
   getAgentSettings,
   getAgentUsage,
+  getCodingThreads,
+  interruptCodingThread,
   post,
   resetAgent,
   setAgent,
   updateAgentSettings,
 } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
+import { ago } from '../lib/format';
 import { formatResetTime } from '../lib/formatResetTime';
 import { radius, screenPad, space, useTheme } from '../theme';
 
@@ -42,6 +46,7 @@ const GEMINI_ICON = require('../../assets/brand-gemini.png');
 const CACHE_AGENT_STATE = 'agent:state';
 const CACHE_AGENT_SETTINGS = 'agent:settings';
 const CACHE_AGENT_USAGE = 'agent:usage';
+const CACHE_AGENT_THREADS = 'agent:threads';
 const FIVE_HOUR_THRESHOLDS = [10, 15, 20, 25, 30, 40, 50];
 const WEEKLY_THRESHOLDS = [5, 10, 15, 20, 25, 30];
 let lastAccountCount = 5;
@@ -406,6 +411,112 @@ function formatEffort(v: string): string {
   return v ? v[0].toUpperCase() + v.slice(1) : '—';
 }
 
+function threadStatusTone(status: string): Tone {
+  if (status === 'running' || status === 'starting' || status === 'preparing') return 'accent';
+  if (status === 'waiting' || status === 'queued') return 'warn';
+  if (status === 'completed' || status === 'idle') return 'ok';
+  if (status === 'failed' || status === 'interrupted' || status === 'cancelled') return 'bad';
+  return 'faint';
+}
+
+function threadAge(iso: string): string {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  return ago(ms / 1000);
+}
+
+function ThreadSkeletonCard() {
+  const t = useTheme();
+  return (
+    <Card style={{ gap: space(2) }}>
+      {[0, 1, 2].map((i) => (
+        <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: space(2.5), paddingVertical: 4 }}>
+          <View style={[st.skelLine, { width: 8, height: 8, borderRadius: 4, backgroundColor: t.cardAlt }]} />
+          <View style={{ flex: 1, gap: 6 }}>
+            <View style={[st.skelLine, { width: '65%', height: 14, backgroundColor: t.cardAlt }]} />
+            <View style={[st.skelLine, { width: '45%', height: 11, backgroundColor: t.cardAlt }]} />
+          </View>
+        </View>
+      ))}
+    </Card>
+  );
+}
+
+function CodingThreadsSection({
+  threads,
+  loading,
+  err,
+  interruptingId,
+  onRefresh,
+  onInterrupt,
+}: {
+  threads: CodingThread[] | null;
+  loading: boolean;
+  err: string | null;
+  interruptingId: string | null;
+  onRefresh: () => void;
+  onInterrupt: (th: CodingThread) => void;
+}) {
+  const t = useTheme();
+  const isInterruptible = (status: string) =>
+    status === 'running' || status === 'starting' || status === 'preparing' || status === 'waiting' || status === 'queued';
+
+  return (
+    <Section
+      label="Coding threads"
+      right={
+        loading ? (
+          <ActivityIndicator size="small" color={t.accent} />
+        ) : (
+          <Pressable onPress={onRefresh} hitSlop={8}>
+            <Text style={{ color: t.accent, fontSize: 12.5, fontWeight: '500' }}>Refresh</Text>
+          </Pressable>
+        )
+      }
+    >
+      {err ? <Banner tone="bad" title="Coding threads">{err}</Banner> : null}
+      {!threads && loading ? (
+        <ThreadSkeletonCard />
+      ) : threads?.length ? (
+        <List>
+          {threads.map((th, idx) => {
+            const active = isInterruptible(th.status);
+            const meta = [th.model, th.instance, th.status, threadAge(th.updated_at || th.created_at)]
+              .filter(Boolean)
+              .join(' · ');
+            return (
+              <ListRow
+                key={th.id}
+                leading={<StatusDot tone={threadStatusTone(th.status)} />}
+                title={th.title || 'Untitled'}
+                subtitle={meta}
+                chevron={false}
+                last={idx === threads.length - 1}
+                trailing={
+                  active ? (
+                    <Button
+                      label="Interrupt"
+                      kind="danger"
+                      compact
+                      busy={interruptingId === th.id}
+                      disabled={interruptingId !== null && interruptingId !== th.id}
+                      onPress={() => onInterrupt(th)}
+                    />
+                  ) : null
+                }
+              />
+            );
+          })}
+        </List>
+      ) : !err ? (
+        <Card>
+          <Text style={{ color: t.textFaint, fontSize: 13 }}>No recent threads.</Text>
+        </Card>
+      ) : null}
+    </Section>
+  );
+}
+
 export default function AgentSettingsScreen() {
   const t = useTheme();
   const nav = useNavigation<any>();
@@ -431,6 +542,12 @@ export default function AgentSettingsScreen() {
   const [settings, setSettings] = useState<AgentSettings | null>(() => cacheGet<AgentSettings>(CACHE_AGENT_SETTINGS));
   const [settingsErr, setSettingsErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Coding threads state
+  const [threads, setThreads] = useState<CodingThread[] | null>(() => cacheGet<CodingThread[]>(CACHE_AGENT_THREADS));
+  const [threadsLoading, setThreadsLoading] = useState(() => cacheGet<CodingThread[]>(CACHE_AGENT_THREADS) === null);
+  const [threadsErr, setThreadsErr] = useState<string | null>(null);
+  const [interruptingId, setInterruptingId] = useState<string | null>(null);
 
   // Actions state
   const [restartingClaude, setRestartingClaude] = useState(false);
@@ -529,20 +646,57 @@ export default function AgentSettingsScreen() {
     return () => clearInterval(iv);
   }, [loadAgent, tick, agentState?.switching]);
 
+  const loadThreads = useCallback(async (silent = false) => {
+    if (!silent) setThreadsLoading(true);
+    try {
+      const res = await getCodingThreads();
+      if (!mounted.current) return;
+      cacheSet(CACHE_AGENT_THREADS, res.threads);
+      setThreads(res.threads);
+      setThreadsErr(null);
+    } catch (e) {
+      if (!mounted.current) return;
+      setThreadsErr((e as Error).message);
+    } finally {
+      if (mounted.current && !silent) setThreadsLoading(false);
+    }
+  }, []);
+
+  const interruptThread = (th: CodingThread) =>
+    Alert.alert('Interrupt thread?', th.title || 'Untitled', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Interrupt',
+        style: 'destructive',
+        onPress: async () => {
+          setInterruptingId(th.id);
+          try {
+            await interruptCodingThread(th.id);
+            await loadThreads(true);
+          } catch (e) {
+            Alert.alert('Interrupt failed', (e as Error).message);
+          } finally {
+            if (mounted.current) setInterruptingId(null);
+          }
+        },
+      },
+    ]);
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadSettings();
     void loadUsage(false);
-  }, [loadSettings, loadUsage]);
+    void loadThreads(false);
+  }, [loadSettings, loadUsage, loadThreads]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await Promise.all([loadAgent(), loadSettings(), loadUsage(true)]);
+      await Promise.all([loadAgent(), loadSettings(), loadUsage(true), loadThreads(true)]);
     } finally {
       if (mounted.current) setRefreshing(false);
     }
-  }, [loadAgent, loadSettings, loadUsage]);
+  }, [loadAgent, loadSettings, loadUsage, loadThreads]);
 
   const selectEngine = async (target: AgentEngine) => {
     if (!agentState || !agentState.available || pendingRef.current !== null || agentState.switching) return;
@@ -943,6 +1097,15 @@ export default function AgentSettingsScreen() {
           />
         </List>
       </Section>
+
+      <CodingThreadsSection
+        threads={threads}
+        loading={threadsLoading}
+        err={threadsErr}
+        interruptingId={interruptingId}
+        onRefresh={() => void loadThreads(false)}
+        onInterrupt={interruptThread}
+      />
 
       <Section label="Conversation">
         <Card>

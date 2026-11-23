@@ -1,6 +1,6 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useCallback, useState } from 'react';
-import { AppState, StyleSheet, Text, View } from 'react-native';
+import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   Banner,
   Bar,
@@ -267,11 +267,18 @@ export default function HealthScreen() {
         </Card>
       ) : null}
 
-      <Section label="Downloads">
+      <Section
+        label="Downloads"
+        right={
+          <Pressable onPress={() => nav.navigate('Downloads')} hitSlop={8}>
+            <Text style={{ color: t.accent, fontSize: 12.5, fontWeight: '500' }}>All ›</Text>
+          </Pressable>
+        }
+      >
         {!dl?.available ? (
           <Unavailable label="Downloads" error={dl?.error} />
         ) : (
-          <Card style={{ gap: space(3) }}>
+          <Card style={{ gap: space(3) }} onPress={() => nav.navigate('Downloads')}>
             {dl.qbt && dl.qbt !== 'ok' ? (
               <Text style={{ color: t.warn, fontSize: 13 }}>
                 qBittorrent {dl.qbt === 'auth' ? 'sign-in failed' : 'is not answering'}
@@ -312,7 +319,16 @@ export default function HealthScreen() {
               </View>
             </View>
             {(dl.items ?? []).length ? (
-              (dl.items ?? []).slice(0, 4).map((d) => <DownloadRow key={d.id} d={d} />)
+              <>
+                {(dl.items ?? []).slice(0, 4).map((d) => (
+                  <DownloadRow key={d.id} d={d} />
+                ))}
+                {(total?.count ?? (dl.items ?? []).length) > 4 ? (
+                  <Text style={{ color: t.accent, fontSize: 12.5, fontWeight: '500' }}>
+                    +{(total?.count ?? (dl.items ?? []).length) - 4} more
+                  </Text>
+                ) : null}
+              </>
             ) : (
               <Text style={{ color: t.textFaint, fontSize: 13 }}>Nothing downloading.</Text>
             )}

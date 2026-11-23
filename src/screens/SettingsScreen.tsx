@@ -5,7 +5,7 @@ import { Alert, Animated, AppState, LayoutAnimation, Linking, Platform, Pressabl
 import { KeyInfo, PcNative } from '../../modules/pc-native';
 import { KeyringUnlockModal } from '../components/KeyringUnlockModal';
 import { Banner, Button, Card, Icon, KV, List, ListRow, Mono, Pill, Screen, Section, StatusDot } from '../components/ui';
-import { AgentState, ApiError, DEFAULT_SERVER, get, getAgent, Info, post, serverUrl, VpnState } from '../lib/api';
+import { AgentState, ApiError, DEFAULT_SERVER, get, getAgent, getKbdLock, Info, KbdLockState, post, serverUrl, setKbdLock, VpnState } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
 import { refreshCatCam, toggleCatCam, useCatCam } from '../lib/catcam';
 import {
@@ -959,6 +959,100 @@ function Server() {
   );
 }
 
+/** Standalone switch for kbd-lock.service (built-in laptop keyboard lock). */
+function KeyboardLockCard() {
+  const t = useTheme();
+  const tick = useAppActiveTick();
+  const [s, setS] = useState<KbdLockState | null>(() => cacheGet<KbdLockState>('settings:kbd-lock'));
+  const [pending, setPending] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const next = await getKbdLock();
+      cacheSet('settings:kbd-lock', next);
+      setS(next);
+      setErr(null);
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void refresh();
+    }, [refresh]),
+  );
+
+  useEffect(() => {
+    if (tick <= 0) return;
+    getKbdLock()
+      .then((next) => {
+        cacheSet('settings:kbd-lock', next);
+        setS(next);
+        setErr(null);
+      })
+      .catch((e) => setErr((e as Error).message));
+  }, [tick]);
+
+  const toggle = async (v: boolean) => {
+    if (busy) return;
+    const before = s;
+    setPending(v);
+    setBusy(true);
+    try {
+      const next = await setKbdLock(v);
+      cacheSet('settings:kbd-lock', next);
+      setS(next);
+      setErr(null);
+    } catch (e) {
+      setS(before);
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+      setPending(null);
+    }
+  };
+
+  const enabled = pending ?? s?.enabled ?? false;
+  const unavailable = s != null && !s.available;
+  const status = busy
+    ? enabled
+      ? 'Locking…'
+      : 'Unlocking…'
+    : unavailable
+      ? 'Unavailable'
+      : !s
+        ? 'Checking…'
+        : enabled
+          ? 'Locked'
+          : 'Unlocked';
+  const dot = busy ? 'warn' : unavailable || !s ? 'faint' : enabled ? 'ok' : 'faint';
+
+  return (
+    <Card style={{ gap: space(3) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
+        <Icon name={enabled ? 'keyboard-off-outline' : 'keyboard-outline'} size={22} color={enabled ? t.accent : t.textDim} />
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Keyboard lock</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <StatusDot tone={dot} />
+            <Text style={{ color: t.textDim, fontSize: 13 }}>{status}</Text>
+          </View>
+        </View>
+        <Toggle
+          value={enabled}
+          onValueChange={(v) => void toggle(v)}
+          disabled={!s || unavailable || busy}
+          label="Keyboard lock"
+        />
+      </View>
+      {err ? <Banner tone="bad" title="Keyboard lock">{err}</Banner> : null}
+    </Card>
+  );
+}
+
 export default function SettingsScreen() {
   const t = useTheme();
   const version = Constants.expoConfig?.version ?? '?';
@@ -980,6 +1074,9 @@ export default function SettingsScreen() {
       </Section>
       <Section label="Cameras">
         <CatCamCard />
+      </Section>
+      <Section label="Keyboard">
+        <KeyboardLockCard />
       </Section>
       <Section label="Network">
         <TorrentVpn />

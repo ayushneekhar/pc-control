@@ -2,12 +2,13 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNavigationContainerRef, DarkTheme, DefaultTheme, LinkingOptions, NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Alert, AppState, StyleSheet, Text, View } from 'react-native';
 import { PcNative } from './modules/pc-native';
 import { prepareCamsOnce } from './src/lib/cams/prepare';
-import { youtubeLink } from './src/lib/cams/youtube';
+import { parseSharedText, SharedTarget } from './src/lib/share';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { ShareSheet } from './src/components/ShareSheet';
 import { SystemInsetsProvider } from './src/components/SystemInsets';
 import { Button, Icon } from './src/components/ui';
 import { applyOta, dismissOta, startOta, updateOffered, useOta } from './src/lib/otaStore';
@@ -18,9 +19,11 @@ import { pendingList, startRootStore, useRootStore } from './src/lib/rootStore';
 import AgentRuleScreen from './src/screens/AgentRuleScreen';
 import AgentSettingsScreen from './src/screens/AgentSettingsScreen';
 import AgentViewScreen from './src/screens/AgentViewScreen';
+import DownloadsScreen from './src/screens/DownloadsScreen';
 import HealthScreen from './src/screens/HealthScreen';
 import RootScreen from './src/screens/RootScreen';
 import RoutesScreen from './src/screens/RoutesScreen';
+import SeerrScreen from './src/screens/SeerrScreen';
 import ServiceDetailScreen from './src/screens/ServiceDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import VitalsScreen from './src/screens/VitalsScreen';
@@ -30,8 +33,8 @@ const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 const navRef = createNavigationContainerRef<any>();
 
-/** "Share → PC Control" from YouTube: open Cat cams → Music, which plays it on the laptop speakers. */
-function takeShare() {
+/** "Share → PC Control": YouTube -> cam-music, magnet -> qBittorrent confirm, IMDb/TMDB/Letterboxd -> Seerr confirm. */
+function takeShare(onConfirm: (t: Exclude<SharedTarget, { kind: 'youtube' }>) => void) {
   let text: string | null = null;
   try {
     text = PcNative?.takeSharedText() ?? null;
@@ -39,14 +42,21 @@ function takeShare() {
     return;
   }
   if (!text) return;
-  const link = youtubeLink(text);
-  if (!link) {
-    Alert.alert('Not a YouTube link', 'PC Control can play YouTube links on the laptop speakers. Share a video from the YouTube app.');
+  const parsed = parseSharedText(text);
+  if (!parsed) {
+    Alert.alert(
+      'Unsupported link',
+      'Share a YouTube video, magnet link, or IMDb/TMDB/Letterboxd link.',
+    );
     return;
   }
-  const go = () => navRef.navigate('Cams', { tab: 'music', share: link, shareId: Date.now() });
-  if (navRef.isReady()) go();
-  else setTimeout(() => (navRef.isReady() ? go() : setTimeout(go, 1000)), 300);
+  if (parsed.kind === 'youtube') {
+    const go = () => navRef.navigate('Cams', { tab: 'music', share: parsed.url, shareId: Date.now() });
+    if (navRef.isReady()) go();
+    else setTimeout(() => (navRef.isReady() ? go() : setTimeout(go, 1000)), 300);
+    return;
+  }
+  onConfirm(parsed);
 }
 
 const linking: LinkingOptions<any> = {
@@ -63,6 +73,8 @@ const linking: LinkingOptions<any> = {
         },
       },
       Cams: 'cams',
+      Downloads: 'downloads',
+      Seerr: 'seerr',
       ServiceDetail: 'service/:unit',
       AgentSettings: 'agent-settings',
     },
@@ -81,6 +93,8 @@ const TAB_LABEL: Record<string, string> = { Routes: 'Home', Vitals: 'Vitals', Ro
 
 export default function App() {
   const t = useTheme();
+  const [shareTarget, setShareTarget] = useState<Exclude<SharedTarget, { kind: 'youtube' }> | null>(null);
+  const checkShare = useCallback(() => takeShare(setShareTarget), []);
   useEffect(() => startRootStore(), []);
   useEffect(() => startOta(), []);
   useEffect(() => void uploadCrashes(), []);
@@ -89,10 +103,10 @@ export default function App() {
     askNotificationPermission().finally(() => registerPush());
   }, []);
   useEffect(() => {
-    takeShare();
-    const s = AppState.addEventListener('change', (st) => st === 'active' && takeShare());
+    checkShare();
+    const s = AppState.addEventListener('change', (st) => st === 'active' && checkShare());
     return () => s.remove();
-  }, []);
+  }, [checkShare]);
   useEffect(() => {
     // Live download progress: also start it when the app is opened (or comes back) while something downloads.
     startLiveIfDownloading();
@@ -125,6 +139,8 @@ export default function App() {
             <Stack.Screen name="AgentView" component={AgentViewScreen} />
             <Stack.Screen name="AgentRule" component={AgentRuleScreen} />
             <Stack.Screen name="AgentSettings" component={AgentSettingsScreen} />
+            <Stack.Screen name="Downloads" component={DownloadsScreen} />
+            <Stack.Screen name="Seerr" component={SeerrScreen} />
             <Stack.Screen name="ServiceDetail" component={ServiceDetailScreen} />
             <Stack.Screen
               name="Cams"
@@ -137,6 +153,7 @@ export default function App() {
             />
           </Stack.Navigator>
           <OtaPrompt />
+          <ShareSheet target={shareTarget} onClose={() => setShareTarget(null)} />
         </NavigationContainer>
       </SystemInsetsProvider>
     </SafeAreaProvider>

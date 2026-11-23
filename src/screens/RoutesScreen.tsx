@@ -456,42 +456,41 @@ export default function RoutesScreen() {
       ) : null}
 
       <Section label="Open">
-        {openScreen.length || hasDownloads ? (
-          <List>
-            {openScreen.map((r, i) => {
-              const view = routeView(r);
-              return (
-                <ListRow
-                  key={r.id}
-                  icon={view.icon}
-                  title={view.name}
-                  chevron
-                  last={!hasDownloads && i === openScreen.length - 1}
-                  onPress={() => (view.screen ? nav.navigate(view.screen) : open(r))}
-                />
-              );
-            })}
-            {hasDownloads ? (
+        <List>
+          {openScreen.map((r) => {
+            const view = routeView(r);
+            return (
               <ListRow
-                icon="download-outline"
-                title="Downloads"
-                subtitle={`${active.length} active · ${rate(total?.speed ?? 0)}`}
-                trailing={
-                  progress == null ? undefined : (
-                    <Text style={{ color: t.warn, fontSize: 12, fontWeight: '500', fontVariant: ['tabular-nums'] }}>
-                      {progress}%
-                    </Text>
-                  )
-                }
-                last
+                key={r.id}
+                icon={view.icon}
+                title={view.name}
+                chevron
+                onPress={() => (view.screen ? nav.navigate(view.screen) : open(r))}
               />
-            ) : null}
-          </List>
-        ) : (
-          <Card>
-            <Text style={{ color: t.textFaint }}>{loaded ? 'No shortcuts on this server.' : 'Loading…'}</Text>
-          </Card>
-        )}
+            );
+          })}
+          <ListRow
+            icon="movie-search-outline"
+            title="Seerr"
+            chevron
+            onPress={() => nav.navigate('Seerr')}
+          />
+          <ListRow
+            icon="download-outline"
+            title="Downloads"
+            subtitle={hasDownloads ? `${active.length} active · ${rate(total?.speed ?? 0)}` : undefined}
+            trailing={
+              hasDownloads && progress != null ? (
+                <Text style={{ color: t.warn, fontSize: 12, fontWeight: '500', fontVariant: ['tabular-nums'] }}>
+                  {progress}%
+                </Text>
+              ) : undefined
+            }
+            chevron
+            last
+            onPress={() => nav.navigate('Downloads')}
+          />
+        </List>
       </Section>
     </Screen>
   );

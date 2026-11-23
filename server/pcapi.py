@@ -748,6 +748,19 @@ def map_hook(source, p):
             why = msgs[0] if msgs else (p.get("downloadStatus") or "needs a manual import")
             return {"category": "problems", "title": f"⚠️ {app} needs manual interaction",
                     "body": f"{name}\n{clip(why, 300)}"}
+        if ev in ("ImportFailed", "DownloadFailed"):
+            msgs = [m for s in (p.get("downloadStatusMessages") or []) for m in (s.get("messages") or [])]
+            why = msgs[0] if msgs else (p.get("message") or p.get("downloadStatus") or "import failed")
+            return {"category": "problems", "title": f"⚠️ {app} import failed",
+                    "body": f"{name}\n{clip(why, 300)}"}
+        if ev == "Health":
+            lvl = str(p.get("level") or "").lower()
+            icon = "🔴" if lvl == "error" else "⚠️"
+            msg = clip(p.get("message") or p.get("type") or "Health issue", 350)
+            return {"category": "problems", "title": f"{icon} {app} health issue", "body": msg}
+        if ev == "HealthRestored":
+            msg = clip(p.get("message") or p.get("type") or "Health issue resolved", 350)
+            return {"category": "problems", "title": f"✅ {app} health restored", "body": msg}
         return None
     if source == "seerr":
         nt = p.get("notification_type")
@@ -2968,12 +2981,25 @@ def list_services(timeout=15):
     return out
 
 
-def restart_service(unit):
-    if unit not in own_units(): return 404, {"error": "not one of your user services"}
-    p = subprocess.run(["systemctl", "--user", "restart", "--no-block", unit], capture_output=True, text=True,
+PROTECTED_STOP_UNITS = {"pc-api.service"}
+
+
+def service_action(unit, action):
+    if action not in ("start", "stop", "restart"):
+        return 400, {"error": "action must be start, stop, or restart"}
+    if unit not in own_units():
+        return 404, {"error": "not one of your user services"}
+    if action == "stop" and unit in PROTECTED_STOP_UNITS:
+        return 403, {"error": f"cannot stop {unit}"}
+    p = subprocess.run(["systemctl", "--user", action, "--no-block", unit], capture_output=True, text=True,
                        timeout=15)
-    if p.returncode: return 500, {"error": p.stderr.strip() or "restart failed"}
+    if p.returncode:
+        return 500, {"error": p.stderr.strip() or f"{action} failed"}
     return 200, {"ok": True}
+
+
+def restart_service(unit):
+    return service_action(unit, "restart")
 
 
 def service_logs(unit, n):
@@ -3040,6 +3066,688 @@ def apk_info():
     meta = load_json(os.path.join(DATA_DIR, "app.json"), None)
     if not meta or not os.path.exists(os.path.join(DATA_DIR, "app.apk")): return None
     return meta
+
+
+# ---------------------------------------------------------------- round 4 features
+
+QBT_ADD_CATEGORY = "qwen"
+SEERR_URL = os.environ.get("PCAPI_SEERR_URL", CONFIG.get("seerr_url_local") or "http://127.0.0.1:5055").rstrip("/")
+SEERR_SETTINGS = os.environ.get("PCAPI_SEERR_SETTINGS", os.path.join(HOME, ".config", "seerr", "settings.json"))
+T3_MCP_URL = os.environ.get("PCAPI_T3_MCP_URL", "http://127.0.0.1:3773/mcp")
+T3_CREDS_FILE = os.environ.get("PCAPI_T3_CREDS", os.path.join(HOME, ".claude", ".credentials.json"))
+KBD_LOCK_UNIT = "kbd-lock.service"
+
+ALL_TORRENT_STATE = {
+    **DL_STATE,
+    "stoppedDL": "paused", "pausedDL": "paused",
+    "stoppedUP": "stopped", "pausedUP": "stopped",
+    "uploading": "seeding", "forcedUP": "seeding", "stalledUP": "seeding",
+    "queuedUP": "seeding", "checkingUP": "checking",
+    "error": "error", "missingFiles": "error",
+}
+PAUSED_RAW_STATES = {"stoppedDL", "pausedDL", "stoppedUP", "pausedUP"}
+LETTERBOXD_HOSTS = {"letterboxd.com", "www.letterboxd.com", "boxd.it"}
+
+
+def _qbt_invalidate_cache():
+    if DOWNLOADS is not None:
+        with DOWNLOADS.lock:
+            DOWNLOADS.cache = (0.0, None)
+
+
+def downloads_all(dl=None, timeout=8):
+    """All qBittorrent torrents (active, paused, seeding, stopped, error) + alt-speed + Arr queues."""
+    dl = DOWNLOADS if dl is None else dl
+    alt_speed = False
+    try:
+        items = dl.qbt("torrents/info", timeout=timeout, filter="all", sort="added_on")
+        st = "ok"
+        try:
+            mode = dl.qbt("transfer/speedLimitsMode", get=True, timeout=timeout)
+            alt_speed = str(mode).strip() == "1"
+        except (OSError, ValueError, PermissionError):
+            alt_speed = False
+    except PermissionError:
+        items, st = [], "auth"
+    except (OSError, ValueError):
+        items, st = [], "down"
+    items = [t for t in (items if isinstance(items, list) else []) if isinstance(t, dict)]
+    missing = {t.get("category") for t in items if t.get("category") in dl.arr
+               and str(t.get("hash", "")).upper() not in dl.titles}
+    for cat in missing:
+        if time.time() - dl.arr_at.get(cat, 0) < 30:
+            continue
+        dl.arr_at[cat] = time.time()
+        for h, title in dl.arr_lookup(cat, timeout=timeout).items():
+            if h not in dl.titles:
+                dl.remember(h, title)
+    out = []
+    for t in items:
+        h = str(t.get("hash", "")).upper()
+        size, done = int(t.get("size") or 0), int(t.get("completed") or 0)
+        eta = int(t.get("eta") or 0)
+        raw_state = str(t.get("state") or "")
+        state = ALL_TORRENT_STATE.get(raw_state, raw_state or "unknown")
+        if state == "downloading" and int(t.get("dlspeed") or 0) == 0:
+            state = "stalled"
+        out.append({
+            "hash": h.lower(),
+            "id": h[:16].lower(),
+            "name": dl.titles.get(h) or release_title(t.get("name")),
+            "torrent": clip(t.get("name"), 200),
+            "category": str(t.get("category") or ""),
+            "state": state,
+            "raw_state": raw_state,
+            "paused": raw_state in PAUSED_RAW_STATES,
+            "progress": round(min(1.0, max(0.0, float(t.get("progress") or 0))), 4),
+            "speed": int(t.get("dlspeed") or 0),
+            "upspeed": int(t.get("upspeed") or 0),
+            "eta": eta if state in ("downloading", "stalled", "metadata") and 0 < eta < 8640000 else None,
+            "size": size,
+            "done": min(done, size) if size else done,
+            "seeds": int(t.get("num_seeds") or 0),
+            "ratio": round(float(t.get("ratio") or 0), 2),
+            "added": int(t.get("added_on") or 0),
+        })
+    rank = {"downloading": 0, "stalled": 1, "metadata": 2, "checking": 3, "moving": 3,
+            "queued": 4, "paused": 5, "error": 6, "seeding": 7, "stopped": 8}
+    out.sort(key=lambda d: (rank.get(d["state"], 9), -d["added"]))
+    active = [d for d in out if d["raw_state"] in DL_STATE]
+    sized = [d for d in active if d["size"] > 0]
+    etas = [d["eta"] for d in active if d["eta"]]
+    total = {
+        "count": len(out),
+        "active": len(active),
+        "downloading": sum(d["state"] == "downloading" for d in active),
+        "progress": round(sum(d["done"] for d in sized) / sum(d["size"] for d in sized), 4) if sized else None,
+        "speed": sum(d["speed"] for d in out),
+        "upspeed": sum(d["upspeed"] for d in out),
+        "eta": max(etas) if etas else None,
+    }
+    arr_res = {}
+    for key, cat in (("radarr", "radarr"), ("sonarr", "tv-sonarr")):
+        try:
+            arr_res[key] = {"available": True, **arr_queue(cat, timeout=3)}
+        except Exception as e:
+            arr_res[key] = {"available": False, "error": type(e).__name__}
+    return {"qbt": st, "alt_speed": alt_speed, "torrents": out, "total": total,
+            "radarr": arr_res["radarr"], "sonarr": arr_res["sonarr"], "ts": int(time.time())}
+
+
+def downloads_action(action, body, dl=None):
+    dl = DOWNLOADS if dl is None else dl
+    h = str(body.get("hash") or "").strip()
+    if not HASH_RE.match(h):
+        return 400, {"error": "invalid torrent hash"}
+    try:
+        if action == "pause":
+            dl.qbt("torrents/stop", hashes=h.lower())
+        elif action == "resume":
+            dl.qbt("torrents/start", hashes=h.lower())
+        elif action == "delete":
+            del_files = "true" if bool(body.get("delete_files")) else "false"
+            dl.qbt("torrents/delete", hashes=h.lower(), deleteFiles=del_files)
+        else:
+            return 400, {"error": "unknown action"}
+    except (OSError, ValueError, PermissionError) as e:
+        return 502, {"error": clip(f"qBittorrent {action} failed: {e}", 240)}
+    _qbt_invalidate_cache()
+    return 200, {"ok": True}
+
+
+def downloads_set_alt_speed(body, dl=None):
+    dl = DOWNLOADS if dl is None else dl
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return 400, {"error": "enabled must be true or false"}
+    try:
+        cur = str(dl.qbt("transfer/speedLimitsMode", get=True)).strip() == "1"
+        if cur != enabled:
+            dl.qbt("transfer/toggleSpeedLimitsMode")
+        after = str(dl.qbt("transfer/speedLimitsMode", get=True)).strip() == "1"
+    except (OSError, ValueError, PermissionError) as e:
+        return 502, {"error": clip(f"qBittorrent alt-speed failed: {e}", 240)}
+    return 200, {"ok": True, "alt_speed": after}
+
+
+def downloads_add_magnet(body, dl=None, notify=None):
+    dl = DOWNLOADS if dl is None else dl
+    notify = NOTIFY if notify is None else notify
+    uri = str(body.get("uri") or "").strip()
+    if not uri.lower().startswith("magnet:?") or len(uri) > 4096:
+        return 400, {"error": "uri must be a magnet: link"}
+    already = False
+    try:
+        dl.qbt("torrents/add", urls=uri, category=QBT_ADD_CATEGORY)
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            already = True
+        else:
+            return 502, {"error": clip(f"qBittorrent add failed: HTTP {e.code}", 240)}
+    except (OSError, ValueError, PermissionError) as e:
+        return 502, {"error": clip(f"qBittorrent add failed: {e}", 240)}
+    _qbt_invalidate_cache()
+    if notify is not None and not already:
+        try:
+            notify.live_kick("app")
+        except Exception:
+            pass
+    return 200, {"ok": True, "already_exists": already, "category": QBT_ADD_CATEGORY}
+
+
+def arr_retry_import(body):
+    app = str(body.get("app") or "").strip().lower()
+    cat = {"radarr": "radarr", "sonarr": "tv-sonarr"}.get(app)
+    if not cat or cat not in ARR:
+        return 400, {"error": "app must be radarr or sonarr"}
+    _, base, conf = ARR[cat]
+    try:
+        with open(conf) as f:
+            key = re.search(r"<ApiKey>(\w+)</ApiKey>", f.read())[1]
+        data = json.dumps({"name": "RefreshMonitoredDownloads"}).encode()
+        req = urllib.request.Request(
+            f"{base}/api/v3/command", data=data, method="POST",
+            headers={"X-Api-Key": key, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            res = json.loads(r.read() or b"{}")
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        return 502, {"error": clip(f"{app} retry failed: {e}", 240)}
+    return 200, {"ok": True, "app": app, "command_id": res.get("id")}
+
+
+def jellyfin_refresh_library():
+    try:
+        with open(JELLYFIN_KEY_FILE) as f:
+            key = f.read().strip()
+        if not key:
+            raise ValueError("no Jellyfin API key")
+        req = urllib.request.Request(
+            f"{JELLYFIN_URL}/Library/Refresh", data=b"", method="POST",
+            headers={"Authorization": f'MediaBrowser Token="{key}"'},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            r.read()
+    except (OSError, ValueError) as e:
+        return 502, {"error": clip(f"Jellyfin refresh failed: {e}", 240)}
+    return 200, {"ok": True}
+
+
+def kbd_lock_status(run_fn=None):
+    if KBD_LOCK_UNIT not in own_units():
+        return {"available": False, "enabled": False, "active": "missing"}
+    run = run_fn or subprocess.run
+    p = run(["systemctl", "--user", "is-active", KBD_LOCK_UNIT], capture_output=True, text=True, timeout=10)
+    state = (p.stdout or "").strip() or "inactive"
+    return {"available": True, "enabled": state == "active", "active": state}
+
+
+def kbd_lock_set(body, run_fn=None):
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return 400, {"error": "enabled must be true or false"}
+    if KBD_LOCK_UNIT not in own_units():
+        return 404, {"error": f"{KBD_LOCK_UNIT} is not installed"}
+    action = "start" if enabled else "stop"
+    run = run_fn or subprocess.run
+    p = run(["systemctl", "--user", action, KBD_LOCK_UNIT], capture_output=True, text=True, timeout=15)
+    if p.returncode:
+        return 500, {"error": p.stderr.strip() or f"{action} failed"}
+    return 200, kbd_lock_status(run_fn=run_fn)
+
+
+class SeerrClient:
+    """Thin authenticated proxy to the local Seerr API + IMDb/TMDB/Letterboxd link resolver."""
+
+    def __init__(self, url=SEERR_URL, settings_file=SEERR_SETTINGS):
+        self.url = url.rstrip("/")
+        self.settings_file = settings_file
+        self._lock = threading.Lock()
+        self._meta_cache = {}  # (media_type, tmdb_id) -> {title, year, poster}
+
+    def _api_key(self):
+        with open(self.settings_file) as f:
+            key = (json.load(f).get("main") or {}).get("apiKey") or ""
+        if not key:
+            raise ValueError("Seerr API key missing")
+        return key
+
+    def _req(self, method, path, body=None, timeout=10):
+        key = self._api_key()
+        headers = {"X-Api-Key": key, "Accept": "application/json"}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(f"{self.url}/api/v1{path}", data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+        return json.loads(raw) if raw.strip() else {}
+
+    @staticmethod
+    def _poster(path):
+        if not path or not isinstance(path, str):
+            return None
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        return f"https://image.tmdb.org/t/p/w300{path}"
+
+    @staticmethod
+    def _media_status(media_info):
+        if not isinstance(media_info, dict):
+            return "none"
+        st = media_info.get("status")
+        dl = media_info.get("downloadStatus") or []
+        if st == 5:
+            return "available"
+        if st == 4:
+            return "partial"
+        if dl:
+            return "grabbing"
+        if st in (2, 3):
+            return "requested"
+        return "none"
+
+    @staticmethod
+    def _year(date_str):
+        m = re.match(r"^(\d{4})", str(date_str or ""))
+        return int(m.group(1)) if m else None
+
+    def _normalize_item(self, x, forced_type=None):
+        mtype = forced_type or x.get("mediaType")
+        if mtype not in ("movie", "tv"):
+            return None
+        title = x.get("title") or x.get("name") or x.get("originalTitle") or x.get("originalName") or "Untitled"
+        year = self._year(x.get("releaseDate") or x.get("firstAirDate"))
+        return {
+            "id": int(x.get("id") or 0),
+            "mediaType": mtype,
+            "title": clip(title, 160),
+            "year": year,
+            "poster": self._poster(x.get("posterPath")),
+            "overview": clip(x.get("overview") or "", 240),
+            "status": self._media_status(x.get("mediaInfo")),
+        }
+
+    def search(self, query):
+        q = str(query or "").strip()
+        if not q:
+            return 200, {"results": []}
+        try:
+            data = self._req("GET", f"/search?query={urllib.parse.quote(q)}&page=1")
+        except (OSError, ValueError) as e:
+            return 502, {"error": clip(f"Seerr search failed: {e}", 240)}
+        out = []
+        for x in (data.get("results") or []):
+            if not isinstance(x, dict):
+                continue
+            item = self._normalize_item(x)
+            if item and item["id"]:
+                out.append(item)
+            if len(out) >= 20:
+                break
+        return 200, {"results": out}
+
+    def details(self, media_type, tmdb_id):
+        if media_type not in ("movie", "tv"):
+            return 400, {"error": "type must be movie or tv"}
+        try:
+            tid = int(tmdb_id)
+            if tid <= 0:
+                raise ValueError("bad id")
+        except (TypeError, ValueError):
+            return 400, {"error": "invalid tmdb id"}
+        try:
+            d = self._req("GET", f"/{media_type}/{tid}")
+        except urllib.error.HTTPError as e:
+            return (404 if e.code == 404 else 502), {"error": f"Seerr HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": clip(f"Seerr details failed: {e}", 240)}
+        item = self._normalize_item(d, forced_type=media_type)
+        if not item:
+            return 404, {"error": "not found"}
+        with self._lock:
+            self._meta_cache[(media_type, tid)] = {
+                "title": item["title"], "year": item["year"], "poster": item["poster"],
+            }
+        if media_type == "tv":
+            info_seasons = {
+                s.get("seasonNumber"): s.get("status")
+                for s in ((d.get("mediaInfo") or {}).get("seasons") or [])
+                if isinstance(s, dict)
+            }
+            seasons = []
+            for s in d.get("seasons") or []:
+                if not isinstance(s, dict):
+                    continue
+                sn = s.get("seasonNumber")
+                if not isinstance(sn, int) or sn < 1:
+                    continue
+                st_code = info_seasons.get(sn)
+                s_status = "available" if st_code == 5 else "partial" if st_code == 4 else "requested" if st_code in (2, 3) else "none"
+                seasons.append({
+                    "seasonNumber": sn,
+                    "name": clip(s.get("name") or f"Season {sn}", 80),
+                    "episodeCount": int(s.get("episodeCount") or 0),
+                    "status": s_status,
+                })
+            item["seasons"] = seasons
+        return 200, item
+
+    def _meta(self, media_type, tmdb_id):
+        key = (media_type, tmdb_id)
+        with self._lock:
+            if key in self._meta_cache:
+                return self._meta_cache[key]
+        code, d = self.details(media_type, tmdb_id)
+        if code == 200:
+            return {"title": d["title"], "year": d["year"], "poster": d["poster"]}
+        return {"title": f"TMDB #{tmdb_id}", "year": None, "poster": None}
+
+    def requests(self, take=25):
+        try:
+            data = self._req("GET", f"/request?take={take}&sort=added")
+        except (OSError, ValueError) as e:
+            return 502, {"error": clip(f"Seerr requests failed: {e}", 240)}
+        out = []
+        for r in data.get("results") or []:
+            if not isinstance(r, dict):
+                continue
+            media = r.get("media") or {}
+            mtype = r.get("type") or media.get("mediaType")
+            tid = media.get("tmdbId")
+            if mtype not in ("movie", "tv") or not isinstance(tid, int):
+                continue
+            meta = self._meta(mtype, tid)
+            m_st = media.get("status")
+            dl = media.get("downloadStatus") or []
+            if m_st == 5:
+                status = "available"
+            elif dl:
+                status = "grabbing"
+            elif m_st == 4:
+                status = "partial"
+            elif r.get("status") == 3:
+                status = "declined"
+            else:
+                status = "requested"
+            req_by = r.get("requestedBy") or {}
+            who = req_by.get("displayName") or req_by.get("username") or req_by.get("jellyfinUsername") or ""
+            seasons = [s.get("seasonNumber") for s in (r.get("seasons") or []) if isinstance(s, dict) and isinstance(s.get("seasonNumber"), int)]
+            out.append({
+                "id": int(r.get("id") or 0),
+                "tmdbId": tid,
+                "mediaType": mtype,
+                "title": meta["title"],
+                "year": meta["year"],
+                "poster": meta["poster"],
+                "status": status,
+                "seasons": seasons,
+                "requestedBy": clip(who, 60),
+                "createdAt": r.get("createdAt") or "",
+            })
+        return 200, {"requests": out}
+
+    def create_request(self, body):
+        mtype = str(body.get("mediaType") or "").strip().lower()
+        if mtype not in ("movie", "tv"):
+            return 400, {"error": "mediaType must be movie or tv"}
+        try:
+            mid = int(body.get("mediaId"))
+            if mid <= 0:
+                raise ValueError("bad id")
+        except (TypeError, ValueError):
+            return 400, {"error": "invalid mediaId"}
+        payload = {"mediaType": mtype, "mediaId": mid}
+        if mtype == "tv":
+            seasons = body.get("seasons")
+            if seasons == "all" or seasons is None:
+                payload["seasons"] = "all"
+            elif isinstance(seasons, list) and all(isinstance(s, int) and s >= 1 for s in seasons) and seasons:
+                payload["seasons"] = seasons
+            else:
+                return 400, {"error": "seasons must be a non-empty list of season numbers or 'all'"}
+        try:
+            res = self._req("POST", "/request", payload, timeout=15)
+        except urllib.error.HTTPError as e:
+            raw = ""
+            try:
+                raw = e.read().decode("utf-8", "replace")
+                msg = json.loads(raw).get("message") or raw
+            except Exception:
+                msg = raw or f"Seerr HTTP {e.code}"
+            return (e.code if 400 <= e.code < 500 else 502), {"error": clip(str(msg), 240)}
+        except (OSError, ValueError) as e:
+            return 502, {"error": clip(f"Seerr request failed: {e}", 240)}
+        return 200, {"ok": True, "id": res.get("id"), "status": res.get("status")}
+
+    def _arr_imdb_lookup(self, imdb_id):
+        # Try Radarr (movies) first, then Sonarr (TV) using local Arr APIs.
+        try:
+            _, base, conf = ARR["radarr"]
+            with open(conf) as f:
+                key = re.search(r"<ApiKey>(\w+)</ApiKey>", f.read())[1]
+            req = urllib.request.Request(f"{base}/api/v3/movie/lookup/imdb?imdbId={imdb_id}", headers={"X-Api-Key": key})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                m = json.load(r)
+            if isinstance(m, dict) and m.get("tmdbId"):
+                return "movie", int(m["tmdbId"])
+        except Exception:
+            pass
+        try:
+            _, base, conf = ARR["tv-sonarr"]
+            with open(conf) as f:
+                key = re.search(r"<ApiKey>(\w+)</ApiKey>", f.read())[1]
+            req = urllib.request.Request(f"{base}/api/v3/series/lookup?term=imdb:{imdb_id}", headers={"X-Api-Key": key})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                s = json.load(r)
+            if isinstance(s, list) and s and isinstance(s[0], dict) and s[0].get("tmdbId"):
+                return "tv", int(s[0]["tmdbId"])
+        except Exception:
+            pass
+        return None, None
+
+    def _resolve_letterboxd(self, url):
+        u = urllib.parse.urlsplit(url)
+        host = (u.hostname or "").lower()
+        if u.scheme not in ("http", "https") or host not in LETTERBOXD_HOSTS:
+            return None, None, None
+        slug = None
+        m_slug = re.search(r"/film/([^/?#]+)", u.path)
+        if m_slug:
+            slug = m_slug.group(1).replace("-", " ").strip()
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; pc-control/1)"})
+            with urllib.request.urlopen(req, timeout=6) as r:
+                html = r.read(256 * 1024).decode("utf-8", "replace")
+            m_tmdb = re.search(r'data-tmdb-id="(\d+)"[^>]*data-tmdb-type="(movie|tv)"', html)
+            if m_tmdb:
+                return m_tmdb.group(2), int(m_tmdb.group(1)), None
+            m_link = re.search(r"themoviedb\.org/(movie|tv)/(\d+)", html)
+            if m_link:
+                return m_link.group(1), int(m_link.group(2)), None
+            m_og = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]+)"', html)
+            if m_og:
+                title = re.sub(r"\s*\(\d{4}\)\s*$", "", m_og.group(1)).strip()
+                if title:
+                    return None, None, title
+        except Exception:
+            pass
+        return None, None, slug
+
+    def resolve_url(self, body):
+        url = str(body.get("url") or "").strip()
+        if not url or len(url) > 1000:
+            return 400, {"error": "url required"}
+        m_tmdb = re.search(r"themoviedb\.org/(movie|tv)/(\d+)", url, re.I)
+        if m_tmdb:
+            return self.details(m_tmdb.group(1).lower(), int(m_tmdb.group(2)))
+        m_imdb = re.search(r"imdb\.com/title/(tt\d+)", url, re.I)
+        if m_imdb:
+            mtype, tid = self._arr_imdb_lookup(m_imdb.group(1).lower())
+            if mtype and tid:
+                return self.details(mtype, tid)
+            return 404, {"error": f"Could not resolve IMDb {m_imdb.group(1)}"}
+        m_lb = re.search(r"(?:letterboxd\.com/film/|boxd\.it/)", url, re.I)
+        if m_lb:
+            mtype, tid, query = self._resolve_letterboxd(url)
+            if mtype and tid:
+                return self.details(mtype, tid)
+            if query:
+                code, srch = self.search(query)
+                if code == 200 and srch.get("results"):
+                    top = srch["results"][0]
+                    return self.details(top["mediaType"], top["id"])
+            return 404, {"error": "Could not resolve Letterboxd link"}
+        return 400, {"error": "Unsupported media link (use IMDb, TMDB, or Letterboxd)"}
+
+
+SEERR = SeerrClient()
+
+
+class T3ThreadsClient:
+    """Read-only + interrupt client for the local T3 Code MCP server (127.0.0.1:3773/mcp).
+    Never reads or returns thread message contents — only thread metadata (title, model, status, age)."""
+
+    def __init__(self, url=T3_MCP_URL, creds_file=T3_CREDS_FILE):
+        self.url = url
+        self.creds_file = creds_file
+        self._lock = threading.Lock()
+        self._sid = None
+
+    def _token(self):
+        with open(self.creds_file) as f:
+            d = json.load(f)
+        oauth = d.get("mcpOAuth") or {}
+        for k, v in oauth.items():
+            if k.startswith("t3|") and isinstance(v, dict) and v.get("accessToken"):
+                return v["accessToken"]
+        raise ValueError("T3 OAuth token not found")
+
+    def _post(self, tok, body, sid=None, timeout=15):
+        h = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Authorization": "Bearer " + tok,
+        }
+        if sid:
+            h["mcp-session-id"] = sid
+        req = urllib.request.Request(self.url, json.dumps(body).encode(), h)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            txt = r.read().decode("utf-8", "replace")
+            sid2 = r.headers.get("mcp-session-id")
+        for line in txt.splitlines():
+            if line.startswith("data: "):
+                txt = line[6:]
+        return (json.loads(txt) if txt.strip() else None), sid2
+
+    def _init_session(self, tok):
+        _, sid = self._post(tok, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "pc-api", "version": "1"}},
+        })
+        self._post(tok, {"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
+        return sid
+
+    def _call_tool(self, name, arguments):
+        tok = self._token()
+        with self._lock:
+            sid = self._sid
+            if not sid:
+                sid = self._init_session(tok)
+                self._sid = sid
+        try:
+            res, _ = self._post(tok, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                      "params": {"name": name, "arguments": arguments}}, sid)
+        except urllib.error.HTTPError:
+            with self._lock:
+                sid = self._init_session(tok)
+                self._sid = sid
+            res, _ = self._post(tok, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                      "params": {"name": name, "arguments": arguments}}, sid)
+        if not isinstance(res, dict):
+            raise ValueError("empty T3 response")
+        if "error" in res:
+            raise ValueError(str(res["error"]))
+        content = (res.get("result") or {}).get("content") or []
+        text = content[0].get("text", "") if content and isinstance(content[0], dict) else ""
+        return json.loads(text) if text.strip() else {}
+
+    def list_threads(self, limit=20):
+        try:
+            data = self._call_tool("t3_thread_list", {"allProjects": True, "limit": limit})
+        except (OSError, ValueError) as e:
+            return 502, {"error": clip(f"T3 threads unavailable: {e}", 240)}
+        out = []
+        for th in data.get("threads") or []:
+            if not isinstance(th, dict):
+                continue
+            out.append({
+                "id": str(th.get("threadId") or ""),
+                "title": clip(th.get("title") or "Untitled", 160),
+                "model": clip(th.get("model") or "", 80),
+                "instance": clip(th.get("providerInstanceId") or "", 60),
+                "status": str(th.get("status") or "unknown"),
+                "settled": bool(th.get("settled")),
+                "created_at": th.get("createdAt") or "",
+                "updated_at": th.get("updatedAt") or "",
+            })
+        return 200, {"threads": out, "ts": int(time.time())}
+
+    def interrupt_thread(self, body):
+        tid = str(body.get("threadId") or "").strip()
+        if not tid or len(tid) > 120:
+            return 400, {"error": "threadId required"}
+        try:
+            self._call_tool("t3_thread_interrupt", {"threadId": tid})
+        except (OSError, ValueError) as e:
+            return 502, {"error": clip(f"Interrupt failed: {e}", 240)}
+        return 200, {"ok": True, "threadId": tid}
+
+
+T3_THREADS = T3ThreadsClient()
+
+
+def route_round4_get(path, qs):
+    if path == "/api/downloads/all":
+        return 200, downloads_all()
+    if path == "/api/kbd-lock":
+        return 200, kbd_lock_status()
+    if path == "/api/seerr/search":
+        return SEERR.search(qs.get("q", [""])[0])
+    if path == "/api/seerr/details":
+        return SEERR.details(qs.get("type", [""])[0], qs.get("id", [""])[0])
+    if path == "/api/seerr/requests":
+        return SEERR.requests()
+    if path == "/api/agent/threads":
+        return T3_THREADS.list_threads()
+    return None
+
+
+def route_round4_post(path, b):
+    if path == "/api/downloads/pause":
+        return downloads_action("pause", b)
+    if path == "/api/downloads/resume":
+        return downloads_action("resume", b)
+    if path == "/api/downloads/delete":
+        return downloads_action("delete", b)
+    if path == "/api/downloads/alt-speed":
+        return downloads_set_alt_speed(b)
+    if path == "/api/downloads/add":
+        return downloads_add_magnet(b)
+    if path == "/api/arr/retry":
+        return arr_retry_import(b)
+    if path == "/api/jellyfin/refresh":
+        return jellyfin_refresh_library()
+    if path == "/api/kbd-lock":
+        return kbd_lock_set(b)
+    if path == "/api/seerr/request":
+        return SEERR.create_request(b)
+    if path == "/api/seerr/resolve":
+        return SEERR.resolve_url(b)
+    if path == "/api/agent/threads/interrupt":
+        return T3_THREADS.interrupt_thread(b)
+    return None
 
 
 # ---------------------------------------------------------------- HTTP
@@ -3163,6 +3871,9 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json(502, {"error": f"keyring status failed: {type(e).__name__}"})
             if path in ("/api/ota/ota.version.json", "/api/ota/bundle.zip"):
                 return self.send_ota_file(path.rsplit("/", 1)[1])
+            r4 = route_round4_get(path, qs)
+            if r4 is not None:
+                return self.send_json(*r4)
         elif method == "POST":
             m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
             if m: return self.hook(m.group(1))
@@ -3170,8 +3881,8 @@ class H(BaseHTTPRequestHandler):
             try: b = self.body(limit)
             except ValueError as e:
                 return self.send_json(400, {"error": "invalid request body" if path == "/api/keyring/unlock" else str(e)})
-            m = re.fullmatch(r"/api/services/([^/]+)/restart", path)
-            if m: return self.send_json(*restart_service(m.group(1)))
+            m = re.fullmatch(r"/api/services/([^/]+)/(start|stop|restart)", path)
+            if m: return self.send_json(*service_action(m.group(1), m.group(2)))
             if path in ("/api/root/approve", "/api/root/deny"):
                 op = path.rsplit("/", 1)[1]
                 return self.send_json(*rootd_or_503({"op": op, "id": str(b.get("id", "")),
@@ -3227,6 +3938,9 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
+            r4 = route_round4_post(path, b)
+            if r4 is not None:
+                return self.send_json(*r4)
         return self.send_json(404, {"error": "not found"})
 
     def send_bytes(self, data, ctype, extra=()):

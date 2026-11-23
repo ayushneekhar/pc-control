@@ -1,7 +1,9 @@
 """Unit and HTTP tests for server/chat.py and /pc/api/chat/* scope isolation."""
 
+import base64
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -39,8 +41,11 @@ class FakeAdapter:
         if delay == 0.0:
             self.release.set()
 
-    def send(self, text, *, fresh=False):
-        self.calls.append((text, fresh))
+    def send(self, text, *, fresh=False, attachments=None):
+        if attachments is not None:
+            self.calls.append((text, fresh, attachments))
+        else:
+            self.calls.append((text, fresh))
         self.started.set()
         if self.delay > 0:
             self.release.wait(timeout=self.delay)
@@ -425,6 +430,139 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(adapter.send("reset", fresh=True), "Claude says hi")
             self.assertNotIn("--continue", seen_argvs[-1])
 
+    def test_claude_cli_adapter_forwards_attachment_paths(self):
+        seen_argvs = []
+
+        def fake_run(argv, **kwargs):
+            seen_argvs.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps({"result": "Looked at file"}), stderr=""
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = chat_mod.ClaudeCliAdapter(
+                workdir=tmp,
+                settings_file=os.path.join(tmp, "none.json"),
+                oauth_token_file=os.path.join(tmp, "missing-tok"),
+                run_fn=fake_run,
+            )
+            reply = adapter.send(
+                "Check this",
+                fresh=False,
+                attachments=[
+                    {"path": "/tmp/a_photo.png"},
+                    {"path": "/tmp/b_notes.txt"},
+                ],
+            )
+            self.assertEqual(reply, "Looked at file")
+            prompt_arg = seen_argvs[-1][seen_argvs[-1].index("-p") + 1]
+            self.assertIn("Check this", prompt_arg)
+            self.assertIn("[attachment: /tmp/a_photo.png]", prompt_arg)
+            self.assertIn("[attachment: /tmp/b_notes.txt]", prompt_arg)
+
+            # Empty text with attachment only
+            adapter.send("", fresh=False, attachments=[{"path": "/tmp/only.png"}])
+            prompt_only = seen_argvs[-1][seen_argvs[-1].index("-p") + 1]
+            self.assertEqual(prompt_only, "[attachment: /tmp/only.png]")
+
+    def test_t3_gemini_adapter_uploads_and_sends_attachments_and_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tf = os.path.join(tmp, "t3-thread.json")
+            with open(tf, "w", encoding="utf-8") as f:
+                json.dump({"thread_id": "thr-att", "project_id": "proj-1"}, f)
+
+            img_path = os.path.join(tmp, "pic.png")
+            with open(img_path, "wb") as f:
+                f.write(b"\x89PNG\r\n\x1a\nfake")
+
+            calls = []
+            uploaded_paths = []
+
+            class FakeT3Att:
+                def upload_attachment(self, file_path, **kw):
+                    uploaded_paths.append((str(file_path), kw))
+                    return {
+                        "type": "image",
+                        "id": "att-t3-1",
+                        "name": "pic.png",
+                        "mimeType": "image/png",
+                        "sizeBytes": 12,
+                    }
+
+                def call_tool(self, name, args=None):
+                    args = args or {}
+                    calls.append((name, args))
+                    if name == "t3_thread_read" and args.get("limit") == 1:
+                        return {"thread": {"latestRunId": "run-old"}, "items": [{"position": 5}]}
+                    if name == "t3_thread_send_attachments":
+                        return {"runId": "run-new"}
+                    if name == "t3_thread_wait":
+                        return {"status": "completed", "runId": "run-new"}
+                    if name == "t3_thread_read":
+                        return {
+                            "items": [
+                                {
+                                    "itemId": "it-att",
+                                    "type": "assistant_message",
+                                    "runId": "run-new",
+                                    "text": "Nice picture!",
+                                    "textTruncated": False,
+                                }
+                            ]
+                        }
+                    return {}
+
+            adapter = chat_mod.T3GeminiAdapter(client=FakeT3Att(), thread_file=tf, retry_delay=0.0)
+            reply = adapter.send(
+                "What is this?",
+                attachments=[{"path": img_path, "name": "pic.png", "mime_type": "image/png", "kind": "image"}],
+            )
+            self.assertEqual(reply, "Nice picture!")
+            self.assertEqual(len(uploaded_paths), 1)
+            send_att_call = next(a for n, a in calls if n == "t3_thread_send_attachments")
+            self.assertEqual(send_att_call["threadId"], "thr-att")
+            self.assertEqual(send_att_call["message"], "What is this?")
+            self.assertEqual(send_att_call["attachments"][0]["id"], "att-t3-1")
+
+            # Fallback when upload_attachment fails: appends [attachment: /abs/path] to t3_thread_send
+            calls.clear()
+
+            class FakeT3FailUpload(FakeT3Att):
+                def upload_attachment(self, file_path, **kw):
+                    raise RuntimeError("upload endpoint unavailable")
+
+                def call_tool(self, name, args=None):
+                    args = args or {}
+                    calls.append((name, args))
+                    if name == "t3_thread_read" and args.get("limit") == 1:
+                        return {"thread": {"latestRunId": "run-new"}, "items": [{"position": 6}]}
+                    if name == "t3_thread_send":
+                        return {"runId": "run-fb"}
+                    if name == "t3_thread_wait":
+                        return {"status": "completed", "runId": "run-fb"}
+                    if name == "t3_thread_read":
+                        return {
+                            "items": [
+                                {
+                                    "itemId": "it-fb",
+                                    "type": "assistant_message",
+                                    "runId": "run-fb",
+                                    "text": "Read via fallback path",
+                                    "textTruncated": False,
+                                }
+                            ]
+                        }
+                    return {}
+
+            fb_adapter = chat_mod.T3GeminiAdapter(client=FakeT3FailUpload(), thread_file=tf, retry_delay=0.0)
+            reply2 = fb_adapter.send(
+                "",
+                attachments=[{"path": img_path, "name": "pic.png", "mime_type": "image/png", "kind": "image"}],
+            )
+            self.assertEqual(reply2, "Read via fallback path")
+            send_call = next(a for n, a in calls if n == "t3_thread_send")
+            self.assertEqual(send_call["message"], f"[attachment: {img_path}]")
+
 
 class ChatHttpAndScopeIsolationTests(unittest.TestCase):
     def setUp(self):
@@ -432,6 +570,7 @@ class ChatHttpAndScopeIsolationTests(unittest.TestCase):
         self.tok_file = os.path.join(self.tmp.name, "chat-token")
         self.local_tok_file = os.path.join(self.tmp.name, "local-token")
         self.hist_file = os.path.join(self.tmp.name, "chat-history.jsonl")
+        self.uploads_dir = os.path.join(self.tmp.name, "chat-uploads")
         self.secret = "super-secret-chat-only-token-12345"
         with open(self.tok_file, "w", encoding="utf-8") as f:
             f.write(self.secret + "\n")
@@ -444,6 +583,7 @@ class ChatHttpAndScopeIsolationTests(unittest.TestCase):
             gemini_adapter=self.adapter,
             claude_adapter=self.adapter,
             notify=self.notify,
+            uploads_dir=self.uploads_dir,
         )
 
         self.orig_chat_tok = chat_mod.CHAT_TOKEN_FILE
@@ -565,6 +705,112 @@ class ChatHttpAndScopeIsolationTests(unittest.TestCase):
         code, res = pcapi.NOTIFY.send("chat", "Gemini", "Reply preview", link="pccontrol://chat")
         self.assertEqual(code, 200)
         self.assertEqual(res["telegram"], "off")
+
+    def test_chat_upload_download_size_limit_and_send_with_attachments(self):
+        cf_headers = {
+            "X-Forwarded-For": "203.0.113.10",
+            "Authorization": f"Bearer {self.secret}",
+        }
+        ts_headers = {"Tailscale-User-Login": "ayush@example.com"}
+
+        # Upload a PNG image via chat bearer token
+        png_bytes = b"\x89PNG\r\n\x1a\nhello-image"
+        code, up = self._req(
+            "POST",
+            "/pc/api/chat/upload",
+            {
+                "name": "../../weird name!.png",
+                "mime_type": "image/png",
+                "data_base64": base64.b64encode(png_bytes).decode("ascii"),
+            },
+            headers=cf_headers,
+        )
+        self.assertEqual(code, 200)
+        self.assertEqual(up["kind"], "image")
+        self.assertEqual(up["mime_type"], "image/png")
+        self.assertEqual(up["size_bytes"], len(png_bytes))
+        self.assertTrue(up["url"].startswith("/pc/api/chat/file/"))
+        self.assertNotIn("/", up["name"])
+        self.assertNotIn("..", up["name"])
+
+        # Verify file mode 0600 on disk
+        saved = os.path.join(self.uploads_dir, f"{up['id']}_{up['name']}")
+        self.assertTrue(os.path.isfile(saved))
+        self.assertEqual(stat.S_IMODE(os.stat(saved).st_mode), 0o600)
+
+        # Download via GET /pc/api/chat/file/<id> with chat bearer token
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{up['url']}", headers=cf_headers)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.read(), png_bytes)
+            self.assertEqual(resp.headers.get("Content-Type"), "image/png")
+            self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
+
+        # Download via Tailscale auth also works
+        req2 = urllib.request.Request(f"http://127.0.0.1:{self.port}{up['url']}", headers=ts_headers)
+        with urllib.request.urlopen(req2, timeout=5) as resp2:
+            self.assertEqual(resp2.status, 200)
+            self.assertEqual(resp2.read(), png_bytes)
+
+        # HTML upload is served with safe Content-Type (application/octet-stream) + nosniff
+        code_html, up_html = self._req(
+            "POST",
+            "/pc/api/chat/upload",
+            {
+                "name": "evil.html",
+                "mime_type": "text/html",
+                "data_base64": base64.b64encode(b"<script>alert(1)</script>").decode("ascii"),
+            },
+            headers=ts_headers,
+        )
+        self.assertEqual(code_html, 200)
+        self.assertEqual(up_html["kind"], "file")
+        req_html = urllib.request.Request(f"http://127.0.0.1:{self.port}{up_html['url']}", headers=ts_headers)
+        with urllib.request.urlopen(req_html, timeout=5) as resp_html:
+            self.assertEqual(resp_html.headers.get("Content-Type"), "application/octet-stream")
+            self.assertEqual(resp_html.headers.get("X-Content-Type-Options"), "nosniff")
+
+        # Oversized upload (> 15 MB) is rejected
+        over_b64 = base64.b64encode(b"a" * (chat_mod.MAX_ATTACHMENT_BYTES + 1)).decode("ascii")
+        code_big, _ = self.chat_mgr.handle_upload({"name": "big.bin", "data_base64": over_b64})
+        self.assertEqual(code_big, 413)
+
+        # Send message with attachment and empty text
+        code_send, sent = self._req(
+            "POST",
+            "/pc/api/chat/send",
+            {"text": "", "client_id": "att-cid-1", "attachments": [up]},
+            headers=cf_headers,
+        )
+        self.assertEqual(code_send, 202)
+        self.assertTrue(self.chat_mgr.wait_idle(timeout=3.0))
+        # Public API response omits internal filesystem path
+        self.assertEqual(len(sent["user_message"]["attachments"]), 1)
+        self.assertNotIn("path", sent["user_message"]["attachments"][0])
+        self.assertEqual(sent["user_message"]["attachments"][0]["id"], up["id"])
+
+        # Adapter received the resolved attachment with internal path
+        self.assertEqual(len(self.adapter.calls), 1)
+        call_text, call_fresh, call_atts = self.adapter.calls[0]
+        self.assertEqual(call_text, "")
+        self.assertFalse(call_fresh)
+        self.assertEqual(call_atts[0]["path"], saved)
+
+        # GET /pc/api/chat/messages also omits internal path
+        code_list, listed = self._req("GET", "/pc/api/chat/messages", headers=cf_headers)
+        self.assertEqual(code_list, 200)
+        u_msg = next(m for m in listed["messages"] if m["id"] == sent["user_message"]["id"])
+        self.assertEqual(len(u_msg["attachments"]), 1)
+        self.assertNotIn("path", u_msg["attachments"][0])
+
+        # Unknown attachment id rejected
+        code_bad, _ = self._req(
+            "POST",
+            "/pc/api/chat/send",
+            {"text": "", "attachments": [{"id": "0123456789abcdef"}]},
+            headers=cf_headers,
+        )
+        self.assertEqual(code_bad, 400)
 
 
 if __name__ == "__main__":

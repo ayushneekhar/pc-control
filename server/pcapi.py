@@ -3921,13 +3921,31 @@ class H(BaseHTTPRequestHandler):
                 return self.send_ota_file(path.rsplit("/", 1)[1])
             if path == "/api/chat/messages":
                 return self.send_json(*_chat_manager().handle_get_messages(qs))
+            m = re.fullmatch(r"/api/chat/file/([0-9a-f]{16})", path)
+            if m:
+                res = _chat_manager().handle_get_file(m.group(1))
+                if res is None:
+                    return self.send_json(404, {"error": "attachment not found"})
+                data, ctype, filename = res
+                return self.send_bytes(
+                    data,
+                    ctype,
+                    extra=[
+                        ("X-Content-Type-Options", "nosniff"),
+                        ("Content-Disposition", f'inline; filename="{filename}"'),
+                    ],
+                )
             r4 = route_round4_get(path, qs)
             if r4 is not None:
                 return self.send_json(*r4)
         elif method == "POST":
             m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
             if m: return self.hook(m.group(1))
-            limit = {"/api/notify": 16 * 1024 * 1024, "/api/crash": 2 * 1024 * 1024}.get(path, 64 * 1024)
+            limit = {
+                "/api/notify": 16 * 1024 * 1024,
+                "/api/crash": 2 * 1024 * 1024,
+                "/api/chat/upload": 22 * 1024 * 1024,
+            }.get(path, 64 * 1024)
             try: b = self.body(limit)
             except ValueError as e:
                 return self.send_json(400, {"error": "invalid request body" if path == "/api/keyring/unlock" else str(e)})
@@ -3988,6 +4006,8 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
+            if path == "/api/chat/upload":
+                return self.send_json(*_chat_manager().handle_upload(b))
             if path == "/api/chat/send":
                 return self.send_json(*_chat_manager().handle_send(b))
             if path == "/api/chat/new":

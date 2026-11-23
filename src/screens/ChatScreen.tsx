@@ -11,6 +11,7 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   LayoutChangeEvent,
+  Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
   Platform,
@@ -22,17 +23,26 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { PcNative } from '../../modules/pc-native';
 import { AgentModelPickerModal, AgentSelectionResult } from '../components/AgentModelPickerModal';
 import { Banner, Button, Icon, Screen } from '../components/ui';
 import { AgentSettings, getAgentSettings, setAgent, updateAgentSettings } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
-import { fetchChatMessages, sendChatMessage, startNewChat } from '../lib/chatApi';
+import {
+  fetchChatMessages,
+  resolveChatAttachmentSource,
+  sendChatMessage,
+  startNewChat,
+  uploadChatAttachment,
+} from '../lib/chatApi';
 import {
   CHAT_STATE_CACHE_KEY,
+  ChatAttachment,
   ChatCacheState,
   ChatEngine,
   ChatMessage,
   computeAndroidKeyboardOffset,
+  formatAttachmentSize,
   formatChatTime,
   formatComposerChipLabel,
   makeClientId,
@@ -50,6 +60,7 @@ const CACHE_AGENT_SETTINGS = 'agent:settings';
 const CACHE_AGENT_STATE = 'agent:state';
 const POLL_INTERVAL_MS = 2000;
 const KEYBOARD_BREATHING_ROOM = 12;
+const MAX_ATTACHMENTS = 4;
 
 function engineLabel(engine: ChatEngine): string {
   return engine === 'gemini' ? 'Gemini' : 'Claude';
@@ -212,6 +223,50 @@ function TypingDots() {
   );
 }
 
+function BubbleAttachments({ attachments }: { attachments: ChatAttachment[] }) {
+  const t = useTheme();
+  if (attachments.length === 0) return null;
+  const images = attachments.filter((a) => a.kind === 'image');
+  const files = attachments.filter((a) => a.kind !== 'image');
+
+  return (
+    <View style={st.bubbleAttWrap}>
+      {images.length > 0 ? (
+        <View style={st.bubbleImgGrid}>
+          {images.map((img) => (
+            <Image
+              key={img.id}
+              source={resolveChatAttachmentSource(img.url)}
+              style={[
+                images.length === 1 ? st.bubbleImgSingle : st.bubbleImgMulti,
+                { backgroundColor: t.bg, borderColor: t.border },
+              ]}
+              resizeMode="cover"
+              accessibilityLabel={img.name}
+            />
+          ))}
+        </View>
+      ) : null}
+      {files.map((file) => (
+        <View
+          key={file.id}
+          style={[st.bubbleFileChip, { backgroundColor: t.bg, borderColor: t.border }]}
+        >
+          <Icon name="file-document-outline" size={16} color={t.accent} />
+          <View style={st.bubbleFileMeta}>
+            <Text numberOfLines={1} style={[st.bubbleFileName, { color: t.text }]}>
+              {file.name}
+            </Text>
+            <Text style={[st.bubbleFileSize, { color: t.textFaint }]}>
+              {formatAttachmentSize(file.size_bytes)}
+            </Text>
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function MessageBubble({
   msg,
   showEngine,
@@ -241,6 +296,8 @@ function MessageBubble({
   const isPending = msg.status === 'pending';
   const isError = msg.status === 'error';
   const copyable = (msg.text || msg.error || '').trim();
+  const attachments = msg.attachments ?? [];
+  const hasText = msg.text.trim().length > 0;
 
   return (
     <View style={[st.bubbleRow, isUser ? st.bubbleRowUser : st.bubbleRowAssistant]}>
@@ -262,6 +319,8 @@ function MessageBubble({
           </View>
         ) : null}
 
+        {attachments.length > 0 ? <BubbleAttachments attachments={attachments} /> : null}
+
         {isPending ? (
           <TypingDots />
         ) : isError ? (
@@ -271,9 +330,11 @@ function MessageBubble({
             </Text>
             {timeStr ? <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text> : null}
           </>
-        ) : (
+        ) : hasText ? (
           <MessageBody text={msg.text} isUser={isUser} timeStr={timeStr} />
-        )}
+        ) : timeStr ? (
+          <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text>
+        ) : null}
       </Pressable>
     </View>
   );
@@ -294,6 +355,9 @@ export default function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [draft, setDraft] = useState('');
+  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
+  const [uploadingCount, setUploadingCount] = useState(0);
+  const [attachSheetVisible, setAttachSheetVisible] = useState(false);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [appActive, setAppActive] = useState(() => AppState.currentState === 'active');
@@ -335,12 +399,24 @@ export default function ChatScreen() {
     };
   }, []);
 
+  const clearChatNotifs = useCallback(() => {
+    try {
+      PcNative?.clearChatNotifications?.();
+    } catch {
+      // Ignore on older APKs without clearChatNotifications.
+    }
+  }, []);
+
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
-      setAppActive(state === 'active');
+      const active = state === 'active';
+      setAppActive(active);
+      if (active && isFocusedRef.current) {
+        clearChatNotifs();
+      }
     });
     return () => sub.remove();
-  }, []);
+  }, [clearChatNotifs]);
 
   const scrollToBottom = useCallback((animated: boolean) => {
     if (messagesCountRef.current > 0) {
@@ -375,7 +451,7 @@ export default function ChatScreen() {
 
   const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
   const lastMsgSig = lastMsg
-    ? `${lastMsg.id}:${lastMsg.status}:${lastMsg.text.length}:${lastMsg.error?.length ?? 0}`
+    ? `${lastMsg.id}:${lastMsg.status}:${lastMsg.text.length}:${lastMsg.error?.length ?? 0}:${lastMsg.attachments?.length ?? 0}`
     : '';
   const prevLastMsgSigRef = useRef(lastMsgSig);
 
@@ -524,9 +600,10 @@ export default function ChatScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      clearChatNotifs();
       void loadMessages({ silent: true });
       void loadAgentSettings();
-    }, [loadMessages, loadAgentSettings]),
+    }, [clearChatNotifs, loadMessages, loadAgentSettings]),
   );
 
   const polling = shouldPollChat(messages, running, isFocused, appActive);
@@ -565,9 +642,72 @@ export default function ChatScreen() {
     void Share.share({ message: text }).catch(() => {});
   }, []);
 
+  const onRemoveAttachment = useCallback((id: string) => {
+    setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  const onOpenAttachSheet = useCallback(() => {
+    if (sending) return;
+    if (pendingAttachments.length >= MAX_ATTACHMENTS) {
+      setErr(`Up to ${MAX_ATTACHMENTS} attachments per message.`);
+      return;
+    }
+    Keyboard.dismiss();
+    setAttachSheetVisible(true);
+  }, [sending, pendingAttachments.length]);
+
+  const onPickAttachments = useCallback(
+    async (kind: 'image' | 'file') => {
+      setAttachSheetVisible(false);
+      if (!PcNative?.pickAttachments) {
+        setErr('Update the app APK to attach files.');
+        return;
+      }
+      const slots = MAX_ATTACHMENTS - pendingAttachments.length;
+      if (slots <= 0) {
+        setErr(`Up to ${MAX_ATTACHMENTS} attachments per message.`);
+        return;
+      }
+      setErr(null);
+      try {
+        const picked = await PcNative.pickAttachments(kind);
+        if (!mountedRef.current || !picked || picked.length === 0) return;
+        const batch = picked.slice(0, slots);
+        setUploadingCount((c) => c + batch.length);
+        for (const item of batch) {
+          try {
+            const uploaded = await uploadChatAttachment({
+              name: item.name,
+              mimeType: item.mimeType,
+              base64: item.base64,
+            });
+            if (!mountedRef.current) return;
+            setPendingAttachments((prev) =>
+              prev.length >= MAX_ATTACHMENTS ? prev : [...prev, uploaded],
+            );
+          } catch (e) {
+            if (mountedRef.current) {
+              setErr((e as Error).message || `Failed to upload ${item.name}`);
+            }
+          } finally {
+            if (mountedRef.current) {
+              setUploadingCount((c) => Math.max(0, c - 1));
+            }
+          }
+        }
+      } catch (e) {
+        if (mountedRef.current) {
+          setErr((e as Error).message || 'Could not pick attachment');
+        }
+      }
+    },
+    [pendingAttachments.length],
+  );
+
   const onSend = useCallback(async () => {
     const trimmed = draft.trim();
-    if (!trimmed || sending) return;
+    const toSendAttachments = pendingAttachments;
+    if ((!trimmed && toSendAttachments.length === 0) || sending || uploadingCount > 0) return;
     const clientId = makeClientId();
     const nowSec = Date.now() / 1000;
     const optUser: ChatMessage = {
@@ -578,6 +718,7 @@ export default function ChatScreen() {
       created_at: nowSec,
       status: 'done',
       client_id: clientId,
+      attachments: toSendAttachments.length > 0 ? toSendAttachments : undefined,
       optimistic: true,
     };
     const optAsst: ChatMessage = {
@@ -592,6 +733,7 @@ export default function ChatScreen() {
     };
 
     setDraft('');
+    setPendingAttachments([]);
     setErr(null);
     setSending(true);
     setRunning(true);
@@ -601,7 +743,7 @@ export default function ChatScreen() {
     requestAnimationFrame(() => scrollToBottomSettled(true));
 
     try {
-      const res = await sendChatMessage(trimmed, clientId);
+      const res = await sendChatMessage(trimmed, clientId, toSendAttachments);
       if (!mountedRef.current) return;
       setEngine(res.engine);
       setRunning(res.running);
@@ -616,12 +758,13 @@ export default function ChatScreen() {
       if (!mountedRef.current) return;
       setMessages((prev) => prev.filter((m) => m.id !== optUser.id && m.id !== optAsst.id));
       setDraft(trimmed);
+      setPendingAttachments(toSendAttachments);
       setRunning(false);
       setErr((e as Error).message || 'Failed to send message');
     } finally {
       if (mountedRef.current) setSending(false);
     }
-  }, [draft, sending, engine, hasMore, persistCache, scrollToBottomSettled]);
+  }, [draft, pendingAttachments, sending, uploadingCount, engine, hasMore, persistCache, scrollToBottomSettled]);
 
   const onNewChat = useCallback(() => {
     Alert.alert('New conversation', `Start a fresh ${engineLabel(engine)} session?`, [
@@ -713,7 +856,7 @@ export default function ChatScreen() {
     return `Switch model and effort: ${provider}, ${summary}`;
   }, [engine, agentSettings]);
 
-  const canSend = draft.trim().length > 0 && !sending;
+  const canSend = (draft.trim().length > 0 || pendingAttachments.length > 0) && !sending && uploadingCount === 0;
 
   const headerRight = (
     <View style={st.headerRight}>
@@ -813,6 +956,67 @@ export default function ChatScreen() {
         ) : null}
       </View>
 
+      {pendingAttachments.length > 0 || uploadingCount > 0 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={st.previewStrip}
+          style={st.previewStripWrap}
+          keyboardShouldPersistTaps="handled"
+        >
+          {pendingAttachments.map((att) =>
+            att.kind === 'image' ? (
+              <View key={att.id} style={st.previewImgWrap}>
+                <Image
+                  source={resolveChatAttachmentSource(att.url)}
+                  style={[st.previewImg, { backgroundColor: t.cardAlt, borderColor: t.border }]}
+                  resizeMode="cover"
+                />
+                <Pressable
+                  onPress={() => onRemoveAttachment(att.id)}
+                  accessibilityLabel={`Remove ${att.name}`}
+                  hitSlop={6}
+                  style={[st.previewRemoveBadge, { backgroundColor: t.bg, borderColor: t.border }]}
+                >
+                  <Icon name="close" size={12} color={t.text} />
+                </Pressable>
+              </View>
+            ) : (
+              <View
+                key={att.id}
+                style={[st.previewFileChip, { backgroundColor: t.card, borderColor: t.border }]}
+              >
+                <Icon name="file-document-outline" size={16} color={t.accent} />
+                <View style={st.previewFileMeta}>
+                  <Text numberOfLines={1} style={[st.previewFileName, { color: t.text }]}>
+                    {att.name}
+                  </Text>
+                  <Text style={[st.previewFileSize, { color: t.textFaint }]}>
+                    {formatAttachmentSize(att.size_bytes)}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => onRemoveAttachment(att.id)}
+                  accessibilityLabel={`Remove ${att.name}`}
+                  hitSlop={6}
+                  style={st.previewFileClose}
+                >
+                  <Icon name="close" size={14} color={t.textDim} />
+                </Pressable>
+              </View>
+            ),
+          )}
+          {uploadingCount > 0 ? (
+            <View style={[st.uploadingChip, { backgroundColor: t.card, borderColor: t.border }]}>
+              <ActivityIndicator size="small" color={t.accent} />
+              <Text style={[st.uploadingText, { color: t.textDim }]}>
+                {uploadingCount > 1 ? `Uploading ${uploadingCount}…` : 'Uploading…'}
+              </Text>
+            </View>
+          ) : null}
+        </ScrollView>
+      ) : null}
+
       <View
         style={[
           st.composerPill,
@@ -822,6 +1026,23 @@ export default function ChatScreen() {
           },
         ]}
       >
+        <Pressable
+          onPress={onOpenAttachSheet}
+          disabled={sending || pendingAttachments.length >= MAX_ATTACHMENTS}
+          accessibilityRole="button"
+          accessibilityLabel="Add photo or file"
+          android_ripple={{ color: t.ripple, foreground: true }}
+          style={({ pressed }) => [
+            st.attachBtn,
+            {
+              backgroundColor: t.cardAlt,
+              opacity:
+                sending || pendingAttachments.length >= MAX_ATTACHMENTS ? 0.4 : pressed ? 0.8 : 1,
+            },
+          ]}
+        >
+          <Icon name="plus" size={20} color={t.text} />
+        </Pressable>
         <TextInput
           value={draft}
           onChangeText={setDraft}
@@ -896,6 +1117,53 @@ export default function ChatScreen() {
         onApply={(res) => void onApplyModel(res)}
         onClose={() => setPickerVisible(false)}
       />
+      <Modal
+        visible={attachSheetVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAttachSheetVisible(false)}
+      >
+        <Pressable style={st.sheetBackdrop} onPress={() => setAttachSheetVisible(false)}>
+          <Pressable
+            onPress={() => {}}
+            style={[st.sheetCard, { backgroundColor: t.card, borderColor: t.border }]}
+          >
+            <Text style={[st.sheetTitle, { color: t.textDim }]}>Attach</Text>
+            <Pressable
+              onPress={() => void onPickAttachments('image')}
+              android_ripple={{ color: t.ripple, foreground: true }}
+              style={({ pressed }) => [
+                st.sheetRow,
+                { backgroundColor: pressed ? t.cardAlt : 'transparent' },
+              ]}
+            >
+              <View style={[st.sheetIconWrap, { backgroundColor: t.cardAlt }]}>
+                <Icon name="image-outline" size={20} color={t.accent} />
+              </View>
+              <View style={st.sheetRowText}>
+                <Text style={[st.sheetRowTitle, { color: t.text }]}>Photo</Text>
+                <Text style={[st.sheetRowSub, { color: t.textFaint }]}>Choose images from your device</Text>
+              </View>
+            </Pressable>
+            <Pressable
+              onPress={() => void onPickAttachments('file')}
+              android_ripple={{ color: t.ripple, foreground: true }}
+              style={({ pressed }) => [
+                st.sheetRow,
+                { backgroundColor: pressed ? t.cardAlt : 'transparent' },
+              ]}
+            >
+              <View style={[st.sheetIconWrap, { backgroundColor: t.cardAlt }]}>
+                <Icon name="file-document-outline" size={20} color={t.accent} />
+              </View>
+              <View style={st.sheetRowText}>
+                <Text style={[st.sheetRowTitle, { color: t.text }]}>File</Text>
+                <Text style={[st.sheetRowSub, { color: t.textFaint }]}>Documents, logs, or any file up to 15 MB</Text>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </Screen>
   );
 }
@@ -1017,9 +1285,174 @@ const st = StyleSheet.create({
     marginBottom: space(2),
     borderRadius: 24,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingLeft: 14,
+    paddingLeft: 6,
     paddingRight: 6,
     paddingVertical: 6,
+  },
+  attachBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 1,
+    overflow: 'hidden',
+  },
+  previewStripWrap: {
+    flexGrow: 0,
+    marginTop: space(1),
+  },
+  previewStrip: {
+    paddingHorizontal: screenPad,
+    paddingVertical: 4,
+    gap: 8,
+    alignItems: 'center',
+  },
+  previewImgWrap: {
+    position: 'relative',
+  },
+  previewImg: {
+    width: 56,
+    height: 56,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  previewRemoveBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewFileChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    height: 46,
+    maxWidth: 190,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  previewFileMeta: {
+    flexShrink: 1,
+  },
+  previewFileName: {
+    fontSize: 12.5,
+    fontWeight: '500',
+  },
+  previewFileSize: {
+    fontSize: 10.5,
+    fontVariant: ['tabular-nums'],
+  },
+  previewFileClose: {
+    padding: 2,
+  },
+  uploadingChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    height: 46,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  uploadingText: {
+    fontSize: 12.5,
+  },
+  bubbleAttWrap: {
+    gap: 6,
+    marginBottom: 4,
+  },
+  bubbleImgGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  bubbleImgSingle: {
+    width: 196,
+    height: 148,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  bubbleImgMulti: {
+    width: 112,
+    height: 112,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  bubbleFileChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    maxWidth: 230,
+  },
+  bubbleFileMeta: {
+    flexShrink: 1,
+  },
+  bubbleFileName: {
+    fontSize: 12.5,
+    fontWeight: '500',
+  },
+  bubbleFileSize: {
+    fontSize: 10.5,
+    fontVariant: ['tabular-nums'],
+  },
+  sheetBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'flex-end',
+    padding: screenPad,
+    paddingBottom: space(6),
+  },
+  sheetCard: {
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: space(3),
+    gap: 4,
+  },
+  sheetTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    paddingHorizontal: 8,
+    paddingBottom: 6,
+  },
+  sheetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 11,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  sheetIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetRowText: {
+    flex: 1,
+    gap: 1,
+  },
+  sheetRowTitle: {
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  sheetRowSub: {
+    fontSize: 12,
   },
   input: {
     flex: 1,

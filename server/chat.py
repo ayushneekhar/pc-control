@@ -12,9 +12,12 @@ Provides:
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import queue
+import re
 import secrets
 import subprocess
 import sys
@@ -31,6 +34,7 @@ CONF_DIR = os.path.join(HOME, ".config", "pc-control")
 DATA_DIR = os.environ.get("PCAPI_DATA", os.path.join(HOME, ".local", "share", "pc-control"))
 CHAT_TOKEN_FILE = os.environ.get("PCAPI_CHAT_TOKEN", os.path.join(CONF_DIR, "chat-token"))
 CHAT_HISTORY_FILE = os.environ.get("PCAPI_CHAT_HISTORY", os.path.join(DATA_DIR, "chat-history.jsonl"))
+CHAT_UPLOADS_DIR = os.environ.get("PCAPI_CHAT_UPLOADS", os.path.join(DATA_DIR, "chat-uploads"))
 AGENT_ENGINE_FILE = os.environ.get("PCAPI_AGENT_ENGINE_FILE", os.path.join(HOME, "remote-pc", "agent-engine"))
 
 T3_MCP_URL = os.environ.get("GEMINI_AGENT_T3_URL", "http://127.0.0.1:3773/mcp")
@@ -59,6 +63,8 @@ AGENT_WORKDIR = os.environ.get("PCAPI_AGENT_WORKDIR", os.path.join(HOME, "agent"
 VALID_ENGINES = ("claude", "gemini")
 MAX_TEXT_LEN = 32000
 MAX_CLIENT_ID_LEN = 128
+MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024
+MAX_ATTACHMENTS_PER_MSG = 4
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 DEFAULT_MAX_LINES = 1000
@@ -67,11 +73,82 @@ DEFAULT_KEEP_MESSAGES = 500
 DISPATCH_TIMEOUT = 900.0
 
 _T3_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted", "rolled_back"}
+_ATT_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+_MIME_RE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+_-]*$", re.IGNORECASE)
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_UNSAFE_SERVE_MIMES = {
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-javascript",
+}
 
 
 def _clip(text: Any, limit: int = 240) -> str:
     s = " ".join(str(text or "").split())
     return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def _sanitize_filename(raw: Any, mime_type: str = "") -> str:
+    base = os.path.basename(str(raw or "").replace("\\", "/").strip())
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", base)
+    cleaned = re.sub(r"_+", "_", cleaned).lstrip("._")
+    if not cleaned:
+        ext = mimetypes.guess_extension(mime_type.split(";", 1)[0].strip().lower()) if mime_type else None
+        cleaned = f"attachment{ext or ''}"
+    if len(cleaned) > 120:
+        stem, ext = os.path.splitext(cleaned)
+        ext = ext[:16]
+        cleaned = (stem[: 120 - len(ext)] or "attachment") + ext
+    return cleaned
+
+
+def _sanitize_mime(raw: Any, filename: str) -> str:
+    cand = str(raw or "").split(";", 1)[0].strip().lower()
+    if cand and _MIME_RE.match(cand):
+        return cand
+    guessed = mimetypes.guess_type(filename)[0]
+    if guessed and _MIME_RE.match(guessed):
+        return guessed.lower()
+    return "application/octet-stream"
+
+
+def _attachment_kind(mime_type: str, filename: str) -> str:
+    mt = mime_type.lower()
+    if mt.startswith("image/") and mt != "image/svg+xml":
+        return "image"
+    if os.path.splitext(filename)[1].lower() in _IMAGE_EXTS:
+        return "image"
+    return "file"
+
+
+def _safe_serve_mime(mime_type: str) -> str:
+    mt = mime_type.split(";", 1)[0].strip().lower()
+    if mt in _UNSAFE_SERVE_MIMES or not _MIME_RE.match(mt):
+        return "application/octet-stream"
+    return mt
+
+
+def _append_attachment_paths(text: str, paths: list[str]) -> str:
+    lines = [f"[attachment: {p}]" for p in paths if isinstance(p, str) and p.strip()]
+    if not lines:
+        return text
+    block = "\n".join(lines)
+    return f"{text}\n\n{block}" if text else block
+
+
+def _public_message(msg: dict[str, Any]) -> dict[str, Any]:
+    out = dict(msg)
+    atts = out.get("attachments")
+    if isinstance(atts, list):
+        out["attachments"] = [
+            {k: v for k, v in a.items() if k != "path"}
+            for a in atts
+            if isinstance(a, dict)
+        ]
+    return out
 
 
 # ---------------------------------------------------------------- chat-only auth
@@ -469,6 +546,75 @@ class T3Client:
             return result["structuredContent"]
         return {}
 
+    def _base_origin(self) -> str:
+        u = urllib.parse.urlsplit(self.mcp_url)
+        return f"{u.scheme}://{u.netloc}"
+
+    def upload_attachment(
+        self,
+        file_path: str | Path,
+        *,
+        name: str | None = None,
+        mime_type: str | None = None,
+        kind: str | None = None,
+    ) -> dict[str, Any]:
+        p = Path(file_path)
+        upload_name = name or p.name
+        resolved_mime = _sanitize_mime(mime_type, upload_name)
+        att_type = "image" if (kind == "image" or _attachment_kind(resolved_mime, upload_name) == "image") else "file"
+        data = p.read_bytes()
+        size_bytes = len(data)
+
+        prep = self.call_tool(
+            "t3_attachment_prepare_upload",
+            {
+                "upload": {
+                    "type": att_type,
+                    "name": upload_name,
+                    "mimeType": resolved_mime,
+                    "sizeBytes": size_bytes,
+                }
+            },
+        )
+        att_id = prep.get("attachmentId") or prep.get("id")
+        upload_url = prep.get("uploadUrl")
+        if not upload_url and prep.get("relativeUrl"):
+            rel = str(prep["relativeUrl"])
+            upload_url = f"{self._base_origin()}{rel if rel.startswith('/') else '/' + rel}"
+        if not att_id or not upload_url:
+            raise RuntimeError(f"t3_attachment_prepare_upload returned incomplete response: {prep}")
+
+        with self._lock:
+            token = self._get_token_locked()
+        req = urllib.request.Request(
+            str(upload_url),
+            data=data,
+            headers={
+                "Content-Type": resolved_mime,
+                "Authorization": f"Bearer {token}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                resp.read()
+        except urllib.error.HTTPError as exc:
+            try:
+                err_body = exc.read().decode("utf-8", errors="replace")[:200]
+            finally:
+                exc.close()
+            raise RuntimeError(f"T3 attachment upload HTTP {exc.code}: {err_body}") from None
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+            raise RuntimeError(f"T3 attachment upload failed: {exc}") from None
+
+        return {
+            "type": att_type,
+            "id": str(att_id),
+            "name": upload_name,
+            "mimeType": resolved_mime,
+            "sizeBytes": size_bytes,
+        }
+
 
 class T3GeminiAdapter:
     """Dispatches chat turns to the active persistent Gemini T3 Code thread (shared with Telegram)."""
@@ -701,12 +847,49 @@ class T3GeminiAdapter:
 
         return resolved_run_id, raw_status, False, err_detail, False
 
-    def send(self, text: str, *, fresh: bool = False) -> str:
+    def _upload_t3_attachments(
+        self, attachments: list[dict[str, Any]] | None
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        t3_atts: list[dict[str, Any]] = []
+        fallback_paths: list[str] = []
+        for att in attachments or []:
+            if not isinstance(att, dict):
+                continue
+            path = att.get("path")
+            if not isinstance(path, str) or not path:
+                continue
+            try:
+                uploaded = self.client.upload_attachment(
+                    path,
+                    name=att.get("name") if isinstance(att.get("name"), str) else None,
+                    mime_type=att.get("mime_type") if isinstance(att.get("mime_type"), str) else None,
+                    kind=att.get("kind") if isinstance(att.get("kind"), str) else None,
+                )
+                t3_atts.append(uploaded)
+            except Exception:
+                fallback_paths.append(path)
+        return t3_atts, fallback_paths
+
+    def send(
+        self,
+        text: str,
+        *,
+        fresh: bool = False,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> str:
         state = self._read_thread_state()
         thread_id = state.get("thread_id") if isinstance(state.get("thread_id"), str) else None
         start_pos: int | None = None
         prev_latest_run_id: str | None = None
         run_id: str | None = None
+
+        all_paths = [
+            str(a["path"])
+            for a in (attachments or [])
+            if isinstance(a, dict) and isinstance(a.get("path"), str) and a["path"]
+        ]
+        t3_attachments, fallback_paths = self._upload_t3_attachments(attachments)
+        effective_text = _append_attachment_paths(text, fallback_paths)
 
         if thread_id:
             try:
@@ -724,14 +907,37 @@ class T3GeminiAdapter:
                     start_pos = max(-1, int(head["nextPosition"]) - 1)
                 elif isinstance(head_thread.get("itemCount"), int):
                     start_pos = int(head_thread["itemCount"]) - 1
-                send_args: dict[str, Any] = {
-                    "threadId": thread_id,
-                    "message": text,
-                    "mode": "queue",
-                }
-                if fresh:
-                    send_args["freshContext"] = True
-                sent = self.client.call_tool("t3_thread_send", send_args)
+
+                if t3_attachments and not fresh:
+                    att_args: dict[str, Any] = {
+                        "threadId": thread_id,
+                        "attachments": t3_attachments,
+                    }
+                    if effective_text:
+                        att_args["message"] = effective_text
+                    try:
+                        sent = self.client.call_tool("t3_thread_send_attachments", att_args)
+                    except RuntimeError as att_exc:
+                        msg_lower = str(att_exc).lower()
+                        if "not found" in msg_lower or "does not exist" in msg_lower or "unknown thread" in msg_lower:
+                            raise
+                        # Fall back cleanly to plain message with [attachment: /abs/path].
+                        fallback_msg = _append_attachment_paths(text, all_paths)
+                        sent = self.client.call_tool(
+                            "t3_thread_send",
+                            {"threadId": thread_id, "message": fallback_msg, "mode": "queue"},
+                        )
+                else:
+                    msg_text = _append_attachment_paths(text, all_paths) if (t3_attachments and fresh) else effective_text
+                    send_args: dict[str, Any] = {
+                        "threadId": thread_id,
+                        "message": msg_text,
+                        "mode": "queue",
+                    }
+                    if fresh:
+                        send_args["freshContext"] = True
+                    sent = self.client.call_tool("t3_thread_send", send_args)
+
                 run_obj = sent.get("run") if isinstance(sent.get("run"), dict) else {}
                 rid = sent.get("runId") or sent.get("queuedRunId") or run_obj.get("runId")
                 run_id = str(rid) if rid else None
@@ -752,17 +958,17 @@ class T3GeminiAdapter:
                 else self._find_or_create_project()
             )
             model_sel = self._model_selection()
-            launched = self.client.call_tool(
-                "t3_thread_launch",
-                {
-                    "projectId": project_id,
-                    "title": "PC Agent (App)",
-                    "message": text,
-                    "modelSelection": model_sel,
-                    "runtimeMode": "full-access",
-                    "interactionMode": "default",
-                },
-            )
+            launch_args: dict[str, Any] = {
+                "projectId": project_id,
+                "title": "PC Agent (App)",
+                "message": effective_text or "See attached file(s).",
+                "modelSelection": model_sel,
+                "runtimeMode": "full-access",
+                "interactionMode": "default",
+            }
+            if t3_attachments:
+                launch_args["attachments"] = t3_attachments
+            launched = self.client.call_tool("t3_thread_launch", launch_args)
             thread_obj = launched.get("thread") if isinstance(launched.get("thread"), dict) else {}
             tid = launched.get("threadId") or thread_obj.get("threadId")
             if not tid:
@@ -874,8 +1080,20 @@ class ClaudeCliAdapter:
             argv.append("--continue")
         return argv
 
-    def send(self, text: str, *, fresh: bool = False) -> str:
-        argv = self._build_argv(text, fresh=fresh)
+    def send(
+        self,
+        text: str,
+        *,
+        fresh: bool = False,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> str:
+        paths = [
+            str(a["path"])
+            for a in (attachments or [])
+            if isinstance(a, dict) and isinstance(a.get("path"), str) and a["path"]
+        ]
+        prompt = _append_attachment_paths(text, paths)
+        argv = self._build_argv(prompt, fresh=fresh)
         cwd = self.workdir if os.path.isdir(self.workdir) else HOME
         try:
             res = self.run_fn(
@@ -927,6 +1145,7 @@ class ChatManager:
         claude_adapter: Any | None = None,
         notify: Any | None = None,
         clock: Callable[[], float] | None = None,
+        uploads_dir: str | None = None,
     ) -> None:
         self.store = store or ChatHistoryStore()
         self.engine_fn = engine_fn or active_engine
@@ -934,6 +1153,7 @@ class ChatManager:
         self.claude_adapter = claude_adapter or ClaudeCliAdapter()
         self.notify = notify
         self.clock = clock or time.time
+        self.uploads_dir = os.path.abspath(os.path.expanduser(uploads_dir or CHAT_UPLOADS_DIR))
         self._lock = threading.Lock()
         self._fresh_next: dict[str, bool] = {"claude": False, "gemini": False}
         self._in_flight = 0
@@ -970,10 +1190,15 @@ class ChatManager:
         asst_id = job["assistant_id"]
         text = job["text"]
         fresh = bool(job.get("fresh", False))
+        attachments = job.get("attachments") or []
         adapter = self.gemini_adapter if engine == "gemini" else self.claude_adapter
         label = "Gemini" if engine == "gemini" else "Claude"
         try:
-            reply = str(adapter.send(text, fresh=fresh) or "").strip() or "(no response)"
+            if attachments:
+                raw_reply = adapter.send(text, fresh=fresh, attachments=attachments)
+            else:
+                raw_reply = adapter.send(text, fresh=fresh)
+            reply = str(raw_reply or "").strip() or "(no response)"
             self.store.update(asst_id, text=reply, status="done", error=None)
             self._push_reply(label, reply, is_error=False)
         except Exception as exc:
@@ -1002,6 +1227,85 @@ class ChatManager:
             time.sleep(0.02)
         return not self.is_running() and self._queue.empty()
 
+    # ---- attachment storage
+
+    def _resolve_uploaded_file(self, att_id: str) -> tuple[str, str] | None:
+        if not isinstance(att_id, str) or not _ATT_ID_RE.match(att_id):
+            return None
+        if not os.path.isdir(self.uploads_dir):
+            return None
+        prefix = f"{att_id}_"
+        root_real = os.path.realpath(self.uploads_dir)
+        try:
+            for entry in os.listdir(self.uploads_dir):
+                if not entry.startswith(prefix):
+                    continue
+                cand = os.path.realpath(os.path.join(self.uploads_dir, entry))
+                if not cand.startswith(root_real + os.sep):
+                    continue
+                if os.path.isfile(cand):
+                    return cand, entry[len(prefix) :]
+        except OSError:
+            return None
+        return None
+
+    def handle_upload(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        raw_b64 = body.get("data_base64")
+        if not isinstance(raw_b64, str) or not raw_b64.strip():
+            return 400, {"error": "data_base64 is required"}
+        cleaned_b64 = "".join(raw_b64.split())
+        # Quick upper-bound check before allocating decoded bytes.
+        if len(cleaned_b64) > ((MAX_ATTACHMENT_BYTES + 2) // 3) * 4 + 4:
+            return 413, {"error": "attachment exceeds 15 MB limit"}
+        try:
+            data = base64.b64decode(cleaned_b64, validate=True)
+        except ValueError:
+            return 400, {"error": "data_base64 is not valid base64"}
+        if not data:
+            return 400, {"error": "attachment is empty"}
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            return 413, {"error": "attachment exceeds 15 MB limit"}
+
+        raw_mime = body.get("mime_type")
+        safe_name = _sanitize_filename(body.get("name"), str(raw_mime or ""))
+        mime_type = _sanitize_mime(raw_mime, safe_name)
+        kind = _attachment_kind(mime_type, safe_name)
+        att_id = self._new_id()
+
+        os.makedirs(self.uploads_dir, mode=0o700, exist_ok=True)
+        dest = os.path.join(self.uploads_dir, f"{att_id}_{safe_name}")
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+        except Exception:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            raise
+
+        return 200, {
+            "id": att_id,
+            "name": safe_name,
+            "mime_type": mime_type,
+            "size_bytes": len(data),
+            "kind": kind,
+            "url": f"/pc/api/chat/file/{att_id}",
+        }
+
+    def handle_get_file(self, att_id: str) -> tuple[bytes, str, str] | None:
+        found = self._resolve_uploaded_file(att_id)
+        if found is None:
+            return None
+        abs_path, safe_name = found
+        try:
+            data = Path(abs_path).read_bytes()
+        except OSError:
+            return None
+        mime_type = _safe_serve_mime(_sanitize_mime(None, safe_name))
+        return data, mime_type, safe_name
+
     # ---- HTTP handlers
 
     def handle_get_messages(self, qs: dict[str, list[str]]) -> tuple[int, dict[str, Any]]:
@@ -1013,7 +1317,7 @@ class ChatManager:
             return 400, {"error": "limit must be an integer"}
         messages, has_more = self.store.get_messages(before=before, limit=limit)
         return 200, {
-            "messages": messages,
+            "messages": [_public_message(m) for m in messages],
             "engine": self._current_engine(),
             "running": self.is_running(),
             "has_more": has_more,
@@ -1022,11 +1326,58 @@ class ChatManager:
 
     def handle_send(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         raw_text = body.get("text")
-        if not isinstance(raw_text, str) or not raw_text.strip():
-            return 400, {"error": "text is required"}
-        text = raw_text.strip()
+        if raw_text is None:
+            text = ""
+        elif isinstance(raw_text, str):
+            text = raw_text.strip()
+        else:
+            return 400, {"error": "text must be a string"}
         if len(text) > MAX_TEXT_LEN:
             return 400, {"error": f"text exceeds {MAX_TEXT_LEN} characters"}
+
+        raw_atts = body.get("attachments")
+        resolved_atts: list[dict[str, Any]] = []
+        if raw_atts is not None:
+            if not isinstance(raw_atts, list):
+                return 400, {"error": "attachments must be an array"}
+            if len(raw_atts) > MAX_ATTACHMENTS_PER_MSG:
+                return 400, {"error": f"at most {MAX_ATTACHMENTS_PER_MSG} attachments allowed"}
+            for item in raw_atts:
+                if isinstance(item, str):
+                    att_id = item.strip()
+                    req_name = None
+                    req_mime = None
+                elif isinstance(item, dict):
+                    att_id = str(item.get("id") or "").strip()
+                    req_name = item.get("name")
+                    req_mime = item.get("mime_type")
+                else:
+                    return 400, {"error": "invalid attachment entry"}
+                found = self._resolve_uploaded_file(att_id)
+                if found is None:
+                    return 400, {"error": f"unknown attachment id: {att_id or '(empty)'}"}
+                abs_path, stored_name = found
+                try:
+                    size_bytes = os.path.getsize(abs_path)
+                except OSError:
+                    return 400, {"error": f"attachment unavailable: {att_id}"}
+                display_name = _sanitize_filename(req_name, str(req_mime or "")) if isinstance(req_name, str) and req_name.strip() else stored_name
+                mime_type = _sanitize_mime(req_mime, stored_name)
+                kind = _attachment_kind(mime_type, stored_name)
+                resolved_atts.append(
+                    {
+                        "id": att_id,
+                        "name": display_name,
+                        "mime_type": mime_type,
+                        "size_bytes": size_bytes,
+                        "kind": kind,
+                        "url": f"/pc/api/chat/file/{att_id}",
+                        "path": abs_path,
+                    }
+                )
+
+        if not text and not resolved_atts:
+            return 400, {"error": "text or attachments is required"}
 
         raw_cid = body.get("client_id")
         client_id: str | None = None
@@ -1043,8 +1394,8 @@ class ChatManager:
                     return 200, {
                         "ok": True,
                         "deduped": True,
-                        "user_message": user_msg,
-                        "assistant_message": asst_msg,
+                        "user_message": _public_message(user_msg),
+                        "assistant_message": _public_message(asst_msg) if asst_msg is not None else None,
                         "engine": self._current_engine(),
                         "running": self._in_flight > 0 or self.store.has_pending(),
                     }
@@ -1064,6 +1415,7 @@ class ChatManager:
                     "status": "done",
                     "error": None,
                     **({"client_id": client_id} if client_id else {}),
+                    **({"attachments": resolved_atts} if resolved_atts else {}),
                 }
             )
             asst_msg = self.store.append(
@@ -1088,14 +1440,15 @@ class ChatManager:
                     "text": text,
                     "assistant_id": asst_id,
                     "fresh": fresh,
+                    **({"attachments": resolved_atts} if resolved_atts else {}),
                 }
             )
 
         return 202, {
             "ok": True,
             "deduped": False,
-            "user_message": user_msg,
-            "assistant_message": asst_msg,
+            "user_message": _public_message(user_msg),
+            "assistant_message": _public_message(asst_msg),
             "engine": engine,
             "running": True,
         }

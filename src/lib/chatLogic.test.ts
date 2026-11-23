@@ -4,6 +4,7 @@ import { _setCacheBackendForTests, CacheBackend } from './cache';
 import {
   ChatMessage,
   computeAndroidKeyboardOffset,
+  formatAttachmentSize,
   formatChatTime,
   formatComposerChipLabel,
   getChatEndpoint,
@@ -193,4 +194,13 @@ test('shortModelLabel, shortEffortLabel, and formatComposerChipLabel format clea
   assert.equal(formatComposerChipLabel('claude', 'claude-opus-5-5', 'Opus 5.5', 'high'), 'Opus · High');
   assert.equal(formatComposerChipLabel('gemini', null, null, null), 'Gemini');
   assert.equal(formatComposerChipLabel('claude', null, null, null), 'Claude');
+});
+
+test('formatAttachmentSize formats bytes, KB, and MB cleanly', () => {
+  assert.equal(formatAttachmentSize(0), '0 B');
+  assert.equal(formatAttachmentSize(512), '512 B');
+  assert.equal(formatAttachmentSize(1536), '1.5 KB');
+  assert.equal(formatAttachmentSize(24 * 1024), '24 KB');
+  assert.equal(formatAttachmentSize(2.4 * 1024 * 1024), '2.4 MB');
+  assert.equal(formatAttachmentSize(12 * 1024 * 1024), '12 MB');
 });

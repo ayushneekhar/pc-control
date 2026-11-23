@@ -1,9 +1,13 @@
 package expo.modules.pcnative
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.provider.OpenableColumns
 import android.provider.Settings
+import android.util.Base64
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.FragmentActivity
@@ -11,16 +15,125 @@ import expo.modules.kotlin.Promise
 import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.io.ByteArrayOutputStream
 
 class PcNativeModule : Module() {
+  companion object {
+    private const val REQ_PICK_ATTACHMENTS = 9417
+    private const val MAX_PICK_FILES = 4
+    private const val MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024
+  }
+
   private val ctx: Context
     get() = appContext.reactContext ?: throw PcException("E_NO_CONTEXT", "React context is gone")
+
+  @Volatile
+  private var pendingPickPromise: Promise? = null
+
+  private fun readPickedUri(context: Context, uri: Uri): Map<String, Any> {
+    val resolver = context.contentResolver
+    var displayName: String? = null
+    var reportedSize = -1L
+    resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+      if (cursor.moveToFirst()) {
+        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        if (nameIdx >= 0 && !cursor.isNull(nameIdx)) {
+          displayName = cursor.getString(nameIdx)
+        }
+        val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+        if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+          reportedSize = cursor.getLong(sizeIdx)
+        }
+      }
+    }
+    val safeName = displayName?.trim()?.takeIf { it.isNotEmpty() }
+      ?: uri.lastPathSegment?.substringAfterLast('/')?.trim()?.takeIf { it.isNotEmpty() }
+      ?: "attachment"
+    if (reportedSize > MAX_ATTACHMENT_BYTES) {
+      throw PcException("E_FILE_TOO_LARGE", "$safeName exceeds 15 MB limit")
+    }
+    val mimeType = resolver.getType(uri)?.trim()?.takeIf { it.isNotEmpty() } ?: "application/octet-stream"
+    val bytes = resolver.openInputStream(uri)?.use { input ->
+      val out = ByteArrayOutputStream()
+      val buf = ByteArray(16 * 1024)
+      var total = 0
+      while (true) {
+        val n = input.read(buf)
+        if (n <= 0) break
+        total += n
+        if (total > MAX_ATTACHMENT_BYTES) {
+          throw PcException("E_FILE_TOO_LARGE", "$safeName exceeds 15 MB limit")
+        }
+        out.write(buf, 0, n)
+      }
+      out.toByteArray()
+    } ?: throw PcException("E_PICK_READ", "Could not open $safeName")
+
+    val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+    return mapOf(
+      "name" to safeName,
+      "mimeType" to mimeType,
+      "sizeBytes" to bytes.size,
+      "base64" to b64,
+    )
+  }
 
   override fun definition() = ModuleDefinition {
     Name("PcNative")
 
     OnCreate {
       appContext.reactContext?.let { Notifier.ensureChannels(it) }
+    }
+
+    OnDestroy {
+      pendingPickPromise?.resolve(emptyList<Map<String, Any>>())
+      pendingPickPromise = null
+    }
+
+    OnNewIntent { intent ->
+      if (Notifier.isChatDeepLink(intent)) {
+        appContext.reactContext?.let { Notifier.clearChatNotifications(it) }
+      }
+    }
+
+    OnActivityResult { _, payload ->
+      if (payload.requestCode != REQ_PICK_ATTACHMENTS) return@OnActivityResult
+      val promise = pendingPickPromise ?: return@OnActivityResult
+      pendingPickPromise = null
+      val data = payload.data
+      if (payload.resultCode != Activity.RESULT_OK || data == null) {
+        promise.resolve(emptyList<Map<String, Any>>())
+        return@OnActivityResult
+      }
+      val uris = ArrayList<Uri>()
+      val clip = data.clipData
+      if (clip != null) {
+        for (i in 0 until clip.itemCount) {
+          clip.getItemAt(i)?.uri?.let { uris.add(it) }
+        }
+      } else {
+        data.data?.let { uris.add(it) }
+      }
+      val selected = uris.take(MAX_PICK_FILES)
+      if (selected.isEmpty()) {
+        promise.resolve(emptyList<Map<String, Any>>())
+        return@OnActivityResult
+      }
+      val appCtx = appContext.reactContext?.applicationContext
+      if (appCtx == null) {
+        promise.reject(PcException("E_NO_CONTEXT", "React context is gone"))
+        return@OnActivityResult
+      }
+      Thread {
+        try {
+          val items = selected.map { uri -> readPickedUri(appCtx, uri) }
+          promise.resolve(items)
+        } catch (e: PcException) {
+          promise.reject(e)
+        } catch (e: Exception) {
+          promise.reject(PcException("E_PICK_READ", e.message ?: "Failed to read attachment", e))
+        }
+      }.start()
     }
 
     // ---- settings shared with the push service
@@ -55,6 +168,32 @@ class PcNativeModule : Module() {
         .putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       ctx.startActivity(i)
     }
+    Function("clearChatNotifications") { Notifier.clearChatNotifications(ctx) }
+
+    // ---- chat attachment picker (Android SAF ACTION_OPEN_DOCUMENT; zero extra permissions)
+    AsyncFunction("pickAttachments") { kind: String, promise: Promise ->
+      val activity = appContext.currentActivity
+      if (activity == null) {
+        promise.reject(PcException("E_NO_ACTIVITY", "Open the app to pick attachments"))
+        return@AsyncFunction
+      }
+      pendingPickPromise?.resolve(emptyList<Map<String, Any>>())
+      pendingPickPromise = promise
+      val mime = if (kind == "image") "image/*" else "*/*"
+      val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = mime
+        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      }
+      try {
+        @Suppress("DEPRECATION")
+        activity.startActivityForResult(intent, REQ_PICK_ATTACHMENTS)
+      } catch (e: Exception) {
+        pendingPickPromise = null
+        promise.reject(PcException("E_PICK_LAUNCH", e.message ?: "Could not open file picker", e))
+      }
+    }.runOnQueue(Queues.MAIN)
 
     // ---- live download progress (Android 16 Live Updates / Now Bar; see LiveDownloads)
     Function("liveStatus") {

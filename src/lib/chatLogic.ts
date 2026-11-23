@@ -4,6 +4,15 @@ export type ChatEngine = 'claude' | 'gemini';
 export type ChatRole = 'user' | 'assistant' | 'system';
 export type ChatStatus = 'pending' | 'done' | 'error';
 
+export type ChatAttachment = {
+  id: string;
+  name: string;
+  mime_type: string;
+  size_bytes: number;
+  kind: 'image' | 'file';
+  url: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: ChatRole;
@@ -15,6 +24,7 @@ export type ChatMessage = {
   client_id?: string | null;
   reply_to?: string | null;
   kind?: string;
+  attachments?: ChatAttachment[];
   optimistic?: boolean;
 };
 
@@ -289,4 +299,14 @@ export function formatComposerChipLabel(
   const m = shortModelLabel(modelId, modelLabel) || (engine === 'gemini' ? 'Gemini' : 'Claude');
   const e = shortEffortLabel(effort);
   return e ? `${m} · ${e}` : m;
+}
+
+/** Human-readable byte size for chat file attachment chips. */
+export function formatAttachmentSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
 }

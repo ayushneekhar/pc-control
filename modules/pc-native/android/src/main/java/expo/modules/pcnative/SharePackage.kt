@@ -31,9 +31,15 @@ class SharePackage : Package {
     listOf(object : ReactActivityLifecycleListener {
       override fun onCreate(activity: Activity, savedInstanceState: Bundle?) {
         if (savedInstanceState == null) SharedText.from(activity.intent)
+        if (Notifier.isChatDeepLink(activity.intent)) {
+          Notifier.clearChatNotifications(activity.applicationContext)
+        }
       }
       override fun onNewIntent(intent: Intent): Boolean {
         SharedText.from(intent)
+        if (Notifier.isChatDeepLink(intent)) {
+          Notifier.clearChatNotifications(activityContext.applicationContext)
+        }
         return false // let React Native see it too (deep links)
       }
     })

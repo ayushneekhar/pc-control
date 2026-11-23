@@ -1,5 +1,6 @@
 package expo.modules.pcnative
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -8,6 +9,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Bundle
 import java.net.HttpURLConnection
 import java.net.URL
 import androidx.core.app.NotificationCompat
@@ -18,9 +20,12 @@ object Notifier {
   const val CH_REQUESTS = "root_requests"
   const val CH_RESULTS = "root_results"
   const val CH_MESSAGES = "messages"
+  const val CH_CHAT = "cat_chat"
   private const val ID_REQUEST = 2
   private const val ID_RESULT = 3
   private const val ID_MESSAGE = 4
+  private const val EXTRA_CATEGORY = "pc_control_cat"
+  private const val TAG_CHAT_PREFIX = "chat_"
 
   /** Router categories (pc-api CATEGORIES) that get their own Android channel, so each can be tuned in system
    *  settings too. Root approvals/results use the root channels above; anything else uses CH_MESSAGES. */
@@ -33,6 +38,7 @@ object Notifier {
     "system" to Pair("Backups & system alerts", NotificationManager.IMPORTANCE_HIGH),
     "usage_limits" to Pair("Usage limits", NotificationManager.IMPORTANCE_HIGH),
     "keyring" to Pair("Keyring locked", NotificationManager.IMPORTANCE_HIGH),
+    "chat" to Pair("Agent chat", NotificationManager.IMPORTANCE_HIGH),
   )
 
   fun ensureChannels(ctx: Context) {
@@ -126,13 +132,19 @@ object Notifier {
       sighting != null -> open(ctx, sighting, id.hashCode())
       cat == "usage_limits" -> open(ctx, "agent-settings", id.hashCode())
       cat == "keyring" -> open(ctx, "routes?unlockKeyring=1", id.hashCode())
+      cat == "chat" -> open(ctx, "chat", id.hashCode())
       else -> open(ctx, "routes", id.hashCode())
     }
     val b = base(ctx, ch, title, body).setPriority(NotificationCompat.PRIORITY_HIGH).setContentIntent(tap)
+    if (cat == "chat") {
+      b.setCategory(NotificationCompat.CATEGORY_MESSAGE)
+      b.addExtras(Bundle().apply { putString(EXTRA_CATEGORY, "chat") })
+    }
     val pic = image?.let { fetchImage(ctx, it) }
     if (pic != null) b.setLargeIcon(pic).setStyle(NotificationCompat.BigPictureStyle().bigPicture(pic)
       .bigLargeIcon(null as Bitmap?).setSummaryText(body))
-    post(ctx, id, ID_MESSAGE, b)
+    val tag = if (cat == "chat") "$TAG_CHAT_PREFIX$id" else id
+    post(ctx, tag, ID_MESSAGE, b)
   }
 
   /** The notification's picture from pc-api ("/pc/api/notify/image/<id>"), over the tailnet; null on any failure
@@ -157,5 +169,38 @@ object Notifier {
   /** The request was decided, expired or cancelled elsewhere: drop its notification. */
   fun dismiss(ctx: Context, id: String) {
     NotificationManagerCompat.from(ctx).cancel(id, ID_REQUEST)
+  }
+
+  /** Cancel every active chat notification without touching root approvals or download notifications. */
+  fun clearChatNotifications(ctx: Context): Int {
+    val nm = ctx.getSystemService(NotificationManager::class.java) ?: return 0
+    var cleared = 0
+    for (sbn in nm.activeNotifications) {
+      val notif = sbn.notification ?: continue
+      val ch = notif.channelId
+      if (ch == CH_REQUESTS || ch == CH_RESULTS) continue
+      val isChat =
+        ch == CH_CHAT ||
+        sbn.tag?.startsWith(TAG_CHAT_PREFIX) == true ||
+        notif.extras?.getString(EXTRA_CATEGORY) == "chat" ||
+        (ch == CH_MESSAGES && sbn.id == ID_MESSAGE && isLegacyChatTitle(notif.extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString()))
+      if (isChat) {
+        nm.cancel(sbn.tag, sbn.id)
+        cleared++
+      }
+    }
+    return cleared
+  }
+
+  private fun isLegacyChatTitle(title: String?): Boolean {
+    if (title.isNullOrBlank()) return false
+    return title == "Gemini" || title == "Claude" || title.startsWith("Gemini ·") || title.startsWith("Claude ·")
+  }
+
+  /** Returns true when an intent is the pccontrol://chat deep link (e.g. tapping a chat notification). */
+  fun isChatDeepLink(intent: Intent?): Boolean {
+    val uri = intent?.data ?: return false
+    return uri.scheme?.equals("pccontrol", ignoreCase = true) == true &&
+      uri.host?.equals("chat", ignoreCase = true) == true
   }
 }

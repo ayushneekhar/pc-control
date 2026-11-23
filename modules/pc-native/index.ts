@@ -52,6 +52,13 @@ export type CrashReport = {
   trace_b64?: string | null;
 };
 
+export type PickedAttachment = {
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  base64: string;
+};
+
 export type RootApprovalInput = {
   decision: 'approve' | 'deny';
   id: string;
@@ -107,6 +114,10 @@ export type PcNativeModule = {
   pushRegister(): Promise<{ token: string; registered: boolean; error: string | null }>;
   notificationsEnabled(): boolean;
   openNotificationSettings(): void;
+  /** Cancel all active chat notifications without touching root approvals or download notifications. */
+  clearChatNotifications?(): number;
+  /** Pick up to 4 images or files via Android's system document picker (max 15 MB each). Empty array on cancel. */
+  pickAttachments?(kind: 'image' | 'file'): Promise<PickedAttachment[]>;
   liveStatus(): LiveStatus;
   /** Start live download progress for these active downloads (pc-api ids). false = not started (notifications
    *  off, the user already stopped it for all of them, or Android refused the foreground service). */

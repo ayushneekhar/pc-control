@@ -234,7 +234,7 @@ export default function VitalsScreen() {
               {live ? `Up ${upFor(v.uptime)} · live` : 'Disconnected, retrying…'}
             </Text>
           </View>
-        ) : 'Live from the laptop'
+        ) : undefined
       }
     >
       {err && !v ? <Banner tone="bad" title="Can't reach /vitals">{err}</Banner> : null}
@@ -488,11 +488,7 @@ export default function VitalsScreen() {
                   <Text style={{ color: t.textDim }}>Sampling…</Text>
                 </Card>
               )
-            ) : (
-              <Text style={{ color: t.textFaint, fontSize: 13 }}>
-                Off. Sampling processes costs a little CPU on the laptop.
-              </Text>
-            )}
+            ) : null}
           </Section>
         </>
       ) : null}

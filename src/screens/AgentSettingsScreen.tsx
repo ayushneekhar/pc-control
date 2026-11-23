@@ -4,6 +4,7 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
+  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -13,7 +14,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Banner, Button, Card, Icon, List, ListRow, Pill, Screen, Section, StatusDot } from '../components/ui';
+import { Banner, Button, Card, Icon, List, ListRow, Pill, Screen, Section, StatusDot, Tone } from '../components/ui';
 import {
   AgentEngine,
   AgentOption,
@@ -31,7 +32,17 @@ import {
   setAgent,
   updateAgentSettings,
 } from '../lib/api';
+import { formatResetTime } from '../lib/formatResetTime';
 import { radius, screenPad, space, useTheme } from '../theme';
+
+const ANTHROPIC_ICON = require('../../assets/brand-anthropic.png');
+const GEMINI_ICON = require('../../assets/brand-gemini.png');
+
+// Module-level in-memory cache (no native storage lib needed for OTA) so re-entering renders instantly.
+let cachedAgentState: AgentState | null = null;
+let cachedSettings: AgentSettings | null = null;
+let cachedUsage: AgentUsageResponse | null = null;
+let lastAccountCount = 5;
 
 const DEFAULT_AGENT_OPTIONS: AgentOption[] = [
   { id: 'claude', label: 'Claude', model: 'Opus 5.5' },
@@ -39,6 +50,23 @@ const DEFAULT_AGENT_OPTIONS: AgentOption[] = [
 ];
 const AGENT_POLL_MS = 2000;
 const AGENT_POLL_MAX_ATTEMPTS = 15; // 30 s
+const STALE_REPOLL_MS = 2500;
+const STALE_REPOLL_MAX = 4;
+
+type Brand = 'claude' | 'gemini' | 'opencode';
+
+function BrandIcon({ brand, size = 18, color }: { brand: Brand; size?: number; color: string }) {
+  if (brand === 'opencode') {
+    return <Icon name="code-tags" size={size} color={color} />;
+  }
+  return (
+    <Image
+      source={brand === 'claude' ? ANTHROPIC_ICON : GEMINI_ICON}
+      style={{ width: size, height: size, tintColor: color }}
+      resizeMode="contain"
+    />
+  );
+}
 
 function useAppActiveTick() {
   const [tick, setTick] = useState(0);
@@ -133,13 +161,19 @@ function UsageBar({ label, win }: { label: string; win: AgentUsageWindow | null 
   const rem = win?.remaining_pct;
   const pct = rem == null ? 0 : Math.max(0, Math.min(100, rem));
   const barColor = rem == null ? t.textFaint : rem < 15 ? t.bad : rem < 40 ? t.warn : t.ok;
-  const refreshText = win?.refreshes_in
-    ? `Refreshes in ${win.refreshes_in}`
-    : win?.status && win.status.toLowerCase() !== 'quota available'
-      ? win.status
-      : rem != null
-        ? 'Quota available'
-        : '—';
+  const isFullAvailable = rem != null && rem >= 100 && win?.status?.toLowerCase() === 'quota available';
+  const formattedReset = isFullAvailable ? null : formatResetTime(win?.resets_at);
+  const refreshText = isFullAvailable
+    ? 'Quota available'
+    : formattedReset
+      ? formattedReset
+      : win?.refreshes_in
+        ? `Refreshes in ${win.refreshes_in}`
+        : win?.status && win.status.toLowerCase() !== 'quota available'
+          ? win.status
+          : rem != null
+            ? 'Quota available'
+            : '—';
 
   return (
     <View style={{ gap: 5 }}>
@@ -157,15 +191,125 @@ function UsageBar({ label, win }: { label: string; win: AgentUsageWindow | null 
   );
 }
 
-function UsageAccountCard({ acc }: { acc: AgentUsageAccount }) {
+function UsageSkeletonCard() {
   const t = useTheme();
-  const harnessLabel = acc.harness === 'claude' ? 'Claude' : 'Gemini';
-  const icon = acc.harness === 'claude' ? 'creation' : 'google';
+  return (
+    <Card style={{ gap: space(3) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2.5) }}>
+        <View style={[st.skelCircle, { backgroundColor: t.cardAlt }]} />
+        <View style={{ flex: 1, gap: 6 }}>
+          <View style={[st.skelLine, { width: '58%', height: 14, backgroundColor: t.cardAlt }]} />
+          <View style={[st.skelLine, { width: '32%', height: 11, backgroundColor: t.cardAlt }]} />
+        </View>
+        <View style={[st.skelPill, { backgroundColor: t.cardAlt }]} />
+      </View>
+      <View style={{ gap: space(2.5) }}>
+        {[0, 1].map((i) => (
+          <View key={i} style={{ gap: 5 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+              <View style={[st.skelLine, { width: 76, height: 12, backgroundColor: t.cardAlt }]} />
+              <View style={[st.skelLine, { width: 48, height: 12, backgroundColor: t.cardAlt }]} />
+            </View>
+            <View style={[st.barTrack, { backgroundColor: t.cardAlt }]} />
+            <View style={[st.skelLine, { width: 116, height: 11, backgroundColor: t.cardAlt }]} />
+          </View>
+        ))}
+      </View>
+    </Card>
+  );
+}
+
+function shortModelName(model: string): string {
+  const idx = model.indexOf('/');
+  return idx >= 0 ? model.slice(idx + 1) : model;
+}
+
+function OpenCodeUsageCard({ acc }: { acc: AgentUsageAccount }) {
+  const t = useTheme();
+  const ds = acc.deepseek;
+  const zen = acc.zen;
+  const active = acc.signed_in && !acc.error;
 
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2.5) }}>
-        <Icon name={icon} size={20} color={acc.signed_in && !acc.error ? t.accent : t.textFaint} />
+        <BrandIcon brand="opencode" size={20} color={active ? t.accent : t.textFaint} />
+        <View style={{ flex: 1, gap: 1 }}>
+          <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }} numberOfLines={1}>
+            {acc.label}
+          </Text>
+        </View>
+        <Pill label="OpenCode" tone="dim" />
+      </View>
+
+      {acc.error ? (
+        <Text style={{ color: t.bad, fontSize: 12.5, lineHeight: 18 }}>{acc.error}</Text>
+      ) : (
+        <View style={{ gap: space(2.5) }}>
+          <View style={st.ocRow}>
+            <Text style={{ color: t.textDim, fontSize: 13 }}>DeepSeek balance</Text>
+            {ds?.error ? (
+              <Text style={{ color: t.bad, fontSize: 12.5, flexShrink: 1, textAlign: 'right' }} numberOfLines={1}>
+                {ds.error}
+              </Text>
+            ) : ds?.formatted ? (
+              <Text style={{ color: t.text, fontSize: 14, fontWeight: '600', fontVariant: ['tabular-nums'] }}>
+                {ds.formatted} left
+              </Text>
+            ) : (
+              <Text style={{ color: t.textFaint, fontSize: 13 }}>—</Text>
+            )}
+          </View>
+
+          {zen?.status === 'ok' ? (
+            <View style={[st.ocZenBox, { backgroundColor: t.cardAlt }]}>
+              <View style={st.ocRow}>
+                <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500' }}>
+                  Zen ({zen.days ?? 7}d)
+                </Text>
+                <Text style={{ color: t.text, fontSize: 12.5, fontWeight: '600', fontVariant: ['tabular-nums'] }}>
+                  {(zen.messages ?? 0).toLocaleString()} msgs · {zen.total_cost ?? '$0.00'}
+                </Text>
+              </View>
+              {zen.models?.length ? (
+                <View style={{ gap: 4, marginTop: 2 }}>
+                  {zen.models.map((m) => (
+                    <View key={m.model} style={st.ocRow}>
+                      <Text style={{ color: t.textFaint, fontSize: 12, flex: 1 }} numberOfLines={1}>
+                        {shortModelName(m.model)}
+                      </Text>
+                      <Text style={{ color: t.textDim, fontSize: 12, fontVariant: ['tabular-nums'] }}>
+                        {m.messages.toLocaleString()} msgs
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+            </View>
+          ) : zen?.error ? (
+            <Text style={{ color: t.textFaint, fontSize: 12 }}>Zen: {zen.error}</Text>
+          ) : null}
+        </View>
+      )}
+    </Card>
+  );
+}
+
+function UsageAccountCard({ acc }: { acc: AgentUsageAccount }) {
+  const t = useTheme();
+  if (acc.harness === 'opencode') {
+    return <OpenCodeUsageCard acc={acc} />;
+  }
+  const harnessLabel = acc.harness === 'claude' ? 'Claude' : 'Gemini';
+
+  return (
+    <Card style={{ gap: space(3) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2.5) }}>
+        <BrandIcon
+          brand={acc.harness}
+          size={19}
+          color={acc.signed_in && !acc.error ? t.accent : t.textFaint}
+        />
         <View style={{ flex: 1, gap: 1 }}>
           <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }} numberOfLines={1}>
             {acc.email || acc.label}
@@ -210,17 +354,6 @@ function HarnessSection({
   const switching = pending !== null || Boolean(state?.switching);
   const unavailable = state != null && !state.available;
   const disabled = !state || unavailable || switching;
-  const selectedActive = state ? (selected === 'claude' ? state.claude_active : state.gemini_active) : false;
-
-  const statusText = switching
-    ? 'Switching…'
-    : !state || unavailable
-      ? 'Unavailable'
-      : selectedActive
-        ? 'Running'
-        : 'Stopped';
-
-  const dot = switching ? 'warn' : !state || unavailable ? 'faint' : selectedActive ? 'ok' : 'warn';
 
   return (
     <Card style={{ gap: space(3) }}>
@@ -228,6 +361,7 @@ function HarnessSection({
         {options.map((opt) => {
           const on = opt.id === selected;
           const accentOn = on && !unavailable && state != null;
+          const fg = accentOn ? t.onAccent : t.textDim;
           return (
             <Pressable
               key={opt.id}
@@ -241,8 +375,9 @@ function HarnessSection({
                 accentOn ? { backgroundColor: t.accent } : on ? { backgroundColor: t.card } : null,
               ]}
             >
+              <BrandIcon brand={opt.id} size={15} color={fg} />
               <Text
-                style={[st.agentSegText, { color: accentOn ? t.onAccent : t.textDim }]}
+                style={[st.agentSegText, { color: fg }]}
                 numberOfLines={1}
                 adjustsFontSizeToFit
                 minimumFontScale={0.78}
@@ -252,11 +387,6 @@ function HarnessSection({
             </Pressable>
           );
         })}
-      </View>
-
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-        <StatusDot tone={dot} />
-        <Text style={{ color: t.textDim, fontSize: 13 }}>{statusText}</Text>
       </View>
 
       {unavailable ? (
@@ -279,22 +409,24 @@ export default function AgentSettingsScreen() {
   const nav = useNavigation<any>();
   const tick = useAppActiveTick();
 
-  // Harness state
-  const [agentState, setAgentState] = useState<AgentState | null>(null);
+  // Harness state (hydrated from module-level cache for zero layout shift on re-entry)
+  const [agentState, setAgentState] = useState<AgentState | null>(cachedAgentState);
   const [pendingEngine, setPendingEngine] = useState<AgentEngine | null>(null);
   const [agentErr, setAgentErr] = useState<string | null>(null);
   const mounted = useRef(true);
   const switchSeq = useRef(0);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const staleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const staleAttempts = useRef(0);
   const pendingRef = useRef<AgentEngine | null>(null);
 
   // Usage state
-  const [usage, setUsage] = useState<AgentUsageResponse | null>(null);
-  const [usageLoading, setUsageLoading] = useState(true);
+  const [usage, setUsage] = useState<AgentUsageResponse | null>(cachedUsage);
+  const [usageLoading, setUsageLoading] = useState(cachedUsage === null);
   const [usageErr, setUsageErr] = useState<string | null>(null);
 
   // Settings state
-  const [settings, setSettings] = useState<AgentSettings | null>(null);
+  const [settings, setSettings] = useState<AgentSettings | null>(cachedSettings);
   const [settingsErr, setSettingsErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -311,19 +443,28 @@ export default function AgentSettingsScreen() {
     }
   }, []);
 
+  const clearStaleTimer = useCallback(() => {
+    if (staleTimer.current) {
+      clearTimeout(staleTimer.current);
+      staleTimer.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
       clearPoll();
+      clearStaleTimer();
     };
-  }, [clearPoll]);
+  }, [clearPoll, clearStaleTimer]);
 
   const loadAgent = useCallback(async () => {
     if (pendingRef.current !== null) return;
     try {
       const next = await getAgent();
       if (!mounted.current || pendingRef.current !== null) return;
+      cachedAgentState = next;
       setAgentState(next);
       setAgentErr(null);
     } catch (e) {
@@ -336,6 +477,7 @@ export default function AgentSettingsScreen() {
     try {
       const next = await getAgentSettings();
       if (!mounted.current) return;
+      cachedSettings = next;
       setSettings(next);
       setSettingsErr(null);
     } catch (e) {
@@ -344,22 +486,39 @@ export default function AgentSettingsScreen() {
     }
   }, []);
 
-  const loadUsage = useCallback(async (force = false) => {
-    setUsageLoading(true);
-    try {
-      const next = await getAgentUsage(force);
-      if (!mounted.current) return;
-      setUsage(next);
-      setUsageErr(null);
-      // Reload settings once usage completes so newly discovered emails appear in the Gemini instance picker.
-      void loadSettings();
-    } catch (e) {
-      if (!mounted.current) return;
-      setUsageErr((e as Error).message);
-    } finally {
-      if (mounted.current) setUsageLoading(false);
-    }
-  }, [loadSettings]);
+  const loadUsage = useCallback(async (force = false, silent = false) => {
+    const run = async (doForce: boolean, isSilent: boolean) => {
+      if (!isSilent) setUsageLoading(true);
+      clearStaleTimer();
+      if (doForce) staleAttempts.current = 0;
+      try {
+        const next = await getAgentUsage(doForce);
+        if (!mounted.current) return;
+        cachedUsage = next;
+        if (next.accounts.length > 0) {
+          lastAccountCount = next.accounts.length;
+        }
+        setUsage(next);
+        setUsageErr(null);
+        // Reload settings once usage completes so newly discovered emails appear in the Gemini instance picker.
+        void loadSettings();
+        if (next.stale && staleAttempts.current < STALE_REPOLL_MAX) {
+          staleAttempts.current += 1;
+          staleTimer.current = setTimeout(() => {
+            if (mounted.current) void run(false, true);
+          }, STALE_REPOLL_MS);
+        } else if (!next.stale) {
+          staleAttempts.current = 0;
+        }
+      } catch (e) {
+        if (!mounted.current) return;
+        setUsageErr((e as Error).message);
+      } finally {
+        if (mounted.current && !isSilent) setUsageLoading(false);
+      }
+    };
+    await run(force, silent);
+  }, [loadSettings, clearStaleTimer]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -423,6 +582,7 @@ export default function AgentSettingsScreen() {
         const active = target === 'claude' ? cur.claude_active : cur.gemini_active;
         if (active) {
           pendingRef.current = null;
+          cachedAgentState = cur;
           setAgentState(cur);
           setPendingEngine(null);
           setAgentErr(null);
@@ -448,7 +608,10 @@ export default function AgentSettingsScreen() {
     setSettingsErr(null);
     try {
       const updated = await updateAgentSettings(patch);
-      if (mounted.current) setSettings(updated);
+      if (mounted.current) {
+        cachedSettings = updated;
+        setSettings(updated);
+      }
     } catch (e) {
       if (mounted.current) setSettingsErr((e as Error).message);
     } finally {
@@ -501,14 +664,39 @@ export default function AgentSettingsScreen() {
   const geminiModelLabel =
     gemini?.models.find((m) => m.id === gemini.model)?.label ?? gemini?.model ?? '—';
   const geminiInstObj = gemini?.instances.find((i) => i.id === gemini.instance_id);
-  const geminiInstLabel = geminiInstObj
-    ? geminiInstObj.email
-      ? `${geminiInstObj.label} · ${geminiInstObj.email}`
-      : geminiInstObj.label
-    : gemini?.instance_id ?? '—';
+
+  const selectedEngine: AgentEngine = pendingEngine ?? agentState?.engine ?? 'claude';
+  const switching = pendingEngine !== null || Boolean(agentState?.switching);
+  const unavailable = agentState != null && !agentState.available;
+  const selectedActive = agentState
+    ? selectedEngine === 'claude'
+      ? agentState.claude_active
+      : agentState.gemini_active
+    : false;
+  const statusText = switching
+    ? 'Switching…'
+    : !agentState || unavailable
+      ? 'Unavailable'
+      : selectedActive
+        ? 'Running'
+        : 'Stopped';
+  const statusTone: Tone = switching ? 'warn' : !agentState || unavailable ? 'faint' : selectedActive ? 'ok' : 'warn';
+
+  const isStale = Boolean(usage?.stale);
 
   return (
-    <Screen title="Agent settings" onBack={() => nav.goBack()} onRefresh={onRefresh} refreshing={refreshing}>
+    <Screen
+      title="Agent settings"
+      onBack={() => nav.goBack()}
+      onRefresh={onRefresh}
+      refreshing={refreshing}
+      right={
+        <View style={st.headerStatus} accessibilityLabel={`Agent status: ${statusText}`}>
+          <StatusDot tone={statusTone} />
+          <Text style={{ color: t.textDim, fontSize: 13, fontWeight: '500' }}>{statusText}</Text>
+        </View>
+      }
+    >
       <Section label="Harness">
         <HarnessSection state={agentState} pending={pendingEngine} err={agentErr} onSelect={selectEngine} />
       </Section>
@@ -516,20 +704,27 @@ export default function AgentSettingsScreen() {
       <Section
         label="Usage"
         right={
-          usageLoading ? (
-            <ActivityIndicator size="small" color={t.accent} />
-          ) : (
-            <Pressable onPress={() => void loadUsage(true)} hitSlop={8}>
-              <Text style={{ color: t.accent, fontSize: 12.5, fontWeight: '500' }}>Refresh</Text>
-            </Pressable>
-          )
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
+            {isStale ? (
+              <Text style={{ color: t.textFaint, fontSize: 11.5 }}>updating…</Text>
+            ) : null}
+            {usageLoading ? (
+              <ActivityIndicator size="small" color={t.accent} />
+            ) : (
+              <Pressable onPress={() => void loadUsage(true)} hitSlop={8}>
+                <Text style={{ color: t.accent, fontSize: 12.5, fontWeight: '500' }}>Refresh</Text>
+              </Pressable>
+            )}
+          </View>
         }
       >
         {usageErr ? <Banner tone="bad" title="Usage unavailable">{usageErr}</Banner> : null}
         {!usage && usageLoading ? (
-          <Card>
-            <Text style={{ color: t.textDim, fontSize: 13 }}>Loading account usage…</Text>
-          </Card>
+          <View style={{ gap: space(2.5) }}>
+            {Array.from({ length: lastAccountCount }, (_, i) => (
+              <UsageSkeletonCard key={i} />
+            ))}
+          </View>
         ) : usage?.accounts?.length ? (
           <View style={{ gap: space(2.5) }}>
             {usage.accounts.map((acc) => (
@@ -545,11 +740,11 @@ export default function AgentSettingsScreen() {
 
       {settingsErr ? <Banner tone="bad" title="Agent settings">{settingsErr}</Banner> : null}
 
-      <Section label="Claude">
+      <Section label="Claude" icon={<BrandIcon brand="claude" size={14} color={t.textDim} />}>
         <Card style={{ gap: space(3), padding: 0, overflow: 'hidden' }}>
           <View>
             <ListRow
-              icon="account-outline"
+              leading={<BrandIcon brand="claude" size={18} color={t.textDim} />}
               title="Account"
               trailing={claude?.account || '—'}
               chevron={false}
@@ -590,13 +785,8 @@ export default function AgentSettingsScreen() {
               }
             />
           </View>
-          <View style={{ paddingHorizontal: space(4), paddingBottom: space(4), gap: space(2.5) }}>
-            <Text style={{ color: t.textFaint, fontSize: 12.5 }}>
-              {agentState?.engine === 'claude'
-                ? 'Applies after restart.'
-                : 'Applies next time you switch to Claude.'}
-            </Text>
-            {agentState?.engine === 'claude' ? (
+          {agentState?.engine === 'claude' ? (
+            <View style={{ paddingHorizontal: space(4), paddingBottom: space(4) }}>
               <Button
                 label="Restart agent now"
                 kind="subtle"
@@ -604,16 +794,16 @@ export default function AgentSettingsScreen() {
                 busy={restartingClaude}
                 onPress={restartClaude}
               />
-            ) : null}
-          </View>
+            </View>
+          ) : null}
         </Card>
       </Section>
 
-      <Section label="Gemini">
+      <Section label="Gemini" icon={<BrandIcon brand="gemini" size={14} color={t.textDim} />}>
         <Card style={{ gap: space(3), padding: 0, overflow: 'hidden' }}>
           <View>
             <ListRow
-              icon="account-switch-outline"
+              leading={<BrandIcon brand="gemini" size={18} color={t.textDim} />}
               title="Account"
               subtitle={geminiInstObj?.email || (geminiInstObj && !geminiInstObj.signed_in ? 'Not signed in' : undefined)}
               trailing={geminiInstObj?.label ?? gemini?.instance_id ?? '—'}
@@ -638,7 +828,6 @@ export default function AgentSettingsScreen() {
             <ListRow
               icon="autorenew"
               title="Auto-rotate on usage limit"
-              subtitle="Move to the next signed-in account on limit"
               chevron={false}
               trailing={
                 <Switch
@@ -687,19 +876,11 @@ export default function AgentSettingsScreen() {
               }
             />
           </View>
-          <View style={{ paddingHorizontal: space(4), paddingBottom: space(4) }}>
-            <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-              Applies on the next new thread. Switching account ({geminiInstLabel}) starts a fresh thread.
-            </Text>
-          </View>
         </Card>
       </Section>
 
       <Section label="Conversation">
-        <Card style={{ gap: space(2.5) }}>
-          <Text style={{ color: t.textDim, fontSize: 13, lineHeight: 18 }}>
-            Clear the active agent&apos;s conversation history and start a fresh session (keeps NOTES.md).
-          </Text>
+        <Card>
           <Button
             label="Start fresh"
             kind="subtle"
@@ -716,9 +897,12 @@ export default function AgentSettingsScreen() {
 }
 
 const st = StyleSheet.create({
+  headerStatus: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingBottom: 6 },
   agentSeg: { flexDirection: 'row', padding: 3, borderRadius: radius.sm, gap: 3 },
   agentSegBtn: {
     flex: 1,
+    flexDirection: 'row',
+    gap: 6,
     minHeight: 38,
     alignItems: 'center',
     justifyContent: 'center',
@@ -730,6 +914,11 @@ const st = StyleSheet.create({
   agentSegText: { fontSize: 13.5, fontWeight: '600', textAlign: 'center' },
   barTrack: { height: 6, borderRadius: 3, overflow: 'hidden' },
   barFill: { height: '100%', borderRadius: 3 },
+  skelCircle: { width: 20, height: 20, borderRadius: 10 },
+  skelLine: { borderRadius: 4 },
+  skelPill: { width: 54, height: 22, borderRadius: radius.pill },
+  ocRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) },
+  ocZenBox: { borderRadius: radius.sm, padding: space(3), gap: 6 },
   sheetWrap: { flex: 1, justifyContent: 'flex-end' },
   sheet: { maxHeight: '78%', borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, paddingTop: space(2) },
   grabber: { width: 38, height: 4, borderRadius: 2, alignSelf: 'center' },

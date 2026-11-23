@@ -303,7 +303,7 @@ export default function RootScreen() {
         <Section label="Waiting for you">
           {pending.length === 0 ? (
             <Card>
-              <Empty icon="shield-check-outline" title="Nothing waiting" body="When the agent asks to run something as root, it shows up here with the exact command." />
+              <Empty icon="shield-check-outline" title="Nothing waiting" />
             </Card>
           ) : (
             pending.map((r) => <PendingCard key={r.id} req={r} decision={decision} onOpen={() => setOpen(r.id)} />)

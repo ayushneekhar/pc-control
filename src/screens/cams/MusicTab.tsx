@@ -248,7 +248,6 @@ export function MusicTab({
         />
         <Button label="Play" icon="play" busy={playing} disabled={!url.trim()} onPress={() => play(url.trim())} />
       </View>
-      <Text style={{ color: t.textFaint, fontSize: 12 }}>Or in YouTube: Share → PC Control.</Text>
       {err ? <Banner tone="bad" title={err} /> : null}
 
       <View style={[st_.card, { backgroundColor: t.card }]}>

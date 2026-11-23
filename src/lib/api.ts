@@ -263,9 +263,34 @@ export type AgentUsageWindow = {
   status?: string | null;
 };
 
+export type AgentUsageDeepSeek = {
+  is_available?: boolean;
+  currency?: string;
+  total_balance?: number;
+  formatted?: string;
+  error?: string;
+};
+
+export type AgentUsageZenModel = {
+  model: string;
+  messages: number;
+  cost?: string | null;
+};
+
+export type AgentUsageZen = {
+  status: string;
+  days?: number;
+  sessions?: number;
+  messages?: number;
+  total_cost?: string;
+  zen_messages?: number;
+  models?: AgentUsageZenModel[];
+  error?: string;
+};
+
 export type AgentUsageAccount = {
   id: string;
-  harness: AgentEngine;
+  harness: AgentEngine | 'opencode';
   label: string;
   email: string | null;
   signed_in: boolean;
@@ -273,11 +298,14 @@ export type AgentUsageAccount = {
   error: string | null;
   five_hour: AgentUsageWindow | null;
   weekly: AgentUsageWindow | null;
+  deepseek?: AgentUsageDeepSeek | null;
+  zen?: AgentUsageZen | null;
 };
 
 export type AgentUsageResponse = {
   ts: number;
   cached: boolean;
+  stale?: boolean;
   accounts: AgentUsageAccount[];
 };
 

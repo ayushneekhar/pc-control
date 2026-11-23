@@ -39,11 +39,11 @@ type Draft = {
   enabled: boolean;
 };
 
-const ACTIONS: { id: AgentAction; icon: string; title: string; body: string }[] = [
-  { id: 'replace_page', icon: 'file-document-edit-outline', title: 'Show my page', body: 'Serve your own HTML instead of the real page.' },
-  { id: 'replace_text', icon: 'find-replace', title: 'Replace text', body: 'Find and replace text in HTML, text, or JSON.' },
-  { id: 'hide', icon: 'eye-off-outline', title: 'Hide elements', body: 'Remove matching elements with CSS selectors.' },
-  { id: 'block', icon: 'cancel', title: 'Block', body: 'Fail the request with a 404 or a connection reset.' },
+const ACTIONS: { id: AgentAction; icon: string; title: string }[] = [
+  { id: 'replace_page', icon: 'file-document-edit-outline', title: 'Show my page' },
+  { id: 'replace_text', icon: 'find-replace', title: 'Replace text' },
+  { id: 'hide', icon: 'eye-off-outline', title: 'Hide elements' },
+  { id: 'block', icon: 'cancel', title: 'Block' },
 ];
 
 const ACTION_NAMES: Record<AgentAction, string> = {
@@ -311,31 +311,25 @@ export default function AgentRuleScreen() {
       ) : null}
 
       {!loading && !rule && params.url ? (
-        <>
-          <Section label="Action">
-            <List>
-              {ACTIONS.map((a, i) => (
-                <ListRow
-                  key={a.id}
-                  icon={a.icon}
-                  title={a.title}
-                  subtitle={a.body}
-                  trailing={
-                    busy === a.id ? (
-                      <Icon name="progress-clock" size={20} color={t.textFaint} />
-                    ) : undefined
-                  }
-                  chevron={busy !== a.id}
-                  last={i === ACTIONS.length - 1}
-                  onPress={() => chooseAction(a.id)}
-                />
-              ))}
-            </List>
-          </Section>
-          <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-            The rule is created immediately with agentview&apos;s from-url match and inserted above the others.
-          </Text>
-        </>
+        <Section label="Action">
+          <List>
+            {ACTIONS.map((a, i) => (
+              <ListRow
+                key={a.id}
+                icon={a.icon}
+                title={a.title}
+                trailing={
+                  busy === a.id ? (
+                    <Icon name="progress-clock" size={20} color={t.textFaint} />
+                  ) : undefined
+                }
+                chevron={busy !== a.id}
+                last={i === ACTIONS.length - 1}
+                onPress={() => chooseAction(a.id)}
+              />
+            ))}
+          </List>
+        </Section>
       ) : null}
 
       {!loading && rule && draft ? (
@@ -403,13 +397,7 @@ export default function AgentRuleScreen() {
                     { id: 'regex', label: 'Regex' },
                   ]}
                 />
-              ) : (
-                <Text style={{ color: t.textFaint, fontSize: 12, lineHeight: 17 }}>
-                  {draft.matchMode === 'exact'
-                    ? 'Matches this exact URL only.'
-                    : `Matches every page on ${host || 'this host'} (${shownMatch}).`}
-                </Text>
-              )}
+              ) : null}
             </Card>
           </Section>
 
@@ -582,8 +570,8 @@ export default function AgentRuleScreen() {
               <Card style={{ gap: space(2) }}>
                 {(
                   [
-                    { id: '404', title: '404 Not Found', body: 'A plain generic page; the site looks missing.' },
-                    { id: 'reset', title: 'Connection reset', body: 'The connection is dropped before the site is fetched.' },
+                    { id: '404', title: '404 Not Found' },
+                    { id: 'reset', title: 'Connection reset' },
                   ] as const
                 ).map((m) => {
                   const on = draft.blockMode === m.id;
@@ -594,10 +582,7 @@ export default function AgentRuleScreen() {
                       style={[st.radioRow, { backgroundColor: on ? t.cardAlt : 'transparent' }]}
                     >
                       <Icon name={on ? 'radiobox-marked' : 'radiobox-blank'} size={20} color={on ? t.text : t.textFaint} />
-                      <View style={{ flex: 1, gap: 1 }}>
-                        <Text style={{ color: t.text, fontSize: 14, fontWeight: '500' }}>{m.title}</Text>
-                        <Text style={{ color: t.textDim, fontSize: 12.5 }}>{m.body}</Text>
-                      </View>
+                      <Text style={{ color: t.text, fontSize: 14, fontWeight: '500', flex: 1 }}>{m.title}</Text>
                     </Pressable>
                   );
                 })}

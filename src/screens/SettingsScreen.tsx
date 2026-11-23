@@ -75,7 +75,7 @@ function AgentRow() {
   const label = s?.engine === 'gemini' ? 'Gemini' : 'Claude';
   const active = s ? (s.engine === 'gemini' ? s.gemini_active : s.claude_active) : false;
   const status = !s
-    ? 'Harness, usage, models & accounts'
+    ? null
     : !s.available
       ? 'Unavailable'
       : s.switching
@@ -89,12 +89,14 @@ function AgentRow() {
         icon="robot-outline"
         title="Agent"
         subtitle={
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 1 }}>
-            {s ? <StatusDot tone={dot} /> : null}
-            <Text style={{ color: t.textFaint, fontSize: 12.5 }} numberOfLines={1}>
-              {status}
-            </Text>
-          </View>
+          status ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 1 }}>
+              <StatusDot tone={dot} />
+              <Text style={{ color: t.textFaint, fontSize: 12.5 }} numberOfLines={1}>
+                {status}
+              </Text>
+            </View>
+          ) : undefined
         }
         chevron
         last
@@ -179,10 +181,6 @@ function TorrentVpn() {
         <KV k="Forwarded port" v={enabled ? (s?.forwarded_port ?? 'Waiting for NAT-PMP…') : '—'} mono={enabled && s?.forwarded_port != null} />
         <KV k="VPN public IP" v={enabled ? (s?.public_ip ?? '—') : '—'} mono={enabled && !!s?.public_ip} />
       </View>
-
-      <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-        Only qBittorrent goes through Proton (WireGuard, Singapore P2P). Tailscale, Jellyfin, Seerr, cams and browsing stay on the normal connection.
-      </Text>
     </Card>
   );
 }
@@ -329,24 +327,14 @@ function Enrollment() {
       {phase.kind === 'error' ? <Banner tone="bad" title="Setup stopped">{phase.message}</Banner> : null}
       {phase.kind === 'waiting' ? (
         <View style={{ gap: space(3) }}>
-          <Text style={{ color: t.textDim, lineHeight: 20 }}>
-            On the laptop, run this in a terminal (or the installer asks for it), and type the code below when asked:
-          </Text>
           <Mono style={{ backgroundColor: t.cardAlt, padding: space(3), borderRadius: radius.md }}>sudo rootd-admin enroll</Mono>
           <View style={[st.code, { backgroundColor: t.accentSoft }]}>
             <Text selectable style={{ color: t.accent, fontFamily: t.mono, fontSize: 26, fontWeight: '600', letterSpacing: 1.5 }}>
               {phase.code}
             </Text>
           </View>
-          <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-            This code is computed on the phone from its own key. Only someone with sudo on the laptop can confirm it, so
-            nothing on the laptop can enroll a key by itself. Waiting for confirmation…
-          </Text>
+          <Text style={{ color: t.textFaint, fontSize: 12.5 }}>Waiting for confirmation…</Text>
         </View>
-      ) : null}
-
-      {store.rootd !== 'ok' && !enrolledHere ? (
-        <Text style={{ color: t.textFaint, fontSize: 13 }}>Install rootd on the laptop first (see the Root tab).</Text>
       ) : null}
 
       <View style={{ flexDirection: 'row', gap: space(2) }}>
@@ -547,9 +535,6 @@ function NotificationPrefs() {
         <Icon name="bell-cog-outline" size={22} color={t.accent} />
         <View style={{ flex: 1 }}>
           <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Where notifications go</Text>
-          <Text style={{ color: t.textDim, fontSize: 13 }}>
-            {open ? 'Per category: the Qwen bot on Telegram, this app, or both.' : 'Masters below. Tap to choose per category.'}
-          </Text>
         </View>
         <Animated.View
           style={{
@@ -590,7 +575,6 @@ function NotificationPrefs() {
               <Icon name={c.icon} size={20} color={c.telegram || c.app ? t.text : t.textFaint} />
               <View style={{ flex: 1, paddingRight: space(1) }}>
                 <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600' }}>{c.label}</Text>
-                <Text style={{ color: t.textFaint, fontSize: 12, lineHeight: 16 }}>{c.description}</Text>
               </View>
               <View style={st.colCell}>
                 {(c.channels ?? ['telegram', 'app']).includes('telegram') ? (
@@ -604,11 +588,6 @@ function NotificationPrefs() {
               <View style={st.colCell}>{sw(c.app, !s.masters.app, (v) => setCat(c.id, 'app', v), `${c.label} in the app`)}</View>
             </View>
           ))}
-          {!s.masters.telegram || !s.masters.app ? (
-            <Text style={{ color: t.textFaint, fontSize: 12.5, paddingHorizontal: space(4), paddingTop: space(2) }}>
-              A channel that is all off ignores its per-category switches (shown greyed).
-            </Text>
-          ) : null}
         </View>
       ) : null}
     </Card>
@@ -663,13 +642,9 @@ function Updates() {
 
       {newer ? (
         <Banner tone="accent" icon="download" title={`New app version: ${newer.versionName} (${newer.versionCode})`}>
-          This one changes native code, so it’s a full APK from GitHub Releases.
-          <Button label="Download APK" compact kind="primary" icon="download" style={{ alignSelf: 'flex-start', marginTop: 8 }} onPress={() => Linking.openURL(APK_URLS.apkUrl)} />
+          <Button label="Download APK" compact kind="primary" icon="download" style={{ alignSelf: 'flex-start', marginTop: 4 }} onPress={() => Linking.openURL(APK_URLS.apkUrl)} />
         </Banner>
       ) : null}
-      <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-        JS-only changes arrive over the air, signed by the laptop and only for this exact build. Native changes need a new APK.
-      </Text>
     </Card>
   );
 }

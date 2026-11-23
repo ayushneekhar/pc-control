@@ -1432,8 +1432,40 @@ class AgentUsageAndSettingsHttpTests(unittest.TestCase):
             ],
             "claude": {
                 "account": "claude@example.com",
-                "five_hour": {"remaining_pct": 70.0, "used_pct": 30.0, "refreshes_in": "2h"},
-                "weekly": {"remaining_pct": 60.0, "used_pct": 40.0, "refreshes_in": "5d"},
+                "signed_in": True,
+                "five_hour": {
+                    "remaining_pct": 70.0,
+                    "used_pct": 30.0,
+                    "refreshes_in": "2h",
+                    "resets_at": "2026-11-23T08:30:00Z",
+                },
+                "weekly": {
+                    "remaining_pct": 60.0,
+                    "used_pct": 40.0,
+                    "refreshes_in": "5d",
+                    "resets_at": "2026-11-28T06:30:00Z",
+                },
+            },
+            "opencode": {
+                "deepseek": {
+                    "is_available": True,
+                    "currency": "USD",
+                    "total_balance": 3.38,
+                    "granted_balance": 0.0,
+                    "topped_up_balance": 3.38,
+                },
+                "zen": {
+                    "status": "ok",
+                    "days": 7,
+                    "sessions": 8,
+                    "messages": 929,
+                    "total_cost": "$0.62",
+                    "zen_messages": 607,
+                    "models": [
+                        {"model": "opencode/deepseek-v4.1-flash-free", "messages": 607, "cost": "$0.0000"},
+                        {"model": "deepseek/deepseek-flash", "messages": 276, "cost": "$0.6153"},
+                    ],
+                },
             },
         }
 
@@ -1441,12 +1473,14 @@ class AgentUsageAndSettingsHttpTests(unittest.TestCase):
             self.usage_calls += 1
             return pcapi.subprocess.CompletedProcess(argv, 0, json.dumps(self.usage_report), "")
 
+        self.usage_cache_file = os.path.join(self.dir, "agent-usage-cache.json")
         pcapi.AGENT_USAGE = pcapi.AgentUsageManager(
             script=self.usage_script,
             run_fn=fake_usage_run,
             clock=lambda: self.now[0],
             ttl=60.0,
             claude_config_path=self.claude_cfg,
+            cache_path=self.usage_cache_file,
         )
         self.claude_agent_cfg = os.path.join(self.dir, "claude-agent.json")
         self.gemini_agent_cfg = os.path.join(self.dir, "gemini-agent.json")
@@ -1475,34 +1509,101 @@ class AgentUsageAndSettingsHttpTests(unittest.TestCase):
         code, r = self.call("GET", "/pc/api/agent/usage")
         self.assertEqual(code, 200)
         self.assertFalse(r["cached"])
+        self.assertFalse(r["stale"])
         self.assertEqual(self.usage_calls, 1)
-        self.assertEqual(len(r["accounts"]), 3)
+        self.assertEqual(len(r["accounts"]), 4)
         self.assertEqual(r["accounts"][0]["status"], "not signed in")
         self.assertFalse(r["accounts"][0]["signed_in"])
         self.assertEqual(r["accounts"][1]["email"], "gem2@gmail.com")
         self.assertEqual(r["accounts"][1]["five_hour"]["remaining_pct"], 88.0)
+        # Duration-only window still gets an absolute UTC resets_at
+        self.assertIsNotNone(r["accounts"][1]["five_hour"]["resets_at"])
+        self.assertTrue(r["accounts"][1]["five_hour"]["resets_at"].endswith("Z"))
         self.assertEqual(r["accounts"][2]["harness"], "claude")
         self.assertEqual(r["accounts"][2]["email"], "claude@example.com")
+        self.assertTrue(r["accounts"][2]["signed_in"])
+        self.assertEqual(r["accounts"][2]["five_hour"]["resets_at"], "2026-11-23T08:30:00Z")
 
-        # Second call within 60 s hits cache
+        # OpenCode / DeepSeek normalization
+        oc = r["accounts"][3]
+        self.assertEqual(oc["id"], "opencode")
+        self.assertEqual(oc["harness"], "opencode")
+        self.assertEqual(oc["label"], "OpenCode / DeepSeek")
+        self.assertIsNone(oc["five_hour"])
+        self.assertIsNone(oc["weekly"])
+        self.assertEqual(oc["deepseek"]["formatted"], "$3.38")
+        self.assertAlmostEqual(oc["deepseek"]["total_balance"], 3.38)
+        self.assertEqual(oc["zen"]["days"], 7)
+        self.assertEqual(oc["zen"]["messages"], 929)
+        self.assertEqual(oc["zen"]["total_cost"], "$0.62")
+        self.assertEqual(len(oc["zen"]["models"]), 2)
+        self.assertEqual(oc["zen"]["models"][0]["messages"], 607)
+
+        # Second call within 60 s hits fresh cache
         self.now[0] += 30.0
         code, r2 = self.call("GET", "/pc/api/agent/usage")
         self.assertEqual(code, 200)
         self.assertTrue(r2["cached"])
+        self.assertFalse(r2["stale"])
         self.assertEqual(self.usage_calls, 1)
 
-        # ?refresh=1 bypasses cache
+        # ?refresh=1 bypasses cache synchronously
         code, r3 = self.call("GET", "/pc/api/agent/usage?refresh=1")
         self.assertEqual(code, 200)
         self.assertFalse(r3["cached"])
+        self.assertFalse(r3["stale"])
         self.assertEqual(self.usage_calls, 2)
 
-        # TTL expiry refetches
+        # TTL expiry serves stale-while-revalidate immediately & refreshes in background
         self.now[0] += 61.0
         code, r4 = self.call("GET", "/pc/api/agent/usage")
         self.assertEqual(code, 200)
-        self.assertFalse(r4["cached"])
+        self.assertTrue(r4["cached"])
+        self.assertTrue(r4["stale"])
+        # Wait briefly for background refresh thread to finish
+        deadline = time.monotonic() + 3.0
+        while self.usage_calls < 3 and time.monotonic() < deadline:
+            time.sleep(0.02)
         self.assertEqual(self.usage_calls, 3)
+        code, r5 = self.call("GET", "/pc/api/agent/usage")
+        self.assertEqual(code, 200)
+        self.assertTrue(r5["cached"])
+        self.assertFalse(r5["stale"])
+
+    def test_usage_disk_cache_survives_restart_without_blocking(self):
+        # Prime disk cache
+        code, _ = self.call("GET", "/pc/api/agent/usage")
+        self.assertEqual(code, 200)
+        self.assertTrue(os.path.isfile(self.usage_cache_file))
+
+        # Simulate restart with a slow/blocking ai-usage
+        unblock = threading.Event()
+        bg_started = threading.Event()
+
+        def slow_run(argv, **kw):
+            bg_started.set()
+            unblock.wait(timeout=5.0)
+            self.usage_calls += 1
+            return pcapi.subprocess.CompletedProcess(argv, 0, json.dumps(self.usage_report), "")
+
+        pcapi.AGENT_USAGE = pcapi.AgentUsageManager(
+            script=self.usage_script,
+            run_fn=slow_run,
+            clock=lambda: self.now[0],
+            ttl=60.0,
+            claude_config_path=self.claude_cfg,
+            cache_path=self.usage_cache_file,
+        )
+        t0 = time.monotonic()
+        code, r = self.call("GET", "/pc/api/agent/usage")
+        elapsed = time.monotonic() - t0
+        self.assertEqual(code, 200)
+        self.assertTrue(r["cached"])
+        self.assertTrue(r["stale"])
+        self.assertEqual(len(r["accounts"]), 4)
+        self.assertLess(elapsed, 1.0)
+        self.assertTrue(bg_started.wait(timeout=2.0))
+        unblock.set()
 
     def test_settings_get_update_validation_and_fresh_flag(self):
         # Populate cached emails first

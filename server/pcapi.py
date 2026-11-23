@@ -59,7 +59,7 @@ pc-api is NOT a security boundary for root: it runs as the agent's user, so it i
 by rootd. Only the phone's signature releases a command. The tailnet identity check below just keeps
 other tailnet nodes/users away from the service controls.
 """
-import base64, glob, hashlib, ipaddress, json, os, queue, secrets, re, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse
+import base64, datetime, glob, hashlib, ipaddress, json, os, queue, secrets, re, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1422,6 +1422,9 @@ T3_PROVIDERS_DIR = os.environ.get(
     "PCAPI_T3_PROVIDERS_DIR", os.path.join(HOME, ".t3", "userdata", "providers", "antigravity")
 )
 CLAUDE_CONFIG_FILE = os.environ.get("PCAPI_CLAUDE_CONFIG", os.path.join(HOME, ".claude.json"))
+AGENT_USAGE_CACHE_FILE = os.environ.get(
+    "PCAPI_AGENT_USAGE_CACHE", os.path.join(HOME, ".cache", "pc-api", "agent-usage.json")
+)
 AGENT_USAGE_CACHE_TTL = 60.0
 
 CLAUDE_MODELS = (
@@ -1502,6 +1505,33 @@ def _list_t3_antigravity_instances(t3_settings_path=None, t3_providers_dir=None,
     return out
 
 
+_DURATION_PART_RE = re.compile(r"(\d+)\s*([dhms])", re.IGNORECASE)
+
+
+def _duration_to_resets_at(dur):
+    if not dur or not isinstance(dur, str):
+        return None
+    parts = _DURATION_PART_RE.findall(dur)
+    if not parts:
+        return None
+    secs = 0
+    for n_s, unit in parts:
+        n = int(n_s)
+        u = unit.lower()
+        if u == "d":
+            secs += n * 86400
+        elif u == "h":
+            secs += n * 3600
+        elif u == "m":
+            secs += n * 60
+        elif u == "s":
+            secs += n
+    if secs <= 0:
+        return None
+    dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=secs)
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def _normalize_usage_window(win):
     if not isinstance(win, dict):
         return None
@@ -1509,11 +1539,14 @@ def _normalize_usage_window(win):
     used = win.get("used_pct")
     if rem is None and used is None:
         return None
+    resets_at = win.get("resets_at")
+    if not resets_at and win.get("refreshes_in"):
+        resets_at = _duration_to_resets_at(win.get("refreshes_in"))
     return {
         "remaining_pct": rem,
         "used_pct": used,
         "refreshes_in": win.get("refreshes_in"),
-        "resets_at": win.get("resets_at"),
+        "resets_at": resets_at,
         "status": win.get("status"),
     }
 
@@ -1564,36 +1597,160 @@ def _normalize_usage_report(raw, claude_config_path=None):
     claude = raw.get("claude")
     if isinstance(claude, dict):
         c_email = claude.get("account") or _read_claude_email(claude_config_path)
+        c_signed_in = (
+            bool(claude["signed_in"])
+            if "signed_in" in claude
+            else not bool(claude.get("error"))
+        )
         accounts.append({
             "id": "claude",
             "harness": "claude",
             "label": "Claude",
             "email": c_email,
-            "signed_in": not bool(claude.get("error")),
-            "status": None,
+            "signed_in": c_signed_in,
+            "status": claude.get("status"),
             "error": claude.get("error"),
             "five_hour": _normalize_usage_window(claude.get("five_hour")),
             "weekly": _normalize_usage_window(claude.get("weekly")),
+        })
+
+    oc = raw.get("opencode")
+    if isinstance(oc, dict):
+        oc_err = oc.get("error")
+        ds = oc.get("deepseek") if isinstance(oc.get("deepseek"), dict) else {}
+        zen = oc.get("zen") if isinstance(oc.get("zen"), dict) else {}
+
+        ds_info = None
+        if ds:
+            if ds.get("error"):
+                ds_info = {"error": str(ds["error"])}
+            elif "total_balance" in ds:
+                cur = str(ds.get("currency") or "USD")
+                bal = float(ds["total_balance"])
+                sym = "$" if cur == "USD" else ""
+                suffix = f" {cur}" if cur != "USD" else ""
+                ds_info = {
+                    "is_available": bool(ds.get("is_available", False)),
+                    "currency": cur,
+                    "total_balance": bal,
+                    "formatted": f"{sym}{bal:.2f}{suffix}",
+                }
+
+        zen_info = None
+        if zen:
+            if zen.get("status") == "ok":
+                models_raw = zen.get("models") if isinstance(zen.get("models"), list) else []
+                models = [
+                    {
+                        "model": str(m.get("model") or ""),
+                        "messages": int(m.get("messages") or 0),
+                        "cost": m.get("cost"),
+                    }
+                    for m in models_raw
+                    if isinstance(m, dict) and m.get("model")
+                ]
+                zen_info = {
+                    "status": "ok",
+                    "days": int(zen.get("days") or 7),
+                    "sessions": int(zen.get("sessions") or 0),
+                    "messages": int(zen.get("messages") or 0),
+                    "total_cost": str(zen.get("total_cost") or "$0.00"),
+                    "zen_messages": int(zen.get("zen_messages") or 0),
+                    "models": models,
+                }
+            elif zen.get("error"):
+                zen_info = {"status": "n/a", "error": str(zen["error"])}
+
+        has_oc_data = bool(
+            (ds_info and not ds_info.get("error"))
+            or (zen_info and zen_info.get("status") == "ok")
+        )
+        accounts.append({
+            "id": "opencode",
+            "harness": "opencode",
+            "label": "OpenCode / DeepSeek",
+            "email": None,
+            "signed_in": not bool(oc_err) and (has_oc_data or not (ds_info and ds_info.get("error"))),
+            "status": None,
+            "error": oc_err,
+            "five_hour": None,
+            "weekly": None,
+            "deepseek": ds_info,
+            "zen": zen_info,
         })
 
     return accounts, emails
 
 
 class AgentUsageManager:
-    """Query ~/remote-pc/bin/ai-usage --json with a ~60 s in-memory cache."""
+    """Query ~/remote-pc/bin/ai-usage --json with disk persistence and stale-while-revalidate."""
 
     def __init__(self, script=None, run_fn=None, clock=time.monotonic, ttl=AGENT_USAGE_CACHE_TTL,
-                 claude_config_path=None):
+                 claude_config_path=None, cache_path=None):
         self.script = script
         self.run_fn = run_fn
         self.clock = clock
         self.ttl = ttl
         self.claude_config_path = claude_config_path
+        self.cache_path = cache_path
         self.lock = threading.Lock()
         self._fetch_lock = threading.Lock()
         self._cached = None
-        self._cached_at = 0.0
+        self._cached_at = None
+        self._refreshing = False
         self.emails = {}
+        self._load_disk_cache()
+
+    def _cache_file(self):
+        p = self.cache_path if self.cache_path is not None else AGENT_USAGE_CACHE_FILE
+        return os.path.expanduser(p) if p else ""
+
+    def _load_disk_cache(self):
+        path = self._cache_file()
+        if not path:
+            return
+        data = _read_json_file(path, default={})
+        if not isinstance(data, dict) or not isinstance(data.get("accounts"), list):
+            return
+        ts = int(data.get("ts") or 0)
+        accounts = data["accounts"]
+        emails = {}
+        raw_emails = data.get("emails")
+        if isinstance(raw_emails, dict):
+            for k, v in raw_emails.items():
+                if isinstance(k, str) and isinstance(v, str) and v.strip():
+                    emails[k] = v.strip()
+        for acc in accounts:
+            if isinstance(acc, dict) and acc.get("harness") == "gemini":
+                em = acc.get("email")
+                aid = acc.get("id")
+                if isinstance(aid, str) and isinstance(em, str) and em.strip():
+                    emails.setdefault(aid, em.strip())
+        with self.lock:
+            self._cached = {
+                "ts": ts,
+                "accounts": accounts,
+            }
+            # Loaded from disk -> treat as stale so first request returns instantly & refreshes in bg.
+            self._cached_at = None
+            self.emails.update(emails)
+
+    def _save_disk_cache(self, payload, emails):
+        path = self._cache_file()
+        if not path:
+            return
+        try:
+            _write_json_atomic(
+                path,
+                {
+                    "ts": payload["ts"],
+                    "accounts": payload["accounts"],
+                    "emails": dict(emails),
+                },
+                mode=0o600,
+            )
+        except OSError:
+            pass
 
     def _script_path(self):
         p = self.script if self.script is not None else AI_USAGE_BIN
@@ -1606,18 +1763,8 @@ class AgentUsageManager:
         fn = self.run_fn or subprocess.run
         return fn(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
 
-    def get(self, force_refresh=False, timeout=45):
-        now = self.clock()
-        with self.lock:
-            if not force_refresh and self._cached is not None and (now - self._cached_at) < self.ttl:
-                return 200, {**self._cached, "cached": True}
-
+    def _fetch_and_store(self, timeout=45):
         with self._fetch_lock:
-            now = self.clock()
-            with self.lock:
-                if not force_refresh and self._cached is not None and (now - self._cached_at) < self.ttl:
-                    return 200, {**self._cached, "cached": True}
-
             path = self._script_path()
             if not self._is_available(path):
                 return 503, {"error": "ai-usage is not installed"}
@@ -1640,13 +1787,52 @@ class AgentUsageManager:
             payload = {
                 "ts": int(time.time()),
                 "cached": False,
+                "stale": False,
                 "accounts": accounts,
             }
             with self.lock:
-                self._cached = payload
+                self._cached = {
+                    "ts": payload["ts"],
+                    "accounts": accounts,
+                }
                 self._cached_at = self.clock()
                 self.emails.update(emails)
+                emails_snapshot = dict(self.emails)
+            self._save_disk_cache(self._cached, emails_snapshot)
             return 200, payload
+
+    def _start_bg_refresh(self, timeout=45):
+        with self.lock:
+            if self._refreshing:
+                return
+            self._refreshing = True
+
+        def _worker():
+            try:
+                self._fetch_and_store(timeout=timeout)
+            except Exception:
+                pass
+            finally:
+                with self.lock:
+                    self._refreshing = False
+
+        t = threading.Thread(target=_worker, name="agent-usage-refresh", daemon=True)
+        t.start()
+
+    def get(self, force_refresh=False, timeout=45):
+        if not force_refresh:
+            now = self.clock()
+            with self.lock:
+                cached = self._cached
+                cached_at = self._cached_at
+            if cached is not None:
+                is_fresh = cached_at is not None and (now - cached_at) < self.ttl
+                if is_fresh:
+                    return 200, {**cached, "cached": True, "stale": False}
+                self._start_bg_refresh(timeout=timeout)
+                return 200, {**cached, "cached": True, "stale": True}
+
+        return self._fetch_and_store(timeout=timeout)
 
 
 class AgentSettingsManager:

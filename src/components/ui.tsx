@@ -267,11 +267,22 @@ export function StatStrip({ items, onPress }: { items: StatItem[]; onPress?: () 
   );
 }
 
-export function Section({ label, right, children }: { label: string; right?: ReactNode; children?: ReactNode }) {
+export function Section({
+  label,
+  icon,
+  right,
+  children,
+}: {
+  label: string;
+  icon?: ReactNode;
+  right?: ReactNode;
+  children?: ReactNode;
+}) {
   const t = useTheme();
   return (
     <View style={{ gap: space(2), marginTop: space(2) }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space(0.5) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(1.5), paddingHorizontal: space(0.5) }}>
+        {icon}
         <Text style={[styles.section, { color: t.textDim, flex: 1 }]}>{label}</Text>
         {right}
       </View>

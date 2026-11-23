@@ -24,8 +24,8 @@ import { space, useTheme } from '../theme';
 const NATIVE: Record<string, string> = { '/cams/': 'Cams', '/agentview': 'AgentView' };
 
 /** Phone-side names for routes that open a native screen. */
-const TILE: Record<string, Partial<Pick<Route, 'name' | 'icon' | 'subtitle'>>> = {
-  '/agentview': { name: 'Agent view', icon: 'robot-outline', subtitle: 'What agents fetch' },
+const TILE: Record<string, Partial<Pick<Route, 'name' | 'icon'>>> = {
+  '/agentview': { name: 'Agent view', icon: 'robot-outline' },
 };
 
 type DetState = {
@@ -62,7 +62,6 @@ function routeView(r: Route) {
   return {
     name: view?.name ?? r.name,
     icon: view?.icon ?? r.icon,
-    subtitle: view?.subtitle ?? r.subtitle,
     screen: r.port === 443 ? NATIVE[r.path] : undefined,
   };
 }
@@ -88,16 +87,6 @@ function seenAgo(ts: number) {
   if (h < 24) return `${h} h ago`;
   const d = Math.floor(h / 24);
   return d === 1 ? 'yesterday' : `${d} days ago`;
-}
-
-function routeSubtitle(r: Route, view: ReturnType<typeof routeView>) {
-  const name = view.name.toLowerCase();
-  if (name.includes('jellyfin')) return 'Movies & TV';
-  if (r.path === '/agentview') return 'What agents fetch';
-  const sub = (view.subtitle ?? '').trim();
-  if (!sub || sub === 'app' || sub.startsWith('/') || sub.startsWith(':') || /^https?:\/\//i.test(sub))
-    return r.kind === 'app' ? 'On this phone' : 'On the laptop';
-  return sub;
 }
 
 function CameraTile({
@@ -398,7 +387,6 @@ export default function RoutesScreen() {
                   key={r.id}
                   icon={view.icon}
                   title={view.name}
-                  subtitle={routeSubtitle(r, view)}
                   chevron
                   last={!hasDownloads && i === openScreen.length - 1}
                   onPress={() => (view.screen ? nav.navigate(view.screen) : open(r))}

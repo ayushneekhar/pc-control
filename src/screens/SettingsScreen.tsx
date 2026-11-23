@@ -110,7 +110,7 @@ function AgentRow() {
   );
 }
 
-/** Master switch for the cat cam systemd stack (catcam, cam-ptz, camrec, catdetect, cam-music, kbd-lock). */
+/** Master switch for the cat cam systemd stack (catcam, cam-ptz, camrec, catdetect, cam-music). */
 function CatCamCard() {
   const t = useTheme();
   const tick = useAppActiveTick();

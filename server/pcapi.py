@@ -2273,7 +2273,7 @@ class UsageAlertWatcher:
 
 # ---------------------------------------------------------------- cat cam master switch (/pc/api/catcam)
 
-CATCAM_UNITS = ("catcam", "cam-ptz", "camrec", "catdetect", "cam-music", "kbd-lock")
+CATCAM_UNITS = ("catcam", "cam-ptz", "camrec", "catdetect", "cam-music")
 CATCAM_STATE_FILE = os.environ.get("PCAPI_CATCAM_STATE", os.path.join(DATA_DIR, "catcam-state.json"))
 
 

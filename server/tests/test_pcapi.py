@@ -1730,7 +1730,7 @@ class CatCamTests(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.unit_dir = os.path.join(self.dir, "systemd")
         os.makedirs(self.unit_dir)
-        # Create 4 of the 6 units; leave cam-music and kbd-lock missing to test skipping.
+        # Create 4 of the 5 managed units; leave cam-music missing to test skipping.
         for u in ("catcam", "cam-ptz", "camrec", "catdetect"):
             with open(os.path.join(self.unit_dir, f"{u}.service"), "w") as f:
                 f.write("[Unit]\nDescription=test\n")
@@ -1814,6 +1814,51 @@ class CatCamTests(unittest.TestCase):
              "catcam.service", "cam-ptz.service", "camrec.service", "catdetect.service"],
             self.calls,
         )
+
+    def test_kbd_lock_never_touched_by_status_off_or_on(self):
+        for u in ("cam-music", "kbd-lock"):
+            with open(os.path.join(self.unit_dir, f"{u}.service"), "w") as f:
+                f.write("[Unit]\nDescription=test\n")
+        self.active["cam-music"] = "active"
+        self.active["kbd-lock"] = "active"
+
+        # Status reports only the 5 managed units, excluding kbd-lock.
+        code, st = self.call("GET", "/pc/api/catcam")
+        self.assertEqual(code, 200)
+        self.assertEqual(set(st["units"].keys()), {"catcam", "cam-ptz", "camrec", "catdetect", "cam-music"})
+        self.assertNotIn("kbd-lock", st["units"])
+        self.assertTrue(all(v == "active" for v in st["units"].values()))
+
+        # Switch OFF: never mentions kbd-lock and leaves its state untouched.
+        self.calls.clear()
+        code, st = self.call("POST", "/pc/api/catcam", {"enabled": False})
+        self.assertEqual(code, 200)
+        self.assertFalse(st["enabled"])
+        self.assertNotIn("kbd-lock", st["units"])
+        self.assertIn(
+            ["systemctl", "--user", "disable", "--now",
+             "catcam.service", "cam-ptz.service", "camrec.service", "catdetect.service", "cam-music.service"],
+            self.calls,
+        )
+        for argv in self.calls:
+            self.assertFalse(any("kbd-lock" in arg for arg in argv), f"OFF should never mention kbd-lock: {argv}")
+        self.assertEqual(self.active["kbd-lock"], "active")
+
+        # Switch ON: never mentions kbd-lock and leaves its state untouched.
+        self.active["kbd-lock"] = "inactive"
+        self.calls.clear()
+        code, st = self.call("POST", "/pc/api/catcam", {"enabled": True})
+        self.assertEqual(code, 200)
+        self.assertTrue(st["enabled"])
+        self.assertNotIn("kbd-lock", st["units"])
+        self.assertIn(
+            ["systemctl", "--user", "enable", "--now",
+             "catcam.service", "cam-ptz.service", "camrec.service", "catdetect.service", "cam-music.service"],
+            self.calls,
+        )
+        for argv in self.calls:
+            self.assertFalse(any("kbd-lock" in arg for arg in argv), f"ON should never mention kbd-lock: {argv}")
+        self.assertEqual(self.active["kbd-lock"], "inactive")
 
 
 class UsageAlertTests(unittest.TestCase):

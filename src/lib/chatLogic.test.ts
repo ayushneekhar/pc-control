@@ -3,6 +3,7 @@ import test from 'node:test';
 import { _setCacheBackendForTests, CacheBackend } from './cache';
 import {
   ChatMessage,
+  computeAndroidKeyboardOffset,
   formatChatTime,
   getChatEndpoint,
   mergeChatMessages,
@@ -12,6 +13,7 @@ import {
   resolveChatTarget,
   setChatEndpoint,
   shouldPollChat,
+  shouldShowEngineTag,
 } from './chatLogic';
 
 function memBackend(): CacheBackend {
@@ -142,4 +144,30 @@ test('formatChatTime formats same-day and older timestamps', () => {
   assert.equal(formatChatTime(base / 1000, base + 60_000), '2:05 pm');
   const prevDay = new Date(2026, 10, 22, 9, 30, 0).getTime();
   assert.equal(formatChatTime(prevDay / 1000, base), 'Nov 22, 9:30 am');
+});
+
+test('shouldShowEngineTag only shows tag on error or engine change', () => {
+  const msgs: ChatMessage[] = [
+    { id: 'u1', role: 'user', engine: 'gemini', text: 'hi', created_at: 1, status: 'done' },
+    { id: 'a1', role: 'assistant', engine: 'gemini', text: 'hello', created_at: 2, status: 'done' },
+    { id: 'a2', role: 'assistant', engine: 'gemini', text: 'still gemini', created_at: 3, status: 'done' },
+    { id: 'a3', role: 'assistant', engine: 'claude', text: 'switched', created_at: 4, status: 'done' },
+    { id: 'a4', role: 'assistant', engine: 'claude', text: 'still claude', created_at: 5, status: 'done' },
+    { id: 'a5', role: 'assistant', engine: 'claude', text: '', error: 'boom', created_at: 6, status: 'error' },
+  ];
+
+  assert.equal(shouldShowEngineTag(msgs, 0, 'gemini'), false); // user
+  assert.equal(shouldShowEngineTag(msgs, 1, 'gemini'), false); // matches active header engine
+  assert.equal(shouldShowEngineTag(msgs, 1, 'claude'), true); // differs from active header engine
+  assert.equal(shouldShowEngineTag(msgs, 2, 'gemini'), false); // same as previous assistant
+  assert.equal(shouldShowEngineTag(msgs, 3, 'gemini'), true); // engine changed
+  assert.equal(shouldShowEngineTag(msgs, 4, 'gemini'), false); // same as previous assistant
+  assert.equal(shouldShowEngineTag(msgs, 5, 'gemini'), true); // error always shows
+});
+
+test('computeAndroidKeyboardOffset subtracts tab bar and OS resize cleanly', () => {
+  assert.equal(computeAndroidKeyboardOffset(0, 92), 0);
+  assert.equal(computeAndroidKeyboardOffset(320, 92, 0), 228);
+  assert.equal(computeAndroidKeyboardOffset(320, 92, 320), 0);
+  assert.equal(computeAndroidKeyboardOffset(80, 92, 0), 0);
 });

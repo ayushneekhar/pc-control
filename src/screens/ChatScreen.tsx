@@ -1,11 +1,15 @@
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   AppState,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
+  LayoutChangeEvent,
   Platform,
   Pressable,
   RefreshControl,
@@ -16,7 +20,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { Banner, Button, Icon, Pill, Screen, StatusDot } from '../components/ui';
+import { Banner, Button, Icon, Screen, StatusDot } from '../components/ui';
 import { cacheGet, cacheSet } from '../lib/cache';
 import { fetchChatMessages, sendChatMessage, startNewChat } from '../lib/chatApi';
 import {
@@ -24,12 +28,14 @@ import {
   ChatCacheState,
   ChatEngine,
   ChatMessage,
+  computeAndroidKeyboardOffset,
   formatChatTime,
   makeClientId,
   mergeChatMessages,
   parseMessageSegments,
   prependOlderMessages,
   shouldPollChat,
+  shouldShowEngineTag,
 } from '../lib/chatLogic';
 import { radius, screenPad, space, useTheme } from '../theme';
 
@@ -39,15 +45,21 @@ function engineLabel(engine: ChatEngine): string {
   return engine === 'gemini' ? 'Gemini' : 'Claude';
 }
 
-function InlineText({ text, color }: { text: string; color: string }) {
+function InlineText({ text, isUser }: { text: string; isUser: boolean }) {
   const t = useTheme();
   const parts = useMemo(() => text.split(/(`[^`\n]+`)/g), [text]);
   return (
-    <Text selectable style={[st.msgText, { color }]}>
+    <Text selectable style={[st.msgText, { color: t.text }]}>
       {parts.map((part, i) => {
         if (part.length >= 2 && part.startsWith('`') && part.endsWith('`')) {
           return (
-            <Text key={i} style={[st.inlineCode, { fontFamily: t.mono, backgroundColor: t.cardAlt, color: t.accent }]}>
+            <Text
+              key={i}
+              style={[
+                st.inlineCode,
+                { fontFamily: t.mono, backgroundColor: isUser ? t.bg : t.cardAlt, color: t.text },
+              ]}
+            >
               {part.slice(1, -1)}
             </Text>
           );
@@ -61,7 +73,6 @@ function InlineText({ text, color }: { text: string; color: string }) {
 function MessageBody({ text, isUser }: { text: string; isUser: boolean }) {
   const t = useTheme();
   const segments = useMemo(() => parseMessageSegments(text), [text]);
-  const textColor = t.text;
 
   if (segments.length === 0) return null;
 
@@ -75,7 +86,7 @@ function MessageBody({ text, isUser }: { text: string; isUser: boolean }) {
               style={[
                 st.codeBlock,
                 {
-                  backgroundColor: isUser ? t.bg : t.cardAlt,
+                  backgroundColor: t.bg,
                   borderColor: t.border,
                 },
               ]}
@@ -91,7 +102,7 @@ function MessageBody({ text, isUser }: { text: string; isUser: boolean }) {
             </View>
           );
         }
-        return <InlineText key={idx} text={seg.text} color={textColor} />;
+        return <InlineText key={idx} text={seg.text} isUser={isUser} />;
       })}
     </View>
   );
@@ -117,7 +128,15 @@ function ChatSkeleton() {
   );
 }
 
-function MessageBubble({ msg, onCopy }: { msg: ChatMessage; onCopy: (text: string) => void }) {
+function MessageBubble({
+  msg,
+  showEngine,
+  onCopy,
+}: {
+  msg: ChatMessage;
+  showEngine: boolean;
+  onCopy: (text: string) => void;
+}) {
   const t = useTheme();
   const timeStr = formatChatTime(msg.created_at);
 
@@ -143,33 +162,26 @@ function MessageBubble({ msg, onCopy }: { msg: ChatMessage; onCopy: (text: strin
     <View style={[st.bubbleRow, isUser ? st.bubbleRowUser : st.bubbleRowAssistant]}>
       <Pressable
         onLongPress={copyable ? () => onCopy(copyable) : undefined}
-        style={[
+        delayLongPress={260}
+        style={({ pressed }) => [
           st.bubble,
           isUser
-            ? { backgroundColor: t.accentSoft, borderColor: t.accent, borderWidth: StyleSheet.hairlineWidth }
-            : { backgroundColor: t.card, borderColor: isError ? t.bad : t.border, borderWidth: StyleSheet.hairlineWidth },
+            ? [st.bubbleUser, { backgroundColor: t.cardAlt }]
+            : [st.bubbleAssistant, { backgroundColor: isError ? t.badSoft : t.card }],
+          pressed && copyable && { opacity: 0.85 },
         ]}
       >
-        {!isUser ? (
-          <View style={st.bubbleMetaTop}>
-            <Text style={[st.engineTag, { color: isError ? t.bad : t.accent }]}>{engineLabel(msg.engine)}</Text>
-            {copyable && !isPending ? (
-              <Pressable
-                onPress={() => onCopy(copyable)}
-                hitSlop={10}
-                accessibilityLabel="Copy message"
-                style={({ pressed }) => [st.copyBtn, pressed && { opacity: 0.6 }]}
-              >
-                <Icon name="content-copy" size={14} color={t.textFaint} />
-              </Pressable>
-            ) : null}
+        {showEngine ? (
+          <View style={st.engineRow}>
+            {isError ? <Icon name="alert-circle-outline" size={13} color={t.bad} /> : null}
+            <Text style={[st.engineTag, { color: isError ? t.bad : t.textDim }]}>{engineLabel(msg.engine)}</Text>
           </View>
         ) : null}
 
         {isPending ? (
           <View style={st.pendingRow}>
             <ActivityIndicator size="small" color={t.accent} />
-            <Text style={[st.pendingText, { color: t.textDim }]}>Working…</Text>
+            <Text style={[st.pendingText, { color: t.textDim }]}>Thinking…</Text>
           </View>
         ) : isError ? (
           <Text selectable style={[st.errorText, { color: t.bad }]}>
@@ -179,19 +191,9 @@ function MessageBubble({ msg, onCopy }: { msg: ChatMessage; onCopy: (text: strin
           <MessageBody text={msg.text} isUser={isUser} />
         )}
 
-        <View style={st.bubbleMetaBottom}>
+        {!isPending && timeStr ? (
           <Text style={[st.timeText, { color: t.textFaint }]}>{timeStr}</Text>
-          {isUser && copyable ? (
-            <Pressable
-              onPress={() => onCopy(copyable)}
-              hitSlop={10}
-              accessibilityLabel="Copy message"
-              style={({ pressed }) => [st.copyBtn, pressed && { opacity: 0.6 }]}
-            >
-              <Icon name="content-copy" size={13} color={t.textFaint} />
-            </Pressable>
-          ) : null}
-        </View>
+        ) : null}
       </Pressable>
     </View>
   );
@@ -200,6 +202,7 @@ function MessageBubble({ msg, onCopy }: { msg: ChatMessage; onCopy: (text: strin
 export default function ChatScreen() {
   const t = useTheme();
   const isFocused = useIsFocused();
+  const tabBarHeight = useBottomTabBarHeight();
   const cached = useMemo(() => cacheGet<ChatCacheState>(CHAT_STATE_CACHE_KEY), []);
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => cached?.messages ?? []);
@@ -214,9 +217,23 @@ export default function ChatScreen() {
   const [draft, setDraft] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [appActive, setAppActive] = useState(() => AppState.currentState === 'active');
+  const [kbHeight, setKbHeight] = useState(0);
+  const [outerHeight, setOuterHeight] = useState(0);
+  const [baseHeight, setBaseHeight] = useState(0);
+  const [androidPadAnim] = useState(() => new Animated.Value(0));
 
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const mountedRef = useRef(true);
+  const isFocusedRef = useRef(isFocused);
+  const messagesCountRef = useRef(messages.length);
+
+  useEffect(() => {
+    isFocusedRef.current = isFocused;
+  }, [isFocused]);
+
+  useEffect(() => {
+    messagesCountRef.current = messages.length;
+  }, [messages.length]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -231,6 +248,93 @@ export default function ChatScreen() {
     });
     return () => sub.remove();
   }, []);
+
+  const scrollToBottom = useCallback((animated: boolean) => {
+    if (messagesCountRef.current > 0) {
+      listRef.current?.scrollToEnd({ animated });
+    }
+  }, []);
+
+  // Dismiss keyboard and clear any Android keyboard offset when leaving the Chat tab.
+  useEffect(() => {
+    if (!isFocused) {
+      Keyboard.dismiss();
+      androidPadAnim.stopAnimation();
+      androidPadAnim.setValue(0);
+    }
+  }, [isFocused, androidPadAnim]);
+
+  useEffect(() => {
+    let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleScroll = () => {
+      if (scrollTimer) clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(() => scrollToBottom(true), 60);
+    };
+
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      if (!isFocusedRef.current) return;
+      if (Platform.OS === 'android') {
+        setKbHeight(e.endCoordinates?.height ?? 0);
+      } else {
+        scheduleScroll();
+      }
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      if (Platform.OS === 'android') {
+        setKbHeight(0);
+      }
+    });
+
+    return () => {
+      if (scrollTimer) clearTimeout(scrollTimer);
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, [scrollToBottom]);
+
+  const effectiveKbHeight = isFocused ? kbHeight : 0;
+
+  const onOuterLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      const h = e.nativeEvent.layout.height;
+      setOuterHeight(h);
+      if (effectiveKbHeight === 0 && h > 0) {
+        setBaseHeight((prev) => (h > prev ? h : prev));
+      }
+    },
+    [effectiveKbHeight],
+  );
+
+  const containerShrink =
+    Platform.OS === 'android' && effectiveKbHeight > 0 && baseHeight > 0
+      ? Math.max(0, baseHeight - outerHeight)
+      : 0;
+
+  const targetAndroidPad =
+    Platform.OS === 'android'
+      ? computeAndroidKeyboardOffset(effectiveKbHeight, tabBarHeight, containerShrink)
+      : 0;
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    if (!isFocused) {
+      androidPadAnim.stopAnimation();
+      androidPadAnim.setValue(0);
+      return;
+    }
+    Animated.timing(androidPadAnim, {
+      toValue: targetAndroidPad,
+      duration: targetAndroidPad > 0 ? 150 : 110,
+      useNativeDriver: false,
+    }).start(({ finished }) => {
+      if (finished && effectiveKbHeight > 0) {
+        scrollToBottom(true);
+      }
+    });
+  }, [targetAndroidPad, effectiveKbHeight, isFocused, androidPadAnim, scrollToBottom]);
 
   const persistCache = useCallback((nextMsgs: ChatMessage[], nextEngine: ChatEngine, nextHasMore: boolean) => {
     const clean = nextMsgs.filter((m) => !m.optimistic).slice(-80);
@@ -400,145 +504,220 @@ export default function ChatScreen() {
     ]);
   }, [engine, hasMore, persistCache]);
 
+  const canSend = draft.trim().length > 0 && !sending;
+
   const headerRight = (
     <View style={st.headerRight}>
-      <View style={[st.enginePill, { backgroundColor: t.accentSoft }]}>
-        {running ? <ActivityIndicator size={12} color={t.accent} /> : <StatusDot tone="accent" size={6} />}
-        <Text style={[st.enginePillText, { color: t.accent }]}>{engineLabel(engine)}</Text>
+      <View style={[st.engineChip, { backgroundColor: t.card }]}>
+        {running ? <ActivityIndicator size={11} color={t.accent} /> : <StatusDot tone="ok" size={6} />}
+        <Text style={[st.engineChipText, { color: t.textDim }]}>{engineLabel(engine)}</Text>
       </View>
-      <Button label="New" kind="subtle" compact busy={resetting} onPress={onNewChat} />
+      <Pressable
+        onPress={onNewChat}
+        disabled={resetting}
+        accessibilityLabel="New conversation"
+        android_ripple={{ color: t.ripple, foreground: true }}
+        style={({ pressed }) => [
+          st.newBtn,
+          { backgroundColor: t.cardAlt, opacity: resetting ? 0.5 : pressed ? 0.8 : 1 },
+        ]}
+      >
+        {resetting ? (
+          <ActivityIndicator size={13} color={t.text} />
+        ) : (
+          <Icon name="square-edit-outline" size={15} color={t.text} />
+        )}
+        <Text style={[st.newBtnText, { color: t.text }]}>New</Text>
+      </Pressable>
     </View>
+  );
+
+  const chatBody = (
+    <>
+      {err ? (
+        <View style={{ paddingHorizontal: screenPad, paddingBottom: space(2) }}>
+          <Banner tone="bad" title={err} />
+        </View>
+      ) : null}
+
+      {loadingInitial && messages.length === 0 ? (
+        <ChatSkeleton />
+      ) : (
+        <FlatList
+          ref={listRef}
+          data={messages}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item, index }) => (
+            <MessageBubble
+              msg={item}
+              showEngine={shouldShowEngineTag(messages, index, engine)}
+              onCopy={onCopy}
+            />
+          )}
+          contentContainerStyle={[st.listContent, messages.length === 0 && st.listContentEmpty]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          onContentSizeChange={() => {
+            if (messages.length > 0) listRef.current?.scrollToEnd({ animated: false });
+          }}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={t.accent}
+              colors={[t.accent]}
+              progressBackgroundColor={t.card}
+            />
+          }
+          ListHeaderComponent={
+            hasMore ? (
+              <View style={st.olderWrap}>
+                <Button
+                  label="Load earlier"
+                  kind="subtle"
+                  compact
+                  busy={loadingOlder}
+                  onPress={() => void onLoadOlder()}
+                />
+              </View>
+            ) : null
+          }
+          ListEmptyComponent={
+            <View style={st.emptyWrap}>
+              <View style={[st.emptyIcon, { backgroundColor: t.card }]}>
+                <Icon name="message-text-outline" size={22} color={t.textFaint} />
+              </View>
+              <Text style={[st.emptyLabel, { color: t.textFaint }]}>Start a conversation</Text>
+            </View>
+          }
+        />
+      )}
+
+      <View style={[st.composerWrap, { borderTopColor: t.border, backgroundColor: t.bg }]}>
+        <TextInput
+          value={draft}
+          onChangeText={setDraft}
+          placeholder={`Message ${engineLabel(engine)}`}
+          placeholderTextColor={t.textFaint}
+          multiline
+          maxLength={32000}
+          selectionColor={t.accent}
+          style={[
+            st.input,
+            {
+              backgroundColor: t.card,
+              borderColor: t.border,
+              color: t.text,
+            },
+          ]}
+        />
+        <Pressable
+          onPress={() => void onSend()}
+          disabled={!canSend}
+          accessibilityLabel="Send message"
+          style={({ pressed }) => [
+            st.sendBtn,
+            {
+              backgroundColor: canSend ? t.accent : t.cardAlt,
+              opacity: pressed && canSend ? 0.85 : 1,
+            },
+          ]}
+        >
+          {sending ? (
+            <ActivityIndicator size="small" color={t.accent} />
+          ) : (
+            <Icon name="arrow-up" size={20} color={canSend ? t.onAccent : t.textFaint} />
+          )}
+        </Pressable>
+      </View>
+    </>
   );
 
   return (
     <Screen title="Chat" right={headerRight} scroll={false}>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        {err ? (
-          <View style={{ paddingHorizontal: screenPad, paddingBottom: space(2) }}>
-            <Banner tone="bad" title={err} />
-          </View>
-        ) : null}
-
-        {loadingInitial && messages.length === 0 ? (
-          <ChatSkeleton />
+      <View style={{ flex: 1 }} onLayout={onOuterLayout}>
+        {Platform.OS === 'ios' ? (
+          <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
+            {chatBody}
+          </KeyboardAvoidingView>
         ) : (
-          <FlatList
-            ref={listRef}
-            data={messages}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => <MessageBubble msg={item} onCopy={onCopy} />}
-            contentContainerStyle={st.listContent}
-            keyboardShouldPersistTaps="handled"
-            onContentSizeChange={() => {
-              if (messages.length > 0) listRef.current?.scrollToEnd({ animated: false });
-            }}
-            refreshControl={
-              <RefreshControl
-                refreshing={refreshing}
-                onRefresh={onRefresh}
-                tintColor={t.accent}
-                colors={[t.accent]}
-                progressBackgroundColor={t.card}
-              />
-            }
-            ListHeaderComponent={
-              hasMore ? (
-                <View style={st.olderWrap}>
-                  <Button
-                    label="Load earlier"
-                    kind="subtle"
-                    compact
-                    busy={loadingOlder}
-                    onPress={() => void onLoadOlder()}
-                  />
-                </View>
-              ) : null
-            }
-            ListEmptyComponent={
-              <View style={st.emptyWrap}>
-                <Pill label={engineLabel(engine)} tone="accent" dot />
-              </View>
-            }
-          />
+          <Animated.View style={{ flex: 1, paddingBottom: androidPadAnim }}>{chatBody}</Animated.View>
         )}
-
-        <View style={[st.composerWrap, { borderTopColor: t.border, backgroundColor: t.bg }]}>
-          <TextInput
-            value={draft}
-            onChangeText={setDraft}
-            placeholder={`Message ${engineLabel(engine)}`}
-            placeholderTextColor={t.textFaint}
-            multiline
-            maxLength={32000}
-            style={[
-              st.input,
-              {
-                backgroundColor: t.card,
-                borderColor: t.border,
-                color: t.text,
-              },
-            ]}
-          />
-          <Pressable
-            onPress={() => void onSend()}
-            disabled={!draft.trim() || sending}
-            accessibilityLabel="Send message"
-            style={({ pressed }) => [
-              st.sendBtn,
-              {
-                backgroundColor: t.accent,
-                opacity: !draft.trim() || sending ? 0.35 : pressed ? 0.8 : 1,
-              },
-            ]}
-          >
-            {sending ? (
-              <ActivityIndicator size="small" color={t.onAccent} />
-            ) : (
-              <Icon name="arrow-up" size={20} color={t.onAccent} />
-            )}
-          </Pressable>
-        </View>
-      </KeyboardAvoidingView>
+      </View>
     </Screen>
   );
 }
 
 const st = StyleSheet.create({
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: space(2), paddingBottom: 4 },
-  enginePill: {
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: space(2), paddingBottom: 2 },
+  engineChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    height: 36,
-    paddingHorizontal: 11,
+    height: 32,
+    paddingHorizontal: 10,
     borderRadius: radius.pill,
   },
-  enginePillText: { fontSize: 12.5, fontWeight: '600' },
-  listContent: { paddingHorizontal: screenPad, paddingTop: space(1), paddingBottom: space(4), gap: space(2.5), flexGrow: 1 },
+  engineChipText: { fontSize: 12.5, fontWeight: '500' },
+  newBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    height: 32,
+    paddingHorizontal: 11,
+    borderRadius: radius.pill,
+    overflow: 'hidden',
+  },
+  newBtnText: { fontSize: 13, fontWeight: '500' },
+  listContent: {
+    paddingHorizontal: screenPad,
+    paddingTop: space(1),
+    paddingBottom: space(4),
+    gap: space(2.5),
+    flexGrow: 1,
+  },
+  listContentEmpty: {
+    justifyContent: 'center',
+  },
   olderWrap: { alignItems: 'center', paddingBottom: space(2) },
-  emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: space(12) },
+  emptyWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: space(2.5),
+    paddingVertical: space(8),
+  },
+  emptyIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyLabel: { fontSize: 14, fontWeight: '400' },
   bubbleRow: { flexDirection: 'row', width: '100%' },
   bubbleRowUser: { justifyContent: 'flex-end' },
   bubbleRowAssistant: { justifyContent: 'flex-start' },
   bubble: {
-    maxWidth: '88%',
-    borderRadius: radius.md,
-    paddingHorizontal: space(3.5),
-    paddingVertical: space(2.5),
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     gap: space(1.5),
   },
-  bubbleMetaTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) },
-  engineTag: { fontSize: 11.5, fontWeight: '600' },
-  bubbleMetaBottom: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: space(1.5) },
-  timeText: { fontSize: 11, fontVariant: ['tabular-nums'] },
-  copyBtn: { padding: 2 },
-  msgText: { fontSize: 14.5, lineHeight: 20.5 },
+  bubbleUser: {
+    maxWidth: '82%',
+    borderBottomRightRadius: 5,
+  },
+  bubbleAssistant: {
+    maxWidth: '88%',
+    borderBottomLeftRadius: 5,
+  },
+  engineRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  engineTag: { fontSize: 11.5, fontWeight: '500' },
+  timeText: { fontSize: 11, fontVariant: ['tabular-nums'], alignSelf: 'flex-end' },
+  msgText: { fontSize: 15, lineHeight: 21 },
   inlineCode: { fontSize: 13, paddingHorizontal: 4, borderRadius: 4 },
   codeBlock: {
-    borderRadius: radius.sm,
+    borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
     padding: space(2.5),
     gap: 4,
@@ -546,8 +725,8 @@ const st = StyleSheet.create({
   codeLang: { fontSize: 10.5 },
   codeText: { fontSize: 12.5, lineHeight: 18 },
   pendingRow: { flexDirection: 'row', alignItems: 'center', gap: space(2), paddingVertical: 2 },
-  pendingText: { fontSize: 13.5 },
-  errorText: { fontSize: 13.5, lineHeight: 19 },
+  pendingText: { fontSize: 14 },
+  errorText: { fontSize: 14, lineHeight: 20 },
   systemRow: { flexDirection: 'row', alignItems: 'center', gap: space(2.5), paddingVertical: space(2) },
   systemLine: { flex: 1, height: StyleSheet.hairlineWidth },
   systemText: { fontSize: 11.5, fontVariant: ['tabular-nums'] },
@@ -561,24 +740,42 @@ const st = StyleSheet.create({
   },
   input: {
     flex: 1,
-    minHeight: 42,
+    minHeight: 44,
     maxHeight: 120,
-    borderRadius: radius.md,
+    borderRadius: 22,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: space(3.5),
-    paddingVertical: space(2.5),
+    paddingHorizontal: 16,
+    paddingTop: 11,
+    paddingBottom: 11,
     fontSize: 15,
     lineHeight: 20,
+    textAlignVertical: 'center',
+    includeFontPadding: false,
   },
   sendBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    marginBottom: 2,
     alignItems: 'center',
     justifyContent: 'center',
   },
   skelWrap: { flex: 1, paddingHorizontal: screenPad, paddingTop: space(3), gap: space(3) },
-  skelBubbleRight: { alignSelf: 'flex-end', width: '68%', borderRadius: radius.md, padding: space(3.5), gap: space(2) },
-  skelBubbleLeft: { alignSelf: 'flex-start', width: '80%', borderRadius: radius.md, padding: space(3.5), gap: space(2) },
+  skelBubbleRight: {
+    alignSelf: 'flex-end',
+    width: '68%',
+    borderRadius: 18,
+    borderBottomRightRadius: 5,
+    padding: space(3.5),
+    gap: space(2),
+  },
+  skelBubbleLeft: {
+    alignSelf: 'flex-start',
+    width: '80%',
+    borderRadius: 18,
+    borderBottomLeftRadius: 5,
+    padding: space(3.5),
+    gap: space(2),
+  },
   skelLine: { height: 12, borderRadius: 4 },
 });

@@ -1,11 +1,11 @@
 import { useFocusEffect } from '@react-navigation/native';
-import { useCallback, useRef, useState } from 'react';
-import { AppState, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
-import { Banner, Bar, Card, Icon, List, ListRow, Mono, Screen, Section, StatusDot } from '../components/ui';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Banner, Bar, Card, Icon, List, ListRow, Mono, Screen, Section, StatusDot, Tone } from '../components/ui';
 import { get, Proc, Vitals } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
 import { bytes, rate } from '../lib/format';
-import { space, useTheme } from '../theme';
+import { screenPad, space, useTheme } from '../theme';
 
 type Hist = Vitals['hist'][number];
 
@@ -136,7 +136,15 @@ function procCompare(a: Proc, b: Proc, k: ProcSort) {
   return (x ?? -1) - (y ?? -1);
 }
 
-export default function VitalsScreen() {
+export default function VitalsScreen({
+  embedded = false,
+  active = true,
+  onStatus,
+}: {
+  embedded?: boolean;
+  active?: boolean;
+  onStatus?: (status: { tone: Tone; text: string } | null) => void;
+} = {}) {
   const t = useTheme();
   const [v, setV] = useState<Vitals | null>(() => cacheGet<Vitals>('vitals:snapshot'));
   const [hist, setHist] = useState<Hist[]>(() => cacheGet<Vitals>('vitals:snapshot')?.hist?.slice(-300) ?? []);
@@ -156,6 +164,7 @@ export default function VitalsScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      if (!active) return;
       let off = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
       let full = true;
@@ -206,7 +215,7 @@ export default function VitalsScreen() {
         off = true;
         if (timer) clearTimeout(timer);
       };
-    }, []),
+    }, [active]),
   );
 
   const nics = Object.entries(v?.nics ?? {});
@@ -232,20 +241,16 @@ export default function VitalsScreen() {
     }
   };
 
-  return (
-    <Screen
-      title="Vitals"
-      subtitle={
-        v ? (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            <StatusDot tone={live ? 'ok' : 'bad'} />
-            <Text style={{ color: t.textDim, fontSize: 12.5 }}>
-              {live ? `Up ${upFor(v.uptime)} · live` : 'Disconnected, retrying…'}
-            </Text>
-          </View>
-        ) : undefined
-      }
-    >
+  const statusText = v ? (live ? `Up ${upFor(v.uptime)} · live` : 'Disconnected, retrying…') : null;
+  const statusTone: Tone = live ? 'ok' : 'bad';
+
+  useEffect(() => {
+    if (!onStatus) return;
+    onStatus(statusText ? { tone: statusTone, text: statusText } : null);
+  }, [onStatus, statusTone, statusText]);
+
+  const content = (
+    <>
       {err && !v ? <Banner tone="bad" title="Can't reach /vitals">{err}</Banner> : null}
       {v ? (
         <>
@@ -501,6 +506,33 @@ export default function VitalsScreen() {
           </Section>
         </>
       ) : null}
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <ScrollView
+        style={{ flex: 1, backgroundColor: t.bg }}
+        contentContainerStyle={{ paddingHorizontal: screenPad, paddingBottom: space(8), gap: space(3) }}
+      >
+        {content}
+      </ScrollView>
+    );
+  }
+
+  return (
+    <Screen
+      title="Vitals"
+      subtitle={
+        statusText ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <StatusDot tone={statusTone} />
+            <Text style={{ color: t.textDim, fontSize: 12.5 }}>{statusText}</Text>
+          </View>
+        ) : undefined
+      }
+    >
+      {content}
     </Screen>
   );
 }

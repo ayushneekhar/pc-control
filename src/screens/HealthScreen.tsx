@@ -1,6 +1,6 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import { useCallback, useState } from 'react';
-import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { AppState, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
   Banner,
   Bar,
@@ -20,7 +20,7 @@ import { ArrQueue, get, Health, HealthDownload, HealthProblem, Service } from '.
 import { cacheGet, cacheSet } from '../lib/cache';
 import { useCatCam } from '../lib/catcam';
 import { bytes, clock, duration, rate } from '../lib/format';
-import { space, useTheme } from '../theme';
+import { screenPad, space, useTheme } from '../theme';
 
 type ServiceTone = 'ok' | 'bad' | 'warn' | 'dim';
 type Filter = 'all' | 'media' | 'cams' | 'agents';
@@ -185,7 +185,15 @@ function ArrRow({ label, q, last }: { label: string; q: ArrQueue; last?: boolean
   );
 }
 
-export default function HealthScreen() {
+export default function HealthScreen({
+  embedded = false,
+  active = true,
+  onStatus,
+}: {
+  embedded?: boolean;
+  active?: boolean;
+  onStatus?: (status: { tone: Tone; text: string } | null) => void;
+} = {}) {
   const t = useTheme();
   const nav = useNavigation<any>();
   const catCam = useCatCam();
@@ -207,6 +215,7 @@ export default function HealthScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      if (!active) return;
       let off = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
       const tick = async () => {
@@ -218,7 +227,7 @@ export default function HealthScreen() {
         off = true;
         if (timer) clearTimeout(timer);
       };
-    }, [load]),
+    }, [active, load]),
   );
 
   const effectiveFilter: Filter = !catCam.enabled && filter === 'cams' ? 'all' : filter;
@@ -233,24 +242,21 @@ export default function HealthScreen() {
   const bad = problems.some((p) => p.severity === 'bad');
   const summaryTone: Tone = problems.length ? (bad ? 'bad' : 'warn') : 'ok';
 
-  return (
-    <Screen
-      title="Services"
-      subtitle={
-        h ? (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            <StatusDot tone={problems.length ? (bad ? 'bad' : 'warn') : 'ok'} />
-            <Text style={{ color: t.textDim, fontSize: 12.5 }}>Checked {clock(h.ts)}</Text>
-          </View>
-        ) : undefined
-      }
-      refreshing={refreshing}
-      onRefresh={async () => {
-        setRefreshing(true);
-        await load();
-        setRefreshing(false);
-      }}
-    >
+  const statusText = h ? `Checked ${clock(h.ts)}` : null;
+
+  useEffect(() => {
+    if (!onStatus) return;
+    onStatus(statusText ? { tone: summaryTone, text: statusText } : null);
+  }, [onStatus, summaryTone, statusText]);
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+  }, [load]);
+
+  const content = (
+    <>
       {err && !h ? <Banner tone="bad" title="Can't reach the laptop">{err}</Banner> : null}
 
       {h ? (
@@ -453,6 +459,44 @@ export default function HealthScreen() {
           </List>
         )
       ) : null}
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <ScrollView
+        style={{ flex: 1, backgroundColor: t.bg }}
+        contentContainerStyle={{ paddingHorizontal: screenPad, paddingBottom: space(8), gap: space(3) }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={t.accent}
+            colors={[t.accent]}
+            progressBackgroundColor={t.card}
+          />
+        }
+      >
+        {content}
+      </ScrollView>
+    );
+  }
+
+  return (
+    <Screen
+      title="Services"
+      subtitle={
+        statusText ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <StatusDot tone={summaryTone} />
+            <Text style={{ color: t.textDim, fontSize: 12.5 }}>{statusText}</Text>
+          </View>
+        ) : undefined
+      }
+      refreshing={refreshing}
+      onRefresh={handleRefresh}
+    >
+      {content}
     </Screen>
   );
 }

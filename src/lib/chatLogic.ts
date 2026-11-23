@@ -201,3 +201,36 @@ export function formatChatTime(epochSec: number, nowMs = Date.now()): string {
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   return `${months[d.getMonth()]} ${d.getDate()}, ${h12}:${mm} ${ampm}`;
 }
+
+/**
+ * Show the engine tag on an assistant bubble only when it's an error, when the engine changed
+ * compared to the previous assistant message, or when the first assistant message differs from
+ * the currently active header engine.
+ */
+export function shouldShowEngineTag(messages: ChatMessage[], index: number, activeEngine: ChatEngine): boolean {
+  const msg = messages[index];
+  if (!msg || msg.role !== 'assistant') return false;
+  if (msg.status === 'error') return true;
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (messages[i].role === 'assistant') {
+      return messages[i].engine !== msg.engine;
+    }
+  }
+  return msg.engine !== activeEngine;
+}
+
+/**
+ * Computes the extra bottom padding needed on Android when the soft keyboard is visible.
+ * Subtracts the bottom tab bar height (which sits behind the keyboard on edge-to-edge Android)
+ * and any height already shrunk by the OS window resize so there is never a dead gap or double-lift.
+ */
+export function computeAndroidKeyboardOffset(
+  keyboardHeight: number,
+  tabBarHeight: number,
+  containerShrink = 0,
+): number {
+  if (!Number.isFinite(keyboardHeight) || keyboardHeight <= 0) return 0;
+  const tab = Number.isFinite(tabBarHeight) && tabBarHeight > 0 ? tabBarHeight : 0;
+  const shrink = Number.isFinite(containerShrink) && containerShrink > 0 ? containerShrink : 0;
+  return Math.max(0, keyboardHeight - tab - shrink);
+}

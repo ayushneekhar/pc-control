@@ -1,5 +1,12 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { createNavigationContainerRef, DarkTheme, DefaultTheme, LinkingOptions, NavigationContainer } from '@react-navigation/native';
+import {
+  createNavigationContainerRef,
+  DarkTheme,
+  DefaultTheme,
+  getStateFromPath,
+  LinkingOptions,
+  NavigationContainer,
+} from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useState } from 'react';
@@ -12,6 +19,7 @@ import { ShareSheet } from './src/components/ShareSheet';
 import { SystemInsetsProvider } from './src/components/SystemInsets';
 import { Button, Icon } from './src/components/ui';
 import { applyOta, dismissOta, startOta, updateOffered, useOta } from './src/lib/otaStore';
+import { normalizeDeepLinkPath } from './src/lib/linking';
 import { startLiveIfDownloading } from './src/lib/live';
 import { uploadCrashes } from './src/lib/crash';
 import { askNotificationPermission, registerPush } from './src/lib/push';
@@ -21,14 +29,13 @@ import AgentSettingsScreen from './src/screens/AgentSettingsScreen';
 import AgentViewScreen from './src/screens/AgentViewScreen';
 import ChatScreen from './src/screens/ChatScreen';
 import DownloadsScreen from './src/screens/DownloadsScreen';
-import HealthScreen from './src/screens/HealthScreen';
 import RootScreen from './src/screens/RootScreen';
 import RoutesScreen from './src/screens/RoutesScreen';
 import SeerrScreen from './src/screens/SeerrScreen';
 import ServiceDetailScreen from './src/screens/ServiceDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import SpaceScreen from './src/screens/SpaceScreen';
-import VitalsScreen from './src/screens/VitalsScreen';
+import SystemScreen from './src/screens/SystemScreen';
 import { radius, screenPad, space, useTheme } from './src/theme';
 
 const Tab = createBottomTabNavigator();
@@ -63,15 +70,15 @@ function takeShare(onConfirm: (t: Exclude<SharedTarget, { kind: 'youtube' }>) =>
 
 const linking: LinkingOptions<any> = {
   prefixes: ['pccontrol://'],
+  getStateFromPath: (path, options) => getStateFromPath(normalizeDeepLinkPath(path), options),
   config: {
     screens: {
       Tabs: {
         screens: {
           Routes: 'routes',
           Chat: 'chat',
-          Vitals: 'vitals',
+          System: 'system/:tab?',
           Root: 'root/:requestId?',
-          Health: 'health',
           Settings: 'settings',
         },
       },
@@ -88,13 +95,12 @@ const linking: LinkingOptions<any> = {
 const ICONS: Record<string, [string, string]> = {
   Routes: ['home-variant', 'home-variant-outline'],
   Chat: ['message-text', 'message-text-outline'],
-  Vitals: ['chart-line', 'chart-line'],
+  System: ['monitor-dashboard', 'monitor-dashboard'],
   Root: ['shield-key', 'shield-key-outline'],
-  Health: ['server', 'server'],
   Settings: ['cog', 'cog-outline'],
 };
 
-const TAB_LABEL: Record<string, string> = { Routes: 'Home', Chat: 'Chat', Vitals: 'Vitals', Root: 'Root', Health: 'Services', Settings: 'Settings' };
+const TAB_LABEL: Record<string, string> = { Routes: 'Home', Chat: 'Chat', System: 'System', Root: 'Root', Settings: 'Settings' };
 
 export default function App() {
   const t = useTheme();
@@ -201,8 +207,7 @@ function Tabs() {
     >
       <Tab.Screen name="Routes" component={RoutesScreen} />
       <Tab.Screen name="Chat" component={ChatScreen} />
-      <Tab.Screen name="Vitals" component={VitalsScreen} />
-      <Tab.Screen name="Health" component={HealthScreen} />
+      <Tab.Screen name="System" component={SystemScreen} />
       <Tab.Screen
         name="Root"
         component={RootScreen}

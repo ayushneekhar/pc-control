@@ -405,7 +405,7 @@ export default function RoutesScreen() {
 
       {vitals ? (
         <StatStrip
-          onPress={() => nav.navigate('Vitals')}
+          onPress={() => nav.navigate('System', { tab: 'vitals', tabRequest: Date.now() })}
           items={[
             { label: 'CPU', value: Math.round(vitals.cpu), unit: '%' },
             {

@@ -3,10 +3,20 @@ import Constants from 'expo-constants';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Animated, AppState, LayoutAnimation, Linking, Platform, Pressable, StyleSheet, Switch, Text, TextInput, UIManager, View } from 'react-native';
 import { KeyInfo, PcNative } from '../../modules/pc-native';
+import { KeyringUnlockModal } from '../components/KeyringUnlockModal';
 import { Banner, Button, Card, Icon, KV, List, ListRow, Mono, Pill, Screen, Section, StatusDot } from '../components/ui';
 import { AgentState, ApiError, DEFAULT_SERVER, get, getAgent, Info, post, serverUrl, VpnState } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
 import { refreshCatCam, toggleCatCam, useCatCam } from '../lib/catcam';
+import {
+  clearKeyringFeedback,
+  forgetKeyringPassword,
+  keyringVaultSupported,
+  refreshKeyring,
+  saveKeyringPassword,
+  unlockKeyringWithSaved,
+  useKeyring,
+} from '../lib/keyring';
 import { ApkRelease, APK_URLS, binaryTarget, clearOtaRecovery, latestApk, otaRecovery, otaSnapshot } from '../lib/ota';
 import { applyOta, checkOta, useOta } from '../lib/otaStore';
 import { liveStatus } from '../lib/live';
@@ -425,6 +435,168 @@ function Enrollment() {
   );
 }
 
+/** Biometric-encrypted GNOME login keyring password on this phone + remote unlock for RDP. */
+function KeyringCard() {
+  const t = useTheme();
+  const tick = useAppActiveTick();
+  const keyring = useKeyring();
+  const [editing, setEditing] = useState(false);
+  const [pw, setPw] = useState('');
+  const [unlockModal, setUnlockModal] = useState(false);
+  const supported = keyringVaultSupported();
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshKeyring();
+    }, []),
+  );
+
+  useEffect(() => {
+    if (tick > 0) void refreshKeyring();
+  }, [tick]);
+
+  useEffect(() => () => setPw(''), []);
+
+  const onSave = async () => {
+    let entered: string | null = pw;
+    setPw('');
+    try {
+      const res = await saveKeyringPassword(entered);
+      if (res.ok) setEditing(false);
+    } finally {
+      entered = null;
+    }
+  };
+
+  const onCancelEdit = () => {
+    setPw('');
+    setEditing(false);
+  };
+
+  const onForget = () =>
+    Alert.alert(
+      'Forget keyring password?',
+      'Removes the encrypted password and its Keystore key from this phone. You can still unlock by typing it manually.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Forget', style: 'destructive', onPress: forgetKeyringPassword },
+      ],
+    );
+
+  const onUnlock = async () => {
+    if (keyring.hasSaved) {
+      const res = await unlockKeyringWithSaved();
+      if (!res.ok && res.invalidated) setUnlockModal(true);
+    } else {
+      setUnlockModal(true);
+    }
+  };
+
+  const locked = keyring.status?.locked === true;
+  const dot = !keyring.status ? 'faint' : locked ? 'warn' : 'ok';
+  const subtitle = !keyring.status
+    ? 'Checking…'
+    : locked
+      ? `Locked · RDP unavailable (${keyring.status.rdp})`
+      : `Unlocked · RDP ${keyring.status.rdp}`;
+
+  return (
+    <Card style={{ gap: space(3) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
+        <Icon name={locked ? 'lock-outline' : 'key-outline'} size={22} color={locked ? t.warn : keyring.hasSaved ? t.ok : t.textDim} />
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Keyring</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <StatusDot tone={dot} />
+            <Text style={{ color: t.textDim, fontSize: 13 }}>{subtitle}</Text>
+          </View>
+        </View>
+        {locked ? <Pill tone="warn" icon="lock-outline" label="Locked" /> : keyring.hasSaved ? <Pill tone="ok" icon="fingerprint" label="Saved" /> : null}
+      </View>
+
+      <View>
+        <KV k="Saved password" v={keyring.hasSaved ? 'Encrypted (fingerprint)' : 'Not saved'} />
+        <KV k="Storage" v="Phone Keystore only (never on laptop)" />
+      </View>
+
+      {keyring.error ? <Banner tone="bad" title="Keyring">{keyring.error}</Banner> : null}
+      {keyring.notice ? (
+        <Banner tone="ok" title={keyring.notice}>
+          <Button label="Dismiss" compact kind="subtle" style={{ alignSelf: 'flex-start', marginTop: 4 }} onPress={clearKeyringFeedback} />
+        </Banner>
+      ) : null}
+
+      {editing ? (
+        <View style={{ gap: space(2.5) }}>
+          <Text style={{ color: t.textDim, fontSize: 13 }}>
+            Type your laptop login keyring password once. It will be encrypted with your fingerprint.
+          </Text>
+          <TextInput
+            value={pw}
+            onChangeText={setPw}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoComplete="off"
+            textContentType="none"
+            editable={!keyring.busy}
+            autoFocus
+            onSubmitEditing={() => void onSave()}
+            placeholder="Keyring password"
+            placeholderTextColor={t.textFaint}
+            selectionColor={t.accent}
+            style={[st.input, { color: t.text, backgroundColor: t.cardAlt, borderColor: t.border }]}
+          />
+          <View style={{ flexDirection: 'row', gap: space(2) }}>
+            <Button label="Cancel" kind="subtle" style={{ flex: 1 }} disabled={keyring.busy} onPress={onCancelEdit} />
+            <Button
+              label="Save"
+              icon="fingerprint"
+              style={{ flex: 1 }}
+              busy={keyring.busy}
+              disabled={!pw}
+              onPress={() => void onSave()}
+            />
+          </View>
+        </View>
+      ) : (
+        <View style={{ gap: space(2) }}>
+          {locked ? (
+            <Button
+              label={keyring.hasSaved ? 'Unlock (fingerprint)' : 'Unlock'}
+              icon={keyring.hasSaved ? 'fingerprint' : 'lock-open-outline'}
+              busy={keyring.busy}
+              onPress={() => void onUnlock()}
+            />
+          ) : null}
+          {supported ? (
+            <View style={{ flexDirection: 'row', gap: space(2) }}>
+              <Button
+                label={keyring.hasSaved ? 'Change password' : 'Save password'}
+                icon="key-plus"
+                kind={keyring.hasSaved || locked ? 'subtle' : 'primary'}
+                style={{ flex: 1 }}
+                disabled={keyring.busy}
+                onPress={() => {
+                  clearKeyringFeedback();
+                  setEditing(true);
+                }}
+              />
+              {keyring.hasSaved ? (
+                <Button label="Forget" kind="danger" icon="delete-outline" disabled={keyring.busy} onPress={onForget} />
+              ) : null}
+            </View>
+          ) : (
+            <Text style={{ color: t.textFaint, fontSize: 12.5 }}>Install the latest APK to save the keyring password on this phone.</Text>
+          )}
+        </View>
+      )}
+
+      <KeyringUnlockModal visible={unlockModal} onClose={() => setUnlockModal(false)} />
+    </Card>
+  );
+}
+
 /** One warning only when something blocks notifications; a healthy setup adds no card. */
 function NotificationHealth() {
   const t = useTheme();
@@ -809,6 +981,9 @@ export default function SettingsScreen() {
       </Section>
       <Section label="Root approvals">
         <Enrollment />
+      </Section>
+      <Section label="Keyring">
+        <KeyringCard />
       </Section>
       <Section label="Notifications">
         <NotificationHealth />

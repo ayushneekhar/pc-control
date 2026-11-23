@@ -187,5 +187,33 @@ class PcNativeModule : Module() {
         })
       }
     }.runOnQueue(Queues.MAIN)
+
+    // ---- GNOME keyring password vault (Keystore AES-GCM + BiometricPrompt CryptoObject)
+    Function("keyringHasSaved") { KeyringVault.hasSaved(ctx) }
+    Function("keyringForget") { KeyringVault.forget(ctx) }
+    AsyncFunction("keyringSave") { password: String, title: String, subtitle: String, promise: Promise ->
+      val activity = appContext.currentActivity as? FragmentActivity
+      if (activity == null) {
+        promise.reject(PcException("E_NO_ACTIVITY", "Open the app to save the keyring password"))
+        return@AsyncFunction
+      }
+      KeyringVault.save(activity, ctx, password, title, subtitle) { r ->
+        r.fold({ promise.resolve(null) }, { e ->
+          if (e is PcException) promise.reject(e) else promise.reject(PcException("E_ENCRYPT", e.message ?: "failed", e))
+        })
+      }
+    }.runOnQueue(Queues.MAIN)
+    AsyncFunction("keyringDecrypt") { title: String, subtitle: String, promise: Promise ->
+      val activity = appContext.currentActivity as? FragmentActivity
+      if (activity == null) {
+        promise.reject(PcException("E_NO_ACTIVITY", "Open the app to unlock the keyring"))
+        return@AsyncFunction
+      }
+      KeyringVault.decrypt(activity, ctx, title, subtitle) { r ->
+        r.fold({ promise.resolve(it) }, { e ->
+          if (e is PcException) promise.reject(e) else promise.reject(PcException("E_DECRYPT", e.message ?: "failed", e))
+        })
+      }
+    }.runOnQueue(Queues.MAIN)
   }
 }

@@ -39,6 +39,8 @@ GET  /pc/api/agent/usage[?refresh=1]  per-account usage across harnesses (via ai
 GET  /pc/api/agent/settings           Claude & Gemini model, effort, account/instance, auto-rotate & options
 POST /pc/api/agent/settings           update Claude and/or Gemini agent settings
 POST /pc/api/agent/reset              start a fresh agent conversation via ~/remote-pc/bin/agent-reset
+GET  /pc/api/keyring                  {locked: bool, rdp: <gnome-remote-desktop active state>}
+POST /pc/api/keyring/unlock           {password}: unlock GNOME login keyring via --stdin and restart RDP
 POST /pc/api/downloads/started        {hash?, title?}: "a download just started" (the Qwen bot calls it): wakes the
                                       phone's live progress (FCM "downloads") if that category is on
 POST /pc/api/hook/radarr|sonarr|seerr webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
@@ -405,6 +407,8 @@ CATEGORIES = [
     ("vpn_down", "Torrent VPN down", "qBittorrent lost its Proton VPN route or its forwarded port, and when it recovers.",
      True, True, "shield-off-outline"),
     ("usage_limits", "Usage limits", "An AI account is running low on 5-hour or weekly quota.", False, True, "gauge"),
+    ("keyring", "Keyring locked", "GNOME keyring is locked after a reboot; tap to unlock RDP.", False, True,
+     "key-outline"),
     ("root", "Root approvals", "A root command is waiting for your fingerprint.", False, True, "shield-key-outline"),
     ("results", "Command results", "An approved root command finished or failed.", False, True, "console"),
     ("other", "Other messages", "Anything else sent to /pc/api/notify.", False, True, "message-outline"),
@@ -2346,6 +2350,129 @@ class CatCamManager:
 CATCAM = CatCamManager()
 
 
+# ---------------------------------------------------------------- GNOME keyring unlock (/pc/api/keyring*)
+
+KEYRING_UNLOCK_BIN = os.environ.get("PCAPI_KEYRING_UNLOCK", os.path.join(HOME, "remote-pc", "bin", "keyring-unlock"))
+KEYRING_RDP_UNIT = "gnome-remote-desktop"
+KEYRING_MAX_FAILURES = 5
+KEYRING_WINDOW_SECS = 600
+
+
+class KeyringManager:
+    """Checks GNOME login keyring lock state over the session D-Bus and unlocks it via keyring-unlock --stdin.
+    The password is never passed in argv/env, never stored on disk, and never logged or echoed."""
+
+    def __init__(self, notify=None, unlock_bin=KEYRING_UNLOCK_BIN, run_fn=None, clock=time.monotonic,
+                 max_failures=KEYRING_MAX_FAILURES, window_secs=KEYRING_WINDOW_SECS):
+        self.notify = notify
+        self.unlock_bin = unlock_bin
+        self._run = run_fn or subprocess.run
+        self._clock = clock
+        self.max_failures = max_failures
+        self.window_secs = window_secs
+        self._lock = threading.Lock()
+        self._failures = []
+
+    def _env(self):
+        env = dict(os.environ)
+        env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{os.getuid()}/bus")
+        return env
+
+    def _is_locked(self):
+        r = self._run(
+            ["busctl", "--user", "get-property", "org.freedesktop.secrets",
+             "/org/freedesktop/secrets/collection/login", "org.freedesktop.Secret.Collection", "Locked"],
+            capture_output=True, text=True, timeout=5, env=self._env(),
+        )
+        if r.returncode != 0:
+            raise RuntimeError("could not read keyring status")
+        out = (r.stdout or "").strip()
+        if out == "b true":
+            return True
+        if out == "b false":
+            return False
+        raise RuntimeError("unexpected keyring status")
+
+    def _rdp_state(self):
+        try:
+            r = self._run(
+                ["systemctl", "--user", "is-active", KEYRING_RDP_UNIT],
+                capture_output=True, text=True, timeout=5, env=self._env(),
+            )
+            return (r.stdout or "").strip() or "unknown"
+        except (OSError, subprocess.TimeoutExpired):
+            return "unknown"
+
+    def status(self):
+        return {"locked": self._is_locked(), "rdp": self._rdp_state()}
+
+    def _prune_failures_locked(self, now):
+        cutoff = now - self.window_secs
+        self._failures = [t for t in self._failures if t > cutoff]
+
+    def unlock(self, password):
+        if not isinstance(password, str) or not password or any(ch in password for ch in ("\n", "\r", "\x00")):
+            return 400, {"ok": False, "error": "invalid password"}
+        with self._lock:
+            now = self._clock()
+            self._prune_failures_locked(now)
+            if len(self._failures) >= self.max_failures:
+                retry_after = max(1, int(self.window_secs - (now - self._failures[0])) + 1)
+                return 429, {"ok": False, "error": "Too many failed unlock attempts. Try again later.",
+                             "retry_after": retry_after}
+        try:
+            r = self._run(
+                [self.unlock_bin, "--stdin"],
+                input=password + "\n",
+                capture_output=True, text=True, timeout=30, env=self._env(),
+            )
+        except FileNotFoundError:
+            return 503, {"ok": False, "error": "keyring-unlock helper is not installed"}
+        except subprocess.TimeoutExpired:
+            return 504, {"ok": False, "error": "keyring unlock timed out"}
+        except OSError:
+            return 502, {"ok": False, "error": "could not run keyring-unlock"}
+        finally:
+            password = ""
+
+        if r.returncode != 0:
+            with self._lock:
+                now = self._clock()
+                self._prune_failures_locked(now)
+                self._failures.append(now)
+            return 401, {"ok": False, "error": "Wrong keyring password"}
+
+        with self._lock:
+            self._failures.clear()
+
+        try:
+            self._run(
+                ["systemctl", "--user", "restart", KEYRING_RDP_UNIT],
+                capture_output=True, text=True, timeout=20, env=self._env(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        try:
+            locked = self._is_locked()
+        except Exception:
+            locked = False
+        return 200, {"ok": True, "locked": locked, "rdp": self._rdp_state()}
+
+    def notify_if_locked_on_startup(self):
+        try:
+            st = self.status()
+        except Exception:
+            return False
+        if st.get("locked") and self.notify is not None:
+            self.notify.send_async("keyring", "Keyring locked", "Keyring locked after reboot: tap to unlock RDP")
+            return True
+        return False
+
+
+KEYRING = KeyringManager()
+
+
 # ---------------------------------------------------------------- local OTA mirror (/pc/api/ota/*)
 
 OTA_DIR = os.environ.get("PCAPI_OTA_DIR", os.path.join(DATA_DIR, "ota"))
@@ -2993,6 +3120,11 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(200, AGENT_SETTINGS.get())
             if path == "/api/catcam":
                 return self.send_json(200, CATCAM.status())
+            if path == "/api/keyring":
+                try:
+                    return self.send_json(200, KEYRING.status())
+                except Exception as e:
+                    return self.send_json(502, {"error": f"keyring status failed: {type(e).__name__}"})
             if path in ("/api/ota/ota.version.json", "/api/ota/bundle.zip"):
                 return self.send_ota_file(path.rsplit("/", 1)[1])
         elif method == "POST":
@@ -3000,7 +3132,8 @@ class H(BaseHTTPRequestHandler):
             if m: return self.hook(m.group(1))
             limit = {"/api/notify": 16 * 1024 * 1024, "/api/crash": 2 * 1024 * 1024}.get(path, 64 * 1024)
             try: b = self.body(limit)
-            except ValueError as e: return self.send_json(400, {"error": str(e)})
+            except ValueError as e:
+                return self.send_json(400, {"error": "invalid request body" if path == "/api/keyring/unlock" else str(e)})
             m = re.fullmatch(r"/api/services/([^/]+)/restart", path)
             if m: return self.send_json(*restart_service(m.group(1)))
             if path in ("/api/root/approve", "/api/root/deny"):
@@ -3051,6 +3184,10 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*agent_reset())
             if path == "/api/catcam":
                 return self.send_json(*CATCAM.set_enabled(b.get("enabled")))
+            if path == "/api/keyring/unlock":
+                pw = b.get("password")
+                b.clear()
+                return self.send_json(*KEYRING.unlock(pw))
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
@@ -3156,7 +3293,10 @@ class H(BaseHTTPRequestHandler):
         except Exception as e: self.fail(e)
 
     def fail(self, e):
-        print(f"pc-api error on {self.command} {self.path}: {type(e).__name__}: {e}", file=sys.stderr)
+        if self.path.rstrip("/") == "/pc/api/keyring/unlock":
+            print(f"pc-api error on {self.command} /pc/api/keyring/unlock: {type(e).__name__}", file=sys.stderr)
+        else:
+            print(f"pc-api error on {self.command} {self.path}: {type(e).__name__}: {e}", file=sys.stderr)
         try: self.send_json(500, {"error": f"internal: {type(e).__name__}"})
         except Exception: pass
 
@@ -3167,7 +3307,7 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER, VPN, USAGE_ALERTS
+    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER, VPN, USAGE_ALERTS, KEYRING
     PUSH = Push()
     NOTIFY = Notify(PUSH)
     DOWNLOADS = Downloads()
@@ -3175,9 +3315,11 @@ def main():
     USAGE_ALERTS = UsageAlertWatcher(NOTIFY, AGENT_USAGE, AGENT_SETTINGS)
     AGENT_USAGE.on_update = USAGE_ALERTS.evaluate
     USAGE_ALERTS.start()
+    KEYRING = KeyringManager(NOTIFY)
     hook_secret()
     HUB = Hub()
     WATCHER = ServiceWatcher(NOTIFY).start()
+    KEYRING.notify_if_locked_on_startup()
     srv = Server(("127.0.0.1", PORT), H)
     print(f"pc-api on 127.0.0.1:{PORT}, allowed tailnet logins: {sorted(ALLOWED_LOGINS) or 'NONE'}, "
           f"FCM {'configured' if PUSH.configured() else 'NOT configured'}, {len(PUSH.tokens)} push token(s)", flush=True)

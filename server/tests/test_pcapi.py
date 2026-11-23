@@ -2007,3 +2007,208 @@ class UsageAlertTests(unittest.TestCase):
         self.assertFalse(w.check_activity())
         self.assertEqual(len(refreshes), 2)
 
+
+class KeyringTests(unittest.TestCase):
+    def _proc(self, rc=0, stdout="", stderr=""):
+        return mock.Mock(returncode=rc, stdout=stdout, stderr=stderr)
+
+    def test_status_locked_unlocked_and_dbus_error(self):
+        state = {"locked": True, "rdp": "inactive"}
+
+        def fake_run(argv, **kw):
+            if argv[0] == "busctl":
+                return self._proc(0, "b true\n" if state["locked"] else "b false\n")
+            if argv[0] == "systemctl" and "is-active" in argv:
+                return self._proc(0 if state["rdp"] == "active" else 3, state["rdp"] + "\n")
+            raise AssertionError(f"unexpected cmd: {argv}")
+
+        km = pcapi.KeyringManager(run_fn=fake_run)
+        self.assertEqual(km.status(), {"locked": True, "rdp": "inactive"})
+
+        state["locked"] = False
+        state["rdp"] = "active"
+        self.assertEqual(km.status(), {"locked": False, "rdp": "active"})
+
+        km_err = pcapi.KeyringManager(run_fn=lambda argv, **kw: self._proc(1, "", "bus error"))
+        with self.assertRaises(RuntimeError):
+            km_err.status()
+
+    def test_unlock_success_uses_stdin_restarts_rdp_and_never_leaks_secret(self):
+        secret = "Sup3rS3cret!Pass#42"
+        calls = []
+        state = {"locked": True, "rdp": "inactive"}
+
+        def fake_run(argv, **kw):
+            calls.append((list(argv), dict(kw)))
+            if argv[0].endswith("keyring-unlock"):
+                # Verify secret is ONLY in stdin, never in argv or env
+                for a in argv:
+                    self.assertNotIn(secret, a)
+                for k, v in (kw.get("env") or {}).items():
+                    self.assertNotIn(secret, str(k))
+                    self.assertNotIn(secret, str(v))
+                self.assertEqual(kw.get("input"), secret + "\n")
+                state["locked"] = False
+                return self._proc(0, "Unlocked\n")
+            if argv[0] == "systemctl" and "restart" in argv:
+                self.assertEqual(argv, ["systemctl", "--user", "restart", "gnome-remote-desktop"])
+                state["rdp"] = "active"
+                return self._proc(0, "")
+            if argv[0] == "busctl":
+                return self._proc(0, "b true\n" if state["locked"] else "b false\n")
+            if argv[0] == "systemctl" and "is-active" in argv:
+                return self._proc(0 if state["rdp"] == "active" else 3, state["rdp"] + "\n")
+            raise AssertionError(f"unexpected cmd: {argv}")
+
+        km = pcapi.KeyringManager(unlock_bin="/fake/keyring-unlock", run_fn=fake_run)
+        code, body = km.unlock(secret)
+        self.assertEqual(code, 200)
+        self.assertEqual(body, {"ok": True, "locked": False, "rdp": "active"})
+        self.assertNotIn(secret, json.dumps(body))
+        self.assertEqual(calls[0][0], ["/fake/keyring-unlock", "--stdin"])
+        self.assertIn(["systemctl", "--user", "restart", "gnome-remote-desktop"], [c[0] for c in calls])
+
+    def test_unlock_failure_returns_401_and_rate_limits_after_5_in_10_minutes(self):
+        secret = "WrongPass-9999"
+        now = [1000.0]
+        restarts = []
+
+        def fake_run(argv, **kw):
+            if argv[0].endswith("keyring-unlock"):
+                return self._proc(1, "", f"Failed: wrong password ({secret})")
+            if argv[0] == "systemctl" and "restart" in argv:
+                restarts.append(argv)
+                return self._proc(0, "")
+            raise AssertionError(f"unexpected cmd: {argv}")
+
+        km = pcapi.KeyringManager(unlock_bin="/fake/keyring-unlock", run_fn=fake_run, clock=lambda: now[0])
+        for i in range(5):
+            code, body = km.unlock(secret)
+            self.assertEqual(code, 401, f"attempt {i + 1}")
+            self.assertFalse(body["ok"])
+            self.assertNotIn(secret, json.dumps(body))
+            now[0] += 10.0
+
+        # 6th attempt within 10 minutes -> 429
+        code, body = km.unlock(secret)
+        self.assertEqual(code, 429)
+        self.assertFalse(body["ok"])
+        self.assertGreater(body["retry_after"], 0)
+        self.assertEqual(restarts, [])
+
+        # Advance past 10 minutes from the first failure -> allowed again
+        now[0] = 1601.0
+        code, _ = km.unlock(secret)
+        self.assertEqual(code, 401)
+
+    def test_http_endpoints_auth_and_no_secret_in_logs_or_errors(self):
+        import io
+        secret = "TopSecretHTTP#77"
+        state = {"locked": True, "rdp": "inactive"}
+
+        def fake_run(argv, **kw):
+            if argv[0] == "busctl":
+                return self._proc(0, "b true\n" if state["locked"] else "b false\n")
+            if argv[0] == "systemctl" and "is-active" in argv:
+                return self._proc(3 if state["rdp"] != "active" else 0, state["rdp"] + "\n")
+            if argv[0].endswith("keyring-unlock"):
+                if kw.get("input") == secret + "\n":
+                    state["locked"] = False
+                    return self._proc(0, "Unlocked\n")
+                return self._proc(1, "", "Failed")
+            if argv[0] == "systemctl" and "restart" in argv:
+                state["rdp"] = "active"
+                return self._proc(0, "")
+            raise AssertionError(f"unexpected cmd: {argv}")
+
+        km = pcapi.KeyringManager(unlock_bin="/fake/keyring-unlock", run_fn=fake_run)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), pcapi.H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+        def req(method, path, payload=None, raw=None, headers=None):
+            data = raw if raw is not None else (json.dumps(payload).encode() if payload is not None else None)
+            hdrs = {"Content-Type": "application/json"} if data is not None else {}
+            if headers:
+                hdrs.update(headers)
+            r = urllib.request.Request(base + path, data=data, headers=hdrs, method=method)
+            try:
+                with urllib.request.urlopen(r, timeout=5) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read())
+
+        stderr_buf = io.StringIO()
+        try:
+            with mock.patch.object(pcapi, "KEYRING", km), \
+                 mock.patch.object(pcapi, "ALLOWED_LOGINS", {"ayush@example.com"}), \
+                 mock.patch.object(sys, "stderr", stderr_buf):
+                # Forbidden tailnet login rejected on both GET and POST
+                code, _ = req("GET", "/pc/api/keyring", headers={"Tailscale-User-Login": "other@example.com"})
+                self.assertEqual(code, 403)
+                code, _ = req("POST", "/pc/api/keyring/unlock", {"password": secret},
+                              headers={"Tailscale-User-Login": "other@example.com"})
+                self.assertEqual(code, 403)
+
+                # Malformed JSON containing secret must not echo or log secret
+                code, body = req("POST", "/pc/api/keyring/unlock", raw=f'{{"password": "{secret}'.encode(),
+                                 headers={"Tailscale-User-Login": "ayush@example.com"})
+                self.assertEqual(code, 400)
+                self.assertNotIn(secret, json.dumps(body))
+
+                # GET locked status
+                code, body = req("GET", "/pc/api/keyring", headers={"Tailscale-User-Login": "ayush@example.com"})
+                self.assertEqual((code, body), (200, {"locked": True, "rdp": "inactive"}))
+
+                # POST unlock success
+                code, body = req("POST", "/pc/api/keyring/unlock", {"password": secret},
+                                 headers={"Tailscale-User-Login": "ayush@example.com"})
+                self.assertEqual((code, body), (200, {"ok": True, "locked": False, "rdp": "active"}))
+                self.assertNotIn(secret, json.dumps(body))
+
+                # Unexpected exception inside unlock must not log secret to stderr
+                with mock.patch.object(km, "unlock", side_effect=RuntimeError(f"boom {secret}")):
+                    code, body = req("POST", "/pc/api/keyring/unlock", {"password": secret},
+                                     headers={"Tailscale-User-Login": "ayush@example.com"})
+                    self.assertEqual(code, 500)
+                    self.assertNotIn(secret, json.dumps(body))
+
+                self.assertNotIn(secret, stderr_buf.getvalue())
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_startup_notification_only_when_locked(self):
+        sent = []
+
+        class FakeNotify:
+            def send_async(self, cat, title, body, *a, **kw):
+                sent.append((cat, title, body))
+
+        def run_locked(argv, **kw):
+            if argv[0] == "busctl":
+                return self._proc(0, "b true\n")
+            return self._proc(3, "inactive\n")
+
+        def run_unlocked(argv, **kw):
+            if argv[0] == "busctl":
+                return self._proc(0, "b false\n")
+            return self._proc(0, "active\n")
+
+        km_locked = pcapi.KeyringManager(notify=FakeNotify(), run_fn=run_locked)
+        self.assertTrue(km_locked.notify_if_locked_on_startup())
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "keyring")
+        self.assertIn("Keyring locked after reboot: tap to unlock RDP", sent[0][2])
+
+        sent.clear()
+        km_unlocked = pcapi.KeyringManager(notify=FakeNotify(), run_fn=run_unlocked)
+        self.assertFalse(km_unlocked.notify_if_locked_on_startup())
+        self.assertEqual(sent, [])
+
+        # D-Bus unavailable at startup -> returns False without raising
+        km_err = pcapi.KeyringManager(notify=FakeNotify(), run_fn=lambda argv, **kw: self._proc(1, "", "err"))
+        self.assertFalse(km_err.notify_if_locked_on_startup())
+        self.assertEqual(sent, [])
+
+

@@ -24,4 +24,12 @@ object Prefs {
   fun setPush(ctx: Context, token: String?, error: String?) =
     sp(ctx).edit().putString("pushToken", token).putString("pushError", error)
       .remove("listenerEnabled").apply()
+
+  /** Encrypted GNOME keyring password (AES-GCM ciphertext + IV, base64; never plaintext). */
+  fun keyringCiphertext(ctx: Context): String? = sp(ctx).getString("keyringCiphertext", null)
+  fun keyringIv(ctx: Context): String? = sp(ctx).getString("keyringIv", null)
+  fun setKeyringBlob(ctx: Context, ciphertext: String, iv: String) =
+    sp(ctx).edit().putString("keyringCiphertext", ciphertext).putString("keyringIv", iv).apply()
+  fun clearKeyringBlob(ctx: Context) =
+    sp(ctx).edit().remove("keyringCiphertext").remove("keyringIv").apply()
 }

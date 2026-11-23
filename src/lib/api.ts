@@ -367,3 +367,19 @@ export type CatCamState = {
 
 export const getCatCam = () => get<CatCamState>('/pc/api/catcam');
 export const setCatCam = (enabled: boolean) => post<CatCamState>('/pc/api/catcam', { enabled }, 30000);
+
+export type KeyringStatus = {
+  locked: boolean;
+  rdp: string;
+};
+
+export type KeyringUnlockResult = {
+  ok: boolean;
+  locked: boolean;
+  rdp: string;
+  error?: string;
+};
+
+export const getKeyring = () => get<KeyringStatus>('/pc/api/keyring');
+export const unlockKeyringApi = (password: string) =>
+  post<KeyringUnlockResult>('/pc/api/keyring/unlock', { password }, 35000);

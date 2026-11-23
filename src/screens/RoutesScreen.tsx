@@ -1,8 +1,10 @@
-import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
 import { type ComponentType, useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, Image, InteractionManager, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { KeyringUnlockModal } from '../components/KeyringUnlockModal';
 import {
   Banner,
+  Button,
   Card,
   Icon,
   List,
@@ -16,6 +18,7 @@ import { PcNative } from '../../modules/pc-native';
 import { get, Health, Info, Route, serverUrl, Vitals } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
 import { refreshCatCam, useCatCam } from '../lib/catcam';
+import { clearKeyringFeedback, refreshKeyring, unlockKeyringWithSaved, useKeyring } from '../lib/keyring';
 import { CAMS, CamId, NAMES } from '../lib/cams/config';
 import { prepareCamsOnce } from '../lib/cams/prepare';
 import { rate } from '../lib/format';
@@ -199,7 +202,10 @@ function StatusLine({ tone, label }: { tone: 'ok' | 'warn' | 'bad' | 'faint'; la
 export default function RoutesScreen() {
   const t = useTheme();
   const nav = useNavigation<any>();
+  const route = useRoute<any>();
   const catCam = useCatCam();
+  const keyring = useKeyring();
+  const [unlockModal, setUnlockModal] = useState(false);
   const [routes, setRoutes] = useState<Route[] | null>(() => cacheGet<Route[]>('home:routes'));
   const [vitals, setVitals] = useState<Vitals | null>(() => cacheGet<Vitals>('home:vitals'));
   const [info, setInfo] = useState<Info | null>(() => cacheGet<Info>('home:info'));
@@ -226,6 +232,7 @@ export default function RoutesScreen() {
       catCam.enabled ? safe(get<DetState>('/detect/state')) : Promise.resolve(null),
       safe(get<DownloadsReply>('/pc/api/downloads')),
       refreshCatCam(),
+      refreshKeyring(),
     ]);
     if (i) {
       cacheSet('home:info', i);
@@ -314,6 +321,23 @@ export default function RoutesScreen() {
     },
     [live, nav],
   );
+  const triggerKeyringUnlock = useCallback(async () => {
+    if (keyring.hasSaved) {
+      const res = await unlockKeyringWithSaved();
+      if (!res.ok && res.invalidated) setUnlockModal(true);
+    } else {
+      setUnlockModal(true);
+    }
+  }, [keyring.hasSaved]);
+
+  useEffect(() => {
+    if (!route.params?.unlockKeyring) return;
+    nav.setParams({ unlockKeyring: undefined });
+    const task = InteractionManager.runAfterInteractions(() => {
+      void triggerKeyringUnlock();
+    });
+    return () => task.cancel();
+  }, [route.params?.unlockKeyring, nav, triggerKeyringUnlock]);
   const liveActive = focused && appActive && catCam.enabled;
   const latest = lastSighting(det);
   const problems = health?.problems?.length ?? 0;
@@ -351,6 +375,31 @@ export default function RoutesScreen() {
           Open Settings to check the server address, and make sure Tailscale is connected.
         </Banner>
       ) : null}
+
+      {keyring.status?.locked ? (
+        <Banner tone="warn" icon="lock-outline" title="Keyring locked: RDP unavailable">
+          <Text style={{ color: t.textDim, fontSize: 13.5, lineHeight: 19 }}>
+            Unlock the laptop’s login keyring to restart remote desktop ({keyring.status.rdp}).
+          </Text>
+          {keyring.error ? (
+            <Text style={{ color: t.bad, fontSize: 13, marginTop: 4 }}>{keyring.error}</Text>
+          ) : null}
+          <Button
+            label={keyring.hasSaved ? 'Unlock (fingerprint)' : 'Unlock'}
+            icon={keyring.hasSaved ? 'fingerprint' : 'lock-open-outline'}
+            compact
+            busy={keyring.busy}
+            style={{ alignSelf: 'flex-start', marginTop: 8 }}
+            onPress={() => void triggerKeyringUnlock()}
+          />
+        </Banner>
+      ) : keyring.notice ? (
+        <Banner tone="ok" icon="lock-open-outline" title={keyring.notice}>
+          <Button label="Dismiss" compact kind="subtle" style={{ alignSelf: 'flex-start', marginTop: 4 }} onPress={clearKeyringFeedback} />
+        </Banner>
+      ) : null}
+
+      <KeyringUnlockModal visible={unlockModal} onClose={() => setUnlockModal(false)} />
 
       {vitals ? (
         <StatStrip

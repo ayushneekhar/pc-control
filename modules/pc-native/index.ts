@@ -108,6 +108,11 @@ export type PcNativeModule = {
   createKey(): Promise<KeyInfo>;
   deleteKey(): void;
   sign(payload: string, title: string, subtitle: string, description: string): Promise<string>;
+  /** Biometric-gated AES-GCM keyring password vault (ciphertext + IV only; never plaintext on disk). */
+  keyringHasSaved?(): boolean;
+  keyringSave?(password: string, title: string, subtitle: string): Promise<void>;
+  keyringDecrypt?(title: string, subtitle: string): Promise<string>;
+  keyringForget?(): void;
   /** null if the OTA bundle at this path is signed by the laptop's key for this exact build, else why not. */
   otaCheck(bundlePath: string): string | null;
   /** "<versionName>+<versionCode>" of the installed APK. */

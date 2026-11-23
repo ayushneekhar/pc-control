@@ -2936,7 +2936,21 @@ def build_routes(status, overrides):
     host = next((hp.rpartition(":")[0] for hp in (status.get("Web") or {})), None)
     for key, (name, icon, sub, pkg, port) in APPS.items():
         o = overrides.get(key) if isinstance(overrides.get(key), dict) else {}
-        if not host or any(r["port"] == port for r in out): continue
+        if not host: continue
+        existing = next((r for r in out if r["port"] == port), None)
+        if existing is not None:
+            port_o = overrides.get(f":{port}") if isinstance(overrides.get(f":{port}"), dict) else {}
+            merged_o = {**port_o, **o}
+            existing["name"] = merged_o.get("name", name)
+            existing["icon"] = merged_o.get("icon", icon)
+            existing["subtitle"] = merged_o.get("subtitle", sub)
+            existing["kind"] = merged_o.get("kind", "app")
+            existing["app"] = merged_o.get("app", pkg)
+            if "url" in merged_o:
+                existing["url"] = merged_o["url"]
+            if "hidden" in merged_o:
+                existing["hidden"] = bool(merged_o["hidden"])
+            continue
         default_url = f"https://{host}:{port}/"
         if key == "jellyfin":
             pub = str(CONFIG.get("jellyfin_public_url") or "").strip()

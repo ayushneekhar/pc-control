@@ -70,6 +70,22 @@ class Routes(unittest.TestCase):
         self.assertNotIn("Jellyfin", visible({"jellyfin": {"hidden": True}}))
         self.assertEqual(pcapi.build_routes({}, {}), [])
 
+    def test_jellyfin_serve_route_attaches_native_app(self):
+        status_with_8920 = {"Web": {
+            **STATUS["Web"],
+            f"{H}:8920": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8096"}}},
+        }}
+        routes = pcapi.build_routes(status_with_8920, {})
+        jf = [r for r in routes if r["port"] == 8920]
+        self.assertEqual(len(jf), 1)
+        self.assertEqual(
+            (jf[0]["name"], jf[0]["app"], jf[0]["kind"], jf[0]["url"], jf[0]["subtitle"]),
+            ("Jellyfin", "org.jellyfin.mobile", "app", f"https://{H}:8920/", "Movies & TV (opens the app)"),
+        )
+        routes_ov = pcapi.build_routes(status_with_8920, {"jellyfin": {"name": "Media", "app": "custom.pkg"}})
+        jf_ov = next(r for r in routes_ov if r["port"] == 8920)
+        self.assertEqual((jf_ov["name"], jf_ov["app"]), ("Media", "custom.pkg"))
+
     def test_bad_override_ignored(self):
         self.assertNotIn("Vitals", visible({"/vitals": "nonsense"}))
         self.assertIn("Vitals", visible({"/vitals": {"hidden": False}}))

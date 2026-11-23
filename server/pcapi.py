@@ -35,6 +35,10 @@ GET  /pc/api/vpn                      {enabled, tunnel_up, forwarded_port, qbt_i
 POST /pc/api/vpn                      {enabled: bool}: route qBittorrent through Proton WireGuard (or back).
 GET  /pc/api/agent                    {engine, claude_active, gemini_active, available, switching, options}
 POST /pc/api/agent                    {engine: "claude"|"gemini"}: detached switch via systemd-run --user (202)
+GET  /pc/api/agent/usage[?refresh=1]  per-account usage across harnesses (via ai-usage --json, cached ~60 s)
+GET  /pc/api/agent/settings           Claude & Gemini model, effort, account/instance, auto-rotate & options
+POST /pc/api/agent/settings           update Claude and/or Gemini agent settings
+POST /pc/api/agent/reset              start a fresh agent conversation via ~/remote-pc/bin/agent-reset
 POST /pc/api/downloads/started        {hash?, title?}: "a download just started" (the Qwen bot calls it): wakes the
                                       phone's live progress (FCM "downloads") if that category is on
 POST /pc/api/hook/radarr|sonarr|seerr webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
@@ -55,7 +59,7 @@ pc-api is NOT a security boundary for root: it runs as the agent's user, so it i
 by rootd. Only the phone's signature releases a command. The tailnet identity check below just keeps
 other tailnet nodes/users away from the service controls.
 """
-import base64, glob, ipaddress, json, os, queue, secrets, re, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse
+import base64, glob, hashlib, ipaddress, json, os, queue, secrets, re, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1398,6 +1402,405 @@ def agent_health(timeout=None):
 AGENT = AgentManager()
 
 
+# ---------------------------------------------------------------- agent usage, settings & reset (/pc/api/agent/*)
+
+AI_USAGE_BIN = os.environ.get("PCAPI_AI_USAGE", os.path.join(HOME, "remote-pc", "bin", "ai-usage"))
+AGENT_RESET_BIN = os.environ.get("PCAPI_AGENT_RESET", os.path.join(HOME, "remote-pc", "bin", "agent-reset"))
+CLAUDE_AGENT_SETTINGS = os.environ.get(
+    "PCAPI_CLAUDE_AGENT_SETTINGS", os.path.join(HOME, ".config", "claude-agent", "settings.json")
+)
+GEMINI_AGENT_SETTINGS = os.environ.get(
+    "PCAPI_GEMINI_AGENT_SETTINGS", os.path.join(HOME, ".config", "gemini-agent", "settings.json")
+)
+GEMINI_FRESH_FLAG = os.environ.get(
+    "PCAPI_GEMINI_FRESH_FLAG", os.path.join(HOME, "remote-pc", ".fresh-gemini")
+)
+T3_SETTINGS_FILE = os.environ.get(
+    "PCAPI_T3_SETTINGS", os.path.join(HOME, ".t3", "userdata", "settings.json")
+)
+T3_PROVIDERS_DIR = os.environ.get(
+    "PCAPI_T3_PROVIDERS_DIR", os.path.join(HOME, ".t3", "userdata", "providers", "antigravity")
+)
+CLAUDE_CONFIG_FILE = os.environ.get("PCAPI_CLAUDE_CONFIG", os.path.join(HOME, ".claude.json"))
+AGENT_USAGE_CACHE_TTL = 60.0
+
+CLAUDE_MODELS = (
+    {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+    {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5"},
+    {"id": "claude-haiku-5-5", "label": "Haiku 5.5"},
+    {"id": "claude-fable-5-2", "label": "Fable 5.2"},
+)
+CLAUDE_MODEL_IDS = frozenset(m["id"] for m in CLAUDE_MODELS)
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+GEMINI_MODELS = (
+    {"id": "gemini-4-neon", "label": "Gemini 4 Neon"},
+    {"id": "gemini-4-argon", "label": "Gemini 4 Argon"},
+    {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen"},
+    {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
+    {"id": "gemini-pro-orchestrator-neon", "label": "Orchestrator (Neon)"},
+    {"id": "gemini-pro-orchestrator-g1-pro", "label": "Orchestrator (Argon)"},
+)
+GEMINI_MODEL_IDS = frozenset(m["id"] for m in GEMINI_MODELS)
+GEMINI_EFFORTS = ("low", "medium", "high", "xhigh")
+
+
+def _read_json_file(path, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else (default if default is not None else {})
+    except Exception:
+        return default if default is not None else {}
+
+
+def _write_json_atomic(path, data, mode=0o600):
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    try:
+        os.chmod(tmp, mode)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
+def _read_claude_email(claude_config_path=None):
+    p = claude_config_path if claude_config_path is not None else CLAUDE_CONFIG_FILE
+    raw = _read_json_file(os.path.expanduser(p))
+    oa = raw.get("oauthAccount") if isinstance(raw, dict) else None
+    email = oa.get("emailAddress") if isinstance(oa, dict) else None
+    return email.strip() if isinstance(email, str) and email.strip() else None
+
+
+def _list_t3_antigravity_instances(t3_settings_path=None, t3_providers_dir=None, email_map=None):
+    settings_p = os.path.expanduser(t3_settings_path if t3_settings_path is not None else T3_SETTINGS_FILE)
+    providers_p = os.path.expanduser(t3_providers_dir if t3_providers_dir is not None else T3_PROVIDERS_DIR)
+    raw = _read_json_file(settings_p)
+    providers = raw.get("providerInstances") if isinstance(raw, dict) else None
+    if not isinstance(providers, dict):
+        return []
+    out = []
+    for iid, entry in providers.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("driver") != "antigravity" or entry.get("enabled") is False:
+            continue
+        inst_id = str(iid)
+        label = str(entry.get("displayName") or inst_id)
+        digest = hashlib.sha256(inst_id.encode("utf-8")).hexdigest()
+        tok = os.path.join(providers_p, digest, "antigravity-acp", "antigravity-oauth-token")
+        try:
+            signed_in = os.path.isfile(tok) and os.path.getsize(tok) > 0
+        except OSError:
+            signed_in = False
+        email = (email_map or {}).get(inst_id)
+        out.append({"id": inst_id, "label": label, "signed_in": signed_in, "email": email})
+    return out
+
+
+def _normalize_usage_window(win):
+    if not isinstance(win, dict):
+        return None
+    rem = win.get("remaining_pct")
+    used = win.get("used_pct")
+    if rem is None and used is None:
+        return None
+    return {
+        "remaining_pct": rem,
+        "used_pct": used,
+        "refreshes_in": win.get("refreshes_in"),
+        "resets_at": win.get("resets_at"),
+        "status": win.get("status"),
+    }
+
+
+def _normalize_usage_report(raw, claude_config_path=None):
+    accounts = []
+    emails = {}
+    agy_accounts = raw.get("antigravity_accounts")
+    if isinstance(agy_accounts, list) and agy_accounts:
+        for acc in agy_accounts:
+            if not isinstance(acc, dict):
+                continue
+            inst_id = str(acc.get("instance_id") or "antigravity")
+            label = str(acc.get("display_name") or inst_id)
+            email = acc.get("account")
+            if isinstance(email, str) and email.strip():
+                emails[inst_id] = email.strip()
+            sections = acc.get("sections") if isinstance(acc.get("sections"), dict) else {}
+            gem = sections.get("gemini") if isinstance(sections.get("gemini"), dict) else {}
+            accounts.append({
+                "id": inst_id,
+                "harness": "gemini",
+                "label": label,
+                "email": email,
+                "signed_in": bool(acc.get("signed_in", True)),
+                "status": acc.get("status"),
+                "error": acc.get("error"),
+                "five_hour": _normalize_usage_window(gem.get("five_hour")),
+                "weekly": _normalize_usage_window(gem.get("weekly")),
+            })
+    else:
+        agy = raw.get("antigravity")
+        if isinstance(agy, dict):
+            sections = agy.get("sections") if isinstance(agy.get("sections"), dict) else {}
+            gem = sections.get("gemini") if isinstance(sections.get("gemini"), dict) else {}
+            accounts.append({
+                "id": "antigravity",
+                "harness": "gemini",
+                "label": "Antigravity",
+                "email": agy.get("account"),
+                "signed_in": bool(agy.get("signed_in", not bool(agy.get("error")))),
+                "status": agy.get("status"),
+                "error": agy.get("error"),
+                "five_hour": _normalize_usage_window(gem.get("five_hour")),
+                "weekly": _normalize_usage_window(gem.get("weekly")),
+            })
+
+    claude = raw.get("claude")
+    if isinstance(claude, dict):
+        c_email = claude.get("account") or _read_claude_email(claude_config_path)
+        accounts.append({
+            "id": "claude",
+            "harness": "claude",
+            "label": "Claude",
+            "email": c_email,
+            "signed_in": not bool(claude.get("error")),
+            "status": None,
+            "error": claude.get("error"),
+            "five_hour": _normalize_usage_window(claude.get("five_hour")),
+            "weekly": _normalize_usage_window(claude.get("weekly")),
+        })
+
+    return accounts, emails
+
+
+class AgentUsageManager:
+    """Query ~/remote-pc/bin/ai-usage --json with a ~60 s in-memory cache."""
+
+    def __init__(self, script=None, run_fn=None, clock=time.monotonic, ttl=AGENT_USAGE_CACHE_TTL,
+                 claude_config_path=None):
+        self.script = script
+        self.run_fn = run_fn
+        self.clock = clock
+        self.ttl = ttl
+        self.claude_config_path = claude_config_path
+        self.lock = threading.Lock()
+        self._fetch_lock = threading.Lock()
+        self._cached = None
+        self._cached_at = 0.0
+        self.emails = {}
+
+    def _script_path(self):
+        p = self.script if self.script is not None else AI_USAGE_BIN
+        return os.path.abspath(os.path.expanduser(p))
+
+    def _is_available(self, path):
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+
+    def _run(self, argv, timeout=45):
+        fn = self.run_fn or subprocess.run
+        return fn(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+
+    def get(self, force_refresh=False, timeout=45):
+        now = self.clock()
+        with self.lock:
+            if not force_refresh and self._cached is not None and (now - self._cached_at) < self.ttl:
+                return 200, {**self._cached, "cached": True}
+
+        with self._fetch_lock:
+            now = self.clock()
+            with self.lock:
+                if not force_refresh and self._cached is not None and (now - self._cached_at) < self.ttl:
+                    return 200, {**self._cached, "cached": True}
+
+            path = self._script_path()
+            if not self._is_available(path):
+                return 503, {"error": "ai-usage is not installed"}
+            try:
+                r = self._run([path, "--json"], timeout=timeout)
+            except Exception as e:
+                return 502, {"error": clip(f"ai-usage failed: {e}", 240)}
+            stdout = (r.stdout or "").strip()
+            if not stdout:
+                detail = (r.stderr or f"exit {r.returncode}").strip()
+                return 502, {"error": clip(f"ai-usage failed: {detail}", 240)}
+            try:
+                raw = json.loads(stdout)
+            except ValueError as e:
+                return 502, {"error": clip(f"bad ai-usage JSON: {e}", 240)}
+            if not isinstance(raw, dict):
+                return 502, {"error": "ai-usage JSON must be an object"}
+
+            accounts, emails = _normalize_usage_report(raw, self.claude_config_path)
+            payload = {
+                "ts": int(time.time()),
+                "cached": False,
+                "accounts": accounts,
+            }
+            with self.lock:
+                self._cached = payload
+                self._cached_at = self.clock()
+                self.emails.update(emails)
+            return 200, payload
+
+
+class AgentSettingsManager:
+    """Persist and validate Claude (~/.config/claude-agent/settings.json) and Gemini
+    (~/.config/gemini-agent/settings.json) agent settings."""
+
+    def __init__(self, claude_path=None, gemini_path=None, gemini_fresh_flag=None,
+                 t3_settings_path=None, t3_providers_dir=None, claude_config_path=None,
+                 usage_mgr=None):
+        self.claude_path = claude_path
+        self.gemini_path = gemini_path
+        self.gemini_fresh_flag = gemini_fresh_flag
+        self.t3_settings_path = t3_settings_path
+        self.t3_providers_dir = t3_providers_dir
+        self.claude_config_path = claude_config_path
+        self.usage_mgr = usage_mgr
+        self.lock = threading.Lock()
+
+    def _claude_file(self):
+        return os.path.expanduser(self.claude_path if self.claude_path is not None else CLAUDE_AGENT_SETTINGS)
+
+    def _gemini_file(self):
+        return os.path.expanduser(self.gemini_path if self.gemini_path is not None else GEMINI_AGENT_SETTINGS)
+
+    def _fresh_flag(self):
+        return os.path.expanduser(self.gemini_fresh_flag if self.gemini_fresh_flag is not None else GEMINI_FRESH_FLAG)
+
+    def get(self):
+        with self.lock:
+            c_raw = _read_json_file(self._claude_file())
+            g_raw = _read_json_file(self._gemini_file())
+
+        email_map = dict(self.usage_mgr.emails) if self.usage_mgr is not None else {}
+        instances = _list_t3_antigravity_instances(self.t3_settings_path, self.t3_providers_dir, email_map)
+        default_inst = next((i["id"] for i in instances if i["signed_in"]), instances[0]["id"] if instances else "antigravity")
+
+        c_model = c_raw.get("model") if c_raw.get("model") in CLAUDE_MODEL_IDS else "claude-opus-5-5"
+        c_effort = c_raw.get("effort") if c_raw.get("effort") in CLAUDE_EFFORTS else "high"
+
+        g_inst = g_raw.get("instance_id") if isinstance(g_raw.get("instance_id"), str) and g_raw.get("instance_id").strip() else default_inst
+        g_model = g_raw.get("model") if isinstance(g_raw.get("model"), str) and g_raw.get("model").strip() else "gemini-4-neon"
+        g_thought = g_raw.get("thought_level") if g_raw.get("thought_level") in GEMINI_EFFORTS else "medium"
+        g_auto = bool(g_raw.get("auto_rotate", False))
+
+        return {
+            "claude": {
+                "account": _read_claude_email(self.claude_config_path),
+                "model": c_model,
+                "effort": c_effort,
+                "models": [dict(m) for m in CLAUDE_MODELS],
+                "efforts": list(CLAUDE_EFFORTS),
+            },
+            "gemini": {
+                "instance_id": g_inst,
+                "model": g_model,
+                "thought_level": g_thought,
+                "auto_rotate": g_auto,
+                "instances": instances,
+                "models": [dict(m) for m in GEMINI_MODELS],
+                "efforts": list(GEMINI_EFFORTS),
+            },
+        }
+
+    def update(self, body):
+        if not isinstance(body, dict):
+            return 400, {"error": "body must be a JSON object"}
+        c_upd = body.get("claude")
+        g_upd = body.get("gemini")
+        if c_upd is None and g_upd is None:
+            return 400, {"error": "provide 'claude' and/or 'gemini' settings"}
+
+        if c_upd is not None:
+            if not isinstance(c_upd, dict):
+                return 400, {"error": "claude must be an object"}
+            if "model" in c_upd and c_upd["model"] not in CLAUDE_MODEL_IDS:
+                return 400, {"error": f"invalid claude model: {c_upd['model']!r}"}
+            if "effort" in c_upd and c_upd["effort"] not in CLAUDE_EFFORTS:
+                return 400, {"error": f"invalid claude effort: {c_upd['effort']!r}"}
+
+        if g_upd is not None:
+            if not isinstance(g_upd, dict):
+                return 400, {"error": "gemini must be an object"}
+            if "instance_id" in g_upd:
+                iid = g_upd["instance_id"]
+                if not isinstance(iid, str) or not iid.strip():
+                    return 400, {"error": "invalid gemini instance_id"}
+                instances = _list_t3_antigravity_instances(self.t3_settings_path, self.t3_providers_dir)
+                known_ids = {i["id"] for i in instances}
+                if known_ids and iid not in known_ids:
+                    return 400, {"error": f"unknown gemini instance_id: {iid!r}"}
+            if "model" in g_upd:
+                m = g_upd["model"]
+                if not isinstance(m, str) or not m.strip() or len(m) > 100:
+                    return 400, {"error": "invalid gemini model"}
+            if "thought_level" in g_upd and g_upd["thought_level"] not in GEMINI_EFFORTS:
+                return 400, {"error": f"invalid gemini thought_level: {g_upd['thought_level']!r}"}
+            if "auto_rotate" in g_upd and not isinstance(g_upd["auto_rotate"], bool):
+                return 400, {"error": "gemini auto_rotate must be boolean"}
+
+        with self.lock:
+            if c_upd is not None:
+                c_path = self._claude_file()
+                cur = _read_json_file(c_path)
+                if "model" in c_upd:
+                    cur["model"] = c_upd["model"]
+                if "effort" in c_upd:
+                    cur["effort"] = c_upd["effort"]
+                _write_json_atomic(c_path, cur)
+
+            if g_upd is not None:
+                g_path = self._gemini_file()
+                cur = _read_json_file(g_path)
+                prev_inst = cur.get("instance_id")
+                if "instance_id" in g_upd:
+                    cur["instance_id"] = g_upd["instance_id"].strip()
+                if "model" in g_upd:
+                    cur["model"] = g_upd["model"].strip()
+                if "thought_level" in g_upd:
+                    cur["thought_level"] = g_upd["thought_level"]
+                if "auto_rotate" in g_upd:
+                    cur["auto_rotate"] = g_upd["auto_rotate"]
+                _write_json_atomic(g_path, cur)
+                if "instance_id" in g_upd and cur.get("instance_id") != prev_inst:
+                    flag = self._fresh_flag()
+                    try:
+                        os.makedirs(os.path.dirname(os.path.abspath(flag)), exist_ok=True)
+                        with open(flag, "a", encoding="utf-8"):
+                            pass
+                    except OSError:
+                        pass
+
+        return 200, self.get()
+
+
+def agent_reset(script=None, run_fn=None, timeout=10):
+    path = os.path.abspath(os.path.expanduser(script if script is not None else AGENT_RESET_BIN))
+    if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+        return 503, {"error": "agent-reset is not installed"}
+    fn = run_fn or subprocess.run
+    try:
+        r = fn([path], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        return 502, {"error": clip(f"agent reset failed: {e}", 240)}
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+        return 502, {"error": clip(f"agent reset failed: {detail}", 240)}
+    msg = (r.stdout or "Reset requested").strip()
+    return 200, {"ok": True, "message": msg}
+
+
+AGENT_USAGE = AgentUsageManager()
+AGENT_SETTINGS = AgentSettingsManager(usage_mgr=AGENT_USAGE)
+
+
 # ---------------------------------------------------------------- health overview (/pc/api/health)
 
 HEALTH_TIMEOUT = 2.0        # seconds, shared by all sources (they run concurrently)
@@ -2016,6 +2419,11 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json(200, AGENT.status())
                 except Exception as e:
                     return self.send_json(502, {"error": clip(f"agent status failed: {e}", 240)})
+            if path == "/api/agent/usage":
+                refresh = qs.get("refresh", [""])[0] in ("1", "true", "yes")
+                return self.send_json(*AGENT_USAGE.get(force_refresh=refresh))
+            if path == "/api/agent/settings":
+                return self.send_json(200, AGENT_SETTINGS.get())
         elif method == "POST":
             m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
             if m: return self.hook(m.group(1))
@@ -2066,6 +2474,10 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json(502, {"error": clip(f"qBittorrent did not take the change: {e}", 240)})
             if path == "/api/agent":
                 return self.send_json(*AGENT.switch(b.get("engine")))
+            if path == "/api/agent/settings":
+                return self.send_json(*AGENT_SETTINGS.update(b))
+            if path == "/api/agent/reset":
+                return self.send_json(*agent_reset())
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))

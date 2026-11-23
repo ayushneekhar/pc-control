@@ -16,6 +16,7 @@ import { uploadCrashes } from './src/lib/crash';
 import { askNotificationPermission, registerPush } from './src/lib/push';
 import { pendingList, startRootStore, useRootStore } from './src/lib/rootStore';
 import AgentRuleScreen from './src/screens/AgentRuleScreen';
+import AgentSettingsScreen from './src/screens/AgentSettingsScreen';
 import AgentViewScreen from './src/screens/AgentViewScreen';
 import HealthScreen from './src/screens/HealthScreen';
 import RootScreen from './src/screens/RootScreen';
@@ -63,6 +64,7 @@ const linking: LinkingOptions<any> = {
       },
       Cams: 'cams',
       ServiceDetail: 'service/:unit',
+      AgentSettings: 'agent-settings',
     },
   },
 };
@@ -122,6 +124,7 @@ export default function App() {
             {/* loaded on first open: react-native-webrtc stays out of app start */}
             <Stack.Screen name="AgentView" component={AgentViewScreen} />
             <Stack.Screen name="AgentRule" component={AgentRuleScreen} />
+            <Stack.Screen name="AgentSettings" component={AgentSettingsScreen} />
             <Stack.Screen name="ServiceDetail" component={ServiceDetailScreen} />
             <Stack.Screen
               name="Cams"

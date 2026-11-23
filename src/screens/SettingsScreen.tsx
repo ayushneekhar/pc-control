@@ -1,9 +1,10 @@
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import Constants from 'expo-constants';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Animated, AppState, LayoutAnimation, Linking, Platform, Pressable, StyleSheet, Switch, Text, TextInput, UIManager, View } from 'react-native';
 import { KeyInfo, PcNative } from '../../modules/pc-native';
-import { Banner, Button, Card, Icon, KV, Mono, Pill, Screen, Section, StatusDot } from '../components/ui';
-import { AgentEngine, AgentOption, AgentState, ApiError, DEFAULT_SERVER, get, getAgent, Info, post, serverUrl, setAgent, VpnState } from '../lib/api';
+import { Banner, Button, Card, Icon, KV, List, ListRow, Mono, Pill, Screen, Section, StatusDot } from '../components/ui';
+import { AgentState, ApiError, DEFAULT_SERVER, get, getAgent, Info, post, serverUrl, VpnState } from '../lib/api';
 import { ApkRelease, APK_URLS, binaryTarget, clearOtaRecovery, latestApk, otaRecovery, otaSnapshot } from '../lib/ota';
 import { applyOta, checkOta, useOta } from '../lib/otaStore';
 import { liveStatus } from '../lib/live';
@@ -51,205 +52,55 @@ function Toggle({ value, onValueChange, label, disabled, dim = false }: {
   );
 }
 
-const DEFAULT_AGENT_OPTIONS: AgentOption[] = [
-  { id: 'claude', label: 'Claude', model: 'Opus 5.5' },
-  { id: 'gemini', label: 'Gemini', model: 'Gemini 4 Neon' },
-];
-const AGENT_POLL_MS = 2000;
-const AGENT_POLL_MAX_ATTEMPTS = 15; // 15 * 2 s = 30 s
-
-/** Choose which AI runs the always-on PC agent (Claude or Gemini). Optimistic switch with 2 s polling. */
-function AgentSwitch() {
+/** Line item in Settings that navigates to the dedicated Agent settings screen. */
+function AgentRow() {
   const t = useTheme();
-  const tick = useAppActiveTick();
+  const nav = useNavigation<any>();
   const [s, setS] = useState<AgentState | null>(null);
-  const [pending, setPending] = useState<AgentEngine | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const mounted = useRef(true);
-  const switchSeq = useRef(0);
-  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingRef = useRef<AgentEngine | null>(null);
-
-  const clearPoll = useCallback(() => {
-    if (pollTimer.current) {
-      clearTimeout(pollTimer.current);
-      pollTimer.current = null;
-    }
-  }, []);
-
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      clearPoll();
-    };
-  }, [clearPoll]);
 
   const refresh = useCallback(async () => {
-    if (pendingRef.current !== null) return;
     try {
-      const next = await getAgent();
-      if (!mounted.current || pendingRef.current !== null) return;
-      setS(next);
-      setErr(null);
-    } catch (e) {
-      if (!mounted.current || pendingRef.current !== null) return;
-      setErr((e as Error).message);
+      setS(await getAgent());
+    } catch {
+      // keep previous summary
     }
   }, []);
 
-  useEffect(() => {
-    // one check on mount, then every 8 s while Settings is open (or 2 s if server reports switching)
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    refresh();
-    const iv = setInterval(refresh, s?.switching ? AGENT_POLL_MS : 8000);
-    return () => clearInterval(iv);
-  }, [refresh, tick, s?.switching]);
+  useFocusEffect(
+    useCallback(() => {
+      void refresh();
+    }, [refresh]),
+  );
 
-  const select = async (target: AgentEngine) => {
-    if (!s || !s.available || pendingRef.current !== null || s.switching) return;
-    const targetCurrentlyActive = target === 'claude' ? s.claude_active : s.gemini_active;
-    if (target === s.engine && targetCurrentlyActive) return;
-
-    const seq = ++switchSeq.current;
-    clearPoll();
-    pendingRef.current = target;
-    setPending(target);
-    setErr(null);
-
-    try {
-      await setAgent(target);
-    } catch (e) {
-      if (!mounted.current || switchSeq.current !== seq) return;
-      pendingRef.current = null;
-      setPending(null);
-      setErr((e as Error).message || 'Failed to switch agent');
-      return;
-    }
-
-    if (!mounted.current || switchSeq.current !== seq) return;
-    let attempts = 0;
-
-    const poll = async () => {
-      if (!mounted.current || switchSeq.current !== seq) return;
-      attempts += 1;
-      try {
-        const cur = await getAgent();
-        if (!mounted.current || switchSeq.current !== seq) return;
-        if (!cur.available) {
-          pendingRef.current = null;
-          setS(cur);
-          setPending(null);
-          setErr('Agent switch not installed');
-          return;
-        }
-        const active = target === 'claude' ? cur.claude_active : cur.gemini_active;
-        if (active) {
-          pendingRef.current = null;
-          setS(cur);
-          setPending(null);
-          setErr(null);
-          return;
-        }
-      } catch {
-        // transient network error while switching; keep polling until deadline
-      }
-
-      if (attempts >= AGENT_POLL_MAX_ATTEMPTS) {
-        pendingRef.current = null;
-        setPending(null);
-        setErr(`Switch to ${target === 'claude' ? 'Claude' : 'Gemini'} timed out`);
-        return;
-      }
-      pollTimer.current = setTimeout(poll, AGENT_POLL_MS);
-    };
-
-    pollTimer.current = setTimeout(poll, AGENT_POLL_MS);
-  };
-
-  const options = s?.options?.length ? s.options : DEFAULT_AGENT_OPTIONS;
-  const selected: AgentEngine = pending ?? s?.engine ?? 'claude';
-  const switching = pending !== null || Boolean(s?.switching);
-  const unavailable = s != null && !s.available;
-  const disabled = !s || unavailable || switching;
-  const selectedActive = s ? (selected === 'claude' ? s.claude_active : s.gemini_active) : false;
-
-  const statusText = switching
-    ? 'Switching…'
-    : !s || unavailable
+  const label = s?.engine === 'gemini' ? 'Gemini' : 'Claude';
+  const active = s ? (s.engine === 'gemini' ? s.gemini_active : s.claude_active) : false;
+  const status = !s
+    ? 'Harness, usage, models & accounts'
+    : !s.available
       ? 'Unavailable'
-      : selectedActive
-        ? 'Running'
-        : 'Stopped';
-
-  const dot = switching
-    ? 'warn'
-    : !s || unavailable
-      ? 'faint'
-      : selectedActive
-        ? 'ok'
-        : 'warn';
-
-  const iconColor = switching
-    ? t.warn
-    : selectedActive && !unavailable
-      ? t.accent
-      : t.textDim;
+      : s.switching
+        ? `${label} · Switching…`
+        : `${label} · ${active ? 'Running' : 'Stopped'}`;
+  const dot = !s || !s.available ? 'faint' : s.switching ? 'warn' : active ? 'ok' : 'warn';
 
   return (
-    <Card style={{ gap: space(3) }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <Icon name="robot-outline" size={22} color={iconColor} />
-        <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Agent</Text>
-      </View>
-
-      <View
-        style={[st.agentSeg, { backgroundColor: t.cardAlt, opacity: disabled ? 0.55 : 1 }]}
-        accessibilityRole="tablist"
-      >
-        {options.map((opt) => {
-          const on = opt.id === selected;
-          const accentOn = on && !unavailable && s != null;
-          return (
-            <Pressable
-              key={opt.id}
-              onPress={() => select(opt.id)}
-              disabled={disabled}
-              accessibilityRole="tab"
-              accessibilityState={{ selected: on, disabled }}
-              android_ripple={{ color: t.ripple, borderless: false }}
-              style={[
-                st.agentSegBtn,
-                accentOn ? { backgroundColor: t.accent } : on ? { backgroundColor: t.card } : null,
-              ]}
-            >
-              <Text
-                style={[st.agentSegText, { color: accentOn ? t.onAccent : t.textDim }]}
-                numberOfLines={1}
-                adjustsFontSizeToFit
-                minimumFontScale={0.78}
-              >
-                {`${opt.label} · ${opt.model}`}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
-
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-        <StatusDot tone={dot} />
-        <Text style={{ color: t.textDim, fontSize: 13 }}>{statusText}</Text>
-      </View>
-
-      {unavailable ? (
-        <Text style={{ color: t.textFaint, fontSize: 12.5, lineHeight: 18 }}>
-          Agent switch not installed
-        </Text>
-      ) : null}
-      {err && !unavailable ? (
-        <Text style={{ color: t.bad, fontSize: 12.5, lineHeight: 18 }}>{err}</Text>
-      ) : null}
-    </Card>
+    <List>
+      <ListRow
+        icon="robot-outline"
+        title="Agent"
+        subtitle={
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 1 }}>
+            {s ? <StatusDot tone={dot} /> : null}
+            <Text style={{ color: t.textFaint, fontSize: 12.5 }} numberOfLines={1}>
+              {status}
+            </Text>
+          </View>
+        }
+        chevron
+        last
+        onPress={() => nav.navigate('AgentSettings')}
+      />
+    </List>
   );
 }
 
@@ -905,7 +756,7 @@ export default function SettingsScreen() {
       }
     >
       <Section label="Agent">
-        <AgentSwitch />
+        <AgentRow />
       </Section>
       <Section label="Network">
         <TorrentVpn />
@@ -928,18 +779,6 @@ export default function SettingsScreen() {
 }
 
 const st = StyleSheet.create({
-  agentSeg: { flexDirection: 'row', padding: 3, borderRadius: radius.sm, gap: 3 },
-  agentSegBtn: {
-    flex: 1,
-    minHeight: 38,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 10,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    overflow: 'hidden',
-  },
-  agentSegText: { fontSize: 13, fontWeight: '600', textAlign: 'center' },
   code: { borderRadius: radius.md, paddingVertical: space(4), alignItems: 'center' },
   masters: { flexDirection: 'row', borderRadius: radius.md, padding: space(2), gap: space(2), marginHorizontal: space(3), marginBottom: space(2) },
   master: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space(2), paddingLeft: space(1) },

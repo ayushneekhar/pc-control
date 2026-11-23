@@ -254,3 +254,72 @@ export type AgentState = {
 
 export const getAgent = () => get<AgentState>('/pc/api/agent');
 export const setAgent = (engine: AgentEngine) => post<AgentState>('/pc/api/agent', { engine });
+
+export type AgentUsageWindow = {
+  remaining_pct: number | null;
+  used_pct: number | null;
+  refreshes_in?: string | null;
+  resets_at?: string | null;
+  status?: string | null;
+};
+
+export type AgentUsageAccount = {
+  id: string;
+  harness: AgentEngine;
+  label: string;
+  email: string | null;
+  signed_in: boolean;
+  status: string | null;
+  error: string | null;
+  five_hour: AgentUsageWindow | null;
+  weekly: AgentUsageWindow | null;
+};
+
+export type AgentUsageResponse = {
+  ts: number;
+  cached: boolean;
+  accounts: AgentUsageAccount[];
+};
+
+export type AgentModelOption = {
+  id: string;
+  label: string;
+};
+
+export type GeminiInstanceOption = {
+  id: string;
+  label: string;
+  signed_in: boolean;
+  email: string | null;
+};
+
+export type AgentSettings = {
+  claude: {
+    account: string | null;
+    model: string;
+    effort: string;
+    models: AgentModelOption[];
+    efforts: string[];
+  };
+  gemini: {
+    instance_id: string;
+    model: string;
+    thought_level: string;
+    auto_rotate: boolean;
+    instances: GeminiInstanceOption[];
+    models: AgentModelOption[];
+    efforts: string[];
+  };
+};
+
+export type AgentSettingsPatch = {
+  claude?: { model?: string; effort?: string };
+  gemini?: { instance_id?: string; model?: string; thought_level?: string; auto_rotate?: boolean };
+};
+
+export const getAgentUsage = (refresh = false) =>
+  get<AgentUsageResponse>(refresh ? '/pc/api/agent/usage?refresh=1' : '/pc/api/agent/usage', 50000);
+export const getAgentSettings = () => get<AgentSettings>('/pc/api/agent/settings');
+export const updateAgentSettings = (patch: AgentSettingsPatch) =>
+  post<AgentSettings>('/pc/api/agent/settings', patch);
+export const resetAgent = () => post<{ ok: boolean; message: string }>('/pc/api/agent/reset', {});

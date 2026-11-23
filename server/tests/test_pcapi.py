@@ -1344,3 +1344,223 @@ class AgentHttpTests(unittest.TestCase):
         self.state.update({"engine": "gemini", "claude_active": False, "gemini_active": True})
         code, r = self.call("GET", "/pc/api/agent")
         self.assertEqual((code, r["engine"], r["gemini_active"], r["switching"]), (200, "gemini", True, False))
+
+
+class AgentUsageAndSettingsHttpTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = (
+            pcapi.ALLOWED_LOGINS,
+            pcapi.AGENT_USAGE,
+            pcapi.AGENT_SETTINGS,
+            pcapi.AGENT_RESET_BIN,
+        )
+        pcapi.ALLOWED_LOGINS = {"me@example.com"}
+        cls.api = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        threading.Thread(target=cls.api.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.api.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.api.shutdown()
+        (
+            pcapi.ALLOWED_LOGINS,
+            pcapi.AGENT_USAGE,
+            pcapi.AGENT_SETTINGS,
+            pcapi.AGENT_RESET_BIN,
+        ) = cls.saved
+
+    def setUp(self):
+        import hashlib
+
+        self.dir = tempfile.mkdtemp()
+        self.usage_script = os.path.join(self.dir, "ai-usage")
+        with open(self.usage_script, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(self.usage_script, 0o755)
+
+        self.reset_script = os.path.join(self.dir, "agent-reset")
+        with open(self.reset_script, "w") as f:
+            f.write("#!/bin/sh\necho 'fresh started'\n")
+        os.chmod(self.reset_script, 0o755)
+        pcapi.AGENT_RESET_BIN = self.reset_script
+
+        self.t3_settings = os.path.join(self.dir, "t3-settings.json")
+        self.t3_providers = os.path.join(self.dir, "t3-providers")
+        with open(self.t3_settings, "w") as f:
+            json.dump({
+                "providerInstances": {
+                    "opencode": {"driver": "opencode", "displayName": "OpenCode", "enabled": True},
+                    "antigravity": {"driver": "antigravity", "displayName": "Antigravity 1", "enabled": True},
+                    "antigravity-2": {"driver": "antigravity", "displayName": "Antigravity 2", "enabled": True},
+                }
+            }, f)
+        h2 = hashlib.sha256(b"antigravity-2").hexdigest()
+        tok2 = os.path.join(self.t3_providers, h2, "antigravity-acp", "antigravity-oauth-token")
+        os.makedirs(os.path.dirname(tok2), exist_ok=True)
+        with open(tok2, "w") as f:
+            f.write("secret-token-never-returned")
+
+        self.claude_cfg = os.path.join(self.dir, "claude.json")
+        with open(self.claude_cfg, "w") as f:
+            json.dump({"oauthAccount": {"emailAddress": "claude@example.com"}}, f)
+
+        self.now = [1000.0]
+        self.usage_calls = 0
+        self.usage_report = {
+            "antigravity_accounts": [
+                {
+                    "instance_id": "antigravity",
+                    "display_name": "Antigravity 1",
+                    "signed_in": False,
+                    "status": "not signed in",
+                    "account": None,
+                    "sections": {},
+                },
+                {
+                    "instance_id": "antigravity-2",
+                    "display_name": "Antigravity 2",
+                    "signed_in": True,
+                    "account": "gem2@gmail.com",
+                    "sections": {
+                        "gemini": {
+                            "five_hour": {"remaining_pct": 88.0, "used_pct": 12.0, "refreshes_in": "4h 10m"},
+                            "weekly": {"remaining_pct": 95.0, "used_pct": 5.0, "refreshes_in": "160h"},
+                        }
+                    },
+                },
+            ],
+            "claude": {
+                "account": "claude@example.com",
+                "five_hour": {"remaining_pct": 70.0, "used_pct": 30.0, "refreshes_in": "2h"},
+                "weekly": {"remaining_pct": 60.0, "used_pct": 40.0, "refreshes_in": "5d"},
+            },
+        }
+
+        def fake_usage_run(argv, **kw):
+            self.usage_calls += 1
+            return pcapi.subprocess.CompletedProcess(argv, 0, json.dumps(self.usage_report), "")
+
+        pcapi.AGENT_USAGE = pcapi.AgentUsageManager(
+            script=self.usage_script,
+            run_fn=fake_usage_run,
+            clock=lambda: self.now[0],
+            ttl=60.0,
+            claude_config_path=self.claude_cfg,
+        )
+        self.claude_agent_cfg = os.path.join(self.dir, "claude-agent.json")
+        self.gemini_agent_cfg = os.path.join(self.dir, "gemini-agent.json")
+        self.fresh_flag = os.path.join(self.dir, ".fresh-gemini")
+        pcapi.AGENT_SETTINGS = pcapi.AgentSettingsManager(
+            claude_path=self.claude_agent_cfg,
+            gemini_path=self.gemini_agent_cfg,
+            gemini_fresh_flag=self.fresh_flag,
+            t3_settings_path=self.t3_settings,
+            t3_providers_dir=self.t3_providers,
+            claude_config_path=self.claude_cfg,
+            usage_mgr=pcapi.AGENT_USAGE,
+        )
+
+    def call(self, method, path, body=None, headers=None):
+        import urllib.request, urllib.error
+        req = urllib.request.Request(self.url + path, method=method,
+                                     headers={"Content-Type": "application/json", **(headers or {})},
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.load(e)
+
+    def test_usage_endpoint_caching_and_normalization(self):
+        code, r = self.call("GET", "/pc/api/agent/usage")
+        self.assertEqual(code, 200)
+        self.assertFalse(r["cached"])
+        self.assertEqual(self.usage_calls, 1)
+        self.assertEqual(len(r["accounts"]), 3)
+        self.assertEqual(r["accounts"][0]["status"], "not signed in")
+        self.assertFalse(r["accounts"][0]["signed_in"])
+        self.assertEqual(r["accounts"][1]["email"], "gem2@gmail.com")
+        self.assertEqual(r["accounts"][1]["five_hour"]["remaining_pct"], 88.0)
+        self.assertEqual(r["accounts"][2]["harness"], "claude")
+        self.assertEqual(r["accounts"][2]["email"], "claude@example.com")
+
+        # Second call within 60 s hits cache
+        self.now[0] += 30.0
+        code, r2 = self.call("GET", "/pc/api/agent/usage")
+        self.assertEqual(code, 200)
+        self.assertTrue(r2["cached"])
+        self.assertEqual(self.usage_calls, 1)
+
+        # ?refresh=1 bypasses cache
+        code, r3 = self.call("GET", "/pc/api/agent/usage?refresh=1")
+        self.assertEqual(code, 200)
+        self.assertFalse(r3["cached"])
+        self.assertEqual(self.usage_calls, 2)
+
+        # TTL expiry refetches
+        self.now[0] += 61.0
+        code, r4 = self.call("GET", "/pc/api/agent/usage")
+        self.assertEqual(code, 200)
+        self.assertFalse(r4["cached"])
+        self.assertEqual(self.usage_calls, 3)
+
+    def test_settings_get_update_validation_and_fresh_flag(self):
+        # Populate cached emails first
+        self.assertEqual(self.call("GET", "/pc/api/agent/usage")[0], 200)
+
+        code, s = self.call("GET", "/pc/api/agent/settings")
+        self.assertEqual(code, 200)
+        self.assertEqual(s["claude"]["account"], "claude@example.com")
+        self.assertEqual(s["claude"]["model"], "claude-opus-5-5")
+        self.assertEqual(s["claude"]["effort"], "high")
+        self.assertEqual(s["gemini"]["instance_id"], "antigravity-2")
+        self.assertEqual(s["gemini"]["instances"][1]["email"], "gem2@gmail.com")
+        self.assertFalse(s["gemini"]["auto_rotate"])
+
+        # Reject invalid model / effort / instance
+        self.assertEqual(self.call("POST", "/pc/api/agent/settings", {"claude": {"model": "nope"}})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/agent/settings", {"claude": {"effort": "ultra"}})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/agent/settings", {"gemini": {"instance_id": "unknown"}})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/agent/settings", {"gemini": {"thought_level": "max"}})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/agent/settings", {"gemini": {"auto_rotate": "yes"}})[0], 400)
+
+        # Valid update persists both configs and touches .fresh-gemini on instance change
+        code, u = self.call("POST", "/pc/api/agent/settings", {
+            "claude": {"model": "claude-sonnet-5-5", "effort": "xhigh"},
+            "gemini": {
+                "instance_id": "antigravity",
+                "model": "gemini-4-argon",
+                "thought_level": "high",
+                "auto_rotate": True,
+            },
+        })
+        self.assertEqual(code, 200)
+        self.assertEqual(u["claude"]["model"], "claude-sonnet-5-5")
+        self.assertEqual(u["claude"]["effort"], "xhigh")
+        self.assertEqual(u["gemini"]["instance_id"], "antigravity")
+        self.assertEqual(u["gemini"]["model"], "gemini-4-argon")
+        self.assertEqual(u["gemini"]["thought_level"], "high")
+        self.assertTrue(u["gemini"]["auto_rotate"])
+        self.assertTrue(os.path.exists(self.fresh_flag))
+
+        # Verify files on disk
+        with open(self.claude_agent_cfg) as f:
+            self.assertEqual(json.load(f), {"model": "claude-sonnet-5-5", "effort": "xhigh"})
+        with open(self.gemini_agent_cfg) as f:
+            self.assertEqual(json.load(f), {
+                "instance_id": "antigravity",
+                "model": "gemini-4-argon",
+                "thought_level": "high",
+                "auto_rotate": True,
+            })
+
+    def test_reset_endpoint(self):
+        code, r = self.call("POST", "/pc/api/agent/reset", {})
+        self.assertEqual(code, 200)
+        self.assertTrue(r["ok"])
+        self.assertIn("fresh started", r["message"])
+
+        pcapi.AGENT_RESET_BIN = os.path.join(self.dir, "missing-reset")
+        code, r2 = self.call("POST", "/pc/api/agent/reset", {})
+        self.assertEqual(code, 503)
+        self.assertIn("error", r2)

@@ -11,9 +11,10 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   LayoutChangeEvent,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   Platform,
   Pressable,
-  RefreshControl,
   ScrollView,
   Share,
   StyleSheet,
@@ -54,9 +55,18 @@ function engineLabel(engine: ChatEngine): string {
   return engine === 'gemini' ? 'Gemini' : 'Claude';
 }
 
-function InlineText({ text, isUser }: { text: string; isUser: boolean }) {
+function InlineText({
+  text,
+  isUser,
+  trailingTime,
+}: {
+  text: string;
+  isUser: boolean;
+  trailingTime?: string;
+}) {
   const t = useTheme();
   const parts = useMemo(() => text.split(/(`[^`\n]+`)/g), [text]);
+  const spacer = trailingTime ? `\u00A0\u00A0${trailingTime.replace(/ /g, '\u00A0')}` : '';
   return (
     <Text selectable style={[st.msgText, { color: t.text }]}>
       {parts.map((part, i) => {
@@ -75,45 +85,62 @@ function InlineText({ text, isUser }: { text: string; isUser: boolean }) {
         }
         return <React.Fragment key={i}>{part}</React.Fragment>;
       })}
+      {spacer ? (
+        <Text style={st.timeSpacer} accessibilityElementsHidden importantForAccessibility="no">
+          {spacer}
+        </Text>
+      ) : null}
     </Text>
   );
 }
 
-function MessageBody({ text, isUser }: { text: string; isUser: boolean }) {
+function MessageBody({ text, isUser, timeStr }: { text: string; isUser: boolean; timeStr: string }) {
   const t = useTheme();
   const segments = useMemo(() => parseMessageSegments(text), [text]);
 
   if (segments.length === 0) return null;
 
+  if (segments.length === 1 && segments[0].kind === 'text') {
+    return (
+      <View style={st.inlineTimeWrap}>
+        <InlineText text={segments[0].text} isUser={isUser} trailingTime={timeStr || undefined} />
+        {timeStr ? <Text style={[st.timeInline, { color: t.textFaint }]}>{timeStr}</Text> : null}
+      </View>
+    );
+  }
+
   return (
-    <View style={{ gap: space(2) }}>
-      {segments.map((seg, idx) => {
-        if (seg.kind === 'codeblock') {
-          return (
-            <View
-              key={idx}
-              style={[
-                st.codeBlock,
-                {
-                  backgroundColor: t.bg,
-                  borderColor: t.border,
-                },
-              ]}
-            >
-              {seg.lang ? (
-                <Text style={[st.codeLang, { color: t.textFaint, fontFamily: t.mono }]}>{seg.lang}</Text>
-              ) : null}
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                <Text selectable style={[st.codeText, { color: t.text, fontFamily: t.mono }]}>
-                  {seg.code}
-                </Text>
-              </ScrollView>
-            </View>
-          );
-        }
-        return <InlineText key={idx} text={seg.text} isUser={isUser} />;
-      })}
-    </View>
+    <>
+      <View style={{ gap: space(2) }}>
+        {segments.map((seg, idx) => {
+          if (seg.kind === 'codeblock') {
+            return (
+              <View
+                key={idx}
+                style={[
+                  st.codeBlock,
+                  {
+                    backgroundColor: t.bg,
+                    borderColor: t.border,
+                  },
+                ]}
+              >
+                {seg.lang ? (
+                  <Text style={[st.codeLang, { color: t.textFaint, fontFamily: t.mono }]}>{seg.lang}</Text>
+                ) : null}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  <Text selectable style={[st.codeText, { color: t.text, fontFamily: t.mono }]}>
+                    {seg.code}
+                  </Text>
+                </ScrollView>
+              </View>
+            );
+          }
+          return <InlineText key={idx} text={seg.text} isUser={isUser} />;
+        })}
+      </View>
+      {timeStr ? <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text> : null}
+    </>
   );
 }
 
@@ -133,6 +160,54 @@ function ChatSkeleton() {
       <View style={[st.skelBubbleRight, { backgroundColor: t.cardAlt }]}>
         <View style={[st.skelLine, { width: '60%', backgroundColor: t.border }]} />
       </View>
+    </View>
+  );
+}
+
+function TypingDots() {
+  const t = useTheme();
+  const [dots] = useState(() => [new Animated.Value(0), new Animated.Value(0), new Animated.Value(0)]);
+
+  useEffect(() => {
+    const loops: Animated.CompositeAnimation[] = [];
+    const timers = dots.map((dot, idx) =>
+      setTimeout(() => {
+        const loop = Animated.loop(
+          Animated.sequence([
+            Animated.timing(dot, { toValue: 1, duration: 360, useNativeDriver: true }),
+            Animated.timing(dot, { toValue: 0, duration: 360, useNativeDriver: true }),
+            Animated.delay(260),
+          ]),
+        );
+        loops.push(loop);
+        loop.start();
+      }, idx * 160),
+    );
+    return () => {
+      timers.forEach((id) => clearTimeout(id));
+      loops.forEach((loop) => loop.stop());
+    };
+  }, [dots]);
+
+  return (
+    <View style={st.typingRow} accessible accessibilityLabel="Assistant is typing">
+      {dots.map((dot, idx) => (
+        <Animated.View
+          key={idx}
+          style={[
+            st.typingDot,
+            {
+              backgroundColor: t.accent,
+              opacity: dot.interpolate({ inputRange: [0, 1], outputRange: [0.28, 0.9] }),
+              transform: [
+                {
+                  translateY: dot.interpolate({ inputRange: [0, 1], outputRange: [0, -2.5] }),
+                },
+              ],
+            },
+          ]}
+        />
+      ))}
     </View>
   );
 }
@@ -188,21 +263,17 @@ function MessageBubble({
         ) : null}
 
         {isPending ? (
-          <View style={st.pendingRow}>
-            <ActivityIndicator size="small" color={t.accent} />
-            <Text style={[st.pendingText, { color: t.textDim }]}>Thinking…</Text>
-          </View>
+          <TypingDots />
         ) : isError ? (
-          <Text selectable style={[st.errorText, { color: t.bad }]}>
-            {msg.error || 'Request failed'}
-          </Text>
+          <>
+            <Text selectable style={[st.errorText, { color: t.bad }]}>
+              {msg.error || 'Request failed'}
+            </Text>
+            {timeStr ? <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text> : null}
+          </>
         ) : (
-          <MessageBody text={msg.text} isUser={isUser} />
+          <MessageBody text={msg.text} isUser={isUser} timeStr={timeStr} />
         )}
-
-        {!isPending && timeStr ? (
-          <Text style={[st.timeText, { color: t.textFaint }]}>{timeStr}</Text>
-        ) : null}
       </Pressable>
     </View>
   );
@@ -219,11 +290,11 @@ export default function ChatScreen() {
   const [hasMore, setHasMore] = useState<boolean>(() => cached?.has_more ?? false);
   const [running, setRunning] = useState(false);
   const [loadingInitial, setLoadingInitial] = useState(() => !cached);
-  const [refreshing, setRefreshing] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [sending, setSending] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [draft, setDraft] = useState('');
+  const [showScrollDown, setShowScrollDown] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [appActive, setAppActive] = useState(() => AppState.currentState === 'active');
   const [kbHeight, setKbHeight] = useState(0);
@@ -244,6 +315,9 @@ export default function ChatScreen() {
   const mountedRef = useRef(true);
   const isFocusedRef = useRef(isFocused);
   const messagesCountRef = useRef(messages.length);
+  const nearBottomRef = useRef(true);
+  const loadingOlderRef = useRef(false);
+  const settleScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     isFocusedRef.current = isFocused;
@@ -257,6 +331,7 @@ export default function ChatScreen() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (settleScrollTimerRef.current) clearTimeout(settleScrollTimerRef.current);
     };
   }, []);
 
@@ -272,6 +347,46 @@ export default function ChatScreen() {
       listRef.current?.scrollToEnd({ animated });
     }
   }, []);
+
+  const scrollToBottomSettled = useCallback((animated: boolean) => {
+    if (messagesCountRef.current <= 0) return;
+    listRef.current?.scrollToEnd({ animated });
+    if (settleScrollTimerRef.current) clearTimeout(settleScrollTimerRef.current);
+    settleScrollTimerRef.current = setTimeout(() => {
+      if (mountedRef.current && nearBottomRef.current && !loadingOlderRef.current && messagesCountRef.current > 0) {
+        listRef.current?.scrollToEnd({ animated: true });
+      }
+    }, 80);
+  }, []);
+
+  const onListScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+    const isNear = distanceFromBottom <= 120;
+    nearBottomRef.current = isNear;
+    setShowScrollDown((prev) => (prev === !isNear ? prev : !isNear));
+  }, []);
+
+  const onPressScrollToBottom = useCallback(() => {
+    nearBottomRef.current = true;
+    setShowScrollDown(false);
+    scrollToBottomSettled(true);
+  }, [scrollToBottomSettled]);
+
+  const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+  const lastMsgSig = lastMsg
+    ? `${lastMsg.id}:${lastMsg.status}:${lastMsg.text.length}:${lastMsg.error?.length ?? 0}`
+    : '';
+  const prevLastMsgSigRef = useRef(lastMsgSig);
+
+  useEffect(() => {
+    const prev = prevLastMsgSigRef.current;
+    prevLastMsgSigRef.current = lastMsgSig;
+    if (!lastMsgSig || lastMsgSig === prev) return;
+    if (!nearBottomRef.current || loadingOlderRef.current) return;
+    const raf = requestAnimationFrame(() => scrollToBottomSettled(true));
+    return () => cancelAnimationFrame(raf);
+  }, [lastMsgSig, scrollToBottomSettled]);
 
   // Dismiss keyboard and clear any Android keyboard offset when leaving the Chat tab.
   useEffect(() => {
@@ -385,7 +500,6 @@ export default function ChatScreen() {
       } finally {
         if (mountedRef.current) {
           setLoadingInitial(false);
-          setRefreshing(false);
         }
       }
     },
@@ -425,15 +539,11 @@ export default function ChatScreen() {
     return () => clearInterval(id);
   }, [polling, loadMessages]);
 
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    void loadMessages();
-  }, [loadMessages]);
-
   const onLoadOlder = useCallback(async () => {
     if (loadingOlder || !hasMore || messages.length === 0) return;
     const oldest = messages[0];
     if (!oldest || oldest.optimistic) return;
+    loadingOlderRef.current = true;
     setLoadingOlder(true);
     try {
       const res = await fetchChatMessages(oldest.id, 50);
@@ -445,6 +555,9 @@ export default function ChatScreen() {
       setErr((e as Error).message || 'Failed to load older messages');
     } finally {
       if (mountedRef.current) setLoadingOlder(false);
+      setTimeout(() => {
+        loadingOlderRef.current = false;
+      }, 200);
     }
   }, [loadingOlder, hasMore, messages]);
 
@@ -482,8 +595,10 @@ export default function ChatScreen() {
     setErr(null);
     setSending(true);
     setRunning(true);
+    nearBottomRef.current = true;
+    setShowScrollDown(false);
     setMessages((prev) => [...prev, optUser, optAsst]);
-    requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+    requestAnimationFrame(() => scrollToBottomSettled(true));
 
     try {
       const res = await sendChatMessage(trimmed, clientId);
@@ -506,7 +621,7 @@ export default function ChatScreen() {
     } finally {
       if (mountedRef.current) setSending(false);
     }
-  }, [draft, sending, engine, hasMore, persistCache]);
+  }, [draft, sending, engine, hasMore, persistCache, scrollToBottomSettled]);
 
   const onNewChat = useCallback(() => {
     Alert.alert('New conversation', `Start a fresh ${engineLabel(engine)} session?`, [
@@ -521,12 +636,14 @@ export default function ChatScreen() {
               if (!mountedRef.current) return;
               setEngine(res.engine);
               setRunning(res.running);
+              nearBottomRef.current = true;
+              setShowScrollDown(false);
               setMessages((prev) => {
                 const next = mergeChatMessages(prev, [...prev.filter((m) => !m.optimistic), res.boundary_message]);
                 persistCache(next, res.engine, hasMore);
                 return next;
               });
-              requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+              requestAnimationFrame(() => scrollToBottomSettled(true));
             })
             .catch((e) => {
               if (!mountedRef.current) return;
@@ -538,7 +655,7 @@ export default function ChatScreen() {
         },
       },
     ]);
-  }, [engine, hasMore, persistCache]);
+  }, [engine, hasMore, persistCache, scrollToBottomSettled]);
 
   const openModelPicker = useCallback(() => {
     Keyboard.dismiss();
@@ -583,14 +700,17 @@ export default function ChatScreen() {
     [engine, hasMore, persistCache],
   );
 
-  const chipLabel = useMemo(() => {
-    if (!agentSettings) return engineLabel(engine);
+  const modelTriggerA11yLabel = useMemo(() => {
+    const provider = engineLabel(engine);
+    if (!agentSettings) return `Switch model and effort: ${provider}`;
     if (engine === 'claude') {
       const m = agentSettings.claude.models.find((x) => x.id === agentSettings.claude.model);
-      return formatComposerChipLabel('claude', agentSettings.claude.model, m?.label, agentSettings.claude.effort);
+      const summary = formatComposerChipLabel('claude', agentSettings.claude.model, m?.label, agentSettings.claude.effort);
+      return `Switch model and effort: ${provider}, ${summary}`;
     }
     const m = agentSettings.gemini.models.find((x) => x.id === agentSettings.gemini.model);
-    return formatComposerChipLabel('gemini', agentSettings.gemini.model, m?.label, agentSettings.gemini.thought_level);
+    const summary = formatComposerChipLabel('gemini', agentSettings.gemini.model, m?.label, agentSettings.gemini.thought_level);
+    return `Switch model and effort: ${provider}, ${summary}`;
   }, [engine, agentSettings]);
 
   const canSend = draft.trim().length > 0 && !sending;
@@ -625,118 +745,129 @@ export default function ChatScreen() {
         </View>
       ) : null}
 
-      {loadingInitial && messages.length === 0 ? (
-        <ChatSkeleton />
-      ) : (
-        <FlatList
-          ref={listRef}
-          data={messages}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item, index }) => (
-            <MessageBubble
-              msg={item}
-              showEngine={shouldShowEngineTag(messages, index, engine)}
-              onCopy={onCopy}
-            />
-          )}
-          contentContainerStyle={[st.listContent, messages.length === 0 && st.listContentEmpty]}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="interactive"
-          onContentSizeChange={() => {
-            if (messages.length > 0) listRef.current?.scrollToEnd({ animated: false });
-          }}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={t.accent}
-              colors={[t.accent]}
-              progressBackgroundColor={t.card}
-            />
-          }
-          ListHeaderComponent={
-            hasMore ? (
-              <View style={st.olderWrap}>
-                <Button
-                  label="Load earlier"
-                  kind="subtle"
-                  compact
-                  busy={loadingOlder}
-                  onPress={() => void onLoadOlder()}
-                />
-              </View>
-            ) : null
-          }
-          ListEmptyComponent={
-            <View style={st.emptyWrap}>
-              <View style={[st.emptyIcon, { backgroundColor: t.card }]}>
-                <Icon name="message-text-outline" size={22} color={t.textFaint} />
-              </View>
-              <Text style={[st.emptyLabel, { color: t.textFaint }]}>Start a conversation</Text>
-            </View>
-          }
-        />
-      )}
-
-      <View style={[st.composerOuter, { backgroundColor: t.bg }]}>
-        <View
-          style={[
-            st.composerPill,
-            {
-              backgroundColor: t.card,
-              borderColor: t.border,
-            },
-          ]}
-        >
-          <TextInput
-            value={draft}
-            onChangeText={setDraft}
-            placeholder={`Message ${engineLabel(engine)}`}
-            placeholderTextColor={t.textFaint}
-            multiline
-            maxLength={32000}
-            selectionColor={t.accent}
-            style={[st.input, { color: t.text }]}
-          />
-          <View style={st.composerControls}>
-            <Pressable
-              onPress={openModelPicker}
-              accessibilityLabel={`Switch model and effort: ${chipLabel}`}
-              android_ripple={{ color: t.ripple, foreground: true }}
-              style={({ pressed }) => [
-                st.modelChip,
-                { backgroundColor: t.cardAlt, opacity: pressed ? 0.8 : 1 },
-              ]}
-            >
-              <Image
-                source={engine === 'claude' ? ANTHROPIC_ICON : GEMINI_ICON}
-                style={[st.modelChipIcon, { tintColor: t.accent }]}
-                resizeMode="contain"
+      <View style={st.listWrap}>
+        {loadingInitial && messages.length === 0 ? (
+          <ChatSkeleton />
+        ) : (
+          <FlatList
+            ref={listRef}
+            data={messages}
+            keyExtractor={(item) => item.id}
+            renderItem={({ item, index }) => (
+              <MessageBubble
+                msg={item}
+                showEngine={shouldShowEngineTag(messages, index, engine)}
+                onCopy={onCopy}
               />
-              <Text style={[st.modelChipText, { color: t.textDim }]} numberOfLines={1}>
-                {chipLabel}
-              </Text>
-              <Icon name="chevron-down" size={14} color={t.textFaint} />
-            </Pressable>
-            <Pressable
-              onPress={() => void onSend()}
-              disabled={!canSend}
-              accessibilityLabel="Send message"
-              style={({ pressed }) => [
-                st.sendBtn,
-                {
-                  backgroundColor: canSend ? t.accent : t.cardAlt,
-                  opacity: pressed && canSend ? 0.85 : 1,
-                },
-              ]}
-            >
-              {sending ? (
-                <ActivityIndicator size="small" color={t.accent} />
-              ) : (
-                <Icon name="arrow-up" size={18} color={canSend ? t.onAccent : t.textFaint} />
-              )}
-            </Pressable>
-          </View>
+            )}
+            contentContainerStyle={[st.listContent, messages.length === 0 && st.listContentEmpty]}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
+            onScroll={onListScroll}
+            scrollEventThrottle={100}
+            onContentSizeChange={() => {
+              if (messages.length > 0 && nearBottomRef.current && !loadingOlderRef.current) {
+                scrollToBottomSettled(false);
+              }
+            }}
+            ListHeaderComponent={
+              hasMore ? (
+                <View style={st.olderWrap}>
+                  <Button
+                    label="Load earlier"
+                    kind="subtle"
+                    compact
+                    busy={loadingOlder}
+                    onPress={() => void onLoadOlder()}
+                  />
+                </View>
+              ) : null
+            }
+            ListEmptyComponent={
+              <View style={st.emptyWrap}>
+                <View style={[st.emptyIcon, { backgroundColor: t.card }]}>
+                  <Icon name="message-text-outline" size={22} color={t.textFaint} />
+                </View>
+                <Text style={[st.emptyLabel, { color: t.textFaint }]}>Start a conversation</Text>
+              </View>
+            }
+          />
+        )}
+        {showScrollDown && messages.length > 0 ? (
+          <Pressable
+            onPress={onPressScrollToBottom}
+            accessibilityRole="button"
+            accessibilityLabel="Scroll to latest message"
+            android_ripple={{ color: t.ripple, foreground: true }}
+            style={({ pressed }) => [
+              st.scrollDownBtn,
+              {
+                backgroundColor: t.card,
+                borderColor: t.border,
+                opacity: pressed ? 0.8 : 1,
+              },
+            ]}
+          >
+            <Icon name="chevron-down" size={20} color={t.text} />
+          </Pressable>
+        ) : null}
+      </View>
+
+      <View
+        style={[
+          st.composerPill,
+          {
+            backgroundColor: t.card,
+            borderColor: t.border,
+          },
+        ]}
+      >
+        <TextInput
+          value={draft}
+          onChangeText={setDraft}
+          placeholder={`Message ${engineLabel(engine)}`}
+          placeholderTextColor={t.textFaint}
+          multiline
+          maxLength={32000}
+          selectionColor={t.accent}
+          style={[st.input, { color: t.text }]}
+        />
+        <View style={st.composerControls}>
+          <Pressable
+            onPress={openModelPicker}
+            accessibilityRole="button"
+            accessibilityLabel={modelTriggerA11yLabel}
+            android_ripple={{ color: t.ripple, foreground: true }}
+            style={({ pressed }) => [
+              st.modelChip,
+              { backgroundColor: t.cardAlt, opacity: pressed ? 0.8 : 1 },
+            ]}
+          >
+            <Image
+              source={engine === 'claude' ? ANTHROPIC_ICON : GEMINI_ICON}
+              style={[st.modelChipIcon, { tintColor: t.accent }]}
+              resizeMode="contain"
+            />
+            <Icon name="chevron-down" size={13} color={t.textFaint} />
+          </Pressable>
+          <Pressable
+            onPress={() => void onSend()}
+            disabled={!canSend}
+            accessibilityLabel="Send message"
+            style={({ pressed }) => [
+              st.sendBtn,
+              {
+                backgroundColor: canSend ? t.accent : t.cardAlt,
+                opacity: pressed && canSend ? 0.85 : 1,
+              },
+            ]}
+          >
+            {sending ? (
+              <ActivityIndicator size="small" color={t.accent} />
+            ) : (
+              <Icon name="arrow-up" size={18} color={canSend ? t.onAccent : t.textFaint} />
+            )}
+          </Pressable>
         </View>
       </View>
     </>
@@ -781,6 +912,7 @@ const st = StyleSheet.create({
     overflow: 'hidden',
   },
   newBtnText: { fontSize: 13, fontWeight: '500' },
+  listWrap: { flex: 1, position: 'relative' },
   listContent: {
     paddingHorizontal: screenPad,
     paddingTop: space(1),
@@ -811,9 +943,10 @@ const st = StyleSheet.create({
   bubbleRowAssistant: { justifyContent: 'flex-start' },
   bubble: {
     borderRadius: 18,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    gap: space(1.5),
+    paddingHorizontal: 13,
+    paddingTop: 8,
+    paddingBottom: 7,
+    gap: 3,
   },
   bubbleUser: {
     maxWidth: '82%',
@@ -825,8 +958,23 @@ const st = StyleSheet.create({
   },
   engineRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   engineTag: { fontSize: 11.5, fontWeight: '500' },
-  timeText: { fontSize: 11, fontVariant: ['tabular-nums'], alignSelf: 'flex-end' },
-  msgText: { fontSize: 15, lineHeight: 21 },
+  inlineTimeWrap: { position: 'relative' },
+  timeSpacer: { fontSize: 10.5, lineHeight: 14, fontVariant: ['tabular-nums'], color: 'transparent' },
+  timeInline: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    fontSize: 10.5,
+    lineHeight: 14,
+    fontVariant: ['tabular-nums'],
+  },
+  timeBlock: {
+    fontSize: 10.5,
+    lineHeight: 14,
+    fontVariant: ['tabular-nums'],
+    alignSelf: 'flex-end',
+  },
+  msgText: { fontSize: 15, lineHeight: 20 },
   inlineCode: { fontSize: 13, paddingHorizontal: 4, borderRadius: 4 },
   codeBlock: {
     borderRadius: 10,
@@ -836,22 +984,37 @@ const st = StyleSheet.create({
   },
   codeLang: { fontSize: 10.5 },
   codeText: { fontSize: 12.5, lineHeight: 18 },
-  pendingRow: { flexDirection: 'row', alignItems: 'center', gap: space(2), paddingVertical: 2 },
-  pendingText: { fontSize: 14 },
+  typingRow: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 5, paddingHorizontal: 2 },
+  typingDot: { width: 7, height: 7, borderRadius: 3.5 },
   errorText: { fontSize: 14, lineHeight: 20 },
   systemRow: { flexDirection: 'row', alignItems: 'center', gap: space(2.5), paddingVertical: space(2) },
   systemLine: { flex: 1, height: StyleSheet.hairlineWidth },
   systemText: { fontSize: 11.5, fontVariant: ['tabular-nums'] },
-  composerOuter: {
-    paddingHorizontal: screenPad,
-    paddingTop: space(2),
-    paddingBottom: space(2.5),
+  scrollDownBtn: {
+    position: 'absolute',
+    right: screenPad,
+    bottom: space(2),
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
   },
   composerPill: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 6,
     minHeight: 48,
+    marginHorizontal: screenPad,
+    marginTop: space(1.5),
+    marginBottom: space(2),
     borderRadius: 24,
     borderWidth: StyleSheet.hairlineWidth,
     paddingLeft: 14,
@@ -879,22 +1042,17 @@ const st = StyleSheet.create({
   modelChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    height: 32,
-    maxWidth: 148,
-    paddingLeft: 8,
+    justifyContent: 'center',
+    gap: 2,
+    height: 34,
+    paddingLeft: 9,
     paddingRight: 6,
     borderRadius: radius.pill,
     overflow: 'hidden',
   },
   modelChipIcon: {
-    width: 13,
-    height: 13,
-  },
-  modelChipText: {
-    fontSize: 12,
-    fontWeight: '500',
-    flexShrink: 1,
+    width: 16,
+    height: 16,
   },
   sendBtn: {
     width: 34,

@@ -1,5 +1,5 @@
 """pc-api route classification (API-only routes hidden server-side, overridable via routes.json)."""
-import json, os, struct, sys, tempfile, threading, time, unittest, urllib.parse
+import json, os, shutil, struct, sys, tempfile, threading, time, unittest, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
@@ -1665,3 +1665,300 @@ class AgentUsageAndSettingsHttpTests(unittest.TestCase):
         code, r2 = self.call("POST", "/pc/api/agent/reset", {})
         self.assertEqual(code, 503)
         self.assertIn("error", r2)
+
+
+class OtaMirrorTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.ota_dir = os.path.join(self.dir, "ota")
+        self.art_dir = os.path.join(self.dir, "artifacts")
+        os.makedirs(self.ota_dir)
+        os.makedirs(self.art_dir)
+        self.orig = (pcapi.OTA_DIR, pcapi.OTA_ARTIFACTS_DIR)
+        pcapi.OTA_DIR = self.ota_dir
+        pcapi.OTA_ARTIFACTS_DIR = self.art_dir
+        self.srv = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        pcapi.OTA_DIR, pcapi.OTA_ARTIFACTS_DIR = self.orig
+        shutil.rmtree(self.dir)
+
+    def fetch(self, path):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}")
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.headers.get("Content-Type", ""), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Content-Type", ""), e.read()
+
+    def test_404_when_missing_and_fallback_to_artifacts_then_override(self):
+        code, _, _ = self.fetch("/pc/api/ota/ota.version.json")
+        self.assertEqual(code, 404)
+        code, _, _ = self.fetch("/pc/api/ota/bundle.zip")
+        self.assertEqual(code, 404)
+
+        # Fallback to artifacts dir when ota_dir is empty
+        with open(os.path.join(self.art_dir, "ota.version.json"), "w") as f:
+            json.dump({"version": "27"}, f)
+        with open(os.path.join(self.art_dir, "bundle.zip"), "wb") as f:
+            f.write(b"PK-art")
+
+        code, ctype, body = self.fetch("/pc/api/ota/ota.version.json")
+        self.assertEqual(code, 200)
+        self.assertIn("application/json", ctype)
+        self.assertEqual(json.loads(body)["version"], "27")
+
+        code, ctype, body = self.fetch("/pc/api/ota/bundle.zip")
+        self.assertEqual(code, 200)
+        self.assertEqual(ctype, "application/zip")
+        self.assertEqual(body, b"PK-art")
+
+        # ota_dir takes precedence over artifacts dir
+        with open(os.path.join(self.ota_dir, "ota.version.json"), "w") as f:
+            json.dump({"version": "28"}, f)
+        code, _, body = self.fetch("/pc/api/ota/ota.version.json")
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["version"], "28")
+
+
+class CatCamTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.unit_dir = os.path.join(self.dir, "systemd")
+        os.makedirs(self.unit_dir)
+        # Create 4 of the 6 units; leave cam-music and kbd-lock missing to test skipping.
+        for u in ("catcam", "cam-ptz", "camrec", "catdetect"):
+            with open(os.path.join(self.unit_dir, f"{u}.service"), "w") as f:
+                f.write("[Unit]\nDescription=test\n")
+        self.state_file = os.path.join(self.dir, "catcam-state.json")
+        self.calls = []
+        self.active = {u: "active" for u in ("catcam", "cam-ptz", "camrec", "catdetect")}
+
+        def fake_run(argv, **kw):
+            self.calls.append(list(argv))
+            if argv[:3] == ["systemctl", "--user", "is-active"]:
+                lines = [self.active.get(u.removesuffix(".service"), "inactive") for u in argv[3:]]
+                rc = 0 if all(x == "active" for x in lines) else 3
+                return pcapi.subprocess.CompletedProcess(argv, rc, "\n".join(lines) + "\n", "")
+            if argv[:4] == ["systemctl", "--user", "disable", "--now"]:
+                for u in argv[4:]:
+                    self.active[u.removesuffix(".service")] = "inactive"
+                return pcapi.subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:4] == ["systemctl", "--user", "enable", "--now"]:
+                for u in argv[4:]:
+                    self.active[u.removesuffix(".service")] = "active"
+                return pcapi.subprocess.CompletedProcess(argv, 0, "", "")
+            return pcapi.subprocess.CompletedProcess(argv, 1, "", "unexpected cmd")
+
+        self.fake_run = fake_run
+        self.orig_catcam = pcapi.CATCAM
+        pcapi.CATCAM = pcapi.CatCamManager(unit_dir=self.unit_dir, state_file=self.state_file, run_fn=fake_run)
+        self.srv = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        pcapi.CATCAM = self.orig_catcam
+        shutil.rmtree(self.dir)
+
+    def call(self, method, path, body=None):
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}", data=data, method=method,
+            headers={"Content-Type": "application/json"} if data is not None else {},
+        )
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def test_toggle_off_and_on_skips_missing_units_and_persists(self):
+        code, st = self.call("GET", "/pc/api/catcam")
+        self.assertEqual(code, 200)
+        self.assertTrue(st["enabled"])
+        self.assertEqual(set(st["units"].keys()), {"catcam", "cam-ptz", "camrec", "catdetect"})
+        self.assertTrue(all(v == "active" for v in st["units"].values()))
+
+        # Validation
+        self.assertEqual(self.call("POST", "/pc/api/catcam", {"enabled": "no"})[0], 400)
+
+        # Turn off -> disable --now only existing units
+        code, st = self.call("POST", "/pc/api/catcam", {"enabled": False})
+        self.assertEqual(code, 200)
+        self.assertFalse(st["enabled"])
+        self.assertTrue(all(v == "inactive" for v in st["units"].values()))
+        self.assertIn(
+            ["systemctl", "--user", "disable", "--now",
+             "catcam.service", "cam-ptz.service", "camrec.service", "catdetect.service"],
+            self.calls,
+        )
+
+        # Persists across a fresh manager instance
+        mgr2 = pcapi.CatCamManager(unit_dir=self.unit_dir, state_file=self.state_file, run_fn=self.fake_run)
+        self.assertFalse(mgr2.status()["enabled"])
+
+        # Turn back on -> enable --now
+        code, st = self.call("POST", "/pc/api/catcam", {"enabled": True})
+        self.assertEqual(code, 200)
+        self.assertTrue(st["enabled"])
+        self.assertTrue(all(v == "active" for v in st["units"].values()))
+        self.assertIn(
+            ["systemctl", "--user", "enable", "--now",
+             "catcam.service", "cam-ptz.service", "camrec.service", "catdetect.service"],
+            self.calls,
+        )
+
+
+class UsageAlertTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.sent = []
+
+        class FakeNotify:
+            def __init__(self, out):
+                self.out = out
+
+            def send(self, cat, title, body=""):
+                self.out.append((cat, title, body))
+                return 200, {"ok": True}
+
+        self.notify = FakeNotify(self.sent)
+        self.settings_path = os.path.join(self.dir, "usage-alerts.json")
+        self.state_path = os.path.join(self.dir, "usage-alerts-state.json")
+        self.settings = pcapi.AgentSettingsManager(
+            claude_path=os.path.join(self.dir, "claude.json"),
+            gemini_path=os.path.join(self.dir, "gemini.json"),
+            usage_alerts_path=self.settings_path,
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def _acc(self, aid="claude", email="me@example.com", fh=50, fh_reset="2026-11-23T18:00:00Z",
+             wk=50, wk_reset="2026-11-29T00:00:00Z"):
+        return {
+            "id": aid,
+            "harness": "claude",
+            "label": "Claude",
+            "email": email,
+            "signed_in": True,
+            "status": None,
+            "error": None,
+            "five_hour": {"remaining_pct": fh, "used_pct": 100 - fh, "resets_at": fh_reset},
+            "weekly": {"remaining_pct": wk, "used_pct": 100 - wk, "resets_at": wk_reset},
+        }
+
+    def test_thresholds_dedupe_and_window_reset(self):
+        w = pcapi.UsageAlertWatcher(self.notify, None, self.settings, state_file=self.state_path)
+
+        # Above thresholds -> no alert
+        self.assertEqual(w.evaluate([self._acc(fh=50, wk=50)]), [])
+        self.assertEqual(len(self.sent), 0)
+
+        # 5h crosses <= 20% -> sends once
+        res = w.evaluate([self._acc(fh=20, wk=50, fh_reset="2026-11-23T18:00:00Z")])
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0][1], "five_hour_low")
+        self.assertEqual(self.sent[-1][0], "usage_limits")
+
+        # Same window -> deduped (no second alert even as remaining drops to 12%)
+        self.assertEqual(w.evaluate([self._acc(fh=12, wk=50, fh_reset="2026-11-23T18:00:00Z")]), [])
+
+        # Hits 0% -> sends five_hour_zero once
+        res = w.evaluate([self._acc(fh=0, wk=50, fh_reset="2026-11-23T18:00:00Z")])
+        self.assertEqual([r[1] for r in res], ["five_hour_zero"])
+        self.assertEqual(w.evaluate([self._acc(fh=0, wk=50, fh_reset="2026-11-23T18:00:00Z")]), [])
+
+        # New resets_at window -> dedupe resets and alerts fire again
+        res = w.evaluate([self._acc(fh=15, wk=50, fh_reset="2026-11-23T23:00:00Z")])
+        self.assertEqual([r[1] for r in res], ["five_hour_low"])
+
+        # Weekly <= 10% -> sends weekly_low once per weekly resets_at
+        res = w.evaluate([self._acc(fh=15, wk=10, fh_reset="2026-11-23T23:00:00Z", wk_reset="2026-11-29T00:00:00Z")])
+        self.assertEqual([r[1] for r in res], ["weekly_low"])
+        self.assertEqual(
+            w.evaluate([self._acc(fh=15, wk=8, fh_reset="2026-11-23T23:00:00Z", wk_reset="2026-11-29T00:00:00Z")]),
+            [],
+        )
+        res = w.evaluate([self._acc(fh=15, wk=9, fh_reset="2026-11-23T23:00:00Z", wk_reset="2026-12-06T00:00:00Z")])
+        self.assertEqual([r[1] for r in res], ["weekly_low"])
+
+        # Persists dedupe across restart
+        w2 = pcapi.UsageAlertWatcher(self.notify, None, self.settings, state_file=self.state_path)
+        self.assertEqual(
+            w2.evaluate([self._acc(fh=15, wk=9, fh_reset="2026-11-23T23:00:00Z", wk_reset="2026-12-06T00:00:00Z")]),
+            [],
+        )
+
+    def test_configurable_thresholds_and_disable(self):
+        code, s = self.settings.update({"usage_alerts": {"enabled": True, "five_hour_pct": 30, "weekly_pct": 15}})
+        self.assertEqual(code, 200)
+        self.assertEqual(s["usage_alerts"], {"enabled": True, "five_hour_pct": 30, "weekly_pct": 15})
+        self.assertEqual(self.settings.update({"usage_alerts": {"five_hour_pct": 0}})[0], 400)
+
+        w = pcapi.UsageAlertWatcher(self.notify, None, self.settings, state_file=self.state_path)
+        res = w.evaluate([self._acc(fh=28, wk=14)])
+        self.assertEqual({r[1] for r in res}, {"five_hour_low", "weekly_low"})
+
+        # Disabled -> no alerts even at 0%
+        self.settings.update({"usage_alerts": {"enabled": False}})
+        self.assertEqual(w.evaluate([self._acc(fh=0, wk=0, fh_reset="new", wk_reset="new")]), [])
+
+    def test_activity_triggered_no_polling_and_5min_throttle(self):
+        watch_dir = os.path.join(self.dir, "logs")
+        os.makedirs(watch_dir)
+        log_file = os.path.join(watch_dir, "acp.log")
+        with open(log_file, "w") as f:
+            f.write("init\n")
+
+        now = [1000.0]
+        refreshes = []
+
+        class FakeUsageMgr:
+            on_update = None
+
+            def get(self, force_refresh=False):
+                refreshes.append(force_refresh)
+                return 200, {"accounts": []}
+
+        w = pcapi.UsageAlertWatcher(
+            self.notify, FakeUsageMgr(), self.settings,
+            state_file=self.state_path, watch_paths=[(watch_dir, 1)],
+            min_interval=300.0, clock=lambda: now[0],
+        )
+
+        # Baseline scan -> zero network calls
+        self.assertFalse(w.check_activity())
+        self.assertEqual(len(refreshes), 0)
+
+        # Idle checks -> zero network calls even hours later
+        now[0] += 3600.0
+        self.assertFalse(w.check_activity())
+        self.assertEqual(len(refreshes), 0)
+
+        # Local file touched -> triggers one refresh
+        os.utime(log_file, ns=(time.time_ns() + 10_000_000, time.time_ns() + 10_000_000))
+        self.assertTrue(w.check_activity())
+        self.assertEqual(refreshes, [True])
+
+        # Another write 60 s later -> throttled (< 5 min)
+        now[0] += 60.0
+        os.utime(log_file, ns=(time.time_ns() + 20_000_000, time.time_ns() + 20_000_000))
+        self.assertFalse(w.check_activity())
+        self.assertEqual(len(refreshes), 1)
+
+        # After 5 min -> pending activity triggers exactly one refresh, then quiet again
+        now[0] += 240.0
+        self.assertTrue(w.check_activity())
+        self.assertEqual(len(refreshes), 2)
+        now[0] += 600.0
+        self.assertFalse(w.check_activity())
+        self.assertEqual(len(refreshes), 2)
+

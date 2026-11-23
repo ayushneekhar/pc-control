@@ -404,6 +404,7 @@ CATEGORIES = [
      "server-off"),
     ("vpn_down", "Torrent VPN down", "qBittorrent lost its Proton VPN route or its forwarded port, and when it recovers.",
      True, True, "shield-off-outline"),
+    ("usage_limits", "Usage limits", "An AI account is running low on 5-hour or weekly quota.", False, True, "gauge"),
     ("root", "Root approvals", "A root command is waiting for your fingerprint.", False, True, "shield-key-outline"),
     ("results", "Command results", "An approved root command finished or failed.", False, True, "console"),
     ("other", "Other messages", "Anything else sent to /pc/api/notify.", False, True, "message-outline"),
@@ -1686,13 +1687,14 @@ class AgentUsageManager:
     """Query ~/remote-pc/bin/ai-usage --json with disk persistence and stale-while-revalidate."""
 
     def __init__(self, script=None, run_fn=None, clock=time.monotonic, ttl=AGENT_USAGE_CACHE_TTL,
-                 claude_config_path=None, cache_path=None):
+                 claude_config_path=None, cache_path=None, on_update=None):
         self.script = script
         self.run_fn = run_fn
         self.clock = clock
         self.ttl = ttl
         self.claude_config_path = claude_config_path
         self.cache_path = cache_path
+        self.on_update = on_update
         self.lock = threading.Lock()
         self._fetch_lock = threading.Lock()
         self._cached = None
@@ -1799,6 +1801,12 @@ class AgentUsageManager:
                 self.emails.update(emails)
                 emails_snapshot = dict(self.emails)
             self._save_disk_cache(self._cached, emails_snapshot)
+            cb = self.on_update
+            if cb is not None:
+                try:
+                    cb(accounts)
+                except Exception as e:
+                    print(f"usage-alerts callback error: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
             return 200, payload
 
     def _start_bg_refresh(self, timeout=45):
@@ -1835,13 +1843,22 @@ class AgentUsageManager:
         return self._fetch_and_store(timeout=timeout)
 
 
+USAGE_ALERTS_CONFIG_FILE = os.environ.get(
+    "PCAPI_USAGE_ALERTS_CONFIG", os.path.join(DATA_DIR, "usage-alerts.json")
+)
+USAGE_ALERTS_STATE_FILE = os.environ.get(
+    "PCAPI_USAGE_ALERTS_STATE", os.path.join(DATA_DIR, "usage-alerts-state.json")
+)
+DEFAULT_USAGE_ALERTS = {"enabled": True, "five_hour_pct": 20, "weekly_pct": 10}
+
+
 class AgentSettingsManager:
-    """Persist and validate Claude (~/.config/claude-agent/settings.json) and Gemini
-    (~/.config/gemini-agent/settings.json) agent settings."""
+    """Persist and validate Claude (~/.config/claude-agent/settings.json), Gemini
+    (~/.config/gemini-agent/settings.json), and usage alert thresholds."""
 
     def __init__(self, claude_path=None, gemini_path=None, gemini_fresh_flag=None,
                  t3_settings_path=None, t3_providers_dir=None, claude_config_path=None,
-                 usage_mgr=None):
+                 usage_mgr=None, usage_alerts_path=None):
         self.claude_path = claude_path
         self.gemini_path = gemini_path
         self.gemini_fresh_flag = gemini_fresh_flag
@@ -1849,6 +1866,7 @@ class AgentSettingsManager:
         self.t3_providers_dir = t3_providers_dir
         self.claude_config_path = claude_config_path
         self.usage_mgr = usage_mgr
+        self.usage_alerts_path = usage_alerts_path
         self.lock = threading.Lock()
 
     def _claude_file(self):
@@ -1859,6 +1877,20 @@ class AgentSettingsManager:
 
     def _fresh_flag(self):
         return os.path.expanduser(self.gemini_fresh_flag if self.gemini_fresh_flag is not None else GEMINI_FRESH_FLAG)
+
+    def _usage_alerts_file(self):
+        p = self.usage_alerts_path if self.usage_alerts_path is not None else USAGE_ALERTS_CONFIG_FILE
+        return os.path.expanduser(p)
+
+    def get_usage_alerts(self):
+        with self.lock:
+            raw = _read_json_file(self._usage_alerts_file())
+        enabled = raw.get("enabled") if isinstance(raw.get("enabled"), bool) else DEFAULT_USAGE_ALERTS["enabled"]
+        fh = raw.get("five_hour_pct")
+        fh = int(fh) if isinstance(fh, (int, float)) and not isinstance(fh, bool) and 1 <= fh <= 95 else DEFAULT_USAGE_ALERTS["five_hour_pct"]
+        wk = raw.get("weekly_pct")
+        wk = int(wk) if isinstance(wk, (int, float)) and not isinstance(wk, bool) and 1 <= wk <= 95 else DEFAULT_USAGE_ALERTS["weekly_pct"]
+        return {"enabled": enabled, "five_hour_pct": fh, "weekly_pct": wk}
 
     def get(self):
         with self.lock:
@@ -1894,6 +1926,7 @@ class AgentSettingsManager:
                 "models": [dict(m) for m in GEMINI_MODELS],
                 "efforts": list(GEMINI_EFFORTS),
             },
+            "usage_alerts": self.get_usage_alerts(),
         }
 
     def update(self, body):
@@ -1901,8 +1934,9 @@ class AgentSettingsManager:
             return 400, {"error": "body must be a JSON object"}
         c_upd = body.get("claude")
         g_upd = body.get("gemini")
-        if c_upd is None and g_upd is None:
-            return 400, {"error": "provide 'claude' and/or 'gemini' settings"}
+        u_upd = body.get("usage_alerts")
+        if c_upd is None and g_upd is None and u_upd is None:
+            return 400, {"error": "provide 'claude', 'gemini', and/or 'usage_alerts' settings"}
 
         if c_upd is not None:
             if not isinstance(c_upd, dict):
@@ -1931,6 +1965,17 @@ class AgentSettingsManager:
                 return 400, {"error": f"invalid gemini thought_level: {g_upd['thought_level']!r}"}
             if "auto_rotate" in g_upd and not isinstance(g_upd["auto_rotate"], bool):
                 return 400, {"error": "gemini auto_rotate must be boolean"}
+
+        if u_upd is not None:
+            if not isinstance(u_upd, dict):
+                return 400, {"error": "usage_alerts must be an object"}
+            if "enabled" in u_upd and not isinstance(u_upd["enabled"], bool):
+                return 400, {"error": "usage_alerts.enabled must be boolean"}
+            for field in ("five_hour_pct", "weekly_pct"):
+                if field in u_upd:
+                    v = u_upd[field]
+                    if isinstance(v, bool) or not isinstance(v, (int, float)) or not (1 <= v <= 95):
+                        return 400, {"error": f"usage_alerts.{field} must be between 1 and 95"}
 
         with self.lock:
             if c_upd is not None:
@@ -1964,6 +2009,17 @@ class AgentSettingsManager:
                     except OSError:
                         pass
 
+            if u_upd is not None:
+                u_path = self._usage_alerts_file()
+                cur = _read_json_file(u_path)
+                if "enabled" in u_upd:
+                    cur["enabled"] = u_upd["enabled"]
+                if "five_hour_pct" in u_upd:
+                    cur["five_hour_pct"] = int(u_upd["five_hour_pct"])
+                if "weekly_pct" in u_upd:
+                    cur["weekly_pct"] = int(u_upd["weekly_pct"])
+                _write_json_atomic(u_path, cur)
+
         return 200, self.get()
 
 
@@ -1985,6 +2041,331 @@ def agent_reset(script=None, run_fn=None, timeout=10):
 
 AGENT_USAGE = AgentUsageManager()
 AGENT_SETTINGS = AgentSettingsManager(usage_mgr=AGENT_USAGE)
+
+
+# ---------------------------------------------------------------- usage alerts (activity-triggered, no polling)
+
+def _stat_tree_sig(paths):
+    """Cheap local-only (max_mtime_ns, entry_count) across watched paths (zero network)."""
+    max_mtime = 0
+    count = 0
+    for spec in paths:
+        if isinstance(spec, tuple):
+            pattern, depth = spec
+        else:
+            pattern, depth = spec, 1
+        expanded = os.path.expanduser(pattern)
+        roots = glob.glob(expanded) if any(c in expanded for c in "*?[") else [expanded]
+        for root in roots:
+            try:
+                st = os.stat(root)
+            except OSError:
+                continue
+            count += 1
+            if st.st_mtime_ns > max_mtime:
+                max_mtime = st.st_mtime_ns
+            if depth <= 0 or not os.path.isdir(root):
+                continue
+            stack = [(root, depth)]
+            while stack:
+                d, rem = stack.pop()
+                try:
+                    with os.scandir(d) as it:
+                        for entry in it:
+                            try:
+                                est = entry.stat(follow_symlinks=False)
+                            except OSError:
+                                continue
+                            count += 1
+                            if est.st_mtime_ns > max_mtime:
+                                max_mtime = est.st_mtime_ns
+                            if rem > 1 and entry.is_dir(follow_symlinks=False):
+                                stack.append((entry.path, rem - 1))
+                except OSError:
+                    continue
+    return (max_mtime, count)
+
+
+def _default_activity_paths():
+    return [
+        (os.path.join(HOME, ".t3", "userdata", "providers", "antigravity", "*", "antigravity-acp", "log"), 1),
+        (os.path.join(HOME, ".claude", "projects"), 2),
+        (os.path.join(HOME, ".local", "state", "gemini-agent"), 1),
+        (os.path.join(HOME, ".local", "share", "opencode", "opencode.db"), 0),
+        (os.path.join(HOME, ".local", "share", "opencode", "opencode.db-wal"), 0),
+        (os.path.join(HOME, ".local", "share", "opencode", "log"), 1),
+    ]
+
+
+class UsageAlertWatcher:
+    """Watches local agent activity mtimes and runs ai-usage at most once per min_interval (5 min)
+    when activity is seen. When nothing is running there are zero network calls."""
+
+    def __init__(self, notify, usage_mgr, settings_mgr, state_file=None, watch_paths=None,
+                 min_interval=300.0, poll_interval=15.0, clock=time.monotonic):
+        self.notify = notify
+        self.usage_mgr = usage_mgr
+        self.settings_mgr = settings_mgr
+        self.state_file = state_file
+        self.watch_paths = watch_paths
+        self.min_interval = min_interval
+        self.poll_interval = poll_interval
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+        self._last_sig = None
+        self._pending = False
+        self._last_refresh = None
+        self._dedupe = self._load_state()
+
+    def _state_path(self):
+        p = self.state_file if self.state_file is not None else USAGE_ALERTS_STATE_FILE
+        return os.path.expanduser(p) if p else ""
+
+    def _load_state(self):
+        p = self._state_path()
+        if not p:
+            return {}
+        raw = _read_json_file(p, default={})
+        return {str(k): str(v) for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+
+    def _save_state(self, state):
+        p = self._state_path()
+        if not p:
+            return
+        try:
+            _write_json_atomic(p, state, mode=0o600)
+        except OSError:
+            pass
+
+    def activity_signature(self):
+        paths = self.watch_paths if self.watch_paths is not None else _default_activity_paths()
+        return _stat_tree_sig(paths)
+
+    def _send(self, title, body):
+        fn = getattr(self.notify, "send_async", None) or getattr(self.notify, "send", None)
+        if fn:
+            fn("usage_limits", title, body)
+
+    def evaluate(self, accounts):
+        """Evaluate normalized usage accounts against configured thresholds and send deduped alerts.
+        Returns list of (account_id, alert_kind, title, body) sent."""
+        if not isinstance(accounts, list):
+            return []
+        cfg = self.settings_mgr.get_usage_alerts() if self.settings_mgr is not None else dict(DEFAULT_USAGE_ALERTS)
+        if not cfg.get("enabled", True):
+            return []
+        five_pct = cfg.get("five_hour_pct", DEFAULT_USAGE_ALERTS["five_hour_pct"])
+        week_pct = cfg.get("weekly_pct", DEFAULT_USAGE_ALERTS["weekly_pct"])
+
+        to_send = []
+        changed = False
+        with self.lock:
+            dedupe = self._dedupe
+            for acc in accounts:
+                if not isinstance(acc, dict):
+                    continue
+                if not acc.get("signed_in") or acc.get("error") or acc.get("harness") == "opencode":
+                    continue
+                aid = str(acc.get("id") or "")
+                if not aid:
+                    continue
+                name = str(acc.get("email") or acc.get("label") or aid)
+
+                fh = acc.get("five_hour")
+                if isinstance(fh, dict):
+                    rem = fh.get("remaining_pct")
+                    if isinstance(rem, (int, float)) and not isinstance(rem, bool):
+                        token = str(fh.get("resets_at") or fh.get("status") or "window")
+                        k_zero = f"{aid}:five_hour_zero"
+                        k_low = f"{aid}:five_hour_low"
+                        if rem <= 0:
+                            if dedupe.get(k_zero) != token:
+                                dedupe[k_zero] = token
+                                dedupe[k_low] = token
+                                changed = True
+                                title = f"{name}: 5h limit reached"
+                                body = "5-hour quota is at 0% remaining."
+                                to_send.append((aid, "five_hour_zero", title, body))
+                        elif rem <= five_pct:
+                            if dedupe.get(k_low) != token:
+                                dedupe[k_low] = token
+                                changed = True
+                                title = f"{name}: 5h quota low"
+                                body = f"{round(rem)}% remaining on 5-hour limit."
+                                to_send.append((aid, "five_hour_low", title, body))
+                        else:
+                            if k_low in dedupe:
+                                del dedupe[k_low]
+                                changed = True
+                            if k_zero in dedupe:
+                                del dedupe[k_zero]
+                                changed = True
+
+                wk = acc.get("weekly")
+                if isinstance(wk, dict):
+                    rem = wk.get("remaining_pct")
+                    if isinstance(rem, (int, float)) and not isinstance(rem, bool):
+                        token = str(wk.get("resets_at") or wk.get("status") or "window")
+                        k_wk = f"{aid}:weekly_low"
+                        if rem <= week_pct:
+                            if dedupe.get(k_wk) != token:
+                                dedupe[k_wk] = token
+                                changed = True
+                                title = f"{name}: weekly quota low"
+                                body = f"{round(rem)}% remaining on weekly limit."
+                                to_send.append((aid, "weekly_low", title, body))
+                        else:
+                            if k_wk in dedupe:
+                                del dedupe[k_wk]
+                                changed = True
+
+            if changed:
+                self._save_state(dict(dedupe))
+
+        for _, _, title, body in to_send:
+            self._send(title, body)
+        return to_send
+
+    def check_activity(self):
+        """Check local activity mtimes; trigger ai-usage refresh only if activity changed and
+        at least min_interval has elapsed since the previous activity-triggered refresh."""
+        sig = self.activity_signature()
+        with self.lock:
+            if self._last_sig is None:
+                self._last_sig = sig
+                return False
+            if sig != self._last_sig:
+                self._last_sig = sig
+                self._pending = True
+            if not self._pending:
+                return False
+            cfg = self.settings_mgr.get_usage_alerts() if self.settings_mgr is not None else dict(DEFAULT_USAGE_ALERTS)
+            if not cfg.get("enabled", True):
+                self._pending = False
+                return False
+            now = self.clock()
+            if self._last_refresh is not None and (now - self._last_refresh) < self.min_interval:
+                return False
+            self._pending = False
+            self._last_refresh = now
+
+        if self.usage_mgr is not None:
+            code, payload = self.usage_mgr.get(force_refresh=True)
+            # If usage_mgr does not have our callback wired, evaluate directly.
+            if code == 200 and getattr(self.usage_mgr, "on_update", None) is None:
+                self.evaluate(payload.get("accounts") or [])
+        return True
+
+    def start(self):
+        self._last_sig = self.activity_signature()
+        threading.Thread(target=self._loop, daemon=True, name="usage-alert-watcher").start()
+        return self
+
+    def _loop(self):
+        while not self.stop.is_set():
+            try:
+                self.check_activity()
+            except Exception as e:
+                print(f"usage-alert-watcher: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            self.stop.wait(self.poll_interval)
+
+
+# ---------------------------------------------------------------- cat cam master switch (/pc/api/catcam)
+
+CATCAM_UNITS = ("catcam", "cam-ptz", "camrec", "catdetect", "cam-music", "kbd-lock")
+CATCAM_STATE_FILE = os.environ.get("PCAPI_CATCAM_STATE", os.path.join(DATA_DIR, "catcam-state.json"))
+
+
+class CatCamManager:
+    """Master switch for the cat cam systemd user stack: disable --now when off, enable --now when on."""
+
+    def __init__(self, unit_dir=None, state_file=None, run_fn=None):
+        self.unit_dir = unit_dir
+        self.state_file = state_file
+        self.run_fn = run_fn
+        self.lock = threading.Lock()
+
+    def _unit_dir(self):
+        return os.path.expanduser(self.unit_dir if self.unit_dir is not None else UNIT_DIR)
+
+    def _state_file(self):
+        return os.path.expanduser(self.state_file if self.state_file is not None else CATCAM_STATE_FILE)
+
+    def existing_units(self):
+        udir = self._unit_dir()
+        return [name for name in CATCAM_UNITS if os.path.exists(os.path.join(udir, f"{name}.service"))]
+
+    def _run(self, argv, timeout=20):
+        fn = self.run_fn or subprocess.run
+        return fn(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+
+    def _unit_states(self, units):
+        if not units:
+            return {}
+        try:
+            r = self._run(["systemctl", "--user", "is-active", *[f"{u}.service" for u in units]], timeout=10)
+            lines = [ln.strip() for ln in (r.stdout or "").splitlines()]
+        except Exception:
+            lines = []
+        out = {}
+        for i, name in enumerate(units):
+            out[name] = lines[i] if i < len(lines) and lines[i] else "unknown"
+        return out
+
+    def _load_enabled(self):
+        raw = _read_json_file(self._state_file(), default={})
+        if isinstance(raw.get("enabled"), bool):
+            return raw["enabled"]
+        return True
+
+    def status(self):
+        with self.lock:
+            enabled = self._load_enabled()
+        units = self.existing_units()
+        return {"enabled": enabled, "units": self._unit_states(units)}
+
+    def set_enabled(self, enabled):
+        if not isinstance(enabled, bool):
+            return 400, {"error": "enabled must be true or false"}
+        with self.lock:
+            units = self.existing_units()
+            if units:
+                action = "enable" if enabled else "disable"
+                try:
+                    r = self._run(["systemctl", "--user", action, "--now", *[f"{u}.service" for u in units]], timeout=25)
+                except Exception as e:
+                    return 502, {"error": clip(f"systemctl {action} failed: {e}", 240)}
+                if r.returncode != 0:
+                    detail = (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+                    return 502, {"error": clip(f"systemctl {action} failed: {detail}", 240)}
+            _write_json_atomic(self._state_file(), {"enabled": enabled}, mode=0o600)
+        return 200, self.status()
+
+
+CATCAM = CatCamManager()
+
+
+# ---------------------------------------------------------------- local OTA mirror (/pc/api/ota/*)
+
+OTA_DIR = os.environ.get("PCAPI_OTA_DIR", os.path.join(DATA_DIR, "ota"))
+OTA_ARTIFACTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".artifacts", "nitro-ota", "android"
+)
+OTA_ALLOWED_FILES = {"ota.version.json": "application/json; charset=utf-8", "bundle.zip": "application/zip"}
+
+
+def ota_file_path(filename, ota_dir=None, artifacts_dir=None):
+    if filename not in OTA_ALLOWED_FILES:
+        return None
+    for base in (ota_dir if ota_dir is not None else OTA_DIR,
+                 artifacts_dir if artifacts_dir is not None else OTA_ARTIFACTS_DIR):
+        if not base:
+            continue
+        p = os.path.join(os.path.expanduser(base), filename)
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 # ---------------------------------------------------------------- health overview (/pc/api/health)
@@ -2610,6 +2991,10 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*AGENT_USAGE.get(force_refresh=refresh))
             if path == "/api/agent/settings":
                 return self.send_json(200, AGENT_SETTINGS.get())
+            if path == "/api/catcam":
+                return self.send_json(200, CATCAM.status())
+            if path in ("/api/ota/ota.version.json", "/api/ota/bundle.zip"):
+                return self.send_ota_file(path.rsplit("/", 1)[1])
         elif method == "POST":
             m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
             if m: return self.hook(m.group(1))
@@ -2664,6 +3049,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*AGENT_SETTINGS.update(b))
             if path == "/api/agent/reset":
                 return self.send_json(*agent_reset())
+            if path == "/api/catcam":
+                return self.send_json(*CATCAM.set_enabled(b.get("enabled")))
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
@@ -2695,6 +3082,24 @@ class H(BaseHTTPRequestHandler):
         if not n: return self.send_json(200, {"ok": True, "ignored": True})
         img = NOTIFY.fetch_poster(n["image_url"]) if n.get("image_url") else None
         return self.send_json(*NOTIFY.send(n["category"], n["title"], n["body"], None, img, n.get("link")))
+
+    def send_ota_file(self, filename):
+        p = ota_file_path(filename)
+        if not p:
+            return self.send_json(404, {"error": f"no local OTA {filename}"})
+        ctype = OTA_ALLOWED_FILES[filename]
+        try:
+            size = os.path.getsize(p)
+            with open(p, "rb") as f:
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                while chunk := f.read(256 * 1024):
+                    self.wfile.write(chunk)
+        except FileNotFoundError:
+            return self.send_json(404, {"error": f"no local OTA {filename}"})
 
     def send_apk(self):
         p = os.path.join(DATA_DIR, "app.apk")
@@ -2762,11 +3167,14 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER, VPN
+    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER, VPN, USAGE_ALERTS
     PUSH = Push()
     NOTIFY = Notify(PUSH)
     DOWNLOADS = Downloads()
     VPN = VpnManager(NOTIFY, qbt=DOWNLOADS).start()
+    USAGE_ALERTS = UsageAlertWatcher(NOTIFY, AGENT_USAGE, AGENT_SETTINGS)
+    AGENT_USAGE.on_update = USAGE_ALERTS.evaluate
+    USAGE_ALERTS.start()
     hook_secret()
     HUB = Hub()
     WATCHER = ServiceWatcher(NOTIFY).start()

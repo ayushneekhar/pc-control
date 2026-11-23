@@ -32,16 +32,18 @@ import {
   setAgent,
   updateAgentSettings,
 } from '../lib/api';
+import { cacheGet, cacheSet } from '../lib/cache';
 import { formatResetTime } from '../lib/formatResetTime';
 import { radius, screenPad, space, useTheme } from '../theme';
 
 const ANTHROPIC_ICON = require('../../assets/brand-anthropic.png');
 const GEMINI_ICON = require('../../assets/brand-gemini.png');
 
-// Module-level in-memory cache (no native storage lib needed for OTA) so re-entering renders instantly.
-let cachedAgentState: AgentState | null = null;
-let cachedSettings: AgentSettings | null = null;
-let cachedUsage: AgentUsageResponse | null = null;
+const CACHE_AGENT_STATE = 'agent:state';
+const CACHE_AGENT_SETTINGS = 'agent:settings';
+const CACHE_AGENT_USAGE = 'agent:usage';
+const FIVE_HOUR_THRESHOLDS = [10, 15, 20, 25, 30, 40, 50];
+const WEEKLY_THRESHOLDS = [5, 10, 15, 20, 25, 30];
 let lastAccountCount = 5;
 
 const DEFAULT_AGENT_OPTIONS: AgentOption[] = [
@@ -409,8 +411,8 @@ export default function AgentSettingsScreen() {
   const nav = useNavigation<any>();
   const tick = useAppActiveTick();
 
-  // Harness state (hydrated from module-level cache for zero layout shift on re-entry)
-  const [agentState, setAgentState] = useState<AgentState | null>(cachedAgentState);
+  // Harness state (hydrated from persistent MMKV cache for instant render on cold start & re-entry)
+  const [agentState, setAgentState] = useState<AgentState | null>(() => cacheGet<AgentState>(CACHE_AGENT_STATE));
   const [pendingEngine, setPendingEngine] = useState<AgentEngine | null>(null);
   const [agentErr, setAgentErr] = useState<string | null>(null);
   const mounted = useRef(true);
@@ -421,12 +423,12 @@ export default function AgentSettingsScreen() {
   const pendingRef = useRef<AgentEngine | null>(null);
 
   // Usage state
-  const [usage, setUsage] = useState<AgentUsageResponse | null>(cachedUsage);
-  const [usageLoading, setUsageLoading] = useState(cachedUsage === null);
+  const [usage, setUsage] = useState<AgentUsageResponse | null>(() => cacheGet<AgentUsageResponse>(CACHE_AGENT_USAGE));
+  const [usageLoading, setUsageLoading] = useState(() => cacheGet<AgentUsageResponse>(CACHE_AGENT_USAGE) === null);
   const [usageErr, setUsageErr] = useState<string | null>(null);
 
   // Settings state
-  const [settings, setSettings] = useState<AgentSettings | null>(cachedSettings);
+  const [settings, setSettings] = useState<AgentSettings | null>(() => cacheGet<AgentSettings>(CACHE_AGENT_SETTINGS));
   const [settingsErr, setSettingsErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -464,7 +466,7 @@ export default function AgentSettingsScreen() {
     try {
       const next = await getAgent();
       if (!mounted.current || pendingRef.current !== null) return;
-      cachedAgentState = next;
+      cacheSet(CACHE_AGENT_STATE, next);
       setAgentState(next);
       setAgentErr(null);
     } catch (e) {
@@ -477,7 +479,7 @@ export default function AgentSettingsScreen() {
     try {
       const next = await getAgentSettings();
       if (!mounted.current) return;
-      cachedSettings = next;
+      cacheSet(CACHE_AGENT_SETTINGS, next);
       setSettings(next);
       setSettingsErr(null);
     } catch (e) {
@@ -494,7 +496,7 @@ export default function AgentSettingsScreen() {
       try {
         const next = await getAgentUsage(doForce);
         if (!mounted.current) return;
-        cachedUsage = next;
+        cacheSet(CACHE_AGENT_USAGE, next);
         if (next.accounts.length > 0) {
           lastAccountCount = next.accounts.length;
         }
@@ -582,7 +584,7 @@ export default function AgentSettingsScreen() {
         const active = target === 'claude' ? cur.claude_active : cur.gemini_active;
         if (active) {
           pendingRef.current = null;
-          cachedAgentState = cur;
+          cacheSet(CACHE_AGENT_STATE, cur);
           setAgentState(cur);
           setPendingEngine(null);
           setAgentErr(null);
@@ -609,7 +611,7 @@ export default function AgentSettingsScreen() {
     try {
       const updated = await updateAgentSettings(patch);
       if (mounted.current) {
-        cachedSettings = updated;
+        cacheSet(CACHE_AGENT_SETTINGS, updated);
         setSettings(updated);
       }
     } catch (e) {
@@ -877,6 +879,69 @@ export default function AgentSettingsScreen() {
             />
           </View>
         </Card>
+      </Section>
+
+      <Section label="Usage alerts">
+        <List>
+          <ListRow
+            icon="bell-alert-outline"
+            title="Usage alerts"
+            chevron={false}
+            trailing={
+              <Switch
+                value={settings?.usage_alerts?.enabled ?? true}
+                disabled={!settings || saving}
+                onValueChange={(v) => void savePatch({ usage_alerts: { enabled: v } })}
+                accessibilityLabel="Usage alerts"
+                trackColor={{ true: t.accent, false: t.cardAlt }}
+                thumbColor={(settings?.usage_alerts?.enabled ?? true) ? t.onMedia : t.textFaint}
+              />
+            }
+          />
+          <ListRow
+            icon="timer-sand"
+            title="5-hour threshold"
+            trailing={settings?.usage_alerts ? `${settings.usage_alerts.five_hour_pct}% left` : '—'}
+            chevron
+            onPress={
+              settings?.usage_alerts && !saving
+                ? () =>
+                    setPicker({
+                      title: '5-hour alert threshold',
+                      selected: String(settings.usage_alerts!.five_hour_pct),
+                      options: FIVE_HOUR_THRESHOLDS.map((pct) => ({
+                        id: String(pct),
+                        label: `${pct}% left`,
+                        subtitle: `Alert at ${100 - pct}% used`,
+                      })),
+                      onSelect: (id) => void savePatch({ usage_alerts: { five_hour_pct: Number(id) } }),
+                    })
+                : undefined
+            }
+          />
+          <ListRow
+            icon="calendar-clock"
+            title="Weekly threshold"
+            trailing={settings?.usage_alerts ? `${settings.usage_alerts.weekly_pct}% left` : '—'}
+            chevron
+            last
+            onPress={
+              settings?.usage_alerts && !saving
+                ? () =>
+                    setPicker({
+                      title: 'Weekly alert threshold',
+                      selected: String(settings.usage_alerts!.weekly_pct),
+                      options: WEEKLY_THRESHOLDS.map((pct) => ({
+                        id: String(pct),
+                        label: `${pct}% left`,
+                        subtitle: `Alert at ${100 - pct}% used`,
+                      })),
+                      onSelect: (id) => void savePatch({ usage_alerts: { weekly_pct: Number(id) } }),
+                    })
+                : undefined
+            }
+          />
+        </List>
       </Section>
 
       <Section label="Conversation">

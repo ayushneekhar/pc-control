@@ -14,6 +14,8 @@ import {
 } from '../components/ui';
 import { PcNative } from '../../modules/pc-native';
 import { get, Health, Info, Route, serverUrl, Vitals } from '../lib/api';
+import { cacheGet, cacheSet } from '../lib/cache';
+import { refreshCatCam, useCatCam } from '../lib/catcam';
 import { CAMS, CamId, NAMES } from '../lib/cams/config';
 import { prepareCamsOnce } from '../lib/cams/prepare';
 import { rate } from '../lib/format';
@@ -158,9 +160,10 @@ type LiveTileModule = {
   stopHomeLive: () => void;
 };
 
-function useLazyLiveTile() {
+function useLazyLiveTile(enabled: boolean) {
   const [mod, setMod] = useState<LiveTileModule | null>(null);
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     const task = InteractionManager.runAfterInteractions(() => {
       if (cancelled) return;
@@ -177,8 +180,8 @@ function useLazyLiveTile() {
       cancelled = true;
       task.cancel();
     };
-  }, []);
-  return mod;
+  }, [enabled]);
+  return enabled ? mod : null;
 }
 
 function StatusLine({ tone, label }: { tone: 'ok' | 'warn' | 'bad' | 'faint'; label: string }) {
@@ -196,21 +199,23 @@ function StatusLine({ tone, label }: { tone: 'ok' | 'warn' | 'bad' | 'faint'; la
 export default function RoutesScreen() {
   const t = useTheme();
   const nav = useNavigation<any>();
-  const [routes, setRoutes] = useState<Route[] | null>(null);
-  const [vitals, setVitals] = useState<Vitals | null>(null);
-  const [info, setInfo] = useState<Info | null>(null);
-  const [health, setHealth] = useState<Health | null>(null);
-  const [det, setDet] = useState<DetState | null>(null);
-  const [downloads, setDownloads] = useState<DownloadsReply | null>(null);
+  const catCam = useCatCam();
+  const [routes, setRoutes] = useState<Route[] | null>(() => cacheGet<Route[]>('home:routes'));
+  const [vitals, setVitals] = useState<Vitals | null>(() => cacheGet<Vitals>('home:vitals'));
+  const [info, setInfo] = useState<Info | null>(() => cacheGet<Info>('home:info'));
+  const [health, setHealth] = useState<Health | null>(() => cacheGet<Health>('health:report'));
+  const [det, setDet] = useState<DetState | null>(() => cacheGet<DetState>('home:det'));
+  const [downloads, setDownloads] = useState<DownloadsReply | null>(() => cacheGet<DownloadsReply>('home:downloads'));
   const [tick, setTick] = useState(0);
   const [frames, setFrames] = useState<Partial<Record<CamId, string>>>({});
   const [failedCams, setFailedCams] = useState<Partial<Record<CamId, boolean>>>({});
   const framesRef = useRef<Partial<Record<CamId, string>>>({});
   const [loaded, setLoaded] = useState(false);
+  const [offlineErr, setOfflineErr] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [focused, setFocused] = useState(false);
   const [appActive, setAppActive] = useState(AppState.currentState === 'active');
-  const live = useLazyLiveTile();
+  const live = useLazyLiveTile(catCam.enabled);
 
   const load = useCallback(async () => {
     const [i, v, h, r, d, dl] = await Promise.all([
@@ -218,17 +223,38 @@ export default function RoutesScreen() {
       safe(get<Vitals>('/vitals/api')),
       safe(get<Health>('/pc/api/health')),
       safe(get<{ routes: Route[] }>('/pc/api/routes')),
-      safe(get<DetState>('/detect/state')),
+      catCam.enabled ? safe(get<DetState>('/detect/state')) : Promise.resolve(null),
       safe(get<DownloadsReply>('/pc/api/downloads')),
+      refreshCatCam(),
     ]);
-    setInfo(i);
-    setVitals(v);
-    setHealth(h);
-    if (r) setRoutes(r.routes.filter((x) => !x.hidden));
-    setDet(d);
-    setDownloads(dl);
+    if (i) {
+      cacheSet('home:info', i);
+      setInfo(i);
+    }
+    if (v) {
+      cacheSet('home:vitals', v);
+      setVitals(v);
+    }
+    if (h) {
+      cacheSet('health:report', h);
+      setHealth(h);
+    }
+    if (r) {
+      const visible = r.routes.filter((x) => !x.hidden);
+      cacheSet('home:routes', visible);
+      setRoutes(visible);
+    }
+    if (d) {
+      cacheSet('home:det', d);
+      setDet(d);
+    }
+    if (dl) {
+      cacheSet('home:downloads', dl);
+      setDownloads(dl);
+    }
+    setOfflineErr(!i && !v && !r);
     setLoaded(true);
-  }, []);
+  }, [catCam.enabled]);
 
   useEffect(() => {
     framesRef.current = frames;
@@ -253,6 +279,7 @@ export default function RoutesScreen() {
   );
 
   useEffect(() => {
+    if (!catCam.enabled) return;
     let cancelled = false;
     for (const c of CAMS) {
       const next = `${serverUrl()}/api/frame.jpeg?src=${c.id}&t=${tick}`;
@@ -278,7 +305,7 @@ export default function RoutesScreen() {
     return () => {
       cancelled = true;
     };
-  }, [tick]);
+  }, [tick, catCam.enabled]);
 
   const openCams = useCallback(
     (params?: { tab?: 'replay' | 'music'; tabRequest?: number }) => {
@@ -287,10 +314,10 @@ export default function RoutesScreen() {
     },
     [live, nav],
   );
-  const liveActive = focused && appActive;
+  const liveActive = focused && appActive && catCam.enabled;
   const latest = lastSighting(det);
   const problems = health?.problems?.length ?? 0;
-  const offline = loaded && !info && !vitals && !routes;
+  const offline = loaded && offlineErr;
   const statusTone = offline ? 'bad' : problems ? 'warn' : info ? 'ok' : 'faint';
   const statusLabel = offline
     ? "Can't reach the laptop"
@@ -344,38 +371,40 @@ export default function RoutesScreen() {
         </Card>
       ) : null}
 
-      <Section
-        label="Cameras"
-        right={
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-            <Pressable onPress={() => openCams({ tab: 'replay', tabRequest: Date.now() })} hitSlop={8}>
-              <Text style={{ color: t.textFaint, fontSize: 12.5 }}>Replay</Text>
-            </Pressable>
-            <Text style={{ color: t.textFaint, fontSize: 12.5 }}>·</Text>
-            <Pressable onPress={() => openCams({ tab: 'music', tabRequest: Date.now() })} hitSlop={8}>
-              <Text style={{ color: t.textFaint, fontSize: 12.5 }}>Music</Text>
-            </Pressable>
-          </View>
-        }
-      >
-        <Card onPress={() => openCams()} style={{ padding: 0 }}>
-          <View style={st.camWall}>
-            <View style={{ flexDirection: 'row', gap: 2, flex: 1 }}>
-              <CamTile cam={CAMS[0]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 2 }} />
-              <View style={{ flex: 1, gap: 2 }}>
-                <CamTile cam={CAMS[1]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 1 }} />
-                <CamTile cam={CAMS[2]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 1 }} />
+      {catCam.enabled ? (
+        <Section
+          label="Cameras"
+          right={
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <Pressable onPress={() => openCams({ tab: 'replay', tabRequest: Date.now() })} hitSlop={8}>
+                <Text style={{ color: t.textFaint, fontSize: 12.5 }}>Replay</Text>
+              </Pressable>
+              <Text style={{ color: t.textFaint, fontSize: 12.5 }}>·</Text>
+              <Pressable onPress={() => openCams({ tab: 'music', tabRequest: Date.now() })} hitSlop={8}>
+                <Text style={{ color: t.textFaint, fontSize: 12.5 }}>Music</Text>
+              </Pressable>
+            </View>
+          }
+        >
+          <Card onPress={() => openCams()} style={{ padding: 0 }}>
+            <View style={st.camWall}>
+              <View style={{ flexDirection: 'row', gap: 2, flex: 1 }}>
+                <CamTile cam={CAMS[0]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 2 }} />
+                <View style={{ flex: 1, gap: 2 }}>
+                  <CamTile cam={CAMS[1]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 1 }} />
+                  <CamTile cam={CAMS[2]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 1 }} />
+                </View>
               </View>
             </View>
-          </View>
-          <View style={st.camFoot}>
-            <Text style={{ color: t.text, fontSize: 13.5, fontWeight: '600' }}>{loadedCams} cams</Text>
-            <Text style={{ color: t.textDim, fontSize: 12.5 }} numberOfLines={1}>
-              {latest ? `Cat seen ${seenAgo(latest.ts)} · ${latest.name}` : det ? 'No cats yet' : 'Detector offline'}
-            </Text>
-          </View>
-        </Card>
-      </Section>
+            <View style={st.camFoot}>
+              <Text style={{ color: t.text, fontSize: 13.5, fontWeight: '600' }}>{loadedCams} cams</Text>
+              <Text style={{ color: t.textDim, fontSize: 12.5 }} numberOfLines={1}>
+                {latest ? `Cat seen ${seenAgo(latest.ts)} · ${latest.name}` : det ? 'No cats yet' : 'Detector offline'}
+              </Text>
+            </View>
+          </Card>
+        </Section>
+      ) : null}
 
       <Section label="Open">
         {openScreen.length || hasDownloads ? (

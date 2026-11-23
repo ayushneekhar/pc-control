@@ -3,6 +3,7 @@ import { useCallback, useRef, useState } from 'react';
 import { AppState, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { Banner, Bar, Card, Icon, List, ListRow, Mono, Screen, Section, StatusDot } from '../components/ui';
 import { get, Proc, Vitals } from '../lib/api';
+import { cacheGet, cacheSet } from '../lib/cache';
 import { bytes, rate } from '../lib/format';
 import { space, useTheme } from '../theme';
 
@@ -137,8 +138,8 @@ function procCompare(a: Proc, b: Proc, k: ProcSort) {
 
 export default function VitalsScreen() {
   const t = useTheme();
-  const [v, setV] = useState<Vitals | null>(null);
-  const [hist, setHist] = useState<Hist[]>([]);
+  const [v, setV] = useState<Vitals | null>(() => cacheGet<Vitals>('vitals:snapshot'));
+  const [hist, setHist] = useState<Hist[]>(() => cacheGet<Vitals>('vitals:snapshot')?.hist?.slice(-300) ?? []);
   const [err, setErr] = useState<string | null>(null);
   const [live, setLive] = useState(true);
   const fails = useRef(0);
@@ -171,12 +172,20 @@ export default function VitalsScreen() {
               setLive(true);
               fails.current = 0;
               if (full) {
-                setHist(d.hist.slice(-300));
+                const nextHist = d.hist.slice(-300);
+                setHist(nextHist);
+                cacheSet('vitals:snapshot', { ...d, hist: nextHist, procs: null });
                 full = false;
               } else {
                 const h = d.hist[0];
                 if (h) {
-                  setHist((prev) => (prev.length && prev[prev.length - 1].t === h.t ? prev : [...prev, h].slice(-300)));
+                  setHist((prev) => {
+                    const nextHist = prev.length && prev[prev.length - 1].t === h.t ? prev : [...prev, h].slice(-300);
+                    cacheSet('vitals:snapshot', { ...d, hist: nextHist, procs: null });
+                    return nextHist;
+                  });
+                } else {
+                  cacheSet('vitals:snapshot', { ...d, procs: null });
                 }
               }
             }

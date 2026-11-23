@@ -17,6 +17,8 @@ import {
   Tone,
 } from '../components/ui';
 import { ArrQueue, get, Health, HealthDownload, HealthProblem, Service } from '../lib/api';
+import { cacheGet, cacheSet } from '../lib/cache';
+import { useCatCam } from '../lib/catcam';
 import { bytes, clock, duration, rate } from '../lib/format';
 import { space, useTheme } from '../theme';
 
@@ -186,14 +188,17 @@ function ArrRow({ label, q, last }: { label: string; q: ArrQueue; last?: boolean
 export default function HealthScreen() {
   const t = useTheme();
   const nav = useNavigation<any>();
-  const [h, setH] = useState<Health | null>(null);
+  const catCam = useCatCam();
+  const [h, setH] = useState<Health | null>(() => cacheGet<Health>('health:report'));
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<Filter>('all');
 
   const load = useCallback(async () => {
     try {
-      setH(await get<Health>('/pc/api/health', 8000));
+      const next = await get<Health>('/pc/api/health', 8000);
+      cacheSet('health:report', next);
+      setH(next);
       setErr(null);
     } catch (e) {
       setErr((e as Error).message);
@@ -216,8 +221,9 @@ export default function HealthScreen() {
     }, [load]),
   );
 
+  const effectiveFilter: Filter = !catCam.enabled && filter === 'cams' ? 'all' : filter;
   const units = (h?.services.units ?? []).slice().sort((a, b) => ORDER[tone(a)] - ORDER[tone(b)] || a.unit.localeCompare(b.unit));
-  const shownUnits = filter === 'all' ? units : units.filter((s) => group(s) === filter);
+  const shownUnits = effectiveFilter === 'all' ? units : units.filter((s) => group(s) === effectiveFilter);
   const counts = h?.services.counts;
   const dl = h?.downloads;
   const total = dl?.total;
@@ -392,12 +398,12 @@ export default function HealthScreen() {
 
       {h?.services.available && units.length ? (
         <Segmented
-          value={filter}
+          value={effectiveFilter}
           onChange={setFilter}
           options={[
             { id: 'all', label: 'All' },
             { id: 'media', label: 'Media' },
-            { id: 'cams', label: 'Cams' },
+            ...(catCam.enabled ? [{ id: 'cams' as const, label: 'Cams' }] : []),
             { id: 'agents', label: 'Agents' },
           ]}
         />

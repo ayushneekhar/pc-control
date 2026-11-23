@@ -5,6 +5,8 @@ import { Alert, Animated, AppState, LayoutAnimation, Linking, Platform, Pressabl
 import { KeyInfo, PcNative } from '../../modules/pc-native';
 import { Banner, Button, Card, Icon, KV, List, ListRow, Mono, Pill, Screen, Section, StatusDot } from '../components/ui';
 import { AgentState, ApiError, DEFAULT_SERVER, get, getAgent, Info, post, serverUrl, VpnState } from '../lib/api';
+import { cacheGet, cacheSet } from '../lib/cache';
+import { refreshCatCam, toggleCatCam, useCatCam } from '../lib/catcam';
 import { ApkRelease, APK_URLS, binaryTarget, clearOtaRecovery, latestApk, otaRecovery, otaSnapshot } from '../lib/ota';
 import { applyOta, checkOta, useOta } from '../lib/otaStore';
 import { liveStatus } from '../lib/live';
@@ -56,11 +58,13 @@ function Toggle({ value, onValueChange, label, disabled, dim = false }: {
 function AgentRow() {
   const t = useTheme();
   const nav = useNavigation<any>();
-  const [s, setS] = useState<AgentState | null>(null);
+  const [s, setS] = useState<AgentState | null>(() => cacheGet<AgentState>('agent:state'));
 
   const refresh = useCallback(async () => {
     try {
-      setS(await getAgent());
+      const next = await getAgent();
+      cacheSet('agent:state', next);
+      setS(next);
     } catch {
       // keep previous summary
     }
@@ -106,18 +110,73 @@ function AgentRow() {
   );
 }
 
+/** Master switch for the cat cam systemd stack (catcam, cam-ptz, camrec, catdetect, cam-music, kbd-lock). */
+function CatCamCard() {
+  const t = useTheme();
+  const tick = useAppActiveTick();
+  const cat = useCatCam();
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshCatCam();
+    }, []),
+  );
+
+  useEffect(() => {
+    if (tick > 0) void refreshCatCam();
+  }, [tick]);
+
+  const units = Object.values(cat.data?.units ?? {});
+  const running = units.filter((u) => u === 'active').length;
+  const enabled = cat.enabled;
+  const status = cat.busy
+    ? enabled
+      ? 'Turning on…'
+      : 'Turning off…'
+    : !enabled
+      ? 'Off'
+      : units.length
+        ? `On · ${running}/${units.length} running`
+        : 'On';
+  const dot = cat.busy ? 'warn' : enabled ? (units.length && running === 0 ? 'warn' : 'ok') : 'faint';
+
+  return (
+    <Card style={{ gap: space(3) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
+        <Icon name={enabled ? 'cctv' : 'cctv-off'} size={22} color={enabled ? t.accent : t.textDim} />
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Cat cam</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <StatusDot tone={dot} />
+            <Text style={{ color: t.textDim, fontSize: 13 }}>{status}</Text>
+          </View>
+        </View>
+        <Toggle
+          value={enabled}
+          onValueChange={(v) => void toggleCatCam(v)}
+          disabled={cat.busy}
+          label="Cat cam master switch"
+        />
+      </View>
+      {cat.error ? <Banner tone="bad" title="Cat cam">{cat.error}</Banner> : null}
+    </Card>
+  );
+}
+
 /** qBittorrent -> Proton WireGuard only. The switch is optimistic: it rolls back if pc-api rejects the change. */
 function TorrentVpn() {
   const t = useTheme();
   const tick = useAppActiveTick();
-  const [s, setS] = useState<VpnState | null>(null);
+  const [s, setS] = useState<VpnState | null>(() => cacheGet<VpnState>('settings:vpn'));
   const [err, setErr] = useState<string | null>(null);
   const [pending, setPending] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      setS(await get<VpnState>('/pc/api/vpn'));
+      const next = await get<VpnState>('/pc/api/vpn');
+      cacheSet('settings:vpn', next);
+      setS(next);
       setErr(null);
     } catch (e) {
       setErr((e as Error).message);
@@ -138,7 +197,9 @@ function TorrentVpn() {
     setPending(v);
     setBusy(true);
     try {
-      setS(await post<VpnState>('/pc/api/vpn', { enabled: v }));
+      const next = await post<VpnState>('/pc/api/vpn', { enabled: v });
+      cacheSet('settings:vpn', next);
+      setS(next);
       setErr(null);
     } catch (e) {
       setS(before);
@@ -467,12 +528,14 @@ type NotifSettings = {
 function NotificationPrefs() {
   const t = useTheme();
   const tick = useAppActiveTick();
-  const [s, setS] = useState<NotifSettings | null>(null);
+  const catCam = useCatCam();
+  const [s, setS] = useState<NotifSettings | null>(() => cacheGet<NotifSettings>('settings:notify'));
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     get<NotifSettings>('/pc/api/notify/settings')
       .then((r) => {
+        cacheSet('settings:notify', r);
         setS(r);
         setErr(null);
       })
@@ -483,7 +546,9 @@ function NotificationPrefs() {
     const before = s;
     setS(optimistic);
     try {
-      setS(await post<NotifSettings>('/pc/api/notify/settings', patch));
+      const next = await post<NotifSettings>('/pc/api/notify/settings', patch);
+      cacheSet('settings:notify', next);
+      setS(next);
       setErr(null);
     } catch (e) {
       setS(before);
@@ -570,8 +635,10 @@ function NotificationPrefs() {
             <Text style={[st.col, { color: t.textDim }]}>Telegram</Text>
             <Text style={[st.col, { color: t.textDim }]}>App</Text>
           </View>
-          {s.categories.map((c, i) => (
-            <View key={c.id} style={[st.catRow, i < s.categories.length - 1 && { borderBottomColor: t.border, borderBottomWidth: StyleSheet.hairlineWidth }]}>
+          {s.categories
+            .filter((c) => catCam.enabled || c.id !== 'cats')
+            .map((c, i, visible) => (
+            <View key={c.id} style={[st.catRow, i < visible.length - 1 && { borderBottomColor: t.border, borderBottomWidth: StyleSheet.hairlineWidth }]}>
               <Icon name={c.icon} size={20} color={c.telegram || c.app ? t.text : t.textFaint} />
               <View style={{ flex: 1, paddingRight: space(1) }}>
                 <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600' }}>{c.label}</Text>
@@ -652,18 +719,19 @@ function Updates() {
 function Server() {
   const t = useTheme();
   const [url, setUrl] = useState(serverUrl());
-  const [info, setInfo] = useState<Info | null>(null);
-  const [who, setWho] = useState<{ login: string | null } | null>(null);
+  const [info, setInfo] = useState<Info | null>(() => cacheGet<Info>('home:info'));
+  const [who, setWho] = useState<{ login: string | null } | null>(() => cacheGet<{ login: string | null }>('settings:whoami'));
   const [err, setErr] = useState<string | null>(null);
 
   const test = useCallback(async () => {
     setErr(null);
     try {
       const [i, w] = await Promise.all([get<Info>('/pc/api/info'), get<{ login: string | null }>('/pc/api/whoami')]);
+      cacheSet('home:info', i);
+      cacheSet('settings:whoami', w);
       setInfo(i);
       setWho(w);
     } catch (e) {
-      setInfo(null);
       setErr((e as Error).message);
     }
   }, []);
@@ -732,6 +800,9 @@ export default function SettingsScreen() {
     >
       <Section label="Agent">
         <AgentRow />
+      </Section>
+      <Section label="Cameras">
+        <CatCamCard />
       </Section>
       <Section label="Network">
         <TorrentVpn />

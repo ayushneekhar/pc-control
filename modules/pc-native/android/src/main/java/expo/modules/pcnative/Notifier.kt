@@ -31,6 +31,7 @@ object Notifier {
     "problems" to Pair("Download problems", NotificationManager.IMPORTANCE_HIGH),
     "qwen_done" to Pair("Qwen downloads finished", NotificationManager.IMPORTANCE_DEFAULT),
     "system" to Pair("Backups & system alerts", NotificationManager.IMPORTANCE_HIGH),
+    "usage_limits" to Pair("Usage limits", NotificationManager.IMPORTANCE_HIGH),
   )
 
   fun ensureChannels(ctx: Context) {
@@ -104,6 +105,7 @@ object Notifier {
         PendingIntent.getActivity(ctx, id.hashCode(), Intent(Intent.ACTION_VIEW, Uri.parse(link))
           .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
       sighting != null -> open(ctx, sighting, id.hashCode())
+      cat == "usage_limits" -> open(ctx, "agent-settings", id.hashCode())
       else -> open(ctx, "routes", id.hashCode())
     }
     val b = base(ctx, ch, title, body).setPriority(NotificationCompat.PRIORITY_HIGH).setContentIntent(tap)

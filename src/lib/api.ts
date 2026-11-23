@@ -321,6 +321,12 @@ export type GeminiInstanceOption = {
   email: string | null;
 };
 
+export type UsageAlertsConfig = {
+  enabled: boolean;
+  five_hour_pct: number;
+  weekly_pct: number;
+};
+
 export type AgentSettings = {
   claude: {
     account: string | null;
@@ -338,11 +344,13 @@ export type AgentSettings = {
     models: AgentModelOption[];
     efforts: string[];
   };
+  usage_alerts?: UsageAlertsConfig;
 };
 
 export type AgentSettingsPatch = {
   claude?: { model?: string; effort?: string };
   gemini?: { instance_id?: string; model?: string; thought_level?: string; auto_rotate?: boolean };
+  usage_alerts?: Partial<UsageAlertsConfig>;
 };
 
 export const getAgentUsage = (refresh = false) =>
@@ -351,3 +359,11 @@ export const getAgentSettings = () => get<AgentSettings>('/pc/api/agent/settings
 export const updateAgentSettings = (patch: AgentSettingsPatch) =>
   post<AgentSettings>('/pc/api/agent/settings', patch);
 export const resetAgent = () => post<{ ok: boolean; message: string }>('/pc/api/agent/reset', {});
+
+export type CatCamState = {
+  enabled: boolean;
+  units: Record<string, string>;
+};
+
+export const getCatCam = () => get<CatCamState>('/pc/api/catcam');
+export const setCatCam = (enabled: boolean) => post<CatCamState>('/pc/api/catcam', { enabled }, 30000);

@@ -38,6 +38,11 @@ fi
 
 node scripts/ota/build-nitro-ota.mjs --ota-version "$OTA" ${NOTES:+--release-notes "$NOTES"}
 D=.artifacts/nitro-ota/android
+# Also mirror locally for pc-api (/pc/api/ota/*) so phones on Tailscale fetch over the tailnet first (zip first, manifest last).
+MIRROR_DIR="${PCAPI_OTA_DIR:-$HOME/.local/share/pc-control/ota}"
+mkdir -p "$MIRROR_DIR"
+cp "$D/bundle.zip" "$MIRROR_DIR/bundle.zip.tmp" && mv -f "$MIRROR_DIR/bundle.zip.tmp" "$MIRROR_DIR/bundle.zip"
+cp "$D/ota.version.json" "$MIRROR_DIR/ota.version.json.tmp" && mv -f "$MIRROR_DIR/ota.version.json.tmp" "$MIRROR_DIR/ota.version.json"
 gh release view "$OTA_TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$OTA_TAG" -R "$REPO" --prerelease --latest=false \
   --target "$(git rev-parse origin/HEAD 2>/dev/null || git rev-parse HEAD)" --title "OTA (Android JS bundle)" --notes "Rolling OTA snapshot."
 # Zip first, manifest last: a phone that sees the new manifest always gets the new zip. The version the phone stores

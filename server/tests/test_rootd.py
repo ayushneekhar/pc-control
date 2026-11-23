@@ -41,6 +41,7 @@ def setup_tmp_cfg(tc):
     for d in (rootd.Cfg.conf, rootd.Cfg.state, rootd.Cfg.logdir, rootd.Cfg.run): os.makedirs(d, exist_ok=True)
     rootd.Cfg.allowed_uid, rootd.Cfg.admin_uid = AGENT, ADMIN
     rootd.requests.clear(); rootd.enroll_pending.clear(); rootd.history.clear()
+    rootd.submit_times.clear(); rootd.submit_rl_sent.clear(); rootd.enroll_times.clear(); rootd.wait_counts.clear()
 
 
 class Canonicalization(unittest.TestCase):
@@ -58,10 +59,13 @@ class Canonicalization(unittest.TestCase):
             self.assertEqual(rootd.argv_hash(argv), o["hash"], repr(argv))
 
     def test_payload_matches_app_js(self):
-        req = {"id": "0123456789abcdef", "nonce": "f" * 32, "expires": 1794128000, "argv": TRICKY[5]}
+        req = {"id": "0123456789abcdef", "nonce": "f" * 32, "expires": 1794128000, "timeout": 120,
+               "reason": "restart nginx", "snap_sha256": "a" * 64, "argv": TRICKY[5]}
         for d in ("approve", "deny"):
-            self.assertEqual(js({"payloads": [{"decision": d, "req": req}]})["payloads"][0],
-                             rootd.payload(req, d).decode())
+            self.assertEqual(js({"payloads": [{"decision": d, "req": req, "version": 2}]})["payloads"][0],
+                             rootd.payload_v2(req, d).decode())
+            self.assertEqual(js({"payloads": [{"decision": d, "req": req, "version": 1}]})["payloads"][0],
+                             rootd.payload_v1(req, d).decode())
 
     def test_rejected_chars_agree(self):
         for argv in BAD:
@@ -281,11 +285,19 @@ class Enrollment(unittest.TestCase):
 
     def test_flood_evicts_oldest_but_real_phone_can_repropose(self):
         real = FakePhone()
-        rootd.handle({"op": "enroll_request", "pubkey": real.pem}, AGENT)
-        for _ in range(rootd.MAX_ENROLL_PENDING + 2):
-            rootd.handle({"op": "enroll_request", "pubkey": FakePhone().pem}, AGENT)
-        self.assertEqual(len(rootd.enroll_pending), rootd.MAX_ENROLL_PENDING)
-        rootd.handle({"op": "enroll_request", "pubkey": real.pem}, AGENT)
+        # Admin proposes a phone; agent proposing up to per-uid cap must not evict admin's entry.
+        rootd.handle({"op": "enroll_request", "pubkey": real.pem}, ADMIN)
+        for _ in range(rootd.MAX_ENROLL_PER_UID):
+            r = rootd.handle({"op": "enroll_request", "pubkey": FakePhone().pem}, AGENT)
+            self.assertTrue(r.get("ok"), r)
+        # 5th attempt from AGENT evicts AGENT's oldest, leaving ADMIN's entry intact.
+        r = rootd.handle({"op": "enroll_request", "pubkey": FakePhone().pem}, AGENT)
+        self.assertTrue(r.get("ok"), r)
+        self.assertEqual(sum(1 for e in rootd.enroll_pending.values() if e["uid"] == AGENT), rootd.MAX_ENROLL_PER_UID)
+        self.assertIn(real.fingerprint, rootd.enroll_pending)
+        # 6th attempt within 1 minute hits the enroll_request rate limit (5/min).
+        r = rootd.handle({"op": "enroll_request", "pubkey": FakePhone().pem}, AGENT)
+        self.assertIn("rate limit", r["error"])
         self.assertTrue(rootd.handle({"op": "enroll_confirm", "fingerprint": real.fingerprint}, ADMIN)["ok"])
 
 
@@ -376,7 +388,7 @@ class Socket(unittest.TestCase):
                 self.assertEqual((ev["type"], ev["request"]["id"]), ("request", r["request"]["id"]))
                 # a watcher that never reads must not block rootd
                 stuck = socket.socket(socket.AF_UNIX); stuck.connect(sock); stuck.sendall(b'{"op":"watch"}\n')
-                for _ in range(4): raw_call(sock, {"op": "submit", "argv": ["/bin/echo", "x" * 30000]})
+                for _ in range(4): raw_call(sock, {"op": "submit", "argv": ["/bin/echo", "x" * 7000]})
                 t0 = time.time()
                 self.assertTrue(raw_call(sock, {"op": "list"}, timeout=5)["requests"])
                 self.assertLess(time.time() - t0, 2)
@@ -389,6 +401,183 @@ class Socket(unittest.TestCase):
             p, _ = start_daemon(d, allowed_uid=os.getuid(), admin_uid=os.getuid())
             out = p.communicate(timeout=10)[0].decode()
             self.assertIn("must not be the admin uid", out)
+
+
+class Hardening(unittest.TestCase):
+    def setUp(self):
+        setup_tmp_cfg(self)
+        self.phone = FakePhone()
+        rootd.handle({"op": "enroll_request", "name": "Pixel", "pubkey": self.phone.pem}, AGENT)
+        rootd.handle({"op": "enroll_confirm", "fingerprint": self.phone.fingerprint}, ADMIN)
+
+    def tearDown(self):
+        os.environ.pop("ROOTD_ALLOW_V1", None)
+        time.sleep(0.05)
+        self.tmp.cleanup()
+
+    def test_v2_signs_timeout_reason_and_snap_and_v1_toggle(self):
+        req = rootd.handle({"op": "submit", "argv": ["echo", "ok"], "reason": "r1", "timeout": 30}, AGENT)["request"]
+        # Tampered timeout or reason fails v2
+        for bad in (dict(req, timeout=60), dict(req, reason="r2"), dict(req, snap_sha256="a" * 64)):
+            sig = self.phone.sign("approve", bad, version=2)
+            r = rootd.handle({"op": "approve", "id": req["id"], "device": self.phone.fingerprint, "signature": sig}, AGENT)
+            self.assertIn("signature", r["error"])
+        # v1 accepted by default
+        sig_v1 = self.phone.sign("approve", req, version=1)
+        r = rootd.handle({"op": "approve", "id": req["id"], "device": self.phone.fingerprint, "signature": sig_v1}, AGENT)
+        self.assertTrue(r.get("ok"), r)
+        rootd.handle({"op": "wait", "id": req["id"], "timeout": 10}, AGENT)
+
+        # Turn v1 off via settings.json
+        rootd.save_json(rootd.Cfg.settings(), {"allow_v1": False})
+        self.assertFalse(rootd.allow_v1())
+        req2 = rootd.handle({"op": "submit", "argv": ["echo", "v2only"], "reason": "r2", "timeout": 45}, AGENT)["request"]
+        sig2_v1 = self.phone.sign("approve", req2, version=1)
+        r = rootd.handle({"op": "approve", "id": req2["id"], "device": self.phone.fingerprint, "signature": sig2_v1}, AGENT)
+        self.assertIn("signature", r["error"])
+        # v2 still accepted
+        sig2_v2 = self.phone.sign("approve", req2, version=2)
+        r = rootd.handle({"op": "approve", "id": req2["id"], "device": self.phone.fingerprint, "signature": sig2_v2}, AGENT)
+        self.assertTrue(r.get("ok"), r)
+        rootd.handle({"op": "wait", "id": req2["id"], "timeout": 10}, AGENT)
+
+        # Env override ROOTD_ALLOW_V1=0 also disables v1
+        rootd.save_json(rootd.Cfg.settings(), {"allow_v1": True})
+        os.environ["ROOTD_ALLOW_V1"] = "0"
+        self.assertFalse(rootd.allow_v1())
+
+    def test_snapshot_blocks_toctou_for_executable_and_interpreter(self):
+        import hashlib
+        # 1. Direct user-writable executable in tmpdir
+        script = os.path.join(self.tmp.name, "run.sh")
+        orig = b"#!/bin/sh\necho ORIGINAL\n"
+        with open(script, "wb") as f: f.write(orig)
+        os.chmod(script, 0o755)
+        req = rootd.handle({"op": "submit", "argv": [script], "reason": "snap test"}, AGENT)["request"]
+        self.assertEqual(req["snap_sha256"], hashlib.sha256(orig).hexdigest())
+        snap_dir = os.path.join(rootd.Cfg.snap_dir(), req["id"])
+        self.assertTrue(os.path.isdir(snap_dir))
+        # Mutate the original file BEFORE approving (TOCTOU attack)
+        with open(script, "wb") as f: f.write(b"#!/bin/sh\necho EVIL\n")
+        sig = self.phone.sign("approve", req, version=2)
+        self.assertTrue(rootd.handle({"op": "approve", "id": req["id"], "device": self.phone.fingerprint, "signature": sig}, AGENT).get("ok"))
+        done = rootd.handle({"op": "wait", "id": req["id"], "timeout": 10}, AGENT)["request"]
+        self.assertEqual(done["stdout"], "ORIGINAL\n")
+        self.assertFalse(os.path.exists(snap_dir))
+
+        # 2. Interpreter + user-writable script arg
+        py_script = os.path.join(self.tmp.name, "helper.py")
+        py_orig = b"print('PY_ORIGINAL')\n"
+        with open(py_script, "wb") as f: f.write(py_orig)
+        req2 = rootd.handle({"op": "submit", "argv": ["python3", "-I", py_script], "reason": "py snap"}, AGENT)["request"]
+        self.assertEqual(req2["snap_sha256"], hashlib.sha256(py_orig).hexdigest())
+        with open(py_script, "wb") as f: f.write(b"print('PY_EVIL')\n")
+        sig2 = self.phone.sign("approve", req2, version=2)
+        self.assertTrue(rootd.handle({"op": "approve", "id": req2["id"], "device": self.phone.fingerprint, "signature": sig2}, AGENT).get("ok"))
+        done2 = rootd.handle({"op": "wait", "id": req2["id"], "timeout": 10}, AGENT)["request"]
+        self.assertEqual(done2["stdout"], "PY_ORIGINAL\n")
+        self.assertFalse(os.path.exists(os.path.join(rootd.Cfg.snap_dir(), req2["id"])))
+
+        # 3. Cancelled request also deletes its snapshot
+        req3 = rootd.handle({"op": "submit", "argv": ["sh", script], "reason": "cancel snap"}, AGENT)["request"]
+        self.assertIn("snap_sha256", req3)
+        self.assertTrue(os.path.isdir(os.path.join(rootd.Cfg.snap_dir(), req3["id"])))
+        rootd.handle({"op": "cancel", "id": req3["id"]}, AGENT)
+        self.assertFalse(os.path.exists(os.path.join(rootd.Cfg.snap_dir(), req3["id"])))
+
+        # 4. System binary and sh -c are NOT snapshotted
+        req4 = rootd.handle({"op": "submit", "argv": ["/bin/sh", "-c", "echo hi"], "reason": "inline"}, AGENT)["request"]
+        self.assertNotIn("snap_sha256", req4)
+
+    def test_submit_rate_limits_and_single_event(self):
+        events = []
+        orig_emit = rootd.emit
+        rootd.emit = lambda ev: events.append(ev)
+        try:
+            for _ in range(rootd.SUBMIT_LIMIT_MIN):
+                r = rootd.handle({"op": "submit", "argv": ["true"]}, AGENT)
+                self.assertTrue(r.get("ok"), r)
+                rootd.handle({"op": "cancel", "id": r["request"]["id"]}, AGENT)
+            # Cancelled requests still count: 11th and 12th must be rejected, with only ONE rate_limited event
+            for _ in range(3):
+                r = rootd.handle({"op": "submit", "argv": ["true"]}, AGENT)
+                self.assertIn("rate limit", r["error"])
+            rl_events = [e for e in events if e.get("type") == "rate_limited"]
+            self.assertEqual(len(rl_events), 1)
+            # Hourly cap (30/h): inject 30 timestamps older than 60s but within 3600s
+            now = time.time()
+            rootd.submit_times[AGENT] = [now - 120] * rootd.SUBMIT_LIMIT_HOUR
+            r = rootd.handle({"op": "submit", "argv": ["true"]}, AGENT)
+            self.assertIn("rate limit", r["error"])
+        finally:
+            rootd.emit = orig_emit
+
+    def test_audit_rotation(self):
+        orig_max = rootd.AUDIT_MAX_BYTES
+        rootd.AUDIT_MAX_BYTES = 256
+        try:
+            for i in range(40):
+                rootd.audit("rot_test", i=i, pad="x" * 60)
+            base = rootd.Cfg.audit()
+            self.assertTrue(os.path.exists(base))
+            self.assertTrue(os.path.exists(base + ".1"))
+            self.assertTrue(os.path.exists(base + ".2"))
+            self.assertTrue(os.path.exists(base + ".3"))
+            self.assertFalse(os.path.exists(base + ".4"))
+            for p in (base, base + ".1", base + ".2", base + ".3"):
+                self.assertEqual(oct(os.stat(p).st_mode & 0o777), "0o600")
+        finally:
+            rootd.AUDIT_MAX_BYTES = orig_max
+
+    def test_history_output_ttl_24h(self):
+        req = rootd.handle({"op": "submit", "argv": ["echo", "secret-out"], "reason": "ttl"}, AGENT)["request"]
+        sig = self.phone.sign("approve", req, version=2)
+        rootd.handle({"op": "approve", "id": req["id"], "device": self.phone.fingerprint, "signature": sig}, AGENT)
+        rootd.handle({"op": "wait", "id": req["id"], "timeout": 10}, AGENT)
+        # Backdate finished timestamp > 24h ago
+        rootd.history[-1]["finished"] = time.time() - (rootd.OUTPUT_TTL + 60)
+        rootd._rewrite_history()
+        # Reloading or querying strips stdout/stderr while keeping metadata
+        rootd.history.clear()
+        rootd.load_history()
+        h = rootd.handle({"op": "history", "output": True}, AGENT)["history"][0]
+        self.assertEqual(h["id"], req["id"])
+        self.assertEqual(h["exit"], 0)
+        self.assertNotIn("stdout", h)
+        self.assertNotIn("stderr", h)
+        self.assertTrue(h.get("output_expired"))
+        # Disk file was also stripped
+        disk = [json.loads(l) for l in open(rootd.Cfg.history())]
+        self.assertNotIn("stdout", disk[-1])
+
+    def test_max_argv_bytes_8kb(self):
+        r = rootd.handle({"op": "submit", "argv": ["/bin/echo", "a" * (8 * 1024 + 10)]}, AGENT)
+        self.assertIn("too long", r["error"])
+
+    def test_watch_and_wait_per_uid_caps(self):
+        # Test watch per-uid cap
+        s1, s2 = socket.socketpair()
+        try:
+            fake_watchers = []
+            with rootd.lock:
+                for _ in range(rootd.MAX_WATCH_PER_UID):
+                    w = rootd.Watcher(s1, AGENT)
+                    rootd.watchers.add(w)
+                    fake_watchers.append(w)
+            r = rootd.handle({"op": "watch"}, AGENT, conn=s2)
+            self.assertIn("too many watchers", r["error"])
+            with rootd.lock:
+                for w in fake_watchers:
+                    rootd.watchers.discard(w)
+        finally:
+            s1.close(); s2.close()
+        # Test wait per-uid cap
+        rootd.wait_counts[AGENT] = rootd.MAX_WAIT_PER_UID
+        try:
+            r = rootd.handle({"op": "wait", "id": "0" * 16, "timeout": 1}, AGENT)
+            self.assertIn("too many concurrent waits", r["error"])
+        finally:
+            rootd.wait_counts[AGENT] = 0
 
 
 if __name__ == "__main__":

@@ -18,15 +18,16 @@ def free_port():
 
 
 class SSE(threading.Thread):
-    def __init__(self, url):
+    def __init__(self, url, headers=None):
         super().__init__(daemon=True)
-        self.url, self.events, self.cond = url, [], threading.Condition()
+        self.url, self.headers, self.events, self.cond = url, headers or {}, [], threading.Condition()
         self.start()
 
     def run(self):
         while True:
             try:
-                with urllib.request.urlopen(self.url, timeout=60) as r:
+                req = urllib.request.Request(self.url, headers=self.headers)
+                with urllib.request.urlopen(req, timeout=60) as r:
                     ev = None
                     for raw in r:
                         line = raw.decode().rstrip("\n")
@@ -55,22 +56,30 @@ class EndToEnd(unittest.TestCase):
             sock = os.path.join(d, "run", "rootd.sock")
             port = free_port()
             api = f"http://127.0.0.1:{port}"
+            tok_file = os.path.join(d, "local-token")
             env = {**os.environ, "ROOTD_SOCK": sock, "PCAPI_PORT": str(port), "PCAPI_DATA": os.path.join(d, "data"),
+                   "PCAPI_LOCAL_TOKEN": tok_file,
                    "ROOTD_INSTALLED_MARK": os.path.join(d, "nope"), "PCAPI_FCM_SA": os.path.join(d, "no-fcm.json")}
             procs = []
+            old_tok_env = os.environ.get("PCAPI_LOCAL_TOKEN")
+            os.environ["PCAPI_LOCAL_TOKEN"] = tok_file
             try:
                 # ---- before rootd exists: pc-api works and reports not_installed
                 pcapi = subprocess.Popen([sys.executable, "-I", os.path.join(SERVER, "pcapi.py")], env=env,
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 procs.append(pcapi)
                 for _ in range(100):
-                    try: http(api, "GET", "/pc/api/info"); break
-                    except OSError: time.sleep(0.1)
+                    if os.path.exists(tok_file):
+                        try: http(api, "GET", "/pc/api/info"); break
+                        except OSError: pass
+                    time.sleep(0.1)
+                ltok = open(tok_file).read().strip()
                 self.assertEqual(http(api, "GET", "/pc/api/info")[1]["rootd"]["state"], "not_installed")
                 self.assertEqual(http(api, "GET", "/pc/api/root/pending")[0], 503)
+                self.assertEqual(http(api, "GET", "/pc/api/info", headers={"Authorization": ""})[0], 403)
                 self.assertEqual(http(api, "GET", "/pc/api/info", headers={"Tailscale-User-Login": "x@y"})[0], 403)
                 self.assertEqual(http(api, "GET", "/pc/api/info", headers={"X-Forwarded-For": "100.64.0.9"})[0], 403)
-                sse = SSE(api + "/pc/api/events")
+                sse = SSE(api + "/pc/api/events", headers={"Authorization": f"Bearer {ltok}"})
                 sse.wait_for(lambda e: e[0] == "hello" and e[1]["rootd"] == "not_installed")
 
                 # ---- phase A: Ayush (admin uid) enrolls the phone
@@ -181,6 +190,8 @@ class EndToEnd(unittest.TestCase):
                 self.assertEqual(sum(a["event"] == "bad_signature" for a in audit), 4)
                 self.assertEqual(sum(a["event"] == "enrolled" for a in audit), 1)
             finally:
+                if old_tok_env is None: os.environ.pop("PCAPI_LOCAL_TOKEN", None)
+                else: os.environ["PCAPI_LOCAL_TOKEN"] = old_tok_env
                 for p in procs:
                     if p.poll() is None: p.terminate()
                 for p in procs:

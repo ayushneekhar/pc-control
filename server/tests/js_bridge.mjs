@@ -12,7 +12,7 @@ const src = readFileSync(join(root, 'src', 'lib', 'rootPayload.ts'), 'utf8');
 const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
 const dir = mkdtempSync(join(tmpdir(), 'rootpayload-'));
 writeFileSync(join(dir, 'rootPayload.mjs'), js);
-const { canonicalArgv, argvHash, buildPayload, keyFingerprint, argvLooksSafe } = await import(pathToFileURL(join(dir, 'rootPayload.mjs')).href);
+const { canonicalArgv, argvHash, buildPayload, buildPayloadV1, keyFingerprint, argvLooksSafe } = await import(pathToFileURL(join(dir, 'rootPayload.mjs')).href);
 rmSync(dir, { recursive: true });
 
 let input = '';
@@ -24,7 +24,9 @@ process.stdin.on('end', () => {
     argvs: (q.argvs || []).map((a) => ({ canon: canonicalArgv(a), hash: argvHash(a) })),
     ders: (q.ders || []).map((d) => keyFingerprint(d)),
     payloads: (q.payloads || []).map((p) => {
-      try { return buildPayload(p.decision, p.req); } catch (e) { return { error: String(e.message) }; }
+      try {
+        return p.version === 1 ? buildPayloadV1(p.decision, p.req) : buildPayload(p.decision, p.req);
+      } catch (e) { return { error: String(e.message) }; }
     }),
     safe: (q.safe || []).map((a) => argvLooksSafe(a)),
   };

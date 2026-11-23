@@ -1,10 +1,22 @@
 """pc-api route classification (API-only routes hidden server-side, overridable via routes.json)."""
-import json, os, shutil, struct, sys, tempfile, threading, time, unittest, urllib.error, urllib.parse, urllib.request
+import atexit, json, os, shutil, struct, sys, tempfile, threading, time, unittest, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pcapi  # noqa: E402
+
+_TEST_TOK_DIR = tempfile.mkdtemp(prefix="pcapi-test-tok-")
+atexit.register(shutil.rmtree, _TEST_TOK_DIR, True)
+pcapi.LOCAL_TOKEN_FILE = os.path.join(_TEST_TOK_DIR, "local-token")
+
+
+def _with_local_auth(headers=None, path=""):
+    h = dict(headers or {})
+    if ("Tailscale-User-Login" not in h and "Authorization" not in h and "X-PC-Local-Token" not in h
+            and not path.startswith("/pc/api/hook/")):
+        h["Authorization"] = f"Bearer {pcapi.local_token()}"
+    return h
 
 H = "ayushlive-hp-pavilion.tail65e4a4.ts.net"
 STATUS = {"Web": {
@@ -578,8 +590,9 @@ class DownloadsHttpTests(unittest.TestCase):
 
     def call(self, method, path, body=None, headers=None):
         import urllib.request, urllib.error
-        req = urllib.request.Request(self.url + path, method=method, headers={"Content-Type": "application/json",
-                                     **(headers or {})}, data=json.dumps(body).encode() if body is not None else None)
+        req = urllib.request.Request(self.url + path, method=method,
+                                     headers={"Content-Type": "application/json", **_with_local_auth(headers, path)},
+                                     data=json.dumps(body).encode() if body is not None else None)
         try:
             with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
         except urllib.error.HTTPError as e:
@@ -1114,7 +1127,7 @@ class VpnHttpTests(unittest.TestCase):
     def call(self, method, path, body=None, headers=None):
         import urllib.request, urllib.error
         req = urllib.request.Request(self.url + path, method=method,
-                                     headers={"Content-Type": "application/json", **(headers or {})},
+                                     headers={"Content-Type": "application/json", **_with_local_auth(headers, path)},
                                      data=json.dumps(body).encode() if body is not None else None)
         try:
             with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
@@ -1305,7 +1318,7 @@ class AgentHttpTests(unittest.TestCase):
     def call(self, method, path, body=None, headers=None):
         import urllib.request, urllib.error
         req = urllib.request.Request(self.url + path, method=method,
-                                     headers={"Content-Type": "application/json", **(headers or {})},
+                                     headers={"Content-Type": "application/json", **_with_local_auth(headers, path)},
                                      data=json.dumps(body).encode() if body is not None else None)
         try:
             with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
@@ -1498,7 +1511,7 @@ class AgentUsageAndSettingsHttpTests(unittest.TestCase):
     def call(self, method, path, body=None, headers=None):
         import urllib.request, urllib.error
         req = urllib.request.Request(self.url + path, method=method,
-                                     headers={"Content-Type": "application/json", **(headers or {})},
+                                     headers={"Content-Type": "application/json", **_with_local_auth(headers, path)},
                                      data=json.dumps(body).encode() if body is not None else None)
         try:
             with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
@@ -1688,7 +1701,7 @@ class OtaMirrorTests(unittest.TestCase):
         shutil.rmtree(self.dir)
 
     def fetch(self, path):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}")
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", headers=_with_local_auth(path=path))
         try:
             with urllib.request.urlopen(req) as r:
                 return r.status, r.headers.get("Content-Type", ""), r.read()
@@ -1769,9 +1782,10 @@ class CatCamTests(unittest.TestCase):
 
     def call(self, method, path, body=None):
         data = None if body is None else json.dumps(body).encode()
+        hdrs = _with_local_auth({"Content-Type": "application/json"} if data is not None else {}, path)
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}{path}", data=data, method=method,
-            headers={"Content-Type": "application/json"} if data is not None else {},
+            headers=hdrs,
         )
         try:
             with urllib.request.urlopen(req) as r:
@@ -2210,5 +2224,67 @@ class KeyringTests(unittest.TestCase):
         km_err = pcapi.KeyringManager(notify=FakeNotify(), run_fn=lambda argv, **kw: self._proc(1, "", "err"))
         self.assertFalse(km_err.notify_if_locked_on_startup())
         self.assertEqual(sent, [])
+
+
+class LocalTokenTests(unittest.TestCase):
+    """Localhost requests without tailscale-serve headers require ~/.config/pc-control/local-token (0600),
+    except /pc/api/hook/* which uses its own shared hook-secret."""
+
+    def test_local_token_required_and_webhooks_work_without_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            tok_file = os.path.join(d, "local-token")
+            hook_file = os.path.join(d, "hook-secret")
+            with open(hook_file, "w") as f:
+                f.write("h" * 40 + "\n")
+            fake_push = FakePush()
+            fake_notify = pcapi.Notify(fake_push, data_dir=d, token_file="/nonexistent", chat="")
+            fake_notify.update({"categories": {"grabbed": {"telegram": False}}})
+            srv = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+            def raw_req(method, path, body=None, headers=None):
+                data = json.dumps(body).encode() if body is not None else None
+                hdrs = {"Content-Type": "application/json", **(headers or {})}
+                r = urllib.request.Request(base + path, data=data, method=method, headers=hdrs)
+                try:
+                    with urllib.request.urlopen(r, timeout=5) as resp:
+                        return resp.status, json.loads(resp.read())
+                except urllib.error.HTTPError as e:
+                    return e.code, json.loads(e.read())
+
+            try:
+                with mock.patch.object(pcapi, "LOCAL_TOKEN_FILE", tok_file), \
+                     mock.patch.object(pcapi, "HOOK_SECRET_FILE", hook_file), \
+                     mock.patch.object(pcapi, "PUSH", fake_push), \
+                     mock.patch.object(pcapi, "NOTIFY", fake_notify), \
+                     mock.patch.object(pcapi, "ALLOWED_LOGINS", {"me@example.com"}):
+                    tok = pcapi.local_token()
+                    self.assertTrue(os.path.exists(tok_file))
+                    self.assertEqual(oct(os.stat(tok_file).st_mode & 0o777), "0o600")
+
+                    # Localhost without local-token -> 403
+                    self.assertEqual(raw_req("GET", "/pc/api/notify/settings")[0], 403)
+                    # Wrong bearer token -> 403
+                    self.assertEqual(raw_req("GET", "/pc/api/notify/settings",
+                                             headers={"Authorization": "Bearer wrong"})[0], 403)
+                    # Valid bearer token -> 200
+                    self.assertEqual(raw_req("GET", "/pc/api/notify/settings",
+                                             headers={"Authorization": f"Bearer {tok}"})[0], 200)
+                    # Proxied request (X-Forwarded-For) with valid local token -> 403
+                    self.assertEqual(raw_req("GET", "/pc/api/notify/settings",
+                                             headers={"Authorization": f"Bearer {tok}",
+                                                      "X-Forwarded-For": "100.64.0.9"})[0], 403)
+                    # Webhook from localhost WITHOUT local-token: missing hook-secret -> 401
+                    self.assertEqual(raw_req("POST", "/pc/api/hook/radarr", {"eventType": "Test"})[0], 401)
+                    # Webhook from localhost WITHOUT local-token, WITH hook-secret -> 200
+                    code, res = raw_req("POST", "/pc/api/hook/radarr", {"eventType": "Test"},
+                                        headers={"Authorization": "Bearer " + "h" * 40})
+                    self.assertEqual(code, 200, res)
+                    self.assertTrue(res.get("ok"))
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
 
 

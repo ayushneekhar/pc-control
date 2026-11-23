@@ -8,7 +8,7 @@ import { ApiError, get, RootRequest } from '../lib/api';
 import { commandLine, decide } from '../lib/approve';
 import { clock, duration } from '../lib/format';
 import { pendingList, reconnectRootStore, useRootStore } from '../lib/rootStore';
-import { showArg } from '../lib/rootPayload';
+import { hasUserWritablePath, isLongCommand, showArg } from '../lib/rootPayload';
 import { useNow } from '../lib/useNow';
 import { radius, screenPad, space, useTheme } from '../theme';
 
@@ -75,7 +75,11 @@ function PendingCard({ req, onOpen, decision }: { req: RootRequest; onOpen: () =
   const t = useTheme();
   const now = useNow(1000, req.status === 'pending');
   const left = Math.max(0, Math.round(req.expires - now / 1000));
-  const [showArgs, setShowArgs] = useState(false);
+  const cmd = commandLine(req.argv);
+  const longCmd = isLongCommand(req.argv);
+  const userPath = hasUserWritablePath(req.argv);
+  const [showArgs, setShowArgs] = useState(longCmd);
+  const [reviewedFull, setReviewedFull] = useState(false);
   const pending = req.status === 'pending';
   return (
     <Card style={{ gap: space(3) }}>
@@ -86,16 +90,40 @@ function PendingCard({ req, onOpen, decision }: { req: RootRequest; onOpen: () =
         </Text>
         {pending ? <Pill tone={left < 30 ? 'bad' : 'warn'} icon="timer-sand" label={`${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`} /> : statusPill(req)}
       </View>
-      <Pressable onPress={() => setShowArgs((v) => !v)} style={[st.cmd, { backgroundColor: t.cardAlt }]}>
+      {userPath || req.snap_sha256 ? (
+        <View style={{ flexDirection: 'row', gap: space(2), flexWrap: 'wrap' }}>
+          {userPath ? <Pill tone="warn" icon="folder-alert-outline" label="Path under /home or /tmp" /> : null}
+          {req.snap_sha256 ? <Pill tone="accent" icon="file-lock-outline" label={`Snapshotted · ${req.snap_sha256.slice(0, 12)}…`} /> : null}
+        </View>
+      ) : null}
+      {longCmd ? (
+        <Banner tone="warn" icon="alert-outline" title={`Long command (${cmd.length} chars)`}>
+          Review every argument below before approving.
+        </Banner>
+      ) : null}
+      <Pressable onPress={() => !longCmd && setShowArgs((v) => !v)} style={[st.cmd, { backgroundColor: t.cardAlt }]}>
         <Mono style={{ fontSize: 14 }}>
           <Text style={{ color: t.textFaint, fontWeight: '400' }}># </Text>
-          {commandLine(req.argv)}
+          {cmd}
         </Mono>
-        <Text style={{ color: t.accent, fontSize: 12.5, marginTop: 6, fontWeight: '500' }}>
-          {showArgs ? 'Hide' : 'Show'} {req.argv.length} argument{req.argv.length === 1 ? '' : 's'} exactly
-        </Text>
+        {!longCmd ? (
+          <Text style={{ color: t.accent, fontSize: 12.5, marginTop: 6, fontWeight: '500' }}>
+            {showArgs ? 'Hide' : 'Show'} {req.argv.length} argument{req.argv.length === 1 ? '' : 's'} exactly
+          </Text>
+        ) : null}
       </Pressable>
-      {showArgs ? <ArgvList argv={req.argv} /> : null}
+      {showArgs || longCmd ? <ArgvList argv={req.argv} /> : null}
+      {pending && longCmd ? (
+        <Pressable
+          onPress={() => setReviewedFull((v) => !v)}
+          style={[st.reviewRow, { backgroundColor: t.cardAlt, borderColor: reviewedFull ? t.ok : t.warn }]}
+        >
+          <Icon name={reviewedFull ? 'checkbox-marked' : 'checkbox-blank-outline'} size={20} color={reviewedFull ? t.ok : t.warn} />
+          <Text style={{ color: t.text, fontSize: 13.5, flex: 1 }}>
+            I reviewed all {req.argv.length} arguments ({cmd.length} chars)
+          </Text>
+        </Pressable>
+      ) : null}
       <View style={{ flexDirection: 'row', gap: space(2), flexWrap: 'wrap' }}>
         <Text style={{ color: t.textFaint, fontSize: 12.5 }}>
           {clock(req.created)} · timeout {duration(req.timeout)} · id {req.id.slice(0, 8)}
@@ -118,7 +146,7 @@ function PendingCard({ req, onOpen, decision }: { req: RootRequest; onOpen: () =
             icon="fingerprint"
             style={{ flex: 1.4 }}
             busy={decision.busy === req.id + 'approve'}
-            disabled={!!decision.busy || left <= 0}
+            disabled={!!decision.busy || left <= 0 || (longCmd && !reviewedFull)}
             onPress={() => decision.run(req, 'approve')}
           />
         </View>
@@ -148,8 +176,13 @@ function Detail({ id, onClose, decision }: { id: string | null; onClose: () => v
   }, [id, live?.status]);
   const req = loaded?.id === id ? loaded.req ?? null : null;
   const err = loaded?.id === id ? loaded.err ?? null : null;
+  const [reviewedId, setReviewedId] = useState<string | null>(null);
 
   const r = req ? { ...req, ...(live && live.status !== req.status ? live : {}) } : live ?? null;
+  const longCmd = r ? isLongCommand(r.argv) : false;
+  const cmdLen = r ? commandLine(r.argv).length : 0;
+  const userPath = r ? hasUserWritablePath(r.argv) : false;
+  const reviewedFull = !!r && reviewedId === r.id;
   return (
     <Modal visible={!!id} animationType="slide" onRequestClose={onClose} transparent statusBarTranslucent navigationBarTranslucent>
       <View style={[st.sheetWrap, { backgroundColor: t.overlay }]}>
@@ -167,12 +200,35 @@ function Detail({ id, onClose, decision }: { id: string | null; onClose: () => v
                   </Text>
                   {statusPill(r)}
                 </View>
+                {userPath || r.snap_sha256 ? (
+                  <View style={{ flexDirection: 'row', gap: space(2), flexWrap: 'wrap' }}>
+                    {userPath ? <Pill tone="warn" icon="folder-alert-outline" label="Path under /home or /tmp" /> : null}
+                    {r.snap_sha256 ? <Pill tone="accent" icon="file-lock-outline" label={`Snapshotted · ${r.snap_sha256.slice(0, 12)}…`} /> : null}
+                  </View>
+                ) : null}
+                {longCmd ? (
+                  <Banner tone="warn" icon="alert-outline" title={`Long command (${cmdLen} chars)`}>
+                    Review every argument below before approving.
+                  </Banner>
+                ) : null}
                 <ArgvList argv={r.argv} />
+                {r.status === 'pending' && longCmd ? (
+                  <Pressable
+                    onPress={() => setReviewedId(reviewedFull ? null : r.id)}
+                    style={[st.reviewRow, { backgroundColor: t.cardAlt, borderColor: reviewedFull ? t.ok : t.warn }]}
+                  >
+                    <Icon name={reviewedFull ? 'checkbox-marked' : 'checkbox-blank-outline'} size={20} color={reviewedFull ? t.ok : t.warn} />
+                    <Text style={{ color: t.text, fontSize: 13.5, flex: 1 }}>
+                      I reviewed all {r.argv.length} arguments ({cmdLen} chars)
+                    </Text>
+                  </Pressable>
+                ) : null}
                 {r.status === 'pending' ? (
                   <View style={{ flexDirection: 'row', gap: space(2) }}>
                     <Button label="Deny" kind="subtle" icon="close" style={{ flex: 1 }} disabled={!!decision.busy}
                       busy={decision.busy === r.id + 'deny'} onPress={() => decision.run(r, 'deny')} />
-                    <Button label="Approve" kind="primary" icon="fingerprint" style={{ flex: 1.4 }} disabled={!!decision.busy}
+                    <Button label="Approve" kind="primary" icon="fingerprint" style={{ flex: 1.4 }}
+                      disabled={!!decision.busy || (longCmd && !reviewedFull)}
                       busy={decision.busy === r.id + 'approve'} onPress={() => decision.run(r, 'approve')} />
                   </View>
                 ) : null}
@@ -181,11 +237,16 @@ function Detail({ id, onClose, decision }: { id: string | null; onClose: () => v
                   {r.decided ? <KV k={r.status === 'denied' ? 'Denied' : 'Approved'} v={`${clock(r.decided)} · ${r.device ?? ''}`} /> : null}
                   {r.finished && r.started ? <KV k="Ran for" v={duration(r.finished - r.started) || '<1s'} /> : null}
                   {r.exit != null ? <KV k="Exit code" v={String(r.exit)} mono /> : null}
+                  {r.snap_sha256 ? <KV k="Snapshot SHA-256" v={r.snap_sha256} mono /> : null}
                   <KV k="Request id" v={r.id} mono />
                 </Card>
                 {r.stdout ? <Output title="stdout" text={r.stdout} /> : null}
                 {r.stderr ? <Output title="stderr" text={r.stderr} tone="bad" /> : null}
-                {r.status === 'done' && !r.stdout && !r.stderr ? <Text style={{ color: t.textFaint }}>No output.</Text> : null}
+                {r.status === 'done' && !r.stdout && !r.stderr ? (
+                  <Text style={{ color: t.textFaint }}>
+                    {r.output_expired ? 'Output expired (kept for 24 h).' : 'No output.'}
+                  </Text>
+                ) : null}
               </>
             ) : null}
           </ScrollView>
@@ -348,6 +409,7 @@ const st = StyleSheet.create({
   argRow: { flexDirection: 'row', gap: space(3), alignItems: 'flex-start' },
   argIdx: { width: 18, textAlign: 'right', fontSize: 12, lineHeight: 19 },
   cmd: { borderRadius: radius.md, padding: space(3) },
+  reviewRow: { flexDirection: 'row', alignItems: 'center', gap: space(2), borderRadius: radius.md, borderWidth: 1, padding: space(3) },
   histRow: { flexDirection: 'row', alignItems: 'center', gap: space(3), paddingHorizontal: space(4), paddingVertical: space(3) },
   sheetWrap: { flex: 1, justifyContent: 'flex-end' },
   sheet: { maxHeight: '88%', borderTopLeftRadius: 24, borderTopRightRadius: 24 },

@@ -88,9 +88,22 @@ object Notifier {
       .setContentIntent(open(ctx, "root/$id", id.hashCode())))
   }
 
+  private val IMAGE_PATH_RE = Regex("^/pc/api/notify/image/[0-9a-f]{16}$")
+
+  private fun isAllowedLink(ctx: Context, link: String): Boolean {
+    val uri = try { Uri.parse(link) } catch (_: Exception) { return false }
+    val scheme = uri.scheme?.lowercase() ?: return false
+    if (scheme == "pccontrol") return true
+    if (scheme != "https" && scheme != "http") return false
+    val host = uri.host?.lowercase() ?: return false
+    val serverHost = try { Uri.parse(Prefs.serverUrl(ctx)).host?.lowercase() } catch (_: Exception) { null }
+    return serverHost != null && host == serverHost
+  }
+
   fun result(ctx: Context, id: String, title: String, body: String) {
     dismiss(ctx, id)
     post(ctx, id, ID_RESULT, base(ctx, CH_RESULTS, title, body)
+      .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
       .setTimeoutAfter(10 * 60_000L)
       .setContentIntent(open(ctx, "root/$id", id.hashCode())))
   }
@@ -102,9 +115,14 @@ object Notifier {
     val sighting = if (cam != null && ts != null)
       "cams?tab=replay&cam=${Uri.encode(cam)}&ts=$ts" else null
     val tap = when {
-      link != null && (link.startsWith("https://") || link.startsWith("http://")) ->
-        PendingIntent.getActivity(ctx, id.hashCode(), Intent(Intent.ACTION_VIEW, Uri.parse(link))
-          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+      link != null && isAllowedLink(ctx, link) -> {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(link))
+          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (link.lowercase().startsWith("pccontrol://")) {
+          intent.setPackage(ctx.packageName).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        PendingIntent.getActivity(ctx, id.hashCode(), intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+      }
       sighting != null -> open(ctx, sighting, id.hashCode())
       cat == "usage_limits" -> open(ctx, "agent-settings", id.hashCode())
       cat == "keyring" -> open(ctx, "routes?unlockKeyring=1", id.hashCode())
@@ -120,7 +138,7 @@ object Notifier {
   /** The notification's picture from pc-api ("/pc/api/notify/image/<id>"), over the tailnet; null on any failure
    *  (then it's a text notification). Only paths on the configured laptop are fetched. */
   private fun fetchImage(ctx: Context, path: String): Bitmap? = try {
-    if (!path.startsWith("/pc/api/notify/image/")) null else {
+    if (!IMAGE_PATH_RE.matches(path)) null else {
       val c = URL(Prefs.serverUrl(ctx) + path).openConnection() as HttpURLConnection
       c.connectTimeout = 5000; c.readTimeout = 8000
       try {

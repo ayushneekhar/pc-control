@@ -1,43 +1,36 @@
 import { PcNative } from '../../modules/pc-native';
 import { ApiError, post, RootRequest } from './api';
 import { applyRequest } from './rootStore';
-import { buildPayload, Decision, showArg } from './rootPayload';
+import { argvLooksSafe, commandLine, Decision } from './rootPayload';
+
+export { commandLine };
 
 export type DecideResult = { ok: true } | { ok: false; cancelled?: boolean; reenroll?: boolean; message: string };
 
-export function commandLine(argv: string[]): string {
-  return argv
-    .map((a) => {
-      const s = showArg(a);
-      return s === '' || /[\s"'$`;&|<>(){}*?!#~]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s;
-    })
-    .join(' ');
-}
-
 /**
- * Sign a decision for the request AS SHOWN (the same object the screen rendered) and relay it.
- * The payload is built here on the phone from req.argv; rootd recomputes it from the argv it stored.
+ * Sign a decision for the request AS SHOWN. Native Kotlin builds the rootd-v2 payload and renders
+ * BiometricPrompt from the exact same fields so JS cannot decouple what is shown from what is signed.
  */
 export async function decide(req: RootRequest, decision: Decision): Promise<DecideResult> {
   if (!PcNative) return { ok: false, message: 'Native module missing (old build?)' };
   const fp = PcNative.getSettings().deviceFingerprint;
   if (!fp || !PcNative.keyInfo()) return { ok: false, reenroll: true, message: "This phone isn't set up for root approvals yet. Open Settings > Root approvals." };
   if (req.expires * 1000 <= Date.now()) return { ok: false, message: 'This request already expired.' };
-  let payload: string;
-  try {
-    payload = buildPayload(decision, req);
-  } catch (e) {
-    return { ok: false, message: `Refusing to sign: ${(e as Error).message}` };
+  if (!argvLooksSafe(req.argv)) {
+    return { ok: false, message: 'Refusing to sign: argv contains characters that cannot be shown faithfully' };
   }
-  const cmd = commandLine(req.argv);
   let signature: string;
   try {
-    signature = await PcNative.sign(
-      payload,
-      decision === 'approve' ? 'Run as root?' : 'Deny this command?',
-      cmd.length > 80 ? cmd.slice(0, 77) + '…' : cmd,
-      (req.reason ? `Reason: ${req.reason}\n\n` : '') + (cmd.length > 80 ? cmd.slice(0, 600) : '') ,
-    );
+    signature = await PcNative.approveRoot({
+      decision,
+      id: req.id,
+      nonce: req.nonce,
+      expires: req.expires,
+      argv: req.argv,
+      reason: req.reason || '',
+      timeout: req.timeout,
+      snapSha256: req.snap_sha256 || '',
+    });
   } catch (e: any) {
     const code = e?.code as string | undefined;
     if (code === 'E_CANCELLED') return { ok: false, cancelled: true, message: 'Cancelled' };

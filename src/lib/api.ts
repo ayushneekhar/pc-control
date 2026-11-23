@@ -77,6 +77,8 @@ export type RootRequest = {
   timeout: number;
   uid: number;
   argv_sha256: string;
+  snap_sha256?: string;
+  output_expired?: boolean;
   exit?: number;
   device?: string;
   decided?: number;

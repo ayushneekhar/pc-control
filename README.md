@@ -180,8 +180,9 @@ Now Bar. On older Android it is a normal ongoing progress notification.
   work in the background too: new root request → "Root approval needed" + reason (tapping opens it in the
   Root tab); command finished → "Command finished / failed (exit N)" + reason; decided, expired or cancelled →
   a silent dismiss. Tokens that FCM reports as `UNREGISTERED`/404 (or as invalid) are dropped.
-- Anything local can send a notification through the router (see above):
-  `curl -s localhost:1990/pc/api/notify -H 'Content-Type: application/json' -d '{"category":"system","title":"Backup done","body":"42 GB"}'`.
+- Anything local can send a notification through the router (see above) using the local bearer token in
+  `~/.config/pc-control/local-token` (mode 600, auto-created by pc-api):
+  `curl -s localhost:1990/pc/api/notify -H "Authorization: Bearer $(cat ~/.config/pc-control/local-token)" -H 'Content-Type: application/json' -d '{"category":"system","title":"Backup done","body":"42 GB"}'`.
 - Router notifications use one Android channel per category, so you can also tune them in Android settings.
   A picture (cat alerts, Seerr posters) is fetched from pc-api over the tailnet when the notification arrives
   (`/pc/api/notify/image/<id>`); FCM itself only carries the text and that path.
@@ -211,13 +212,24 @@ How that is enforced:
 3. The phone holds an **Android Keystore EC P-256 key**. The key never leaves the phone's secure hardware
    (StrongBox when available), and every use needs a strong biometric through `BiometricPrompt`. Adding a new
    fingerprint on the phone destroys the key.
-4. To approve, the phone builds this payload **itself from the command it is displaying** and signs it:
-   `rootd-v1\napprove\n<id>\n<nonce>\n<expires>\n<sha256(JSON.stringify(argv))>`.
-   rootd recomputes the payload from the argv **it** stored. If anything differs (the command, the decision,
-   the id, the nonce or the expiry), the signature fails. A request can't be swapped behind the screen.
-5. Approvals are single-use, so a replay finds the request already decided. Pending requests are capped at 5.
-   Commands run with a clean environment, cwd `/`, stdin `/dev/null`, a timeout that kills the whole process
-   group, and capped output. Everything is logged to `/var/log/rootd/audit.jsonl`.
+4. To approve, native Kotlin code (`Signer.kt`) builds the `rootd-v2` payload **itself from the exact command
+   and metadata it displays in BiometricPrompt** and signs it:
+   `rootd-v2\napprove\n<id>\n<nonce>\n<expires>\n<timeout>\n<sha256(reason)>\n<snap_sha256>\n<sha256(JSON.stringify(argv))>`.
+   rootd recomputes the payload from the request **it** stored. If anything differs (the command, decision,
+   id, nonce, expiry, timeout, reason, or snapshot hash), the signature fails. A request can't be swapped
+   behind the screen, and JS cannot decouple what is shown in `BiometricPrompt` from what is signed.
+   Legacy `rootd-v1` signatures stay accepted by default during the APK upgrade transition; once the new APK is
+   installed, turn v1 off by setting `"allow_v1": false` in `/etc/rootd/settings.json` (or
+   `Environment=ROOTD_ALLOW_V1=0` via `sudo systemctl edit rootd`) and running `sudo systemctl restart rootd`.
+5. Approvals are single-use, so a replay finds the request already decided. Pending requests are capped at 5,
+   `argv` is capped at 8 KB, and submissions are rate-limited (10/min, 30/h per uid, counted even when
+   cancelled; `enroll_request` is 5/min). If `argv[0]` (or the script argument to `sh`, `bash`, `dash`,
+   `python3`, `perl`, or `node`) resolves to a non-root-writable file or parent directory, rootd snapshots it
+   into `/var/lib/rootd/snap/<id>` (`0700`), includes its SHA-256 in the request and `rootd-v2` payload,
+   executes the snapshot, and deletes it on finish/expiry. Commands run with a clean environment, cwd `/`,
+   stdin `/dev/null`, a timeout that kills the whole process group, and capped output. Command outputs in
+   `history.jsonl` are stripped after 24 hours (metadata is kept). Everything is logged to
+   `/var/log/rootd/audit.jsonl` (rotated at 5 MB, 3 rotations kept, mode `0600`).
 6. **Enrollment needs root.** The app creates the key and proposes its public key. rootd only marks it
    *pending*. Ayush runs `sudo rootd-admin enroll` and **types the code the phone displays**. The phone computes
    that code from its own key; it never comes from the server. The agent can propose keys but can never
@@ -236,7 +248,11 @@ Tailscale login (the `Tailscale-User-Login` header that `tailscale serve` adds).
 - **The repo is user-writable.** `install-rootd.sh` copies `server/rootd.py` from here. Before running it with
   sudo (first install or upgrade), check what you are installing: `git -C ~/code/pc-control log -p server/`
   or compare the sha256 the installer prints.
-- The agent can deny service: fill the pending queue, or flood enrollment proposals. It cannot get a command run.
+- **Snapshotted scripts can still read sibling files.** When rootd snapshots a user-writable script (e.g. under
+  `/home` or `/tmp`), only that script file itself is frozen and hashed; any sibling files, modules, or configs
+  the script reads at runtime remain user-writable.
+- The agent can deny service: fill the pending queue, hit rate limits, or fill its per-uid enrollment slots. It
+  cannot get a command run.
 - **Notification text goes through Google.** The `--reason` of every root request (and any `/pc/api/notify`
   text) is visible to FCM. Don't put secrets in reasons. The agent can also send you any notification text it
   likes, but a notification can't approve anything: approving means checking the command in the app and

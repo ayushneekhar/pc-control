@@ -393,6 +393,11 @@ function Enrollment() {
           <KV k="Stored in" v={key?.securityLevel === 'strongbox' ? 'StrongBox' : key?.securityLevel === 'tee' ? 'Secure hardware (TEE)' : key?.securityLevel ?? '–'} />
         </View>
       ) : null}
+      {key?.securityLevel === 'software' ? (
+        <Banner tone="bad" title="Software-only keystore">
+          This key is not backed by secure hardware (TEE/StrongBox). Remove it and re-enroll on a hardware-backed device.
+        </Banner>
+      ) : null}
 
       {phase.kind === 'working' ? <Text style={{ color: t.textDim }}>{phase.what}</Text> : null}
       {phase.kind === 'error' ? <Banner tone="bad" title="Setup stopped">{phase.message}</Banner> : null}

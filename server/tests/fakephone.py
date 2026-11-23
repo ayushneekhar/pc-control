@@ -41,23 +41,41 @@ class FakePhone:
         if self._fp is None: self._fp = js({"ders": [self.der_b64]})["ders"][0]
         return self._fp
 
-    def payload(self, decision, req):
-        out = js({"payloads": [{"decision": decision, "req": {k: req[k] for k in ("id", "nonce", "expires", "argv")}}]})
+    def payload(self, decision, req, version=2):
+        fields = {k: req[k] for k in ("id", "nonce", "expires", "argv")}
+        if "timeout" in req: fields["timeout"] = req["timeout"]
+        if "reason" in req: fields["reason"] = req["reason"]
+        if "snap_sha256" in req: fields["snap_sha256"] = req["snap_sha256"]
+        out = js({"payloads": [{"decision": decision, "req": fields, "version": version}]})
         p = out["payloads"][0]
         if isinstance(p, dict): raise ValueError(p["error"])
         return p
 
-    def sign(self, decision, req):
+    def sign(self, decision, req, version=2):
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import ec
-        sig = self.key.sign(self.payload(decision, req).encode("utf-8"), ec.ECDSA(hashes.SHA256()))
+        sig = self.key.sign(self.payload(decision, req, version=version).encode("utf-8"), ec.ECDSA(hashes.SHA256()))
         return base64.b64encode(sig).decode()
+
+
+def _default_local_headers():
+    p = os.environ.get("PCAPI_LOCAL_TOKEN", os.path.expanduser("~/.config/pc-control/local-token"))
+    try:
+        with open(p) as f:
+            tok = f.read().strip()
+        if tok: return {"Authorization": f"Bearer {tok}"}
+    except OSError:
+        pass
+    return {}
 
 
 def http(api, method, path, body=None, headers=None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(api + path, data=data, method=method,
-                                 headers={"Content-Type": "application/json", **(headers or {})})
+    hdrs = {"Content-Type": "application/json"}
+    if not headers or ("Tailscale-User-Login" not in headers and "Authorization" not in headers):
+        hdrs.update(_default_local_headers())
+    hdrs.update(headers or {})
+    req = urllib.request.Request(api + path, data=data, method=method, headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=20) as r: return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:

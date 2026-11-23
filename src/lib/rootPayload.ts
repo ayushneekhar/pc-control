@@ -9,7 +9,12 @@ export type SignableRequest = {
   nonce: string;
   expires: number;
   argv: string[];
+  timeout?: number;
+  reason?: string;
+  snap_sha256?: string;
 };
+
+export const LONG_COMMAND_CHARS = 600;
 
 /** UTF-8 encode (no TextEncoder dependency). Lone surrogates become U+FFFD like TextEncoder. */
 export function utf8(s: string): Uint8Array {
@@ -118,11 +123,8 @@ export function argvLooksSafe(argv: unknown): argv is string[] {
   return Array.isArray(argv) && argv.length > 0 && argv.every((a) => typeof a === 'string' && !BAD.test(a));
 }
 
-/**
- * The bytes the phone signs. Built on the phone from the argv it shows, so a request can't be swapped
- * behind the screen: rootd recomputes this from the argv IT stored.
- */
-export function buildPayload(decision: Decision, req: SignableRequest): string {
+/** Legacy v1 payload (kept for compatibility tests while rootd transitions to v2). */
+export function buildPayloadV1(decision: Decision, req: SignableRequest): string {
   if (decision !== 'approve' && decision !== 'deny') throw new Error('bad decision');
   if (!/^[0-9a-f]{16}$/.test(req.id) || !/^[0-9a-f]{32}$/.test(req.nonce)) throw new Error('bad request id/nonce');
   if (!Number.isSafeInteger(req.expires)) throw new Error('bad expiry');
@@ -130,13 +132,56 @@ export function buildPayload(decision: Decision, req: SignableRequest): string {
   return `rootd-v1\n${decision}\n${req.id}\n${req.nonce}\n${req.expires}\n${argvHash(req.argv)}`;
 }
 
+/**
+ * The v2 bytes the phone signs (built natively in Signer.kt, mirrored here for cross-checking tests).
+ * Signs timeout, sha256(reason), snap_sha256 (empty when not snapshotted), and argv_hash.
+ */
+export function buildPayloadV2(decision: Decision, req: SignableRequest): string {
+  if (decision !== 'approve' && decision !== 'deny') throw new Error('bad decision');
+  if (!/^[0-9a-f]{16}$/.test(req.id) || !/^[0-9a-f]{32}$/.test(req.nonce)) throw new Error('bad request id/nonce');
+  if (!Number.isSafeInteger(req.expires)) throw new Error('bad expiry');
+  const timeout = req.timeout ?? 600;
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 3600) throw new Error('bad timeout');
+  if (!argvLooksSafe(req.argv)) throw new Error('argv contains characters that cannot be shown faithfully');
+  const snap = req.snap_sha256 ?? '';
+  if (snap !== '' && !/^[0-9a-f]{64}$/.test(snap)) throw new Error('bad snapshot sha256');
+  const reasonHash = sha256Hex(utf8(req.reason ?? ''));
+  return `rootd-v2\n${decision}\n${req.id}\n${req.nonce}\n${req.expires}\n${timeout}\n${reasonHash}\n${snap}\n${argvHash(req.argv)}`;
+}
+
+export const buildPayload = buildPayloadV2;
+
 /** Short enrollment code: first 64 bits of SHA-256 over the DER SubjectPublicKeyInfo, as XXXX-XXXX-XXXX-XXXX. */
 export function keyFingerprint(spkiDerBase64: string): string {
   const h = sha256Hex(base64ToBytes(spkiDerBase64)).toUpperCase();
   return [0, 4, 8, 12].map((i) => h.slice(i, i + 4)).join('-');
 }
 
-/** Visible rendering of one argv element: shows tabs/newlines so nothing hides on screen. */
+/** Visible rendering of one argv element: flags long runs of whitespace and shows tabs/newlines. */
 export function showArg(a: string): string {
-  return a.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\t/g, '\\t');
+  const collapsed = a
+    .replace(/ {4,}/g, (m) => `[${m.length} spaces]`)
+    .replace(/\t{4,}/g, (m) => `[${m.length} tabs]`)
+    .replace(/\n{4,}/g, (m) => `[${m.length} newlines]`);
+  return collapsed.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\t/g, '\\t');
+}
+
+export function commandLine(argv: string[]): string {
+  return argv
+    .map((a) => {
+      const s = showArg(a);
+      return s === '' || /[\s"'$`;&|<>(){}*?!#~]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s;
+    })
+    .join(' ');
+}
+
+export function isLongCommand(argv: string[]): boolean {
+  return commandLine(argv).length > LONG_COMMAND_CHARS;
+}
+
+const USER_WRITABLE_RE = /(?:^|[\s"'=:])(\/(?:home|tmp)(?:\/|$))/;
+
+/** True when any argv element references a path under /home or /tmp. */
+export function hasUserWritablePath(argv: string[]): boolean {
+  return argv.some((a) => a === '/home' || a === '/tmp' || a.startsWith('/home/') || a.startsWith('/tmp/') || USER_WRITABLE_RE.test(a));
 }

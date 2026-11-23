@@ -52,7 +52,18 @@ export type CrashReport = {
   trace_b64?: string | null;
 };
 
-/** Error codes thrown by sign()/createKey(): E_CANCELLED, E_KEY_INVALIDATED, E_NO_KEY, E_LOCKOUT, E_AUTH, ... */
+export type RootApprovalInput = {
+  decision: 'approve' | 'deny';
+  id: string;
+  nonce: string;
+  expires: number;
+  argv: string[];
+  reason: string;
+  timeout: number;
+  snapSha256?: string;
+};
+
+/** Error codes thrown by approveRoot()/createKey(): E_CANCELLED, E_KEY_INVALIDATED, E_NO_KEY, E_LOCKOUT, E_AUTH, E_NO_HARDWARE_KEYSTORE, ... */
 export type PcNativeModule = {
   /** System bar + display cutout insets in dp, or null before the activity is attached. */
   windowInsets(): { top: number; bottom: number; left: number; right: number } | null;
@@ -107,7 +118,8 @@ export type PcNativeModule = {
   keyInfo(): KeyInfo | null;
   createKey(): Promise<KeyInfo>;
   deleteKey(): void;
-  sign(payload: string, title: string, subtitle: string, description: string): Promise<string>;
+  /** Native rootd-v2 payload construction + BiometricPrompt rendering + Keystore ECDSA signing. */
+  approveRoot(req: RootApprovalInput): Promise<string>;
   /** Biometric-gated AES-GCM keyring password vault (ciphertext + IV only; never plaintext on disk). */
   keyringHasSaved?(): boolean;
   keyringSave?(password: string, title: string, subtitle: string): Promise<void>;

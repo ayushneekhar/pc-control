@@ -175,13 +175,22 @@ class PcNativeModule : Module() {
       Signer.delete()
       Prefs.setDeviceFingerprint(ctx, null)
     }
-    AsyncFunction("sign") { payload: String, title: String, subtitle: String, description: String, promise: Promise ->
+    AsyncFunction("approveRoot") { req: Map<String, Any?>, promise: Promise ->
       val activity = appContext.currentActivity as? FragmentActivity
       if (activity == null) {
         promise.reject(PcException("E_NO_ACTIVITY", "Open the app to approve"))
         return@AsyncFunction
       }
-      Signer.sign(activity, payload.toByteArray(Charsets.UTF_8), title, subtitle, description) { r ->
+      val decision = req["decision"] as? String ?: ""
+      val id = req["id"] as? String ?: ""
+      val nonce = req["nonce"] as? String ?: ""
+      val expires = (req["expires"] as? Number)?.toLong() ?: 0L
+      val rawArgv = req["argv"] as? List<*>
+      val argv = if (rawArgv != null && rawArgv.all { it is String }) rawArgv.filterIsInstance<String>() else emptyList()
+      val reason = req["reason"] as? String ?: ""
+      val timeout = (req["timeout"] as? Number)?.toInt() ?: 0
+      val snapSha256 = req["snapSha256"] as? String ?: ""
+      Signer.approveRoot(activity, decision, id, nonce, expires, argv, reason, timeout, snapSha256) { r ->
         r.fold({ promise.resolve(it) }, { e ->
           if (e is PcException) promise.reject(e) else promise.reject(PcException("E_SIGN", e.message ?: "failed", e))
         })

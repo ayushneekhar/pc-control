@@ -18,20 +18,31 @@ Security model:
 Test mode: when NOT running as root, ROOTD_TEST_DIR / ROOTD_TEST_UID / ROOTD_TEST_ADMIN_UID override the
 paths and the allowed uids. Running as root with any ROOTD_TEST_* variable set is refused.
 """
-import base64, hashlib, json, os, pwd, queue, re, secrets, selectors, shutil, signal, socket, struct
+import base64, hashlib, json, os, pwd, queue, re, secrets, selectors, shutil, signal, socket, stat, struct
 import subprocess, sys, threading, time, unicodedata
 
-VERSION = 2
+VERSION = 3
 EXPIRY = 180            # seconds a request waits for approval
 MAX_PENDING = 5
 MAX_ENROLL_PENDING = 8
-MAX_ARGV_BYTES = 32 * 1024
+MAX_ENROLL_PER_UID = 4
+MAX_ARGV_BYTES = 8 * 1024
+MAX_SNAP_BYTES = 16 * 1024 * 1024
 MAX_REASON = 500
 MAX_OUT = 256 * 1024    # bytes kept per stream (head + tail)
 DEFAULT_TIMEOUT = 600
 MAX_TIMEOUT = 3600
 MAX_CLIENTS = 64
+MAX_WAIT_PER_UID = 16
+MAX_WATCH_PER_UID = 4
 HISTORY_KEEP = 200
+OUTPUT_TTL = 24 * 3600
+SUBMIT_LIMIT_MIN = 10
+SUBMIT_LIMIT_HOUR = 30
+ENROLL_LIMIT_MIN = 5
+AUDIT_MAX_BYTES = 5 * 1024 * 1024
+AUDIT_KEEP = 3
+INTERPRETERS = frozenset(("sh", "bash", "dash", "python3", "perl", "node"))
 SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SAFE_ENV = {"PATH": SAFE_PATH, "HOME": "/root", "USER": "root", "LOGNAME": "root", "SHELL": "/bin/sh",
             "LANG": "C.UTF-8", "DEBIAN_FRONTEND": "noninteractive", "TERM": "dumb"}
@@ -64,6 +75,15 @@ class Cfg:
     def audit(cls): return os.path.join(cls.logdir, "audit.jsonl")
     @classmethod
     def history(cls): return os.path.join(cls.state, "history.jsonl")
+    @classmethod
+    def snap_dir(cls): return os.path.join(cls.state, "snap")
+
+
+def allow_v1():
+    env = os.environ.get("ROOTD_ALLOW_V1")
+    if env is not None and env != "":
+        return env.strip().lower() not in ("0", "false", "no", "off")
+    return bool(load_json(Cfg.settings(), {}).get("allow_v1", True))
 
 
 def configure_from_env():
@@ -98,9 +118,28 @@ def save_json(p, data):
 audit_lock = threading.Lock()
 
 
+def _rotate_audit():
+    base = Cfg.audit()
+    try:
+        if os.path.getsize(base) < AUDIT_MAX_BYTES:
+            return
+    except OSError:
+        return
+    oldest = f"{base}.{AUDIT_KEEP}"
+    try: os.unlink(oldest)
+    except FileNotFoundError: pass
+    for i in range(AUDIT_KEEP - 1, 0, -1):
+        src, dst = f"{base}.{i}", f"{base}.{i + 1}"
+        if os.path.exists(src):
+            os.replace(src, dst)
+    if os.path.exists(base):
+        os.replace(base, f"{base}.1")
+
+
 def audit(event, **kw):
     rec = {"ts": round(time.time(), 3), "event": event, **kw}
     with audit_lock:
+        _rotate_audit()
         fd = os.open(Cfg.audit(), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a") as f: f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -140,10 +179,21 @@ def argv_hash(argv):
     return hashlib.sha256(canon_argv(argv)).hexdigest()
 
 
-def payload(req, decision):
+def payload_v1(req, decision):
     assert decision in ("approve", "deny")
     return (f"rootd-v1\n{decision}\n{req['id']}\n{req['nonce']}\n{req['expires']}\n"
             f"{argv_hash(req['argv'])}").encode()
+
+
+def payload_v2(req, decision):
+    assert decision in ("approve", "deny")
+    reason_hash = hashlib.sha256(str(req.get("reason", "")).encode("utf-8")).hexdigest()
+    snap = str(req.get("snap_sha256") or "")
+    return (f"rootd-v2\n{decision}\n{req['id']}\n{req['nonce']}\n{req['expires']}\n"
+            f"{req['timeout']}\n{reason_hash}\n{snap}\n{argv_hash(req['argv'])}").encode()
+
+
+payload = payload_v2
 
 
 def load_key(pem):
@@ -188,15 +238,19 @@ def printable(s, n):
 
 lock = threading.Condition()
 requests = {}         # id -> request dict (pending, running, and recent finished)
-enroll_pending = {}   # fp -> {name, pubkey, created}
+enroll_pending = {}   # fp -> {name, pubkey, created, uid}
 watchers = set()      # Watcher objects
 history = []          # finished requests (public + output), newest last, persisted
+submit_times = {}     # uid -> list of submit timestamps (last 3600s)
+submit_rl_sent = set()  # uids already notified of current rate-limit episode
+enroll_times = {}     # uid -> list of enroll_request timestamps (last 60s)
+wait_counts = {}      # uid -> active wait count
 
 
 class Watcher:
     """Event stream to one client. Never blocks the caller: a slow client gets dropped."""
-    def __init__(self, conn):
-        self.conn, self.q = conn, queue.Queue(maxsize=500)
+    def __init__(self, conn, uid=None):
+        self.conn, self.uid, self.q = conn, uid, queue.Queue(maxsize=500)
         threading.Thread(target=self.pump, daemon=True).start()
 
     def push(self, line):
@@ -233,7 +287,7 @@ def emit(ev):
 def public(req):
     r = {k: req[k] for k in ("id", "argv", "reason", "nonce", "created", "expires", "status", "timeout", "uid")}
     r["argv_sha256"] = argv_hash(req["argv"])
-    for k in ("exit", "device", "decided", "started", "finished", "timed_out", "out_bytes", "err_bytes"):
+    for k in ("exit", "device", "decided", "started", "finished", "timed_out", "out_bytes", "err_bytes", "snap_sha256"):
         if k in req: r[k] = req[k]
     return r
 
@@ -245,6 +299,31 @@ def full(req):
     return r
 
 
+def _rewrite_history():
+    tmp = Cfg.history() + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        for h in history: f.write(json.dumps(h, ensure_ascii=False) + "\n")
+    os.replace(tmp, Cfg.history())
+
+
+def prune_history_outputs(now=None):
+    """Strip stdout/stderr from history entries older than OUTPUT_TTL (24 h), keeping metadata."""
+    now = time.time() if now is None else now
+    changed = False
+    for h in history:
+        ts = h.get("finished") or h.get("created") or 0
+        if now - ts > OUTPUT_TTL and ("stdout" in h or "stderr" in h):
+            h.pop("stdout", None)
+            h.pop("stderr", None)
+            h["output_expired"] = True
+            changed = True
+    if changed:
+        try: _rewrite_history()
+        except OSError as e: print(f"rootd: history prune failed: {e}", file=sys.stderr)
+    return changed
+
+
 def record_history(req):
     rec = full(req)
     history.append(rec)
@@ -253,17 +332,17 @@ def record_history(req):
         fd = os.open(Cfg.history(), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a") as f: f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         if os.path.getsize(Cfg.history()) > 32 * 1024 * 1024:   # compact
-            tmp = Cfg.history() + ".tmp"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                for h in history: f.write(json.dumps(h, ensure_ascii=False) + "\n")
-            os.replace(tmp, Cfg.history())
+            _rewrite_history()
     except OSError as e:
         print(f"rootd: history write failed: {e}", file=sys.stderr)
 
 
 def running_marker(rid):
     return os.path.join(Cfg.state, f"running-{rid}.json")
+
+
+def cleanup_snapshot(rid):
+    shutil.rmtree(os.path.join(Cfg.snap_dir(), rid), ignore_errors=True)
 
 
 def load_history():
@@ -275,6 +354,9 @@ def load_history():
     except FileNotFoundError:
         pass
     del history[:-HISTORY_KEEP]
+    prune_history_outputs()
+    # Clean any stale snapshots left behind by a previous run.
+    shutil.rmtree(Cfg.snap_dir(), ignore_errors=True)
     # A request that was running when rootd stopped was killed with it (systemd KillMode=control-group).
     for name in os.listdir(Cfg.state):
         if name.startswith("running-") and name.endswith(".json"):
@@ -293,6 +375,7 @@ def finish(req, status):
     """Move a request to a terminal state. Caller holds lock."""
     req["status"] = status
     req.setdefault("finished", time.time())
+    cleanup_snapshot(req["id"])
     record_history(req)
     try: os.unlink(running_marker(req["id"]))
     except FileNotFoundError: pass
@@ -315,6 +398,8 @@ def housekeeping_loop():
                 del requests[rid]
             for fp in [f for f, e in enroll_pending.items() if now - e["created"] > 900]:
                 del enroll_pending[fp]
+            if n % 300 == 0:
+                prune_history_outputs(now)
             if n % 20 == 0:
                 emit({"type": "ping", "ts": int(now)})
 
@@ -386,9 +471,98 @@ def execute(argv, timeout):
     return res
 
 
+def is_root_only_path(path):
+    """True iff realpath(path) and every parent directory up to / are root-owned and not group/world-writable."""
+    real = os.path.realpath(path)
+    cur = real
+    while True:
+        st = os.stat(cur)
+        if st.st_uid != 0 or (st.st_mode & 0o022) != 0:
+            return False
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return True
+        cur = parent
+
+
+def find_snapshot_target(argv):
+    """If argv[0] (or the script arg to a known interpreter) is non-root-writable, return (index, realpath)."""
+    real0 = os.path.realpath(argv[0])
+    if os.path.isfile(real0) and not is_root_only_path(real0):
+        return 0, real0
+    b0, br = os.path.basename(argv[0]), os.path.basename(real0)
+    is_interp = (b0 in INTERPRETERS or br in INTERPRETERS or
+                 b0.startswith("python3.") or br.startswith("python3."))
+    if not is_interp:
+        return None, None
+    is_shell = b0 in ("sh", "bash", "dash") or br in ("sh", "bash", "dash")
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            i += 1
+            if i < len(argv):
+                real_a = os.path.realpath(argv[i])
+                if os.path.isfile(real_a) and not is_root_only_path(real_a):
+                    return i, real_a
+            return None, None
+        if a.startswith("-") and a != "-":
+            if a in ("-c", "-e", "-E", "-m") or (is_shell and not a.startswith("--") and "c" in a[1:]):
+                return None, None
+            if a in ("-o", "-W", "-X"):
+                i += 2
+                continue
+            i += 1
+            continue
+        if a != "-":
+            real_a = os.path.realpath(a)
+            if os.path.isfile(real_a) and not is_root_only_path(real_a):
+                return i, real_a
+        return None, None
+    return None, None
+
+
+def create_snapshot(rid, src_path, executable):
+    """Copy a user-writable target into a root-only snapshot dir and return (snap_path, sha256_hex)."""
+    os.makedirs(Cfg.snap_dir(), mode=0o700, exist_ok=True)
+    os.chmod(Cfg.snap_dir(), 0o700)
+    rdir = os.path.join(Cfg.snap_dir(), rid)
+    os.makedirs(rdir, mode=0o700, exist_ok=False)
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(src_path)) or "target"
+    dst = os.path.join(rdir, name)
+    h = hashlib.sha256()
+    total = 0
+    sfd = os.open(src_path, os.O_RDONLY)
+    try:
+        st = os.fstat(sfd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("snapshot target is not a regular file")
+        dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700 if executable else 0o600)
+        try:
+            with os.fdopen(sfd, "rb") as sf, os.fdopen(dfd, "wb") as df:
+                sfd = dfd = -1
+                while True:
+                    chunk = sf.read(65536)
+                    if not chunk: break
+                    total += len(chunk)
+                    if total > MAX_SNAP_BYTES:
+                        raise ValueError(f"target file too large to snapshot (max {MAX_SNAP_BYTES} bytes)")
+                    h.update(chunk)
+                    df.write(chunk)
+                df.flush(); os.fsync(df.fileno())
+        finally:
+            if dfd >= 0: os.close(dfd)
+    except Exception:
+        cleanup_snapshot(rid)
+        raise
+    finally:
+        if sfd >= 0: os.close(sfd)
+    return dst, h.hexdigest()
+
+
 def run_request(req):
     t0 = time.time()
-    res = execute(req["argv"], req["timeout"])
+    res = execute(req.get("exec_argv") or req["argv"], req["timeout"])
     with lock:
         req.update(res)
         audit("finished", id=req["id"], exit=res["exit"], secs=round(time.time() - t0, 1),
@@ -421,7 +595,7 @@ def handle(msg, uid, conn=None):
 
     if op == "ping":
         return {"ok": True, "version": VERSION, "admin": admin, "devices": len(load_json(Cfg.devices(), {})),
-                "test": Cfg.test}
+                "test": Cfg.test, "allow_v1": allow_v1()}
 
     if op == "submit":
         argv = msg.get("argv")
@@ -435,13 +609,39 @@ def handle(msg, uid, conn=None):
         try: timeout = max(1, min(int(msg.get("timeout", DEFAULT_TIMEOUT)), MAX_TIMEOUT))
         except (TypeError, ValueError): return {"error": "bad timeout"}
         with lock:
+            now_f = time.time()
+            times = [t for t in submit_times.get(uid, []) if now_f - t < 3600]
+            submit_times[uid] = times
+            recent_min = sum(1 for t in times if now_f - t < 60)
+            if recent_min >= SUBMIT_LIMIT_MIN or len(times) >= SUBMIT_LIMIT_HOUR:
+                audit("rate_limited", op="submit", uid=uid, per_min=recent_min, per_hour=len(times))
+                if uid not in submit_rl_sent:
+                    submit_rl_sent.add(uid)
+                    emit({"type": "rate_limited", "op": "submit", "uid": uid, "ts": int(now_f)})
+                return {"error": f"rate limit exceeded (max {SUBMIT_LIMIT_MIN}/min and {SUBMIT_LIMIT_HOUR}/hour)"}
             if sum(r["status"] == "pending" for r in requests.values()) >= MAX_PENDING:
                 return {"error": f"too many pending requests (max {MAX_PENDING})"}
-            now = int(time.time())
-            req = {"id": secrets.token_hex(8), "nonce": secrets.token_hex(16), "argv": argv, "reason": reason,
-                   "created": now, "expires": now + EXPIRY, "status": "pending", "timeout": timeout, "uid": uid}
+            rid = secrets.token_hex(8)
+            exec_argv = list(argv)
+            snap_sha256 = None
+            snap_idx, snap_src = find_snapshot_target(argv)
+            if snap_idx is not None:
+                try:
+                    snap_path, snap_sha256 = create_snapshot(rid, snap_src, executable=(snap_idx == 0))
+                    exec_argv[snap_idx] = snap_path
+                except Exception as ex:
+                    return {"error": f"snapshot failed: {ex}"}
+            now = int(now_f)
+            req = {"id": rid, "nonce": secrets.token_hex(16), "argv": argv, "exec_argv": exec_argv,
+                   "reason": reason, "created": now, "expires": now + EXPIRY, "status": "pending",
+                   "timeout": timeout, "uid": uid}
+            if snap_sha256:
+                req["snap_sha256"] = snap_sha256
+            times.append(now_f)
+            submit_rl_sent.discard(uid)
             requests[req["id"]] = req
-            audit("submitted", id=req["id"], argv=argv, reason=reason, uid=uid, timeout=timeout)
+            audit("submitted", id=req["id"], argv=argv, reason=reason, uid=uid, timeout=timeout,
+                  **({"snap_sha256": snap_sha256} if snap_sha256 else {}))
             emit({"type": "request", "request": public(req)})
             return {"ok": True, "request": public(req)}
 
@@ -452,6 +652,7 @@ def handle(msg, uid, conn=None):
     if op == "history":
         n = max(1, min(int(msg.get("limit", 50)), HISTORY_KEEP))
         with lock:
+            prune_history_outputs()
             latest = {}
             for h in history: latest[h["id"]] = h
             items = sorted(latest.values(), key=lambda r: -(r.get("finished") or r["created"]))[:n]
@@ -465,15 +666,24 @@ def handle(msg, uid, conn=None):
         except (TypeError, ValueError): return {"error": "bad timeout"}
         deadline = time.time() + wait_for
         with lock:
-            while True:
-                r = requests.get(rid)
-                if not r:
-                    for h in reversed(history):
-                        if h["id"] == rid: return {"request": h}
-                    return {"error": "unknown request"}
-                if op == "get" or r["status"] in TERMINAL or time.time() >= deadline:
-                    return {"request": full(r)}
-                lock.wait(max(0.05, deadline - time.time()))
+            prune_history_outputs()
+            if op == "wait" and not admin:
+                if wait_counts.get(uid, 0) >= MAX_WAIT_PER_UID:
+                    return {"error": f"too many concurrent waits (max {MAX_WAIT_PER_UID})"}
+                wait_counts[uid] = wait_counts.get(uid, 0) + 1
+            try:
+                while True:
+                    r = requests.get(rid)
+                    if not r:
+                        for h in reversed(history):
+                            if h["id"] == rid: return {"request": h}
+                        return {"error": "unknown request"}
+                    if op == "get" or r["status"] in TERMINAL or time.time() >= deadline:
+                        return {"request": full(r)}
+                    lock.wait(max(0.05, deadline - time.time()))
+            finally:
+                if op == "wait" and not admin:
+                    wait_counts[uid] = max(0, wait_counts.get(uid, 1) - 1)
 
     if op == "cancel":
         with lock:
@@ -486,37 +696,46 @@ def handle(msg, uid, conn=None):
 
     if op in ("approve", "deny"):
         # pc-api relays the phone's signature; only the signature counts, not who relays it.
-        devs = load_json(Cfg.devices(), {})
         fp = str(msg.get("device"))
-        dev = devs.get(fp)
         sig = str(msg.get("signature", ""))[:200]
         with lock:
+            devs = load_json(Cfg.devices(), {})
+            dev = devs.get(fp)
             r = requests.get(str(msg.get("id")))
             if not r: return {"error": "unknown request"}
             if r["status"] != "pending": return {"error": f"request is {r['status']}"}
             if time.time() > r["expires"]:
                 audit("expired", id=r["id"]); finish(r, "expired")
                 return {"error": "request expired"}
-            if not dev or not verify(dev["pubkey"], sig, payload(r, op)):
+            sig_ver = None
+            if dev:
+                if verify(dev["pubkey"], sig, payload_v2(r, op)):
+                    sig_ver = 2
+                elif allow_v1() and verify(dev["pubkey"], sig, payload_v1(r, op)):
+                    sig_ver = 1
+            if sig_ver is None:
                 audit("bad_signature", id=r["id"], device=fp, op=op, uid=uid)
                 return {"error": "signature check failed"}
             r["device"], r["decided"] = dev["name"], time.time()
             if op == "deny":
-                audit("denied", id=r["id"], device=dev["name"], fingerprint=fp, signature=sig)
+                audit("denied", id=r["id"], device=dev["name"], fingerprint=fp, signature=sig, sig_version=sig_ver)
                 finish(r, "denied")
                 return {"ok": True, "request": public(r)}
             r["status"], r["started"] = "running", time.time()
             save_json(running_marker(r["id"]), public(r))
-            audit("approved", id=r["id"], device=dev["name"], fingerprint=fp, argv=r["argv"], signature=sig)
+            audit("approved", id=r["id"], device=dev["name"], fingerprint=fp, argv=r["argv"], signature=sig,
+                  sig_version=sig_ver)
             emit({"type": "update", "request": public(r)}); lock.notify_all()
             threading.Thread(target=run_request, args=(r,), daemon=True).start()
             return {"ok": True, "request": public(r)}
 
     if op == "watch":
         if conn is None: return {"error": "watch needs a connection"}
-        if len(watchers) >= 16: return {"error": "too many watchers"}
-        w = Watcher(conn)
         with lock:
+            if len(watchers) >= 16: return {"error": "too many watchers"}
+            if not admin and sum(1 for x in watchers if x.uid == uid) >= MAX_WATCH_PER_UID:
+                return {"error": f"too many watchers for uid (max {MAX_WATCH_PER_UID})"}
+            w = Watcher(conn, uid)
             watchers.add(w)
             w.push((json.dumps({"type": "hello", "version": VERSION,
                                 "pending": [public(r) for r in requests.values() if r["status"] == "pending"]})
@@ -529,14 +748,30 @@ def handle(msg, uid, conn=None):
         pem = str(msg.get("pubkey", ""))[:4096]
         try: fp = key_fp(pem)
         except Exception: return {"error": "bad public key (need EC P-256 SPKI PEM)"}
-        if fp in load_json(Cfg.devices(), {}):
-            return {"ok": True, "fingerprint": fp, "enrolled": True}
         with lock:
+            if fp in load_json(Cfg.devices(), {}):
+                return {"ok": True, "fingerprint": fp, "enrolled": True}
+            now_f = time.time()
+            etimes = [t for t in enroll_times.get(uid, []) if now_f - t < 60]
+            enroll_times[uid] = etimes
+            if len(etimes) >= ENROLL_LIMIT_MIN:
+                audit("rate_limited", op="enroll_request", uid=uid, per_min=len(etimes))
+                return {"error": f"rate limit exceeded (max {ENROLL_LIMIT_MIN} enrollment requests/min)"}
             if fp not in enroll_pending:
-                while len(enroll_pending) >= MAX_ENROLL_PENDING:   # evict oldest; the app re-proposes while waiting
-                    del enroll_pending[min(enroll_pending, key=lambda f: enroll_pending[f]["created"])]
+                own = [f for f, e in enroll_pending.items() if e.get("uid") == uid]
+                while len(own) >= MAX_ENROLL_PER_UID:
+                    oldest = min(own, key=lambda f: enroll_pending[f]["created"])
+                    del enroll_pending[oldest]
+                    own.remove(oldest)
+                if len(enroll_pending) >= MAX_ENROLL_PENDING:
+                    if own:
+                        oldest = min(own, key=lambda f: enroll_pending[f]["created"])
+                        del enroll_pending[oldest]
+                    else:
+                        return {"error": "too many pending enrollments"}
                 audit("enroll_requested", fingerprint=fp, name=name, uid=uid)
-            enroll_pending[fp] = {"name": name, "pubkey": pem, "created": time.time()}
+            etimes.append(now_f)
+            enroll_pending[fp] = {"name": name, "pubkey": pem, "created": now_f, "uid": uid}
         return {"ok": True, "fingerprint": fp, "enrolled": False}
 
     if op == "enroll_status":
@@ -559,23 +794,24 @@ def handle(msg, uid, conn=None):
         fp = norm_fp(msg.get("fingerprint", ""))
         with lock:
             e = enroll_pending.pop(fp, None) if fp else None
-        if not e: return {"error": "no pending phone has that code"}
-        name = printable(msg.get("name") or e["name"], 60) or "phone"
-        devs = load_json(Cfg.devices(), {})
-        devs[fp] = {"name": name, "pubkey": e["pubkey"], "added": time.time()}
-        save_json(Cfg.devices(), devs)
-        audit("enrolled", fingerprint=fp, name=name, uid=uid)
-        emit({"type": "enrolled", "fingerprint": fp})
-        return {"ok": True, "fingerprint": fp, "name": name}
+            if not e: return {"error": "no pending phone has that code"}
+            name = printable(msg.get("name") or e["name"], 60) or "phone"
+            devs = load_json(Cfg.devices(), {})
+            devs[fp] = {"name": name, "pubkey": e["pubkey"], "added": time.time()}
+            save_json(Cfg.devices(), devs)
+            audit("enrolled", fingerprint=fp, name=name, uid=uid)
+            emit({"type": "enrolled", "fingerprint": fp})
+            return {"ok": True, "fingerprint": fp, "name": name}
 
     if op == "revoke":
         fp = norm_fp(msg.get("fingerprint", ""))
-        devs = load_json(Cfg.devices(), {})
-        d = devs.pop(fp, None) if fp else None
-        if d:
-            save_json(Cfg.devices(), devs)
-            audit("revoked", fingerprint=fp, name=d["name"], uid=uid)
-        return {"ok": bool(d)}
+        with lock:
+            devs = load_json(Cfg.devices(), {})
+            d = devs.pop(fp, None) if fp else None
+            if d:
+                save_json(Cfg.devices(), devs)
+                audit("revoked", fingerprint=fp, name=d["name"], uid=uid)
+            return {"ok": bool(d)}
 
     return {"error": "unknown or forbidden op"}
 

@@ -115,6 +115,31 @@ def tailnet_owner():
 
 ALLOWED_LOGINS = set(CONFIG.get("allowed_logins") or filter(None, [tailnet_owner()]))
 ALLOW_UNAUTH_LOCAL = os.environ.get("PCAPI_ALLOW_LOCAL", "1") == "1"
+LOCAL_TOKEN_FILE = os.environ.get("PCAPI_LOCAL_TOKEN", os.path.join(CONF_DIR, "local-token"))
+
+
+def local_token():
+    """Shared bearer token for localhost requests without tailscale-serve headers, auto-created (0600)."""
+    try:
+        with open(LOCAL_TOKEN_FILE) as f:
+            s = f.read().strip()
+            if s: return s
+    except FileNotFoundError:
+        pass
+    os.makedirs(os.path.dirname(LOCAL_TOKEN_FILE), mode=0o700, exist_ok=True)
+    s = secrets.token_urlsafe(32)
+    fd = os.open(LOCAL_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f: f.write(s + "\n")
+    return s
+
+
+def local_token_authorized(headers):
+    tok = local_token()
+    cands = [headers.get("X-PC-Local-Token") or ""]
+    a = (headers.get("Authorization") or "").strip()
+    if a.lower().startswith("bearer "):
+        cands.append(a[7:].strip())
+    return any(c and secrets.compare_digest(c, tok) for c in cands)
 
 
 # ---------------------------------------------------------------- rootd client
@@ -193,6 +218,11 @@ class Hub:
                         self.publish(t, ev["request"])
                         if NOTIFY: NOTIFY.on_root_event(t, ev["request"])
                     elif t == "enrolled": self.publish("enrolled", {"fingerprint": ev.get("fingerprint")})
+                    elif t == "rate_limited":
+                        self.publish("rate_limited", ev)
+                        if NOTIFY:
+                            NOTIFY.send_async("system", "Root approval rate limited",
+                                              "rootd rate-limited command submissions from the laptop.")
                 raise OSError("watch closed")
             except (OSError, ValueError):
                 self.set_status(rootd_state()["state"])
@@ -3035,13 +3065,18 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, fmt, *a):
         if os.environ.get("PCAPI_LOG"): super().log_message(fmt, *a)
 
-    def authorized(self):
+    def authorized(self, is_hook=False):
         login = self.headers.get("Tailscale-User-Login")
         if login:
             return login in ALLOWED_LOGINS
         # No tailnet identity: only plain local requests (never proxied ones from tagged/shared nodes).
-        return ALLOW_UNAUTH_LOCAL and not self.headers.get("X-Forwarded-For") and \
-            self.client_address[0] in ("127.0.0.1", "::1")
+        if not (ALLOW_UNAUTH_LOCAL and not self.headers.get("X-Forwarded-For") and
+                self.client_address[0] in ("127.0.0.1", "::1")):
+            return False
+        # Webhooks (Radarr/Sonarr/Seerr) arrive as other local users and authenticate with hook_secret().
+        if is_hook:
+            return True
+        return local_token_authorized(self.headers)
 
     def send_json(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode()
@@ -3062,7 +3097,8 @@ class H(BaseHTTPRequestHandler):
     def route(self, method):
         u = urllib.parse.urlsplit(self.path)
         path, qs = u.path.rstrip("/"), urllib.parse.parse_qs(u.query)
-        if not self.authorized():
+        is_hook = method == "POST" and bool(re.fullmatch(r"/pc/api/hook/(radarr|sonarr|seerr)", path))
+        if not self.authorized(is_hook=is_hook):
             return self.send_json(403, {"error": "not allowed for this tailnet identity"})
         if not path.startswith("/pc"):
             return self.send_json(404, {"error": "not found"})
@@ -3317,6 +3353,7 @@ def main():
     USAGE_ALERTS.start()
     KEYRING = KeyringManager(NOTIFY)
     hook_secret()
+    local_token()
     HUB = Hub()
     WATCHER = ServiceWatcher(NOTIFY).start()
     KEYRING.notify_if_locked_on_startup()

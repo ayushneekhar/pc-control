@@ -67,5 +67,5 @@ if [ "$ENROLLED" -gt 0 ] && [ "${1:-}" != "--enroll" ]; then
 fi
 echo
 echo "Phone enrollment: open pc-control on your phone > Settings > Root approvals > Set up,"
-echo "approve with your fingerprint, and read the code it shows."
+echo "and read the 16-character code it shows."
 /usr/local/sbin/rootd-admin enroll || echo "Not enrolled yet. Later: sudo rootd-admin enroll"

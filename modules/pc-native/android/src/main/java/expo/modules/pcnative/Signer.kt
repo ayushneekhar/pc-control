@@ -15,6 +15,7 @@ import androidx.fragment.app.FragmentActivity
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
@@ -66,7 +67,15 @@ object Signer {
       gen.initialize(spec(false))
       gen.generateKeyPair()
     }
-    return info()!! + mapOf("strongBox" to strongBox)
+    val keyInfo = info()!!
+    if (keyInfo["securityLevel"] == "software") {
+      delete()
+      throw PcException(
+        "E_NO_HARDWARE_KEYSTORE",
+        "Hardware-backed keystore (TEE/StrongBox) is required; refusing software-only key."
+      )
+    }
+    return keyInfo + mapOf("strongBox" to strongBox)
   }
 
   /** Public key + where it lives, or null when there is no key. */
@@ -109,8 +118,155 @@ object Signer {
       else -> "unsupported"
     }
 
+  private val ID_RE = Regex("^[0-9a-f]{16}$")
+  private val NONCE_RE = Regex("^[0-9a-f]{32}$")
+  private val SHA256_RE = Regex("^[0-9a-f]{64}$")
+  private val QUOTE_RE = Regex("[\\s\"'$`;&|<>(){}*?!#~]")
+  private val LONG_SPACES_RE = Regex(" {4,}")
+  private val LONG_TABS_RE = Regex("\t{4,}")
+  private val LONG_NEWLINES_RE = Regex("\n{4,}")
+  private const val MAX_ARGV_BYTES = 8 * 1024
+  private const val LONG_CMD_CHARS = 600
+
+  private fun sha256Hex(bytes: ByteArray): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+    val sb = StringBuilder(digest.size * 2)
+    for (b in digest) {
+      val v = b.toInt() and 0xff
+      sb.append("0123456789abcdef"[v ushr 4])
+      sb.append("0123456789abcdef"[v and 0x0f])
+    }
+    return sb.toString()
+  }
+
+  /** Same rule as rootd.bad_char: reject Cc, Cf, Cs, Zl, Zp (except \t and \n) and lone surrogates. */
+  internal fun hasBadChar(s: String): Boolean {
+    var i = 0
+    while (i < s.length) {
+      val ch = s[i]
+      if (ch == '\t' || ch == '\n') { i++; continue }
+      if (Character.isHighSurrogate(ch)) {
+        if (i + 1 >= s.length || !Character.isLowSurrogate(s[i + 1])) return true
+        val cp = Character.toCodePoint(ch, s[i + 1])
+        val t = Character.getType(cp)
+        if (t == Character.CONTROL.toInt() || t == Character.FORMAT.toInt() ||
+            t == Character.SURROGATE.toInt() || t == Character.LINE_SEPARATOR.toInt() ||
+            t == Character.PARAGRAPH_SEPARATOR.toInt()) return true
+        i += 2
+        continue
+      }
+      if (Character.isLowSurrogate(ch)) return true
+      val t = Character.getType(ch)
+      if (t == Character.CONTROL.toInt() || t == Character.FORMAT.toInt() ||
+          t == Character.SURROGATE.toInt() || t == Character.LINE_SEPARATOR.toInt() ||
+          t == Character.PARAGRAPH_SEPARATOR.toInt()) return true
+      i++
+    }
+    return false
+  }
+
+  /** Exact match for JSON.stringify(argv) / Python json.dumps(argv, separators=(",", ":"), ensure_ascii=False). */
+  internal fun canonArgv(argv: List<String>): String {
+    val sb = StringBuilder()
+    sb.append('[')
+    for (idx in argv.indices) {
+      if (idx > 0) sb.append(',')
+      sb.append('"')
+      for (ch in argv[idx]) {
+        when (ch) {
+          '"' -> sb.append("\\\"")
+          '\\' -> sb.append("\\\\")
+          '\t' -> sb.append("\\t")
+          '\n' -> sb.append("\\n")
+          else -> sb.append(ch)
+        }
+      }
+      sb.append('"')
+    }
+    sb.append(']')
+    return sb.toString()
+  }
+
+  private fun showArg(a: String): String {
+    val collapsed = a
+      .replace(LONG_SPACES_RE) { "[${it.value.length} spaces]" }
+      .replace(LONG_TABS_RE) { "[${it.value.length} tabs]" }
+      .replace(LONG_NEWLINES_RE) { "[${it.value.length} newlines]" }
+    return collapsed.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t")
+  }
+
+  private fun formatCommand(argv: List<String>): String =
+    argv.joinToString(" ") { a ->
+      val s = showArg(a)
+      if (s.isEmpty() || QUOTE_RE.containsMatchIn(s)) "\"${s.replace("\"", "\\\"")}\"" else s
+    }
+
+  /**
+   * Builds the rootd-v2 payload natively and formats BiometricPrompt from the exact same fields so JS
+   * can never decouple what is shown from what is signed. Must be called on the main thread.
+   */
+  fun approveRoot(
+    activity: FragmentActivity,
+    decision: String,
+    id: String,
+    nonce: String,
+    expires: Long,
+    argv: List<String>,
+    reason: String,
+    timeout: Int,
+    snapSha256: String,
+    onDone: (Result<String>) -> Unit
+  ) {
+    if (decision != "approve" && decision != "deny") {
+      return onDone(Result.failure(PcException("E_BAD_REQUEST", "bad decision")))
+    }
+    if (!ID_RE.matches(id) || !NONCE_RE.matches(nonce)) {
+      return onDone(Result.failure(PcException("E_BAD_REQUEST", "bad request id/nonce")))
+    }
+    if (expires <= 0L) {
+      return onDone(Result.failure(PcException("E_BAD_REQUEST", "bad expiry")))
+    }
+    if (timeout < 1 || timeout > 3600) {
+      return onDone(Result.failure(PcException("E_BAD_REQUEST", "bad timeout")))
+    }
+    if (argv.isEmpty() || argv.size > 512 || argv[0].isEmpty() || argv.any { hasBadChar(it) }) {
+      return onDone(Result.failure(PcException("E_BAD_REQUEST", "argv contains characters that cannot be shown faithfully")))
+    }
+    val canonBytes = canonArgv(argv).toByteArray(Charsets.UTF_8)
+    if (canonBytes.size > MAX_ARGV_BYTES) {
+      return onDone(Result.failure(PcException("E_BAD_REQUEST", "argv too long")))
+    }
+    if (snapSha256.isNotEmpty() && !SHA256_RE.matches(snapSha256)) {
+      return onDone(Result.failure(PcException("E_BAD_REQUEST", "bad snapshot sha256")))
+    }
+    val argvHash = sha256Hex(canonBytes)
+    val reasonHash = sha256Hex(reason.toByteArray(Charsets.UTF_8))
+    val payload = "rootd-v2\n$decision\n$id\n$nonce\n$expires\n$timeout\n$reasonHash\n$snapSha256\n$argvHash"
+
+    val cmd = formatCommand(argv)
+    val isLong = cmd.length > LONG_CMD_CHARS
+    val title = if (decision == "approve") "Run as root?" else "Deny this command?"
+    val subtitle = when {
+      isLong -> "LONG COMMAND (${cmd.length} chars): review full command in app"
+      cmd.length > 80 -> cmd.take(77) + "…"
+      else -> cmd
+    }
+    val meta = buildList {
+      if (reason.isNotEmpty()) add("Reason: $reason")
+      if (snapSha256.isNotEmpty()) add("Snapshot: ${snapSha256.take(16)}…")
+      add("Timeout: ${timeout}s")
+    }.joinToString("\n")
+    val cmdBody = when {
+      isLong -> "LONG COMMAND (${cmd.length} chars): review full command in app\n\n${cmd.take(350)}\n… [+${cmd.length - 350} chars — review full command in app]"
+      cmd.length > 80 -> cmd
+      else -> ""
+    }
+    val description = if (cmdBody.isNotEmpty()) "$meta\n\n$cmdBody" else meta
+    sign(activity, payload.toByteArray(Charsets.UTF_8), title, subtitle, description, onDone)
+  }
+
   /** Must be called on the main thread. Calls back exactly once. */
-  fun sign(
+  private fun sign(
     activity: FragmentActivity,
     data: ByteArray,
     title: String,

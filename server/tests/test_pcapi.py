@@ -58,8 +58,15 @@ class Routes(unittest.TestCase):
         self.assertIn("Cameras", visible({"/": {"hidden": False}}))
 
     def test_jellyfin_app_tile(self):
+        prev = pcapi.CONFIG.pop("jellyfin_public_url", None)
+        if prev is not None:
+            self.addCleanup(pcapi.CONFIG.__setitem__, "jellyfin_public_url", prev)
         j = next(r for r in pcapi.build_routes(STATUS, {}) if r["id"] == "jellyfin")
-        self.assertEqual((j["app"], j["url"], j["kind"]), ("org.jellyfin.mobile", f"http://{H}:8096/", "app"))
+        self.assertEqual((j["app"], j["url"], j["kind"], j["port"]), ("org.jellyfin.mobile", f"https://{H}:8920/", "app", 8920))
+        pcapi.CONFIG["jellyfin_public_url"] = "https://custom.tail.ts.net:8920"
+        self.addCleanup(pcapi.CONFIG.pop, "jellyfin_public_url", None)
+        j2 = next(r for r in pcapi.build_routes(STATUS, {}) if r["id"] == "jellyfin")
+        self.assertEqual(j2["url"], "https://custom.tail.ts.net:8920/")
         self.assertNotIn("Jellyfin", visible({"jellyfin": {"hidden": True}}))
         self.assertEqual(pcapi.build_routes({}, {}), [])
 

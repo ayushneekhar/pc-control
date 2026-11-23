@@ -21,7 +21,7 @@ import { refreshCatCam, useCatCam } from '../lib/catcam';
 import { clearKeyringFeedback, refreshKeyring, unlockKeyringWithSaved, useKeyring } from '../lib/keyring';
 import { CAMS, CamId, NAMES } from '../lib/cams/config';
 import { prepareCamsOnce } from '../lib/cams/prepare';
-import { rate } from '../lib/format';
+import { bytes, rate } from '../lib/format';
 import { DownloadsReply } from '../lib/live';
 import { space, useTheme } from '../theme';
 
@@ -358,6 +358,8 @@ export default function RoutesScreen() {
   const loadedCams = CAMS.filter((c) => !!frames[c.id]).length;
   const hasDownloads = active.length > 0;
   const progress = total?.progress == null ? null : Math.round(total.progress * 100);
+  const hddDisk = health?.disks?.disks?.find((d) => d.kind === 'HDD');
+  const hddFree = hddDisk ? Math.max(0, hddDisk.total - hddDisk.used) : null;
 
   return (
     <Screen
@@ -487,8 +489,27 @@ export default function RoutesScreen() {
               ) : undefined
             }
             chevron
-            last
             onPress={() => nav.navigate('Downloads')}
+          />
+          <ListRow
+            icon="harddisk"
+            title="Space"
+            trailing={
+              hddFree != null ? (
+                <Text
+                  style={{
+                    color: hddFree < 150 * 1024 ** 3 ? t.warn : t.textDim,
+                    fontSize: 12.5,
+                    fontVariant: ['tabular-nums'],
+                  }}
+                >
+                  {bytes(hddFree, 0)} free
+                </Text>
+              ) : undefined
+            }
+            chevron
+            last
+            onPress={() => nav.navigate('Space')}
           />
         </List>
       </Section>

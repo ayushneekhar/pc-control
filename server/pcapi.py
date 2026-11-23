@@ -2870,6 +2870,7 @@ KNOWN = {
     ":7878": ("Radarr", "filmstrip", "Movies", "page"),
     ":8989": ("Sonarr", "television-classic", "TV shows", "page"),
     ":8096": ("Jellyfin", "play-box-multiple-outline", "Media server", "page"),
+    ":8920": ("Jellyfin", "play-box-multiple-outline", "Media server", "page"),
     ":9696": ("Prowlarr", "radar", "Indexers", "page"),
     ":8080": ("qBittorrent", "download-outline", "Torrents", "page"),
 }
@@ -2877,8 +2878,8 @@ KNOWN = {
 # cards. routes.json {"<key>": {"hidden": false}} shows one again.
 HIDDEN = {"1984", ":5055", ":6767", ":7878", ":8989"}  # Cameras (go2rtc), Seerr, Bazarr, Radarr, Sonarr
 # Tiles for apps that aren't `tailscale serve` routes: key -> (name, icon, subtitle, android package, port).
-# The app launches the package; without it (or on builds before 1.5.2) it opens http://<tailnet host>:<port>/.
-APPS = {"jellyfin": ("Jellyfin", "play-box-multiple-outline", "Movies & TV (opens the app)", "org.jellyfin.mobile", 8096)}
+# The app launches the package; without it (or on builds before 1.5.2) it opens https://<tailnet host>:<port>/.
+APPS = {"jellyfin": ("Jellyfin", "play-box-multiple-outline", "Movies & TV (opens the app)", "org.jellyfin.mobile", 8920)}
 ROUTES_CONF = os.path.join(CONF_DIR, "routes.json")
 _serve_cache = [0.0, None]
 
@@ -2921,8 +2922,13 @@ def build_routes(status, overrides):
     for key, (name, icon, sub, pkg, port) in APPS.items():
         o = overrides.get(key) if isinstance(overrides.get(key), dict) else {}
         if not host or any(r["port"] == port for r in out): continue
+        default_url = f"https://{host}:{port}/"
+        if key == "jellyfin":
+            pub = str(CONFIG.get("jellyfin_public_url") or "").strip()
+            if pub:
+                default_url = pub if pub.endswith("/") else pub + "/"
         out.append({"id": key, "name": o.get("name", name), "icon": o.get("icon", icon),
-                    "subtitle": o.get("subtitle", sub), "url": o.get("url", f"http://{host}:{port}/"), "path": "/",
+                    "subtitle": o.get("subtitle", sub), "url": o.get("url", default_url), "path": "/",
                     "port": port, "target": f"app:{pkg}", "kind": "app", "app": o.get("app", pkg),
                     "hidden": bool(o.get("hidden", False))})
     out.sort(key=lambda r: (r["port"] != 443, r["path"] == "/", r["name"].lower()))
@@ -3708,7 +3714,17 @@ class T3ThreadsClient:
 T3_THREADS = T3ThreadsClient()
 
 
+def _space_module():
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import space
+    return space
+
+
 def route_round4_get(path, qs):
+    if path == "/api/space":
+        return _space_module().get_space()
     if path == "/api/downloads/all":
         return 200, downloads_all()
     if path == "/api/kbd-lock":
@@ -3725,6 +3741,8 @@ def route_round4_get(path, qs):
 
 
 def route_round4_post(path, b):
+    if path == "/api/space/free":
+        return _space_module().free_space(b)
     if path == "/api/downloads/pause":
         return downloads_action("pause", b)
     if path == "/api/downloads/resume":

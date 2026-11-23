@@ -508,3 +508,71 @@ export type CodingThread = {
 export const getCodingThreads = () => get<{ threads: CodingThread[]; ts: number }>('/pc/api/agent/threads', 15000);
 export const interruptCodingThread = (threadId: string) =>
   post<{ ok: boolean; threadId: string }>('/pc/api/agent/threads/interrupt', { threadId }, 15000);
+
+// ---------------------------------------------------------------- space manager
+
+export type SpaceHdd = {
+  mount: string;
+  mounted: boolean;
+  total_bytes: number | null;
+  used_bytes: number | null;
+  free_bytes: number | null;
+  pending_bytes: number;
+  pending_count: number;
+  pending_unknown: number;
+  predicted_free_bytes: number | null;
+  threshold_bytes: number;
+};
+
+export type SpaceCandidate = {
+  id: string;
+  kind: 'movie' | 'season';
+  radarr_id?: number;
+  series_id?: number;
+  season_number?: number;
+  title: string;
+  subtitle: string | null;
+  year: number | null;
+  episode_count?: number;
+  size_bytes: number;
+  watched_count: number;
+  total_users: number;
+  watched_users: string[];
+  unwatched_users: string[];
+  warn_unwatched: boolean;
+  monitored: boolean;
+};
+
+export type SpaceResponse = {
+  hdd: SpaceHdd;
+  candidates: SpaceCandidate[];
+  errors: Record<string, string>;
+  ts: number;
+};
+
+export type SpaceFreeItemRequest =
+  | { kind: 'movie'; radarr_id: number }
+  | { kind: 'season'; series_id: number; season_number: number }
+  | { id: string };
+
+export type SpaceFreeItemResult = {
+  id: string;
+  kind: 'movie' | 'season';
+  label: string;
+  ok: boolean;
+  freed_bytes: number;
+  error: string | null;
+  warnings: string[];
+};
+
+export type SpaceFreeResponse = {
+  ok: boolean;
+  freed_bytes: number;
+  results: SpaceFreeItemResult[];
+  warnings: string[];
+  hdd: SpaceHdd;
+};
+
+export const getSpace = () => get<SpaceResponse>('/pc/api/space', 30000);
+export const freeSpace = (items: SpaceFreeItemRequest[]) =>
+  post<SpaceFreeResponse>('/pc/api/space/free', { items }, 120000);

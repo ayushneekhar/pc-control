@@ -26,6 +26,7 @@ import RoutesScreen from './src/screens/RoutesScreen';
 import SeerrScreen from './src/screens/SeerrScreen';
 import ServiceDetailScreen from './src/screens/ServiceDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+import SpaceScreen from './src/screens/SpaceScreen';
 import VitalsScreen from './src/screens/VitalsScreen';
 import { radius, screenPad, space, useTheme } from './src/theme';
 
@@ -75,6 +76,7 @@ const linking: LinkingOptions<any> = {
       Cams: 'cams',
       Downloads: 'downloads',
       Seerr: 'seerr',
+      Space: 'space',
       ServiceDetail: 'service/:unit',
       AgentSettings: 'agent-settings',
     },
@@ -141,6 +143,7 @@ export default function App() {
             <Stack.Screen name="AgentSettings" component={AgentSettingsScreen} />
             <Stack.Screen name="Downloads" component={DownloadsScreen} />
             <Stack.Screen name="Seerr" component={SeerrScreen} />
+            <Stack.Screen name="Space" component={SpaceScreen} />
             <Stack.Screen name="ServiceDetail" component={ServiceDetailScreen} />
             <Stack.Screen
               name="Cams"

@@ -473,6 +473,9 @@ class T3Client:
 class T3GeminiAdapter:
     """Dispatches chat turns to the active persistent Gemini T3 Code thread (shared with Telegram)."""
 
+    _WAIT_RETRY_DELAY = 0.4
+    _EMPTY_REPLY_RETRIES = 3
+
     def __init__(
         self,
         *,
@@ -482,6 +485,7 @@ class T3GeminiAdapter:
         workdir: str = AGENT_WORKDIR,
         timeout: float = DISPATCH_TIMEOUT,
         poll_wait_ms: int = 30000,
+        retry_delay: float | None = None,
     ) -> None:
         self.client = client or T3Client()
         self.thread_file = thread_file
@@ -489,6 +493,7 @@ class T3GeminiAdapter:
         self.workdir = workdir
         self.timeout = float(timeout)
         self.poll_wait_ms = int(poll_wait_ms)
+        self.retry_delay = self._WAIT_RETRY_DELAY if retry_delay is None else float(retry_delay)
 
     def _read_thread_state(self) -> dict[str, Any]:
         try:
@@ -548,63 +553,159 @@ class T3GeminiAdapter:
         return str(pid)
 
     def _fetch_reply(self, thread_id: str, run_id: str | None, after_pos: int | None) -> str:
-        args: dict[str, Any] = {
-            "threadId": thread_id,
-            "view": "messages",
-            "limit": 100,
-            "maxCharsPerItem": 20000,
-        }
-        if after_pos is not None:
-            args["afterPosition"] = after_pos
-        res = self.client.call_tool("t3_thread_read", args)
-        items = res.get("items") if isinstance(res.get("items"), list) else []
         parts: list[str] = []
-        for item in items:
-            if not isinstance(item, dict) or item.get("type") != "assistant_message":
-                continue
-            if run_id and item.get("runId") and item.get("runId") != run_id:
-                continue
-            text = str(item.get("text") or "")
-            item_id = item.get("itemId")
-            truncated = bool(item.get("textTruncated"))
-            next_offset = item.get("nextTextOffset")
-            chunks = 0
-            while truncated and isinstance(next_offset, int) and item_id and chunks < 50:
-                chunks += 1
-                more = self.client.call_tool(
-                    "t3_thread_read",
-                    {
-                        "threadId": thread_id,
-                        "view": "messages",
-                        "itemId": str(item_id),
-                        "textOffset": next_offset,
-                        "maxCharsPerItem": 20000,
-                    },
-                )
-                more_items = more.get("items") if isinstance(more.get("items"), list) else []
-                matched = next(
-                    (m for m in more_items if isinstance(m, dict) and m.get("itemId") == item_id),
-                    more_items[0] if more_items and isinstance(more_items[0], dict) else None,
-                )
-                if not matched:
-                    break
-                chunk_text = str(matched.get("text") or "")
-                if not chunk_text:
-                    break
-                text += chunk_text
-                truncated = bool(matched.get("textTruncated"))
-                new_offset = matched.get("nextTextOffset")
-                if not isinstance(new_offset, int) or new_offset <= next_offset:
-                    break
-                next_offset = new_offset
-            if text.strip():
-                parts.append(text.strip())
+        cur_after = after_pos
+        for _ in range(20):
+            args: dict[str, Any] = {
+                "threadId": thread_id,
+                "view": "messages",
+                "limit": 100,
+                "maxCharsPerItem": 20000,
+            }
+            if cur_after is not None:
+                args["afterPosition"] = cur_after
+            res = self.client.call_tool("t3_thread_read", args)
+            items = res.get("items") if isinstance(res.get("items"), list) else []
+            for item in items:
+                if not isinstance(item, dict) or item.get("type") != "assistant_message":
+                    continue
+                if run_id and item.get("runId") and item.get("runId") != run_id:
+                    continue
+                text = str(item.get("text") or "")
+                item_id = item.get("itemId")
+                truncated = bool(item.get("textTruncated"))
+                next_offset = item.get("nextTextOffset")
+                chunks = 0
+                while truncated and isinstance(next_offset, int) and item_id and chunks < 50:
+                    chunks += 1
+                    more = self.client.call_tool(
+                        "t3_thread_read",
+                        {
+                            "threadId": thread_id,
+                            "view": "messages",
+                            "itemId": str(item_id),
+                            "textOffset": next_offset,
+                            "maxCharsPerItem": 20000,
+                        },
+                    )
+                    more_items = more.get("items") if isinstance(more.get("items"), list) else []
+                    matched = next(
+                        (m for m in more_items if isinstance(m, dict) and m.get("itemId") == item_id),
+                        more_items[0] if more_items and isinstance(more_items[0], dict) else None,
+                    )
+                    if not matched:
+                        break
+                    chunk_text = str(matched.get("text") or "")
+                    if not chunk_text:
+                        break
+                    text += chunk_text
+                    truncated = bool(matched.get("textTruncated"))
+                    new_offset = matched.get("nextTextOffset")
+                    if not isinstance(new_offset, int) or new_offset <= next_offset:
+                        break
+                    next_offset = new_offset
+                if text.strip():
+                    parts.append(text.strip())
+
+            has_more = bool(res.get("hasMore"))
+            next_pos = res.get("nextPosition")
+            if not has_more or not isinstance(next_pos, int):
+                break
+            if cur_after is not None and next_pos <= cur_after:
+                break
+            cur_after = next_pos
         return "\n\n".join(parts)
+
+    def _fetch_reply_with_retries(self, thread_id: str, run_id: str | None, after_pos: int | None) -> str:
+        reply = self._fetch_reply(thread_id, run_id, after_pos)
+        for _ in range(self._EMPTY_REPLY_RETRIES):
+            if reply:
+                break
+            if self.retry_delay > 0:
+                time.sleep(self.retry_delay)
+            reply = self._fetch_reply(thread_id, run_id, after_pos)
+        return reply
+
+    @staticmethod
+    def _extract_wait_state(
+        waited: dict[str, Any],
+        target_run_id: str | None,
+        prev_latest_run_id: str | None,
+    ) -> tuple[str | None, str, bool, str, bool]:
+        """Return (resolved_run_id, status, timed_out, error_detail, is_stale)."""
+        run_obj = waited.get("run") if isinstance(waited.get("run"), dict) else {}
+        thread_obj = waited.get("thread") if isinstance(waited.get("thread"), dict) else {}
+
+        resolved_run_id = target_run_id
+        reported_run_id: str | None = None
+        for cand in (
+            waited.get("runId"),
+            run_obj.get("runId"),
+            thread_obj.get("activeRunId"),
+            thread_obj.get("latestRunId"),
+        ):
+            if isinstance(cand, str) and cand.strip():
+                cand_s = cand.strip()
+                if reported_run_id is None:
+                    reported_run_id = cand_s
+                if not resolved_run_id and cand_s != prev_latest_run_id:
+                    resolved_run_id = cand_s
+
+        err_detail = ""
+        for err_val in (
+            waited.get("error"),
+            waited.get("errorMessage"),
+            run_obj.get("error"),
+            run_obj.get("errorMessage"),
+        ):
+            if isinstance(err_val, str) and err_val.strip():
+                err_detail = err_val.strip()
+                break
+            if isinstance(err_val, dict):
+                msg = err_val.get("message")
+                if isinstance(msg, str) and msg.strip():
+                    err_detail = msg.strip()
+                    break
+
+        timed_out = bool(waited.get("timedOut") or waited.get("timed_out"))
+        raw_status = str(
+            run_obj.get("status")
+            or waited.get("status")
+            or thread_obj.get("status")
+            or ""
+        ).strip().lower()
+        if timed_out or raw_status in ("timeout", "timed_out"):
+            return resolved_run_id, "running", True, err_detail, False
+
+        if not resolved_run_id:
+            if prev_latest_run_id and reported_run_id == prev_latest_run_id:
+                return None, "running", False, "", True
+            if raw_status == "idle":
+                return None, "running", False, "", True
+
+        if (
+            resolved_run_id
+            and prev_latest_run_id
+            and reported_run_id == prev_latest_run_id
+            and resolved_run_id != prev_latest_run_id
+        ):
+            return resolved_run_id, "running", False, "", True
+
+        recent_runs = waited.get("recentRuns") if isinstance(waited.get("recentRuns"), list) else []
+        if resolved_run_id:
+            for run in recent_runs:
+                if isinstance(run, dict) and run.get("runId") == resolved_run_id:
+                    r_status = str(run.get("status") or "").strip().lower()
+                    if r_status:
+                        return resolved_run_id, r_status, False, err_detail, False
+
+        return resolved_run_id, raw_status, False, err_detail, False
 
     def send(self, text: str, *, fresh: bool = False) -> str:
         state = self._read_thread_state()
         thread_id = state.get("thread_id") if isinstance(state.get("thread_id"), str) else None
         start_pos: int | None = None
+        prev_latest_run_id: str | None = None
         run_id: str | None = None
 
         if thread_id:
@@ -613,11 +714,16 @@ class T3GeminiAdapter:
                     "t3_thread_read",
                     {"threadId": thread_id, "view": "messages", "limit": 1},
                 )
+                head_thread = head.get("thread") if isinstance(head.get("thread"), dict) else {}
+                prev_rid = head_thread.get("latestRunId")
+                prev_latest_run_id = str(prev_rid).strip() if isinstance(prev_rid, str) and prev_rid.strip() else None
                 items = head.get("items") if isinstance(head.get("items"), list) else []
                 if items and isinstance(items[0], dict) and isinstance(items[0].get("position"), int):
                     start_pos = int(items[0]["position"])
                 elif isinstance(head.get("nextPosition"), int):
                     start_pos = max(-1, int(head["nextPosition"]) - 1)
+                elif isinstance(head_thread.get("itemCount"), int):
+                    start_pos = int(head_thread["itemCount"]) - 1
                 send_args: dict[str, Any] = {
                     "threadId": thread_id,
                     "message": text,
@@ -627,12 +733,15 @@ class T3GeminiAdapter:
                     send_args["freshContext"] = True
                 sent = self.client.call_tool("t3_thread_send", send_args)
                 run_obj = sent.get("run") if isinstance(sent.get("run"), dict) else {}
-                rid = sent.get("runId") or run_obj.get("runId")
+                rid = sent.get("runId") or sent.get("queuedRunId") or run_obj.get("runId")
                 run_id = str(rid) if rid else None
             except RuntimeError as exc:
                 msg = str(exc).lower()
                 if "not found" in msg or "does not exist" in msg or "unknown thread" in msg:
                     thread_id = None
+                    start_pos = None
+                    prev_latest_run_id = None
+                    run_id = None
                 else:
                     raise
 
@@ -660,9 +769,10 @@ class T3GeminiAdapter:
                 raise RuntimeError("t3_thread_launch returned no threadId")
             thread_id = str(tid)
             run_obj = launched.get("run") if isinstance(launched.get("run"), dict) else {}
-            rid = launched.get("runId") or run_obj.get("runId") or thread_obj.get("latestRunId")
+            rid = launched.get("runId") or launched.get("queuedRunId") or run_obj.get("runId") or thread_obj.get("latestRunId")
             run_id = str(rid) if rid else None
             start_pos = -1
+            prev_latest_run_id = None
             state.update(
                 {
                     "thread_id": thread_id,
@@ -688,21 +798,21 @@ class T3GeminiAdapter:
             if run_id:
                 wait_args["runId"] = run_id
             waited = self.client.call_tool("t3_thread_wait", wait_args)
-            if waited.get("timedOut"):
+            run_id, status, timed_out, err_detail, is_stale = self._extract_wait_state(
+                waited, run_id, prev_latest_run_id
+            )
+            if timed_out:
                 continue
-            status = str(
-                waited.get("status")
-                or (waited.get("run") or {}).get("status")
-                or (waited.get("thread") or {}).get("status")
-                or ""
-            ).lower()
+            if is_stale:
+                if self.retry_delay > 0:
+                    time.sleep(min(self.retry_delay, max(0.0, deadline - time.monotonic())))
+                continue
             if status in ("failed", "cancelled", "interrupted", "rolled_back"):
-                err = waited.get("error") or (waited.get("run") or {}).get("error") or status
-                raise RuntimeError(f"Gemini run {status}: {err}")
+                raise RuntimeError(f"Gemini run {status}: {err_detail or status}")
             if not status or status in _T3_TERMINAL_STATUSES or status == "idle":
                 break
 
-        reply = self._fetch_reply(thread_id, run_id, start_pos)
+        reply = self._fetch_reply_with_retries(thread_id, run_id, start_pos)
         return reply or "(no response)"
 
 

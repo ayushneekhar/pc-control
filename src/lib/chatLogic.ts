@@ -234,3 +234,59 @@ export function computeAndroidKeyboardOffset(
   const shrink = Number.isFinite(containerShrink) && containerShrink > 0 ? containerShrink : 0;
   return Math.max(0, keyboardHeight - tab - shrink);
 }
+
+/** Compact model label for the in-composer pill (e.g. "Neon", "Opus", "Sonnet", "Flash"). */
+export function shortModelLabel(modelId?: string | null, label?: string | null): string {
+  const rawLabel = (label || '').trim();
+  const rawId = (modelId || '').trim().toLowerCase();
+
+  if (rawLabel) {
+    // "Gemini 4 Neon" -> "Neon", "Gemini 3.8 Flash" -> "Flash"
+    const geminiMatch = rawLabel.match(/^Gemini\s+[\d.]+\s+(.+)$/i);
+    if (geminiMatch) return geminiMatch[1].trim();
+    // "Orchestrator (Neon)" -> "Orch"
+    if (/^Orchestrator\b/i.test(rawLabel)) {
+      const paren = rawLabel.match(/\(([^)]+)\)/);
+      return paren ? `Orch ${paren[1].trim()}` : 'Orch';
+    }
+    // "Opus 5.5" -> "Opus", "Sonnet 5.5" -> "Sonnet"
+    const claudeMatch = rawLabel.match(/^([A-Za-z]+)\s+[\d.]+$/);
+    if (claudeMatch) return claudeMatch[1];
+    return rawLabel;
+  }
+
+  if (rawId) {
+    const parts = rawId.split('-').filter(Boolean);
+    if (parts[0] === 'claude' && parts[1]) {
+      return parts[1][0].toUpperCase() + parts[1].slice(1);
+    }
+    if (parts[0] === 'gemini' && parts.length >= 2) {
+      const tail = parts[parts.length - 1];
+      return tail[0].toUpperCase() + tail.slice(1);
+    }
+    return rawId;
+  }
+
+  return '';
+}
+
+/** Compact effort label for the composer pill and segmented selector. */
+export function shortEffortLabel(effort?: string | null): string {
+  const v = (effort || '').trim().toLowerCase();
+  if (!v) return '';
+  if (v === 'medium') return 'Med';
+  if (v === 'xhigh') return 'XHigh';
+  return v[0].toUpperCase() + v.slice(1);
+}
+
+/** Builds the concise composer pill label such as "Neon · Med" or "Opus · High". */
+export function formatComposerChipLabel(
+  engine: ChatEngine,
+  modelId?: string | null,
+  modelLabel?: string | null,
+  effort?: string | null,
+): string {
+  const m = shortModelLabel(modelId, modelLabel) || (engine === 'gemini' ? 'Gemini' : 'Claude');
+  const e = shortEffortLabel(effort);
+  return e ? `${m} · ${e}` : m;
+}

@@ -7,6 +7,7 @@ import {
   Animated,
   AppState,
   FlatList,
+  Image,
   Keyboard,
   KeyboardAvoidingView,
   LayoutChangeEvent,
@@ -20,7 +21,9 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { Banner, Button, Icon, Screen, StatusDot } from '../components/ui';
+import { AgentModelPickerModal, AgentSelectionResult } from '../components/AgentModelPickerModal';
+import { Banner, Button, Icon, Screen } from '../components/ui';
+import { AgentSettings, getAgentSettings, setAgent, updateAgentSettings } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
 import { fetchChatMessages, sendChatMessage, startNewChat } from '../lib/chatApi';
 import {
@@ -30,6 +33,7 @@ import {
   ChatMessage,
   computeAndroidKeyboardOffset,
   formatChatTime,
+  formatComposerChipLabel,
   makeClientId,
   mergeChatMessages,
   parseMessageSegments,
@@ -39,7 +43,12 @@ import {
 } from '../lib/chatLogic';
 import { radius, screenPad, space, useTheme } from '../theme';
 
+const ANTHROPIC_ICON = require('../../assets/brand-anthropic.png');
+const GEMINI_ICON = require('../../assets/brand-gemini.png');
+const CACHE_AGENT_SETTINGS = 'agent:settings';
+const CACHE_AGENT_STATE = 'agent:state';
 const POLL_INTERVAL_MS = 2000;
+const KEYBOARD_BREATHING_ROOM = 12;
 
 function engineLabel(engine: ChatEngine): string {
   return engine === 'gemini' ? 'Gemini' : 'Claude';
@@ -222,6 +231,15 @@ export default function ChatScreen() {
   const [baseHeight, setBaseHeight] = useState(0);
   const [androidPadAnim] = useState(() => new Animated.Value(0));
 
+  const [agentSettings, setAgentSettings] = useState<AgentSettings | null>(() =>
+    cacheGet<AgentSettings>(CACHE_AGENT_SETTINGS),
+  );
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsErr, setSettingsErr] = useState<string | null>(null);
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const [applyingModel, setApplyingModel] = useState(false);
+  const [applyModelErr, setApplyModelErr] = useState<string | null>(null);
+
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const mountedRef = useRef(true);
   const isFocusedRef = useRef(isFocused);
@@ -315,7 +333,8 @@ export default function ChatScreen() {
 
   const targetAndroidPad =
     Platform.OS === 'android'
-      ? computeAndroidKeyboardOffset(effectiveKbHeight, tabBarHeight, containerShrink)
+      ? computeAndroidKeyboardOffset(effectiveKbHeight, tabBarHeight, containerShrink) +
+        (effectiveKbHeight > 0 ? KEYBOARD_BREATHING_ROOM : 0)
       : 0;
 
   useEffect(() => {
@@ -373,10 +392,27 @@ export default function ChatScreen() {
     [persistCache],
   );
 
+  const loadAgentSettings = useCallback(async () => {
+    setSettingsLoading(true);
+    setSettingsErr(null);
+    try {
+      const next = await getAgentSettings();
+      if (!mountedRef.current) return;
+      cacheSet(CACHE_AGENT_SETTINGS, next);
+      setAgentSettings(next);
+    } catch (e) {
+      if (!mountedRef.current) return;
+      setSettingsErr((e as Error).message || 'Failed to load agent settings');
+    } finally {
+      if (mountedRef.current) setSettingsLoading(false);
+    }
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       void loadMessages({ silent: true });
-    }, [loadMessages]),
+      void loadAgentSettings();
+    }, [loadMessages, loadAgentSettings]),
   );
 
   const polling = shouldPollChat(messages, running, isFocused, appActive);
@@ -504,14 +540,63 @@ export default function ChatScreen() {
     ]);
   }, [engine, hasMore, persistCache]);
 
+  const openModelPicker = useCallback(() => {
+    Keyboard.dismiss();
+    setApplyModelErr(null);
+    setPickerVisible(true);
+    if (!agentSettings) {
+      void loadAgentSettings();
+    }
+  }, [agentSettings, loadAgentSettings]);
+
+  const onApplyModel = useCallback(
+    async ({ engine: nextEngine, patch }: AgentSelectionResult) => {
+      setApplyingModel(true);
+      setApplyModelErr(null);
+      try {
+        if (patch.claude || patch.gemini) {
+          const updated = await updateAgentSettings(patch);
+          if (!mountedRef.current) return;
+          cacheSet(CACHE_AGENT_SETTINGS, updated);
+          setAgentSettings(updated);
+        }
+        if (nextEngine !== engine) {
+          const nextState = await setAgent(nextEngine);
+          if (!mountedRef.current) return;
+          cacheSet(CACHE_AGENT_STATE, nextState);
+          setEngine(nextEngine);
+          setMessages((prev) => {
+            persistCache(prev, nextEngine, hasMore);
+            return prev;
+          });
+        }
+        if (mountedRef.current) {
+          setPickerVisible(false);
+        }
+      } catch (e) {
+        if (!mountedRef.current) return;
+        setApplyModelErr((e as Error).message || 'Failed to update model settings');
+      } finally {
+        if (mountedRef.current) setApplyingModel(false);
+      }
+    },
+    [engine, hasMore, persistCache],
+  );
+
+  const chipLabel = useMemo(() => {
+    if (!agentSettings) return engineLabel(engine);
+    if (engine === 'claude') {
+      const m = agentSettings.claude.models.find((x) => x.id === agentSettings.claude.model);
+      return formatComposerChipLabel('claude', agentSettings.claude.model, m?.label, agentSettings.claude.effort);
+    }
+    const m = agentSettings.gemini.models.find((x) => x.id === agentSettings.gemini.model);
+    return formatComposerChipLabel('gemini', agentSettings.gemini.model, m?.label, agentSettings.gemini.thought_level);
+  }, [engine, agentSettings]);
+
   const canSend = draft.trim().length > 0 && !sending;
 
   const headerRight = (
     <View style={st.headerRight}>
-      <View style={[st.engineChip, { backgroundColor: t.card }]}>
-        {running ? <ActivityIndicator size={11} color={t.accent} /> : <StatusDot tone="ok" size={6} />}
-        <Text style={[st.engineChipText, { color: t.textDim }]}>{engineLabel(engine)}</Text>
-      </View>
       <Pressable
         onPress={onNewChat}
         disabled={resetting}
@@ -593,42 +678,66 @@ export default function ChatScreen() {
         />
       )}
 
-      <View style={[st.composerWrap, { borderTopColor: t.border, backgroundColor: t.bg }]}>
-        <TextInput
-          value={draft}
-          onChangeText={setDraft}
-          placeholder={`Message ${engineLabel(engine)}`}
-          placeholderTextColor={t.textFaint}
-          multiline
-          maxLength={32000}
-          selectionColor={t.accent}
+      <View style={[st.composerOuter, { backgroundColor: t.bg }]}>
+        <View
           style={[
-            st.input,
+            st.composerPill,
             {
               backgroundColor: t.card,
               borderColor: t.border,
-              color: t.text,
-            },
-          ]}
-        />
-        <Pressable
-          onPress={() => void onSend()}
-          disabled={!canSend}
-          accessibilityLabel="Send message"
-          style={({ pressed }) => [
-            st.sendBtn,
-            {
-              backgroundColor: canSend ? t.accent : t.cardAlt,
-              opacity: pressed && canSend ? 0.85 : 1,
             },
           ]}
         >
-          {sending ? (
-            <ActivityIndicator size="small" color={t.accent} />
-          ) : (
-            <Icon name="arrow-up" size={20} color={canSend ? t.onAccent : t.textFaint} />
-          )}
-        </Pressable>
+          <TextInput
+            value={draft}
+            onChangeText={setDraft}
+            placeholder={`Message ${engineLabel(engine)}`}
+            placeholderTextColor={t.textFaint}
+            multiline
+            maxLength={32000}
+            selectionColor={t.accent}
+            style={[st.input, { color: t.text }]}
+          />
+          <View style={st.composerControls}>
+            <Pressable
+              onPress={openModelPicker}
+              accessibilityLabel={`Switch model and effort: ${chipLabel}`}
+              android_ripple={{ color: t.ripple, foreground: true }}
+              style={({ pressed }) => [
+                st.modelChip,
+                { backgroundColor: t.cardAlt, opacity: pressed ? 0.8 : 1 },
+              ]}
+            >
+              <Image
+                source={engine === 'claude' ? ANTHROPIC_ICON : GEMINI_ICON}
+                style={[st.modelChipIcon, { tintColor: t.accent }]}
+                resizeMode="contain"
+              />
+              <Text style={[st.modelChipText, { color: t.textDim }]} numberOfLines={1}>
+                {chipLabel}
+              </Text>
+              <Icon name="chevron-down" size={14} color={t.textFaint} />
+            </Pressable>
+            <Pressable
+              onPress={() => void onSend()}
+              disabled={!canSend}
+              accessibilityLabel="Send message"
+              style={({ pressed }) => [
+                st.sendBtn,
+                {
+                  backgroundColor: canSend ? t.accent : t.cardAlt,
+                  opacity: pressed && canSend ? 0.85 : 1,
+                },
+              ]}
+            >
+              {sending ? (
+                <ActivityIndicator size="small" color={t.accent} />
+              ) : (
+                <Icon name="arrow-up" size={18} color={canSend ? t.onAccent : t.textFaint} />
+              )}
+            </Pressable>
+          </View>
+        </View>
       </View>
     </>
   );
@@ -644,21 +753,24 @@ export default function ChatScreen() {
           <Animated.View style={{ flex: 1, paddingBottom: androidPadAnim }}>{chatBody}</Animated.View>
         )}
       </View>
+      <AgentModelPickerModal
+        visible={pickerVisible}
+        engine={engine}
+        settings={agentSettings}
+        loading={settingsLoading}
+        loadError={settingsErr}
+        applying={applyingModel}
+        applyError={applyModelErr}
+        onRetryLoad={() => void loadAgentSettings()}
+        onApply={(res) => void onApplyModel(res)}
+        onClose={() => setPickerVisible(false)}
+      />
     </Screen>
   );
 }
 
 const st = StyleSheet.create({
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: space(2), paddingBottom: 2 },
-  engineChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    height: 32,
-    paddingHorizontal: 10,
-    borderRadius: radius.pill,
-  },
-  engineChipText: { fontSize: 12.5, fontWeight: '500' },
   newBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -730,33 +842,64 @@ const st = StyleSheet.create({
   systemRow: { flexDirection: 'row', alignItems: 'center', gap: space(2.5), paddingVertical: space(2) },
   systemLine: { flex: 1, height: StyleSheet.hairlineWidth },
   systemText: { fontSize: 11.5, fontVariant: ['tabular-nums'] },
-  composerWrap: {
+  composerOuter: {
+    paddingHorizontal: screenPad,
+    paddingTop: space(2),
+    paddingBottom: space(2.5),
+  },
+  composerPill: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: space(2),
-    paddingHorizontal: screenPad,
-    paddingVertical: space(2.5),
-    borderTopWidth: StyleSheet.hairlineWidth,
+    gap: 6,
+    minHeight: 48,
+    borderRadius: 24,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingLeft: 14,
+    paddingRight: 6,
+    paddingVertical: 6,
   },
   input: {
     flex: 1,
-    minHeight: 44,
+    minHeight: 36,
     maxHeight: 120,
-    borderRadius: 22,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 16,
-    paddingTop: 11,
-    paddingBottom: 11,
+    paddingTop: 7,
+    paddingBottom: 7,
+    paddingRight: 4,
     fontSize: 15,
     lineHeight: 20,
     textAlignVertical: 'center',
     includeFontPadding: false,
   },
+  composerControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 1,
+  },
+  modelChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    height: 32,
+    maxWidth: 148,
+    paddingLeft: 8,
+    paddingRight: 6,
+    borderRadius: radius.pill,
+    overflow: 'hidden',
+  },
+  modelChipIcon: {
+    width: 13,
+    height: 13,
+  },
+  modelChipText: {
+    fontSize: 12,
+    fontWeight: '500',
+    flexShrink: 1,
+  },
   sendBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    marginBottom: 2,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
   },

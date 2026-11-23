@@ -278,12 +278,126 @@ class AdapterTests(unittest.TestCase):
                         }
                     return {}
 
-            adapter = chat_mod.T3GeminiAdapter(client=FakeT3(), thread_file=tf)
+            adapter = chat_mod.T3GeminiAdapter(client=FakeT3(), thread_file=tf, retry_delay=0.0)
             reply = adapter.send("ping", fresh=True)
             self.assertEqual(reply, "Hello world")
             send_call = next(a for n, a in calls if n == "t3_thread_send")
             self.assertEqual(send_call["threadId"], "thr-123")
             self.assertTrue(send_call.get("freshContext"))
+
+    def test_t3_gemini_adapter_ignores_stale_prev_run_and_early_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tf = os.path.join(tmp, "t3-thread.json")
+            with open(tf, "w", encoding="utf-8") as f:
+                json.dump({"thread_id": "thr-123", "project_id": "proj-1"}, f)
+
+            wait_calls = []
+            wait_responses = [
+                # Stale previous run reported as completed right after send
+                {"status": "completed", "runId": "run-11"},
+                # Early idle before the queued run starts
+                {"status": "idle"},
+                # New run starts
+                {"status": "running", "run": {"runId": "run-12", "status": "running"}},
+                # New run finishes
+                {"status": "completed", "run": {"runId": "run-12", "status": "completed"}},
+            ]
+            read_after_count = 0
+
+            class FakeT3Race:
+                def call_tool(self, name, args=None):
+                    nonlocal read_after_count
+                    args = args or {}
+                    if name == "t3_thread_read" and args.get("limit") == 1:
+                        return {
+                            "thread": {"latestRunId": "run-11", "itemCount": 12},
+                            "items": [{"position": 11}],
+                        }
+                    if name == "t3_thread_send":
+                        # Returns no runId yet (queued)
+                        return {"ok": True}
+                    if name == "t3_thread_wait":
+                        wait_calls.append(dict(args))
+                        return wait_responses.pop(0)
+                    if name == "t3_thread_read":
+                        read_after_count += 1
+                        # Simulate assistant_message still flushing on first 2 reads
+                        if read_after_count < 3:
+                            return {"items": [{"type": "user_message", "text": "are you continuing?"}]}
+                        return {
+                            "items": [
+                                {
+                                    "itemId": "it-12",
+                                    "type": "assistant_message",
+                                    "runId": "run-12",
+                                    "text": "Yes, continuing the PC Agent thread!",
+                                    "textTruncated": False,
+                                }
+                            ]
+                        }
+                    return {}
+
+            adapter = chat_mod.T3GeminiAdapter(client=FakeT3Race(), thread_file=tf, retry_delay=0.0)
+            reply = adapter.send("are you continuing?")
+            self.assertEqual(reply, "Yes, continuing the PC Agent thread!")
+            self.assertEqual(len(wait_calls), 4)
+            # First three waits have no runId yet; fourth passes resolved run-12.
+            self.assertNotIn("runId", wait_calls[0])
+            self.assertNotIn("runId", wait_calls[1])
+            self.assertNotIn("runId", wait_calls[2])
+            self.assertEqual(wait_calls[3].get("runId"), "run-12")
+            self.assertEqual(read_after_count, 3)
+
+    def test_t3_gemini_adapter_queued_run_id_and_paginated_reply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tf = os.path.join(tmp, "t3-thread.json")
+            with open(tf, "w", encoding="utf-8") as f:
+                json.dump({"thread_id": "thr-456", "project_id": "proj-1"}, f)
+
+            wait_calls = []
+            read_after_positions = []
+
+            class FakeT3Paginated:
+                def call_tool(self, name, args=None):
+                    args = args or {}
+                    if name == "t3_thread_read" and args.get("limit") == 1:
+                        return {
+                            "thread": {"latestRunId": "run-5"},
+                            "items": [{"position": 10}],
+                        }
+                    if name == "t3_thread_send":
+                        return {"queuedRunId": "run-6"}
+                    if name == "t3_thread_wait":
+                        wait_calls.append(dict(args))
+                        return {"status": "completed", "runId": "run-6"}
+                    if name == "t3_thread_read":
+                        pos = args.get("afterPosition")
+                        read_after_positions.append(pos)
+                        if pos == 10:
+                            return {
+                                "items": [{"type": "user_message", "runId": "run-6", "text": "go"}],
+                                "hasMore": True,
+                                "nextPosition": 14,
+                            }
+                        return {
+                            "items": [
+                                {
+                                    "itemId": "it-6",
+                                    "type": "assistant_message",
+                                    "runId": "run-6",
+                                    "text": "Paginated final reply",
+                                    "textTruncated": False,
+                                }
+                            ],
+                            "hasMore": False,
+                        }
+                    return {}
+
+            adapter = chat_mod.T3GeminiAdapter(client=FakeT3Paginated(), thread_file=tf, retry_delay=0.0)
+            reply = adapter.send("go")
+            self.assertEqual(reply, "Paginated final reply")
+            self.assertEqual(wait_calls[0].get("runId"), "run-6")
+            self.assertEqual(read_after_positions, [10, 14])
 
     def test_claude_cli_adapter_continue_and_fresh(self):
         seen_argvs = []

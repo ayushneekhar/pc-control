@@ -5,6 +5,7 @@ import {
   ChatMessage,
   computeAndroidKeyboardOffset,
   formatChatTime,
+  formatComposerChipLabel,
   getChatEndpoint,
   mergeChatMessages,
   normalizeChatUrl,
@@ -12,6 +13,8 @@ import {
   prependOlderMessages,
   resolveChatTarget,
   setChatEndpoint,
+  shortEffortLabel,
+  shortModelLabel,
   shouldPollChat,
   shouldShowEngineTag,
 } from './chatLogic';
@@ -170,4 +173,24 @@ test('computeAndroidKeyboardOffset subtracts tab bar and OS resize cleanly', () 
   assert.equal(computeAndroidKeyboardOffset(320, 92, 0), 228);
   assert.equal(computeAndroidKeyboardOffset(320, 92, 320), 0);
   assert.equal(computeAndroidKeyboardOffset(80, 92, 0), 0);
+});
+
+test('shortModelLabel, shortEffortLabel, and formatComposerChipLabel format cleanly', () => {
+  assert.equal(shortModelLabel('gemini-4-neon', 'Gemini 4 Neon'), 'Neon');
+  assert.equal(shortModelLabel('gemini-3.8-flash', 'Gemini 3.8 Flash'), 'Flash');
+  assert.equal(shortModelLabel('gemini-pro-orchestrator-neon', 'Orchestrator (Neon)'), 'Orch Neon');
+  assert.equal(shortModelLabel('claude-opus-5-5', 'Opus 5.5'), 'Opus');
+  assert.equal(shortModelLabel('claude-sonnet-5-5', 'Sonnet 5.5'), 'Sonnet');
+  assert.equal(shortModelLabel('claude-haiku-5-5'), 'Haiku');
+
+  assert.equal(shortEffortLabel('low'), 'Low');
+  assert.equal(shortEffortLabel('medium'), 'Med');
+  assert.equal(shortEffortLabel('high'), 'High');
+  assert.equal(shortEffortLabel('xhigh'), 'XHigh');
+  assert.equal(shortEffortLabel('max'), 'Max');
+
+  assert.equal(formatComposerChipLabel('gemini', 'gemini-4-neon', 'Gemini 4 Neon', 'medium'), 'Neon · Med');
+  assert.equal(formatComposerChipLabel('claude', 'claude-opus-5-5', 'Opus 5.5', 'high'), 'Opus · High');
+  assert.equal(formatComposerChipLabel('gemini', null, null, null), 'Gemini');
+  assert.equal(formatComposerChipLabel('claude', null, null, null), 'Claude');
 });

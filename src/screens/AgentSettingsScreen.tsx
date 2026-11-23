@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Banner, Button, Card, Icon, List, ListRow, Pill, Screen, Section, StatusDot, Tone } from '../components/ui';
+import { ChatEndpointSection } from '../components/ChatEndpointSection';
 import {
   AgentEngine,
   AgentOption,
@@ -1106,6 +1107,8 @@ export default function AgentSettingsScreen() {
         onRefresh={() => void loadThreads(false)}
         onInterrupt={interruptThread}
       />
+
+      <ChatEndpointSection />
 
       <Section label="Conversation">
         <Card>

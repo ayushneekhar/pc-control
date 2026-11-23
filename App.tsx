@@ -19,6 +19,7 @@ import { pendingList, startRootStore, useRootStore } from './src/lib/rootStore';
 import AgentRuleScreen from './src/screens/AgentRuleScreen';
 import AgentSettingsScreen from './src/screens/AgentSettingsScreen';
 import AgentViewScreen from './src/screens/AgentViewScreen';
+import ChatScreen from './src/screens/ChatScreen';
 import DownloadsScreen from './src/screens/DownloadsScreen';
 import HealthScreen from './src/screens/HealthScreen';
 import RootScreen from './src/screens/RootScreen';
@@ -66,6 +67,7 @@ const linking: LinkingOptions<any> = {
       Tabs: {
         screens: {
           Routes: 'routes',
+          Chat: 'chat',
           Vitals: 'vitals',
           Root: 'root/:requestId?',
           Health: 'health',
@@ -83,13 +85,14 @@ const linking: LinkingOptions<any> = {
 
 const ICONS: Record<string, [string, string]> = {
   Routes: ['home-variant', 'home-variant-outline'],
+  Chat: ['message-text', 'message-text-outline'],
   Vitals: ['chart-line', 'chart-line'],
   Root: ['shield-key', 'shield-key-outline'],
   Health: ['server', 'server'],
   Settings: ['cog', 'cog-outline'],
 };
 
-const TAB_LABEL: Record<string, string> = { Routes: 'Home', Vitals: 'Vitals', Root: 'Root', Health: 'Services', Settings: 'Settings' };
+const TAB_LABEL: Record<string, string> = { Routes: 'Home', Chat: 'Chat', Vitals: 'Vitals', Root: 'Root', Health: 'Services', Settings: 'Settings' };
 
 export default function App() {
   const t = useTheme();
@@ -194,6 +197,7 @@ function Tabs() {
       })}
     >
       <Tab.Screen name="Routes" component={RoutesScreen} />
+      <Tab.Screen name="Chat" component={ChatScreen} />
       <Tab.Screen name="Vitals" component={VitalsScreen} />
       <Tab.Screen name="Health" component={HealthScreen} />
       <Tab.Screen
@@ -235,7 +239,7 @@ function OtaPrompt() {
 }
 
 const st = StyleSheet.create({
-  tabIcon: { width: 64, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  tabIcon: { width: 50, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   prompt: {
     position: 'absolute',
     left: screenPad,

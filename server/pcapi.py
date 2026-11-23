@@ -65,6 +65,20 @@ import base64, datetime, glob, hashlib, ipaddress, json, os, queue, secrets, re,
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+_SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SERVER_DIR not in sys.path:
+    sys.path.insert(0, _SERVER_DIR)
+import chat as chat_mod  # noqa: E402
+
+CHAT = None
+
+
+def _chat_manager():
+    global CHAT
+    if CHAT is None:
+        CHAT = chat_mod.ChatManager(notify=NOTIFY)
+    return CHAT
+
 HOME = os.path.expanduser("~")
 PORT = int(os.environ.get("PCAPI_PORT", "1990"))
 ROOTD_SOCK = os.environ.get("ROOTD_SOCK", "/run/rootd/rootd.sock")
@@ -442,6 +456,7 @@ CATEGORIES = [
     ("root", "Root approvals", "A root command is waiting for your fingerprint.", False, True, "shield-key-outline"),
     ("results", "Command results", "An approved root command finished or failed.", False, True, "console"),
     ("other", "Other messages", "Anything else sent to /pc/api/notify.", False, True, "message-outline"),
+    ("chat", "Agent chat", "Replies from the PC agent in the Chat tab.", False, True, "message-text-outline"),
     ("live", "Live download progress", "Progress in the status bar and Now Bar while something downloads.", False,
      True, "progress-download"),
 ]
@@ -603,8 +618,8 @@ class Notify:
         if not title: return 400, {"error": "title required"}
         if image is not None and (len(image) > 10 * 1024 * 1024 or not image_type(image)):
             return 400, {"error": "image must be a JPEG, PNG or WebP under 10 MB"}
-        if link is not None and not re.fullmatch(r"https?://[^\s]{1,500}", str(link)):
-            return 400, {"error": "link must be an http(s) URL"}
+        if link is not None and not re.fullmatch(r"(?:https?|pccontrol)://[^\s]{1,500}", str(link)):
+            return 400, {"error": "link must be an http(s) or pccontrol URL"}
         w, nid, res = self.wants(cat), secrets.token_hex(8), {"ok": True, "category": cat}
         res["id"] = nid
         if w["app"]:
@@ -3806,7 +3821,8 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlsplit(self.path)
         path, qs = u.path.rstrip("/"), urllib.parse.parse_qs(u.query)
         is_hook = method == "POST" and bool(re.fullmatch(r"/pc/api/hook/(radarr|sonarr|seerr)", path))
-        if not self.authorized(is_hook=is_hook):
+        is_chat = (path == "/pc/api/chat" or path.startswith("/pc/api/chat/")) and ".." not in path.split("/")
+        if not self.authorized(is_hook=is_hook) and not (is_chat and chat_mod.chat_token_authorized(self.headers)):
             return self.send_json(403, {"error": "not allowed for this tailnet identity"})
         if not path.startswith("/pc"):
             return self.send_json(404, {"error": "not found"})
@@ -3871,6 +3887,8 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json(502, {"error": f"keyring status failed: {type(e).__name__}"})
             if path in ("/api/ota/ota.version.json", "/api/ota/bundle.zip"):
                 return self.send_ota_file(path.rsplit("/", 1)[1])
+            if path == "/api/chat/messages":
+                return self.send_json(*_chat_manager().handle_get_messages(qs))
             r4 = route_round4_get(path, qs)
             if r4 is not None:
                 return self.send_json(*r4)
@@ -3938,6 +3956,10 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
+            if path == "/api/chat/send":
+                return self.send_json(*_chat_manager().handle_send(b))
+            if path == "/api/chat/new":
+                return self.send_json(*_chat_manager().handle_new(b))
             r4 = route_round4_post(path, b)
             if r4 is not None:
                 return self.send_json(*r4)
@@ -4057,9 +4079,10 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER, VPN, USAGE_ALERTS, KEYRING
+    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER, VPN, USAGE_ALERTS, KEYRING, CHAT
     PUSH = Push()
     NOTIFY = Notify(PUSH)
+    CHAT = chat_mod.ChatManager(notify=NOTIFY)
     DOWNLOADS = Downloads()
     VPN = VpnManager(NOTIFY, qbt=DOWNLOADS).start()
     USAGE_ALERTS = UsageAlertWatcher(NOTIFY, AGENT_USAGE, AGENT_SETTINGS)

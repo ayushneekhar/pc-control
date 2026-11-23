@@ -148,6 +148,13 @@ class PcNativeModule : Module() {
       OnViewDestroys { view: RecPlayerView -> view.release() }
     }
 
+    // Live cat-cam video on a TextureView (so PinchZoom can transform it); see LivePlayerView
+    View(LivePlayerView::class) {
+      Name("LivePlayer")
+      Prop("streamURL") { view: LivePlayerView, url: String? -> view.setStreamURL(url) }
+      OnViewDestroys { view: LivePlayerView -> view.release() }
+    }
+
     Function("windowInsets") {
       val activity = appContext.currentActivity ?: return@Function null
       val raw = activity.window?.decorView?.rootWindowInsets ?: return@Function null

@@ -3,9 +3,10 @@
 // playlist (gaps left out) in a native Media3 player (RecPlayer). Timeline: a 24 h overview strip (tap / drag)
 // and a zoomable ribbon (drag to scrub, pinch or the zoom button, tap to jump) with the playhead in the middle;
 // amber = cat sightings (logged only while Cat alerts are on).
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, GestureResponderEvent, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { PcNative } from '../../../modules/pc-native';
+import { PinchZoom, type PinchZoomHandle } from '../../components/PinchZoom';
 import { Icon } from '../../components/ui';
 import { serverUrl } from '../../lib/api';
 import { NAMES } from '../../lib/cams/config';
@@ -63,6 +64,9 @@ export function ReplayTab({
   const [ovW, setOvW] = useState(0);
   const [x0, setX0] = useState(0);
   const [snapBusy, setSnapBusy] = useState(false);
+  const zooms = useRef<Partial<Record<RecCam, PinchZoomHandle | null>>>({});
+  const lastTap = useRef<{ cam: RecCam; x: number; y: number; t: number } | null>(null);
+  const big = v?.big ?? 'cat';
 
   useEffect(() => {
     if (!visible) return;
@@ -75,6 +79,10 @@ export function ReplayTab({
     // an unknown cam / bad ts is refused: leave it for a later good one, never crash
     if (eng.seekSighting(target.cam, target.ts)) onTargetConsumed?.();
   }, [visible, target, eng, onTargetConsumed]);
+
+  useEffect(() => {
+    lastTap.current = null;
+  }, [visible, big]);
 
   const snapshot = async () => {
     if (snapBusy) return;
@@ -89,7 +97,27 @@ export function ReplayTab({
   };
 
   // layout of the three tiles (absolute, so a player is never re-parented when the big one changes)
-  const big = v?.big ?? 'cat';
+  const tap = (c: RecCam, x: number, y: number, now: number) => {
+    const prev = lastTap.current;
+    if (prev && prev.cam === c && now - prev.t < 280 && Math.hypot(x - prev.x, y - prev.y) < 30) {
+      lastTap.current = null;
+      eng.togglePlay(); // undo the first tap's play/pause, then zoom
+      zooms.current[c]?.toggleAt(x, y);
+      return;
+    }
+    lastTap.current = { cam: c, x, y, t: now };
+    eng.togglePlay();
+  };
+
+  const tilePress = (c: RecCam, isBig: boolean, e: GestureResponderEvent) => {
+    if (!isBig) {
+      lastTap.current = null;
+      eng.setBig(c);
+      return;
+    }
+    const { locationX: x, locationY: y } = e.nativeEvent;
+    tap(c, x, y, e.nativeEvent.timestamp);
+  };
   const W = width;
   const bigH = (W * 9) / 16;
   const smallW = (W - space(2)) / 2;
@@ -118,19 +146,29 @@ export function ReplayTab({
               return (
                 <Pressable
                   key={c}
-                  onPress={() => (isBig ? eng.togglePlay() : eng.setBig(c))}
+                  onPress={(e) => tilePress(c, isBig, e)}
                   style={[s.tile, box(c), { borderRadius: isBig ? radius.lg : radius.md, backgroundColor: t.media }]}
                 >
                   {v.sources[c] ? (
-                    <RecPlayer
-                      ref={(h) => eng.setHandle(c, h)}
-                      source={v.sources[c]}
-                      playing={v.play[c]}
-                      rate={rate}
+                    <PinchZoom
+                      ref={(h) => {
+                        zooms.current[c] = h;
+                      }}
+                      enabled={isBig}
+                      resetKey={`${visible ? 'visible' : 'hidden'}:${isBig ? 'big' : 'small'}`}
                       style={StyleSheet.absoluteFill}
-                      onProgress={(e) => eng.onProgress(c, e.nativeEvent)}
-                      onPlayerError={() => eng.onError(c)}
-                    />
+                      onTap={(x, y, now) => tap(c, x, y, now)}
+                    >
+                      <RecPlayer
+                        ref={(h) => eng.setHandle(c, h)}
+                        source={v.sources[c]}
+                        playing={v.play[c]}
+                        rate={rate}
+                        style={StyleSheet.absoluteFill}
+                        onProgress={(e) => eng.onProgress(c, e.nativeEvent)}
+                        onPlayerError={() => eng.onError(c)}
+                      />
+                    </PinchZoom>
                   ) : null}
                   {tile.msg ? (
                     <View style={[s.tmsg, { backgroundColor: t.mediaChip }]} pointerEvents="none">
@@ -579,8 +617,7 @@ const s = StyleSheet.create({
     top: '50%',
     width: 64,
     height: 64,
-    marginLeft: -32,
-    marginTop: -32,
+    transform: [{ translateX: -32 }, { translateY: -32 }],
     borderRadius: 32,
     alignItems: 'center',
     justifyContent: 'center',

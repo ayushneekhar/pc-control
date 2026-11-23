@@ -1,7 +1,7 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, AppState, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
-import { Banner, Card, Empty, Icon, Pill, Screen, Segmented } from '../components/ui';
+import { Banner, Card, Empty, Icon, List, ListRow, Pill, Screen, Segmented } from '../components/ui';
 import {
   actionLabel,
   AgentRule,
@@ -142,7 +142,6 @@ export default function AgentViewScreen() {
   return (
     <Screen
       title="Agent view"
-      subtitle="What agents see through the proxy"
       onBack={() => nav.goBack()}
       refreshing={refreshing}
       onRefresh={async () => {
@@ -157,16 +156,11 @@ export default function AgentViewScreen() {
         </Banner>
       ) : null}
 
-      <Card style={{ gap: space(3) }}>
+      <Card>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-          <View style={{ flex: 1, gap: 2 }}>
-            <Text style={{ color: t.text, fontSize: 16, fontWeight: '600' }}>
-              {state?.enabled ? 'Filtering on' : 'Filtering off'}
-            </Text>
-            <Text style={{ color: t.textDim, fontSize: 12.5 }}>
-              {state?.enabled ? 'Enabled rules change what agents receive.' : 'Agents get the real sites; rules are kept.'}
-            </Text>
-          </View>
+          <Text style={{ color: t.text, fontSize: 16, fontWeight: '600', flex: 1 }}>
+            {state?.enabled ? 'Filtering on' : 'Filtering off'}
+          </Text>
           <Switch
             value={!!state?.enabled}
             onValueChange={toggleFilter}
@@ -214,102 +208,109 @@ export default function AgentViewScreen() {
           ) : null}
 
           {urls && urls.length === 0 ? (
-            <Empty
-              icon={q ? 'magnify-close' : 'link-off'}
-              title={q ? 'No matches' : 'No URLs yet'}
-              body={q ? 'Try a different host or path.' : 'URLs appear here once an agent opens a site through the proxy.'}
-            />
+            <Empty icon={q ? 'magnify-close' : 'link-off'} title={q ? 'No matches' : 'No URLs yet'} />
           ) : null}
 
-          {(urls ?? []).map((u) => {
-            const { host, path } = splitUrl(u.url);
-            const rule = state?.rules.find((r) => r.id === u.rule_id);
-            return (
-              <Card key={u.url} onPress={() => editUrl(u)} style={{ gap: space(2) }}>
-                <View style={{ flexDirection: 'row', gap: space(2), alignItems: 'flex-start' }}>
-                  <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={{ color: t.text, fontSize: 15, fontWeight: '500' }} numberOfLines={1}>
-                      {host || u.host}
-                    </Text>
-                    <Text style={{ color: t.textDim, fontSize: 12.5, fontFamily: t.mono }} numberOfLines={2}>
-                      {path}
-                    </Text>
-                  </View>
-                  {rule ? (
-                    <Pill
-                      label={rule.name ? (rule.name.length > 18 ? `${rule.name.slice(0, 17)}…` : rule.name) : 'Rule'}
-                      tone="dim"
-                      icon="filter-variant"
-                    />
-                  ) : null}
-                </View>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <Text style={{ color: t.textFaint, fontSize: 12 }}>{relativeTime(u.last_seen, now)}</Text>
-                  <Text style={{ color: t.textFaint, fontSize: 12 }}>·</Text>
-                  <Text style={{ color: t.textFaint, fontSize: 12 }}>{u.count}×</Text>
-                </View>
-              </Card>
-            );
-          })}
+          {urls && urls.length ? (
+            <List>
+              {urls.map((u, i) => {
+                const { host, path } = splitUrl(u.url);
+                const rule = state?.rules.find((r) => r.id === u.rule_id);
+                return (
+                  <ListRow
+                    key={u.url}
+                    icon="link-variant"
+                    title={host || u.host}
+                    subtitle={
+                      <View style={{ gap: 2 }}>
+                        <Text style={{ color: t.textFaint, fontSize: 12.5, fontFamily: t.mono }} numberOfLines={1}>
+                          {path}
+                        </Text>
+                        <Text style={{ color: t.textFaint, fontSize: 12 }}>
+                          {relativeTime(u.last_seen, now)} · {u.count}×
+                        </Text>
+                      </View>
+                    }
+                    trailing={
+                      rule ? (
+                        <Pill
+                          label={rule.name ? (rule.name.length > 18 ? `${rule.name.slice(0, 17)}…` : rule.name) : 'Rule'}
+                          tone="dim"
+                          icon="filter-variant"
+                        />
+                      ) : undefined
+                    }
+                    chevron
+                    last={i === urls.length - 1}
+                    onPress={() => editUrl(u)}
+                  />
+                );
+              })}
+            </List>
+          ) : null}
         </>
       ) : (
         <>
           {state && state.rules.length === 0 ? (
-            <Empty icon="filter-off-outline" title="No rules yet" body="Open a URL from the URLs tab to add a rule." />
+            <Empty icon="filter-off-outline" title="No rules yet" />
           ) : null}
 
-          {(state?.rules ?? []).map((rule, i) => (
-            <Card key={rule.id} style={{ padding: 0 }}>
-              <View style={st.ruleTop}>
-                <Pressable
-                  onPress={() => nav.navigate('AgentRule', { ruleId: rule.id })}
-                  android_ripple={{ color: t.ripple }}
-                  style={({ pressed }) => [st.ruleMain, pressed && { opacity: 0.85 }]}
-                >
-                  <Icon name={ACTION_ICONS[rule.action]} size={20} color={t.textDim} />
-                  <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '500' }} numberOfLines={1}>
-                      {rule.name || rule.match}
-                    </Text>
-                    <Text style={{ color: t.textFaint, fontSize: 12, fontFamily: t.mono }} numberOfLines={1}>
-                      {rule.match}
-                    </Text>
-                    <Text style={{ color: t.textDim, fontSize: 12 }}>{actionLabel(rule.action)}</Text>
+          {state && state.rules.length ? (
+            <List>
+              {state.rules.map((rule, i) => (
+                <View key={rule.id} style={i > 0 ? { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.border } : undefined}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3), paddingHorizontal: space(4), paddingTop: space(3) }}>
+                    <Pressable
+                      onPress={() => nav.navigate('AgentRule', { ruleId: rule.id })}
+                      android_ripple={{ color: t.ripple }}
+                      style={({ pressed }) => [st.ruleMain, pressed && { opacity: 0.85 }]}
+                    >
+                      <Icon name={ACTION_ICONS[rule.action]} size={20} color={t.textDim} />
+                      <View style={{ flex: 1, gap: 2 }}>
+                        <Text style={{ color: t.text, fontSize: 15, fontWeight: '500' }} numberOfLines={1}>
+                          {rule.name || rule.match}
+                        </Text>
+                        <Text style={{ color: t.textFaint, fontSize: 12.5, fontFamily: t.mono }} numberOfLines={1}>
+                          {rule.match}
+                        </Text>
+                        <Text style={{ color: t.textDim, fontSize: 12 }}>{actionLabel(rule.action)}</Text>
+                      </View>
+                    </Pressable>
+                    <Switch
+                      value={rule.enabled}
+                      onValueChange={(v) => toggleRule(rule, v)}
+                      trackColor={{ true: t.accent, false: t.border }}
+                      thumbColor={t.onMedia}
+                    />
                   </View>
-                </Pressable>
-                <Switch
-                  value={rule.enabled}
-                  onValueChange={(v) => toggleRule(rule, v)}
-                  trackColor={{ true: t.accent, false: t.border }}
-                  thumbColor={t.onMedia}
-                />
-              </View>
-              <View style={[st.ruleActions, { borderTopColor: t.border }]}>
-                <Pressable
-                  onPress={() => moveRule(i, -1)}
-                  disabled={i === 0 || busy}
-                  hitSlop={8}
-                  accessibilityLabel="Move rule up"
-                  style={[st.iconBtn, { opacity: i === 0 ? 0.35 : 1 }]}
-                >
-                  <Icon name="arrow-up" size={20} color={t.textDim} />
-                </Pressable>
-                <Pressable
-                  onPress={() => moveRule(i, 1)}
-                  disabled={i === state!.rules.length - 1 || busy}
-                  hitSlop={8}
-                  accessibilityLabel="Move rule down"
-                  style={[st.iconBtn, { opacity: i === state!.rules.length - 1 ? 0.35 : 1 }]}
-                >
-                  <Icon name="arrow-down" size={20} color={t.textDim} />
-                </Pressable>
-                <View style={{ flex: 1 }} />
-                <Pressable onPress={() => removeRule(rule)} hitSlop={8} accessibilityLabel="Delete rule" style={st.iconBtn}>
-                  <Icon name="trash-can-outline" size={20} color={t.bad} />
-                </Pressable>
-              </View>
-            </Card>
-          ))}
+                  <View style={st.ruleActions}>
+                    <Pressable
+                      onPress={() => moveRule(i, -1)}
+                      disabled={i === 0 || busy}
+                      hitSlop={8}
+                      accessibilityLabel="Move rule up"
+                      style={[st.iconBtn, { opacity: i === 0 ? 0.35 : 1 }]}
+                    >
+                      <Icon name="arrow-up" size={20} color={t.textDim} />
+                    </Pressable>
+                    <Pressable
+                      onPress={() => moveRule(i, 1)}
+                      disabled={i === state.rules.length - 1 || busy}
+                      hitSlop={8}
+                      accessibilityLabel="Move rule down"
+                      style={[st.iconBtn, { opacity: i === state.rules.length - 1 ? 0.35 : 1 }]}
+                    >
+                      <Icon name="arrow-down" size={20} color={t.textDim} />
+                    </Pressable>
+                    <View style={{ flex: 1 }} />
+                    <Pressable onPress={() => removeRule(rule)} hitSlop={8} accessibilityLabel="Delete rule" style={st.iconBtn}>
+                      <Icon name="trash-can-outline" size={20} color={t.bad} />
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+            </List>
+          ) : null}
         </>
       )}
     </Screen>
@@ -325,14 +326,12 @@ const st = StyleSheet.create({
     paddingHorizontal: space(3),
     height: 44,
   },
-  ruleTop: { flexDirection: 'row', alignItems: 'center', gap: space(2), paddingRight: space(3) },
-  ruleMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space(3), padding: space(4) },
+  ruleMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space(3) },
   ruleActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderTopWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: space(2),
-    paddingVertical: 2,
+    paddingBottom: 2,
   },
   iconBtn: { width: 42, height: 38, alignItems: 'center', justifyContent: 'center' },
 });

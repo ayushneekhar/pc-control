@@ -31,6 +31,14 @@ POST /pc/api/notify/test              {channel: telegram|app}: a labelled test m
 GET  /pc/api/notify/image/<id>        a notification's picture (the app fetches it for a big-picture notification)
 GET  /pc/api/downloads                active qBittorrent downloads (all categories) for the app's live progress
                                       notification: {enabled, qbt, downloads: [...], total: {...}}. Read-only.
+GET  /pc/api/vpn                      {enabled, tunnel_up, forwarded_port, qbt_interface, public_ip, last_error}
+POST /pc/api/vpn                      {enabled: bool}: route qBittorrent through Proton WireGuard (or back).
+GET  /pc/api/agent                    {engine, claude_active, gemini_active, available, switching, options}
+POST /pc/api/agent                    {engine: "claude"|"gemini"}: detached switch via systemd-run --user (202)
+GET  /pc/api/agent/usage[?refresh=1]  per-account usage across harnesses (via ai-usage --json, cached ~60 s)
+GET  /pc/api/agent/settings           Claude & Gemini model, effort, account/instance, auto-rotate & options
+POST /pc/api/agent/settings           update Claude and/or Gemini agent settings
+POST /pc/api/agent/reset              start a fresh agent conversation via ~/remote-pc/bin/agent-reset
 POST /pc/api/downloads/started        {hash?, title?}: "a download just started" (the Qwen bot calls it): wakes the
                                       phone's live progress (FCM "downloads") if that category is on
 POST /pc/api/hook/radarr|sonarr|seerr webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
@@ -51,7 +59,7 @@ pc-api is NOT a security boundary for root: it runs as the agent's user, so it i
 by rootd. Only the phone's signature releases a command. The tailnet identity check below just keeps
 other tailnet nodes/users away from the service controls.
 """
-import base64, glob, json, os, queue, secrets, re, socket, subprocess, sys, threading, time, urllib.error, urllib.parse
+import base64, datetime, glob, hashlib, ipaddress, json, os, queue, secrets, re, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -73,6 +81,26 @@ def load_json(p, default):
 
 
 CONFIG = load_json(os.path.join(CONF_DIR, "pcapi.json"), {})
+PCAPI_CONF = os.path.join(CONF_DIR, "pcapi.json")
+
+
+def save_config(updates, path=None):
+    """Merge a few settings into ~/.config/pc-control/pcapi.json (mode 600) without dropping the rest."""
+    path = path or PCAPI_CONF
+    current = load_json(path, {})
+    if not isinstance(current, dict): current = {}
+    current.update(updates)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f: json.dump(current, f, indent=1)
+        os.replace(tmp, path)
+    except Exception:
+        try: os.remove(tmp)
+        except OSError: pass
+        raise
+    if os.path.abspath(path) == os.path.abspath(PCAPI_CONF): CONFIG.update(updates)
 
 
 def tailnet_owner():
@@ -374,6 +402,8 @@ CATEGORIES = [
      "server-outline"),
     ("service_down", "Service down", "A long-running user service stopped or failed, and when it recovers.", True, True,
      "server-off"),
+    ("vpn_down", "Torrent VPN down", "qBittorrent lost its Proton VPN route or its forwarded port, and when it recovers.",
+     True, True, "shield-off-outline"),
     ("root", "Root approvals", "A root command is waiting for your fingerprint.", False, True, "shield-key-outline"),
     ("results", "Command results", "An approved root command finished or failed.", False, True, "console"),
     ("other", "Other messages", "Anything else sent to /pc/api/notify.", False, True, "message-outline"),
@@ -827,8 +857,8 @@ class Downloads:
         return out
 
     # ---- qBittorrent
-    def qbt(self, method, timeout=8, **params):
-        data = urllib.parse.urlencode(params).encode()
+    def qbt(self, method, timeout=8, get=False, **params):
+        data = None if get else urllib.parse.urlencode(params).encode()
         for attempt in (0, 1):
             if self.opener is None:
                 import http.cookiejar
@@ -840,12 +870,20 @@ class Downloads:
                 if not any("SID" in c.name for c in jar): raise PermissionError("qBittorrent login failed")
                 self.opener = op
             try:
-                with self.opener.open(f"{self.url}/api/v2/{method}", data, timeout=timeout) as r: return json.load(r)
+                with self.opener.open(f"{self.url}/api/v2/{method}", data, timeout=timeout) as r:
+                    raw = r.read()
+                return json.loads(raw) if raw.strip() else {}
             except urllib.error.HTTPError as e:
                 self.opener = None
                 if e.code in (401, 403) and attempt == 0: continue      # session expired (qBittorrent restarted)
                 raise
         raise PermissionError("qBittorrent login failed")
+
+    def preferences(self, timeout=8):
+        return self.qbt("app/preferences", get=True, timeout=timeout)
+
+    def set_preferences(self, prefs, timeout=8):
+        return self.qbt("app/setPreferences", timeout=timeout, json=json.dumps(prefs))
 
     def active(self, timeout=8):
         """-> {"qbt": "ok"|"down"|"auth", "downloads": [...], "total": {...}}. Cached ~1.5 s (one phone polls ~3 s)."""
@@ -895,6 +933,1058 @@ class Downloads:
 
 
 DOWNLOADS = None
+
+
+# ---------------------------------------------------------------- torrent VPN (qBittorrent -> Proton WireGuard)
+
+VPN_INTERFACE = os.environ.get("PCAPI_VPN_INTERFACE", "proton0")
+VPN_SOURCE_IP4 = "10.2.0.2"
+VPN_DEFAULT_PORT = 28655
+VPN_NATPMP_GATEWAY = os.environ.get("PCAPI_NATPMP_GATEWAY", "10.2.0.1")
+VPN_NATPMP_PORT = int(os.environ.get("PCAPI_NATPMP_PORT", "5351"))
+VPN_HANDSHAKE_MAX = 180          # s, a WireGuard handshake older than this means the tunnel is down
+VPN_RENEW = 45                   # s, NAT-PMP mappings are requested with a 60 s lifetime
+VPN_ALERT_AFTER = 180            # s unhealthy before one vpn_down alert
+VPN_IP_INTERVAL = 600            # s between public-IP lookups
+VPN_NATPMP_BACKOFF = 60          # s to wait after result 4 (out of resources)
+VPN_WG_KICK = os.environ.get("PCAPI_WG_KICK", "/run/proton-wg-kick/kick")
+
+
+class NatPmpError(Exception):
+    def __init__(self, result, message=""):
+        super().__init__(message or f"NAT-PMP result {result}")
+        self.result = result
+
+
+class NatPmp:
+    """Minimal RFC 6886 NAT-PMP client (UDP, addr 10.2.0.1:5351). bound to 10.2.0.2 so the gateway maps the
+    Proton tunnel address, never the normal LAN one. request(1) = UDP, request(2) = TCP."""
+
+    def __init__(self, gateway=VPN_NATPMP_GATEWAY, port=VPN_NATPMP_PORT, bind=VPN_SOURCE_IP4, timeout=1.5):
+        self.gateway, self.port, self.bind, self.timeout = gateway, port, bind, timeout
+
+    def request(self, opcode, internal, suggested=0, lifetime=60):
+        if opcode not in (1, 2): raise ValueError("opcode must be 1 (UDP) or 2 (TCP)")
+        # version, opcode, reserved, internal port, suggested external port, lifetime
+        req = struct.pack("!BBHHHI", 0, opcode, 0, int(internal) & 0xffff, int(suggested) & 0xffff,
+                          max(0, min(int(lifetime), 0xffffffff)))
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.bind((self.bind, 0))
+            s.settimeout(self.timeout)
+            s.sendto(req, (self.gateway, self.port))
+            data, _ = s.recvfrom(128)
+        finally:
+            s.close()
+        if len(data) < 16:
+            raise NatPmpError(-1, "short NAT-PMP reply")
+        version, op, result = struct.unpack("!BBH", data[:4])
+        if version != 0 or op != 128 + opcode:
+            raise NatPmpError(-1, "bad NAT-PMP reply")
+        if result:
+            raise NatPmpError(result, f"NAT-PMP refused the mapping (result {result})")
+        _, internal_port, external_port, life = struct.unpack("!IHHI", data[4:16])
+        return {"internal": internal_port, "external": external_port, "lifetime": life}
+
+
+def fetch_public_ip(source=VPN_SOURCE_IP4, host="ifconfig.me", timeout=4):
+    """The public IP as seen through proton0: a plain HTTP request whose socket is bound to 10.2.0.2."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.settimeout(timeout)
+        s.bind((source, 0))
+        s.connect((host, 80))
+        s.sendall(b"GET /ip HTTP/1.1\r\nHost: ifconfig.me\r\nConnection: close\r\nUser-Agent: pc-control\r\n\r\n")
+        data = b""
+        while len(data) < 8192:
+            chunk = s.recv(4096)
+            if not chunk: break
+            data += chunk
+    finally:
+        s.close()
+    body = data.split(b"\r\n\r\n", 1)[-1].decode("ascii", "ignore").strip()
+    return str(ipaddress.ip_address(body))
+
+
+class VpnManager:
+    """qBittorrent -> Proton WireGuard only, switchable from the app.
+
+    enabled: qBittorrent's outgoing interface is proton0 (libtorrent binds to it, so a down tunnel leaks nothing)
+    and a NAT-PMP mapping for the public port is kept alive (UDP + TCP, renewed every ~45 s). disabled: the
+    interface goes back to automatic and the listen port returns to the stored one. State lives in pcapi.json.
+    """
+
+    def __init__(self, notify, qbt=None, conf_file=None, net=None, ip_fetcher=None,
+                 renew=VPN_RENEW, check_interval=15, alert_after=VPN_ALERT_AFTER, kick_file=None):
+        self.notify = notify
+        self.qbt = qbt
+        self.conf_file = conf_file or PCAPI_CONF
+        self.net = net or NatPmp()
+        self.ip_fetcher = ip_fetcher or fetch_public_ip
+        self.renew, self.interval, self.alert_after = renew, check_interval, alert_after
+        self.kick_file = kick_file
+        self.lock = threading.RLock()
+        self.stop = threading.Event()
+        conf = load_json(self.conf_file, {})
+        if not isinstance(conf, dict): conf = {}
+        self.enabled = bool(conf.get("torrent_vpn_enabled", False))
+        self.previous_port = self._port(conf.get("torrent_vpn_previous_port"), VPN_DEFAULT_PORT)
+        self.forwarded_port = None
+        self.public_ip = None
+        self.last_error = None
+        self.qbt_interface = ""
+        self.natpmp_ok = False
+        self._qbt_listen_port = None
+        self._ip_at = 0.0
+        self._next_renew = 0.0
+        self._unhealthy_since = None
+        self._alerted = False
+        self._started_enabled = False
+        self._kick_missing_logged = False
+
+    @staticmethod
+    def _port(value, default):
+        try:
+            p = int(value)
+            return p if 1 <= p <= 65535 else default
+        except (TypeError, ValueError):
+            return default
+
+    # ---- tunnel / qBittorrent
+    def _iface_exists(self):
+        return os.path.exists(f"/sys/class/net/{VPN_INTERFACE}")
+
+    def _handshake_age(self):
+        """Seconds since the newest handshake, or None when `wg` can't be read (pc-api is not root)."""
+        try:
+            p = subprocess.run(["wg", "show", VPN_INTERFACE, "latest-handshakes"],
+                               capture_output=True, text=True, timeout=3)
+            if p.returncode != 0: return None
+            stamps = [int(line.split()[1]) for line in p.stdout.splitlines()
+                      if len(line.split()) >= 2 and line.split()[1].isdigit()]
+            newest = max(stamps, default=0)
+            if newest <= 0: return None
+            return max(0.0, time.time() - newest)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+
+    def _tunnel_up(self):
+        if not self._iface_exists(): return False
+        age = self._handshake_age()
+        if age is not None: return age <= VPN_HANDSHAKE_MAX
+        return self.natpmp_ok
+
+    def _notify(self, title, body):
+        fn = getattr(self.notify, "send_async", None) or getattr(self.notify, "send", None)
+        if fn:
+            try: fn("vpn_down", title, body)
+            except Exception as e: print(f"vpn: notify failed: {type(e).__name__}", file=sys.stderr, flush=True)
+
+    def _set_qbt_port(self, port):
+        port = self._port(port, 0)
+        if not port or port == self._qbt_listen_port: return
+        self.qbt.set_preferences({"listen_port": port})
+        self._qbt_listen_port = port
+
+    # ---- state changes
+    def _enable_locked(self, persist=True):
+        if not self.qbt: raise RuntimeError("qBittorrent client is not configured")
+        prefs = self.qbt.preferences()
+        if isinstance(prefs, dict):
+            current = self._port(prefs.get("listen_port"), 0)
+            self._qbt_listen_port = current or None
+            if persist: self.previous_port = current or self.previous_port
+        self.qbt.set_preferences({"current_network_interface": VPN_INTERFACE, "upnp": False})
+        self.qbt_interface = VPN_INTERFACE
+        self.enabled = True
+        self._unhealthy_since, self._alerted = None, False
+        self._next_renew = 0.0
+        self._ip_at = 0.0
+        if persist:
+            save_config({"torrent_vpn_enabled": True, "torrent_vpn_previous_port": self.previous_port},
+                        self.conf_file)
+
+    def _disable_locked(self):
+        if self.qbt:
+            self.qbt.set_preferences({"current_network_interface": "", "listen_port": self.previous_port})
+        self.qbt_interface = ""
+        self._qbt_listen_port = None
+        self.enabled = False
+        self.forwarded_port = None
+        self.public_ip = None
+        self.natpmp_ok = False
+        self.last_error = None
+        self._unhealthy_since, self._alerted = None, False
+        save_config({"torrent_vpn_enabled": False}, self.conf_file)
+
+    def set_enabled(self, enabled):
+        with self.lock:
+            if enabled == self.enabled:
+                if enabled: self._renew_locked()
+                return self._status_locked()
+            if enabled:
+                self._enable_locked()
+                self._renew_locked()
+            else:
+                self._disable_locked()
+            return self._status_locked()
+
+    # ---- NAT-PMP mapping (both protocols). Proton expects internal=0, suggested=1 and forwards the public
+    # port P to the same port P on 10.2.0.2; passing qBittorrent's port gets a new P on every request.
+    def _map(self):
+        udp = self.net.request(1, 0, 1, 60)
+        tcp = self.net.request(2, 0, 1, 60)
+        return udp, tcp
+
+    def _kick_watchdog_locked(self):
+        path = self.kick_file if self.kick_file is not None else os.environ.get("PCAPI_WG_KICK", VPN_WG_KICK)
+        if not path: return
+        parent = os.path.dirname(path)
+        if parent and not os.path.isdir(parent):
+            if not self._kick_missing_logged:
+                self._kick_missing_logged = True
+                print(f"vpn: watchdog kick dir missing ({parent}); skipping kick",
+                      file=sys.stderr, flush=True)
+            return
+        tmp = f"{path}.tmp"
+        fd = -1
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            with os.fdopen(fd, "w") as f:
+                fd = -1
+                f.write(f"{int(time.time())}\n")
+            os.replace(tmp, path)
+            self._kick_missing_logged = False
+        except OSError as e:
+            if fd >= 0:
+                try: os.close(fd)
+                except OSError: pass
+            try: os.remove(tmp)
+            except OSError: pass
+            if not self._kick_missing_logged:
+                self._kick_missing_logged = True
+                print(f"vpn: watchdog kick failed ({path}): {type(e).__name__}: {e}",
+                      file=sys.stderr, flush=True)
+
+    def _renew_locked(self):
+        natpmp_failed = False
+        try:
+            try:
+                udp, tcp = self._map()
+                external = self._port(udp.get("external"), 0)
+                if not external: raise NatPmpError(-1, "NAT-PMP returned no external port")
+                tcp_external = self._port(tcp.get("external"), 0)
+            except Exception:
+                natpmp_failed = True
+                raise
+            if tcp_external and tcp_external != external:
+                print(f"vpn: NAT-PMP ports differ (udp={external}, tcp={tcp_external}); using UDP",
+                      file=sys.stderr, flush=True)
+            self._set_qbt_port(external)
+            self.forwarded_port = external
+            self.natpmp_ok = True
+            self.last_error = None
+            self._next_renew = time.time() + self.renew
+        except Exception as e:
+            self.natpmp_ok = False
+            self.forwarded_port = None
+            self.last_error = clip(f"{type(e).__name__}: {e}", 240)
+            backoff = VPN_NATPMP_BACKOFF if isinstance(e, NatPmpError) and e.result == 4 else 15
+            self._next_renew = time.time() + backoff
+            if natpmp_failed and self.enabled: self._kick_watchdog_locked()
+
+    def _refresh_public_ip_locked(self):
+        now = time.time()
+        # A known IP is refreshed every 10 min; until the first success, retry on each loop tick.
+        if self.public_ip is not None and now - self._ip_at < VPN_IP_INTERVAL: return
+        if not self._iface_exists() or not self.natpmp_ok: return
+        try:
+            ip = self.ip_fetcher()
+        except Exception:
+            return
+        if ip:
+            self.public_ip = str(ip)
+            self._ip_at = now
+
+    def _status_check_locked(self):
+        healthy = self._iface_exists() and self.natpmp_ok
+        age = self._handshake_age() if healthy else None
+        if healthy and age is not None and age > VPN_HANDSHAKE_MAX: healthy = False
+        now = time.time()
+        if healthy:
+            self._unhealthy_since = None
+            if self._alerted:
+                self._alerted = False
+                self._notify("Torrent VPN back up", "qBittorrent is routed through Proton again.")
+            return
+        if self._unhealthy_since is None:
+            self._unhealthy_since = now
+        elif not self._alerted and now - self._unhealthy_since >= self.alert_after:
+            self._alerted = True
+            why = self.last_error or ("proton0 is not up" if not self._iface_exists()
+                                      else "Proton's NAT-PMP gateway is not answering")
+            self._notify("Torrent VPN down", f"qBittorrent is not routed through Proton. {why}")
+
+    # ---- status / loop
+    def _status_locked(self):
+        return {"enabled": self.enabled,
+                "tunnel_up": self._tunnel_up() if self.enabled else False,
+                "forwarded_port": self.forwarded_port if self.enabled else None,
+                "qbt_interface": self.qbt_interface if self.enabled else "",
+                "public_ip": self.public_ip if self.enabled else None,
+                "last_error": self.last_error}
+
+    def status(self):
+        with self.lock:
+            return self._status_locked()
+
+    def start(self):
+        threading.Thread(target=self.loop, daemon=True, name="torrent-vpn").start()
+        return self
+
+    def loop(self):
+        while not self.stop.is_set():
+            try:
+                with self.lock:
+                    if self.enabled:
+                        if not self._started_enabled:
+                            self._started_enabled = True
+                            try:
+                                self._enable_locked(persist=False)
+                            except Exception as e:
+                                self._started_enabled = False      # qBittorrent may still be starting; retry
+                                self.last_error = clip(f"{type(e).__name__}: {e}", 240)
+                        if time.time() >= self._next_renew: self._renew_locked()
+                        self._refresh_public_ip_locked()
+                        self._status_check_locked()
+                    else:
+                        self._started_enabled = False
+            except Exception as e:
+                print(f"vpn: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            self.stop.wait(self.interval)
+
+
+def vpn_health():
+    return VPN.status() if VPN else {"enabled": False, "tunnel_up": False, "forwarded_port": None,
+                                     "qbt_interface": "", "public_ip": None, "last_error": None}
+
+
+VPN = None
+
+
+# ---------------------------------------------------------------- always-on PC agent switch (/pc/api/agent)
+
+AGENT_SWITCH = os.environ.get("PCAPI_AGENT_SWITCH", os.path.join(HOME, "remote-pc", "bin", "agent-switch"))
+AGENT_OPTIONS = (
+    {"id": "claude", "label": "Claude", "model": "Opus 5.5"},
+    {"id": "gemini", "label": "Gemini", "model": "Gemini 4 Neon"},
+)
+AGENT_ENGINES = frozenset(o["id"] for o in AGENT_OPTIONS)
+AGENT_SWITCH_TTL = 35.0          # s, how long switching=True stays set while waiting for the target unit
+
+
+class AgentManager:
+    """Switch the always-on PC agent between Claude (pc-agent.service) and Gemini (gemini-agent.service)
+    via ~/remote-pc/bin/agent-switch. Switches launch detached via `systemd-run --user --collect --quiet`
+    so they outlive the request even if the calling agent itself is being stopped."""
+
+    def __init__(self, script=None, run_fn=None, clock=time.monotonic, switch_ttl=AGENT_SWITCH_TTL):
+        self.script = script
+        self.run_fn = run_fn
+        self.clock = clock
+        self.switch_ttl = switch_ttl
+        self.lock = threading.Lock()
+        self._switch_target = None
+        self._switch_until = 0.0
+
+    def _script_path(self):
+        p = self.script if self.script is not None else AGENT_SWITCH
+        return os.path.abspath(os.path.expanduser(p))
+
+    def _is_available(self, path):
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+
+    def _run(self, argv, timeout=5):
+        fn = self.run_fn or subprocess.run
+        return fn(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+
+    @staticmethod
+    def _options():
+        return [dict(o) for o in AGENT_OPTIONS]
+
+    def _unavailable(self):
+        return {
+            "engine": "claude",
+            "claude_active": False,
+            "gemini_active": False,
+            "available": False,
+            "switching": False,
+            "options": self._options(),
+        }
+
+    def status(self, timeout=5):
+        path = self._script_path()
+        if not self._is_available(path):
+            with self.lock:
+                self._switch_target = None
+                self._switch_until = 0.0
+            return self._unavailable()
+        try:
+            r = self._run([path, "status"], timeout=timeout)
+        except FileNotFoundError:
+            with self.lock:
+                self._switch_target = None
+                self._switch_until = 0.0
+            return self._unavailable()
+        if r.returncode != 0:
+            raise RuntimeError(clip((r.stderr or r.stdout or f"exit {r.returncode}").strip(), 200))
+        try:
+            d = json.loads(r.stdout or "{}")
+        except ValueError as e:
+            raise RuntimeError(f"bad agent-switch JSON: {e}")
+        if not isinstance(d, dict):
+            raise RuntimeError("agent-switch JSON must be an object")
+        engine = d.get("engine") if d.get("engine") in AGENT_ENGINES else "claude"
+        claude_active = bool(d.get("claude_active", False))
+        gemini_active = bool(d.get("gemini_active", False))
+        now = self.clock()
+        with self.lock:
+            switching = False
+            if self._switch_target is not None:
+                target = self._switch_target
+                target_active = claude_active if target == "claude" else gemini_active
+                other_active = gemini_active if target == "claude" else claude_active
+                if (target_active and not other_active) or now >= self._switch_until:
+                    self._switch_target = None
+                    self._switch_until = 0.0
+                else:
+                    switching = True
+        return {
+            "engine": engine,
+            "claude_active": claude_active,
+            "gemini_active": gemini_active,
+            "available": True,
+            "switching": switching,
+            "options": self._options(),
+        }
+
+    def switch(self, engine, timeout=10):
+        if not isinstance(engine, str) or engine not in AGENT_ENGINES:
+            return 400, {"error": "engine must be 'claude' or 'gemini'"}
+        path = self._script_path()
+        if not self._is_available(path):
+            return 503, {"error": "agent-switch is not installed"}
+        argv = ["systemd-run", "--user", "--collect", "--quiet", path, engine]
+        try:
+            r = self._run(argv, timeout=timeout)
+        except Exception as e:
+            return 502, {"error": clip(f"agent switch failed: {e}", 240)}
+        if r.returncode != 0:
+            detail = (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+            return 502, {"error": clip(f"agent switch failed: {detail}", 240)}
+        with self.lock:
+            self._switch_target = engine
+            self._switch_until = self.clock() + self.switch_ttl
+        return 202, {
+            "engine": engine,
+            "claude_active": False,
+            "gemini_active": False,
+            "available": True,
+            "switching": True,
+            "options": self._options(),
+        }
+
+
+def agent_health(timeout=None):
+    return AGENT.status(timeout=HEALTH_TIMEOUT if timeout is None else timeout)
+
+
+AGENT = AgentManager()
+
+
+# ---------------------------------------------------------------- agent usage, settings & reset (/pc/api/agent/*)
+
+AI_USAGE_BIN = os.environ.get("PCAPI_AI_USAGE", os.path.join(HOME, "remote-pc", "bin", "ai-usage"))
+AGENT_RESET_BIN = os.environ.get("PCAPI_AGENT_RESET", os.path.join(HOME, "remote-pc", "bin", "agent-reset"))
+CLAUDE_AGENT_SETTINGS = os.environ.get(
+    "PCAPI_CLAUDE_AGENT_SETTINGS", os.path.join(HOME, ".config", "claude-agent", "settings.json")
+)
+GEMINI_AGENT_SETTINGS = os.environ.get(
+    "PCAPI_GEMINI_AGENT_SETTINGS", os.path.join(HOME, ".config", "gemini-agent", "settings.json")
+)
+GEMINI_FRESH_FLAG = os.environ.get(
+    "PCAPI_GEMINI_FRESH_FLAG", os.path.join(HOME, "remote-pc", ".fresh-gemini")
+)
+T3_SETTINGS_FILE = os.environ.get(
+    "PCAPI_T3_SETTINGS", os.path.join(HOME, ".t3", "userdata", "settings.json")
+)
+T3_PROVIDERS_DIR = os.environ.get(
+    "PCAPI_T3_PROVIDERS_DIR", os.path.join(HOME, ".t3", "userdata", "providers", "antigravity")
+)
+CLAUDE_CONFIG_FILE = os.environ.get("PCAPI_CLAUDE_CONFIG", os.path.join(HOME, ".claude.json"))
+AGENT_USAGE_CACHE_FILE = os.environ.get(
+    "PCAPI_AGENT_USAGE_CACHE", os.path.join(HOME, ".cache", "pc-api", "agent-usage.json")
+)
+AGENT_USAGE_CACHE_TTL = 60.0
+
+CLAUDE_MODELS = (
+    {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+    {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5"},
+    {"id": "claude-haiku-5-5", "label": "Haiku 5.5"},
+    {"id": "claude-fable-5-2", "label": "Fable 5.2"},
+)
+CLAUDE_MODEL_IDS = frozenset(m["id"] for m in CLAUDE_MODELS)
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+GEMINI_MODELS = (
+    {"id": "gemini-4-neon", "label": "Gemini 4 Neon"},
+    {"id": "gemini-4-argon", "label": "Gemini 4 Argon"},
+    {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen"},
+    {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
+    {"id": "gemini-pro-orchestrator-neon", "label": "Orchestrator (Neon)"},
+    {"id": "gemini-pro-orchestrator-g1-pro", "label": "Orchestrator (Argon)"},
+)
+GEMINI_MODEL_IDS = frozenset(m["id"] for m in GEMINI_MODELS)
+GEMINI_EFFORTS = ("low", "medium", "high", "xhigh")
+
+
+def _read_json_file(path, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else (default if default is not None else {})
+    except Exception:
+        return default if default is not None else {}
+
+
+def _write_json_atomic(path, data, mode=0o600):
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    try:
+        os.chmod(tmp, mode)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
+def _read_claude_email(claude_config_path=None):
+    p = claude_config_path if claude_config_path is not None else CLAUDE_CONFIG_FILE
+    raw = _read_json_file(os.path.expanduser(p))
+    oa = raw.get("oauthAccount") if isinstance(raw, dict) else None
+    email = oa.get("emailAddress") if isinstance(oa, dict) else None
+    return email.strip() if isinstance(email, str) and email.strip() else None
+
+
+def _list_t3_antigravity_instances(t3_settings_path=None, t3_providers_dir=None, email_map=None):
+    settings_p = os.path.expanduser(t3_settings_path if t3_settings_path is not None else T3_SETTINGS_FILE)
+    providers_p = os.path.expanduser(t3_providers_dir if t3_providers_dir is not None else T3_PROVIDERS_DIR)
+    raw = _read_json_file(settings_p)
+    providers = raw.get("providerInstances") if isinstance(raw, dict) else None
+    if not isinstance(providers, dict):
+        return []
+    out = []
+    for iid, entry in providers.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("driver") != "antigravity" or entry.get("enabled") is False:
+            continue
+        inst_id = str(iid)
+        label = str(entry.get("displayName") or inst_id)
+        digest = hashlib.sha256(inst_id.encode("utf-8")).hexdigest()
+        tok = os.path.join(providers_p, digest, "antigravity-acp", "antigravity-oauth-token")
+        try:
+            signed_in = os.path.isfile(tok) and os.path.getsize(tok) > 0
+        except OSError:
+            signed_in = False
+        email = (email_map or {}).get(inst_id)
+        out.append({"id": inst_id, "label": label, "signed_in": signed_in, "email": email})
+    return out
+
+
+_DURATION_PART_RE = re.compile(r"(\d+)\s*([dhms])", re.IGNORECASE)
+
+
+def _duration_to_resets_at(dur):
+    if not dur or not isinstance(dur, str):
+        return None
+    parts = _DURATION_PART_RE.findall(dur)
+    if not parts:
+        return None
+    secs = 0
+    for n_s, unit in parts:
+        n = int(n_s)
+        u = unit.lower()
+        if u == "d":
+            secs += n * 86400
+        elif u == "h":
+            secs += n * 3600
+        elif u == "m":
+            secs += n * 60
+        elif u == "s":
+            secs += n
+    if secs <= 0:
+        return None
+    dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=secs)
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_usage_window(win):
+    if not isinstance(win, dict):
+        return None
+    rem = win.get("remaining_pct")
+    used = win.get("used_pct")
+    if rem is None and used is None:
+        return None
+    resets_at = win.get("resets_at")
+    if not resets_at and win.get("refreshes_in"):
+        resets_at = _duration_to_resets_at(win.get("refreshes_in"))
+    return {
+        "remaining_pct": rem,
+        "used_pct": used,
+        "refreshes_in": win.get("refreshes_in"),
+        "resets_at": resets_at,
+        "status": win.get("status"),
+    }
+
+
+def _normalize_usage_report(raw, claude_config_path=None):
+    accounts = []
+    emails = {}
+    agy_accounts = raw.get("antigravity_accounts")
+    if isinstance(agy_accounts, list) and agy_accounts:
+        for acc in agy_accounts:
+            if not isinstance(acc, dict):
+                continue
+            inst_id = str(acc.get("instance_id") or "antigravity")
+            label = str(acc.get("display_name") or inst_id)
+            email = acc.get("account")
+            if isinstance(email, str) and email.strip():
+                emails[inst_id] = email.strip()
+            sections = acc.get("sections") if isinstance(acc.get("sections"), dict) else {}
+            gem = sections.get("gemini") if isinstance(sections.get("gemini"), dict) else {}
+            accounts.append({
+                "id": inst_id,
+                "harness": "gemini",
+                "label": label,
+                "email": email,
+                "signed_in": bool(acc.get("signed_in", True)),
+                "status": acc.get("status"),
+                "error": acc.get("error"),
+                "five_hour": _normalize_usage_window(gem.get("five_hour")),
+                "weekly": _normalize_usage_window(gem.get("weekly")),
+            })
+    else:
+        agy = raw.get("antigravity")
+        if isinstance(agy, dict):
+            sections = agy.get("sections") if isinstance(agy.get("sections"), dict) else {}
+            gem = sections.get("gemini") if isinstance(sections.get("gemini"), dict) else {}
+            accounts.append({
+                "id": "antigravity",
+                "harness": "gemini",
+                "label": "Antigravity",
+                "email": agy.get("account"),
+                "signed_in": bool(agy.get("signed_in", not bool(agy.get("error")))),
+                "status": agy.get("status"),
+                "error": agy.get("error"),
+                "five_hour": _normalize_usage_window(gem.get("five_hour")),
+                "weekly": _normalize_usage_window(gem.get("weekly")),
+            })
+
+    claude = raw.get("claude")
+    if isinstance(claude, dict):
+        c_email = claude.get("account") or _read_claude_email(claude_config_path)
+        c_signed_in = (
+            bool(claude["signed_in"])
+            if "signed_in" in claude
+            else not bool(claude.get("error"))
+        )
+        accounts.append({
+            "id": "claude",
+            "harness": "claude",
+            "label": "Claude",
+            "email": c_email,
+            "signed_in": c_signed_in,
+            "status": claude.get("status"),
+            "error": claude.get("error"),
+            "five_hour": _normalize_usage_window(claude.get("five_hour")),
+            "weekly": _normalize_usage_window(claude.get("weekly")),
+        })
+
+    oc = raw.get("opencode")
+    if isinstance(oc, dict):
+        oc_err = oc.get("error")
+        ds = oc.get("deepseek") if isinstance(oc.get("deepseek"), dict) else {}
+        zen = oc.get("zen") if isinstance(oc.get("zen"), dict) else {}
+
+        ds_info = None
+        if ds:
+            if ds.get("error"):
+                ds_info = {"error": str(ds["error"])}
+            elif "total_balance" in ds:
+                cur = str(ds.get("currency") or "USD")
+                bal = float(ds["total_balance"])
+                sym = "$" if cur == "USD" else ""
+                suffix = f" {cur}" if cur != "USD" else ""
+                ds_info = {
+                    "is_available": bool(ds.get("is_available", False)),
+                    "currency": cur,
+                    "total_balance": bal,
+                    "formatted": f"{sym}{bal:.2f}{suffix}",
+                }
+
+        zen_info = None
+        if zen:
+            if zen.get("status") == "ok":
+                models_raw = zen.get("models") if isinstance(zen.get("models"), list) else []
+                models = [
+                    {
+                        "model": str(m.get("model") or ""),
+                        "messages": int(m.get("messages") or 0),
+                        "cost": m.get("cost"),
+                    }
+                    for m in models_raw
+                    if isinstance(m, dict) and m.get("model")
+                ]
+                zen_info = {
+                    "status": "ok",
+                    "days": int(zen.get("days") or 7),
+                    "sessions": int(zen.get("sessions") or 0),
+                    "messages": int(zen.get("messages") or 0),
+                    "total_cost": str(zen.get("total_cost") or "$0.00"),
+                    "zen_messages": int(zen.get("zen_messages") or 0),
+                    "models": models,
+                }
+            elif zen.get("error"):
+                zen_info = {"status": "n/a", "error": str(zen["error"])}
+
+        has_oc_data = bool(
+            (ds_info and not ds_info.get("error"))
+            or (zen_info and zen_info.get("status") == "ok")
+        )
+        accounts.append({
+            "id": "opencode",
+            "harness": "opencode",
+            "label": "OpenCode / DeepSeek",
+            "email": None,
+            "signed_in": not bool(oc_err) and (has_oc_data or not (ds_info and ds_info.get("error"))),
+            "status": None,
+            "error": oc_err,
+            "five_hour": None,
+            "weekly": None,
+            "deepseek": ds_info,
+            "zen": zen_info,
+        })
+
+    return accounts, emails
+
+
+class AgentUsageManager:
+    """Query ~/remote-pc/bin/ai-usage --json with disk persistence and stale-while-revalidate."""
+
+    def __init__(self, script=None, run_fn=None, clock=time.monotonic, ttl=AGENT_USAGE_CACHE_TTL,
+                 claude_config_path=None, cache_path=None):
+        self.script = script
+        self.run_fn = run_fn
+        self.clock = clock
+        self.ttl = ttl
+        self.claude_config_path = claude_config_path
+        self.cache_path = cache_path
+        self.lock = threading.Lock()
+        self._fetch_lock = threading.Lock()
+        self._cached = None
+        self._cached_at = None
+        self._refreshing = False
+        self.emails = {}
+        self._load_disk_cache()
+
+    def _cache_file(self):
+        p = self.cache_path if self.cache_path is not None else AGENT_USAGE_CACHE_FILE
+        return os.path.expanduser(p) if p else ""
+
+    def _load_disk_cache(self):
+        path = self._cache_file()
+        if not path:
+            return
+        data = _read_json_file(path, default={})
+        if not isinstance(data, dict) or not isinstance(data.get("accounts"), list):
+            return
+        ts = int(data.get("ts") or 0)
+        accounts = data["accounts"]
+        emails = {}
+        raw_emails = data.get("emails")
+        if isinstance(raw_emails, dict):
+            for k, v in raw_emails.items():
+                if isinstance(k, str) and isinstance(v, str) and v.strip():
+                    emails[k] = v.strip()
+        for acc in accounts:
+            if isinstance(acc, dict) and acc.get("harness") == "gemini":
+                em = acc.get("email")
+                aid = acc.get("id")
+                if isinstance(aid, str) and isinstance(em, str) and em.strip():
+                    emails.setdefault(aid, em.strip())
+        with self.lock:
+            self._cached = {
+                "ts": ts,
+                "accounts": accounts,
+            }
+            # Loaded from disk -> treat as stale so first request returns instantly & refreshes in bg.
+            self._cached_at = None
+            self.emails.update(emails)
+
+    def _save_disk_cache(self, payload, emails):
+        path = self._cache_file()
+        if not path:
+            return
+        try:
+            _write_json_atomic(
+                path,
+                {
+                    "ts": payload["ts"],
+                    "accounts": payload["accounts"],
+                    "emails": dict(emails),
+                },
+                mode=0o600,
+            )
+        except OSError:
+            pass
+
+    def _script_path(self):
+        p = self.script if self.script is not None else AI_USAGE_BIN
+        return os.path.abspath(os.path.expanduser(p))
+
+    def _is_available(self, path):
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+
+    def _run(self, argv, timeout=45):
+        fn = self.run_fn or subprocess.run
+        return fn(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+
+    def _fetch_and_store(self, timeout=45):
+        with self._fetch_lock:
+            path = self._script_path()
+            if not self._is_available(path):
+                return 503, {"error": "ai-usage is not installed"}
+            try:
+                r = self._run([path, "--json"], timeout=timeout)
+            except Exception as e:
+                return 502, {"error": clip(f"ai-usage failed: {e}", 240)}
+            stdout = (r.stdout or "").strip()
+            if not stdout:
+                detail = (r.stderr or f"exit {r.returncode}").strip()
+                return 502, {"error": clip(f"ai-usage failed: {detail}", 240)}
+            try:
+                raw = json.loads(stdout)
+            except ValueError as e:
+                return 502, {"error": clip(f"bad ai-usage JSON: {e}", 240)}
+            if not isinstance(raw, dict):
+                return 502, {"error": "ai-usage JSON must be an object"}
+
+            accounts, emails = _normalize_usage_report(raw, self.claude_config_path)
+            payload = {
+                "ts": int(time.time()),
+                "cached": False,
+                "stale": False,
+                "accounts": accounts,
+            }
+            with self.lock:
+                self._cached = {
+                    "ts": payload["ts"],
+                    "accounts": accounts,
+                }
+                self._cached_at = self.clock()
+                self.emails.update(emails)
+                emails_snapshot = dict(self.emails)
+            self._save_disk_cache(self._cached, emails_snapshot)
+            return 200, payload
+
+    def _start_bg_refresh(self, timeout=45):
+        with self.lock:
+            if self._refreshing:
+                return
+            self._refreshing = True
+
+        def _worker():
+            try:
+                self._fetch_and_store(timeout=timeout)
+            except Exception:
+                pass
+            finally:
+                with self.lock:
+                    self._refreshing = False
+
+        t = threading.Thread(target=_worker, name="agent-usage-refresh", daemon=True)
+        t.start()
+
+    def get(self, force_refresh=False, timeout=45):
+        if not force_refresh:
+            now = self.clock()
+            with self.lock:
+                cached = self._cached
+                cached_at = self._cached_at
+            if cached is not None:
+                is_fresh = cached_at is not None and (now - cached_at) < self.ttl
+                if is_fresh:
+                    return 200, {**cached, "cached": True, "stale": False}
+                self._start_bg_refresh(timeout=timeout)
+                return 200, {**cached, "cached": True, "stale": True}
+
+        return self._fetch_and_store(timeout=timeout)
+
+
+class AgentSettingsManager:
+    """Persist and validate Claude (~/.config/claude-agent/settings.json) and Gemini
+    (~/.config/gemini-agent/settings.json) agent settings."""
+
+    def __init__(self, claude_path=None, gemini_path=None, gemini_fresh_flag=None,
+                 t3_settings_path=None, t3_providers_dir=None, claude_config_path=None,
+                 usage_mgr=None):
+        self.claude_path = claude_path
+        self.gemini_path = gemini_path
+        self.gemini_fresh_flag = gemini_fresh_flag
+        self.t3_settings_path = t3_settings_path
+        self.t3_providers_dir = t3_providers_dir
+        self.claude_config_path = claude_config_path
+        self.usage_mgr = usage_mgr
+        self.lock = threading.Lock()
+
+    def _claude_file(self):
+        return os.path.expanduser(self.claude_path if self.claude_path is not None else CLAUDE_AGENT_SETTINGS)
+
+    def _gemini_file(self):
+        return os.path.expanduser(self.gemini_path if self.gemini_path is not None else GEMINI_AGENT_SETTINGS)
+
+    def _fresh_flag(self):
+        return os.path.expanduser(self.gemini_fresh_flag if self.gemini_fresh_flag is not None else GEMINI_FRESH_FLAG)
+
+    def get(self):
+        with self.lock:
+            c_raw = _read_json_file(self._claude_file())
+            g_raw = _read_json_file(self._gemini_file())
+
+        email_map = dict(self.usage_mgr.emails) if self.usage_mgr is not None else {}
+        instances = _list_t3_antigravity_instances(self.t3_settings_path, self.t3_providers_dir, email_map)
+        default_inst = next((i["id"] for i in instances if i["signed_in"]), instances[0]["id"] if instances else "antigravity")
+
+        c_model = c_raw.get("model") if c_raw.get("model") in CLAUDE_MODEL_IDS else "claude-opus-5-5"
+        c_effort = c_raw.get("effort") if c_raw.get("effort") in CLAUDE_EFFORTS else "high"
+
+        g_inst = g_raw.get("instance_id") if isinstance(g_raw.get("instance_id"), str) and g_raw.get("instance_id").strip() else default_inst
+        g_model = g_raw.get("model") if isinstance(g_raw.get("model"), str) and g_raw.get("model").strip() else "gemini-4-neon"
+        g_thought = g_raw.get("thought_level") if g_raw.get("thought_level") in GEMINI_EFFORTS else "medium"
+        g_auto = bool(g_raw.get("auto_rotate", False))
+
+        return {
+            "claude": {
+                "account": _read_claude_email(self.claude_config_path),
+                "model": c_model,
+                "effort": c_effort,
+                "models": [dict(m) for m in CLAUDE_MODELS],
+                "efforts": list(CLAUDE_EFFORTS),
+            },
+            "gemini": {
+                "instance_id": g_inst,
+                "model": g_model,
+                "thought_level": g_thought,
+                "auto_rotate": g_auto,
+                "instances": instances,
+                "models": [dict(m) for m in GEMINI_MODELS],
+                "efforts": list(GEMINI_EFFORTS),
+            },
+        }
+
+    def update(self, body):
+        if not isinstance(body, dict):
+            return 400, {"error": "body must be a JSON object"}
+        c_upd = body.get("claude")
+        g_upd = body.get("gemini")
+        if c_upd is None and g_upd is None:
+            return 400, {"error": "provide 'claude' and/or 'gemini' settings"}
+
+        if c_upd is not None:
+            if not isinstance(c_upd, dict):
+                return 400, {"error": "claude must be an object"}
+            if "model" in c_upd and c_upd["model"] not in CLAUDE_MODEL_IDS:
+                return 400, {"error": f"invalid claude model: {c_upd['model']!r}"}
+            if "effort" in c_upd and c_upd["effort"] not in CLAUDE_EFFORTS:
+                return 400, {"error": f"invalid claude effort: {c_upd['effort']!r}"}
+
+        if g_upd is not None:
+            if not isinstance(g_upd, dict):
+                return 400, {"error": "gemini must be an object"}
+            if "instance_id" in g_upd:
+                iid = g_upd["instance_id"]
+                if not isinstance(iid, str) or not iid.strip():
+                    return 400, {"error": "invalid gemini instance_id"}
+                instances = _list_t3_antigravity_instances(self.t3_settings_path, self.t3_providers_dir)
+                known_ids = {i["id"] for i in instances}
+                if known_ids and iid not in known_ids:
+                    return 400, {"error": f"unknown gemini instance_id: {iid!r}"}
+            if "model" in g_upd:
+                m = g_upd["model"]
+                if not isinstance(m, str) or not m.strip() or len(m) > 100:
+                    return 400, {"error": "invalid gemini model"}
+            if "thought_level" in g_upd and g_upd["thought_level"] not in GEMINI_EFFORTS:
+                return 400, {"error": f"invalid gemini thought_level: {g_upd['thought_level']!r}"}
+            if "auto_rotate" in g_upd and not isinstance(g_upd["auto_rotate"], bool):
+                return 400, {"error": "gemini auto_rotate must be boolean"}
+
+        with self.lock:
+            if c_upd is not None:
+                c_path = self._claude_file()
+                cur = _read_json_file(c_path)
+                if "model" in c_upd:
+                    cur["model"] = c_upd["model"]
+                if "effort" in c_upd:
+                    cur["effort"] = c_upd["effort"]
+                _write_json_atomic(c_path, cur)
+
+            if g_upd is not None:
+                g_path = self._gemini_file()
+                cur = _read_json_file(g_path)
+                prev_inst = cur.get("instance_id")
+                if "instance_id" in g_upd:
+                    cur["instance_id"] = g_upd["instance_id"].strip()
+                if "model" in g_upd:
+                    cur["model"] = g_upd["model"].strip()
+                if "thought_level" in g_upd:
+                    cur["thought_level"] = g_upd["thought_level"]
+                if "auto_rotate" in g_upd:
+                    cur["auto_rotate"] = g_upd["auto_rotate"]
+                _write_json_atomic(g_path, cur)
+                if "instance_id" in g_upd and cur.get("instance_id") != prev_inst:
+                    flag = self._fresh_flag()
+                    try:
+                        os.makedirs(os.path.dirname(os.path.abspath(flag)), exist_ok=True)
+                        with open(flag, "a", encoding="utf-8"):
+                            pass
+                    except OSError:
+                        pass
+
+        return 200, self.get()
+
+
+def agent_reset(script=None, run_fn=None, timeout=10):
+    path = os.path.abspath(os.path.expanduser(script if script is not None else AGENT_RESET_BIN))
+    if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+        return 503, {"error": "agent-reset is not installed"}
+    fn = run_fn or subprocess.run
+    try:
+        r = fn([path], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        return 502, {"error": clip(f"agent reset failed: {e}", 240)}
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+        return 502, {"error": clip(f"agent reset failed: {detail}", 240)}
+    msg = (r.stdout or "Reset requested").strip()
+    return 200, {"ok": True, "message": msg}
+
+
+AGENT_USAGE = AgentUsageManager()
+AGENT_SETTINGS = AgentSettingsManager(usage_mgr=AGENT_USAGE)
 
 
 # ---------------------------------------------------------------- health overview (/pc/api/health)
@@ -1035,6 +2125,8 @@ def health_sources(timeout=HEALTH_TIMEOUT):
         "sonarr": lambda: arr_queue("tv-sonarr", timeout),
         "jellyfin": lambda: jellyfin_streams(timeout),
         "disks": health_disks,
+        "vpn": vpn_health,
+        "agent": lambda: agent_health(timeout),
     }
 
 
@@ -1073,6 +2165,8 @@ def health_report(sources=None, timeout=HEALTH_TIMEOUT):
     sonarr = _health_section(raw, "sonarr")
     jellyfin = _health_section(raw, "jellyfin")
     disks = _health_section(raw, "disks")
+    vpn = _health_section(raw, "vpn")
+    agent = _health_section(raw, "agent")
 
     if services["available"]:
         counts = {"running": 0, "failed": 0, "inactive": 0, "other": 0}
@@ -1095,6 +2189,13 @@ def health_report(sources=None, timeout=HEALTH_TIMEOUT):
     source_problem("Sonarr", sonarr)
     source_problem("Jellyfin", jellyfin)
     source_problem("Disks", disks)
+    if "vpn" in raw:
+        source_problem("VPN", vpn)
+        if vpn["available"] and vpn.get("enabled") and not vpn.get("tunnel_up"):
+            problems.append({"kind": "vpn", "severity": "warn", "title": "Torrent VPN is down",
+                             "detail": vpn.get("last_error") or "qBittorrent is not routed through Proton"})
+    if "agent" in raw and not agent["available"] and agent.get("error"):
+        source_problem("Agent", agent)
 
     if services["available"]:
         for s in services.get("units") or []:
@@ -1134,7 +2235,8 @@ def health_report(sources=None, timeout=HEALTH_TIMEOUT):
                                  "detail": f"{d.get('mount')}: {human_size(total - used)} free of {human_size(total)}"})
 
     return {"ts": int(time.time()), "problems": problems, "services": services, "downloads": downloads,
-            "radarr": radarr, "sonarr": sonarr, "jellyfin": jellyfin, "disks": disks}
+            "radarr": radarr, "sonarr": sonarr, "jellyfin": jellyfin, "disks": disks, "vpn": vpn,
+            "agent": agent}
 
 
 # ---------------------------------------------------------------- app crash reports
@@ -1497,6 +2599,17 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/downloads":
                 return self.send_json(200, {**DOWNLOADS.active(), "enabled": NOTIFY.wants("live")["app"],
                                             "ts": int(time.time())})
+            if path == "/api/vpn": return self.send_json(200, VPN.status())
+            if path == "/api/agent":
+                try:
+                    return self.send_json(200, AGENT.status())
+                except Exception as e:
+                    return self.send_json(502, {"error": clip(f"agent status failed: {e}", 240)})
+            if path == "/api/agent/usage":
+                refresh = qs.get("refresh", [""])[0] in ("1", "true", "yes")
+                return self.send_json(*AGENT_USAGE.get(force_refresh=refresh))
+            if path == "/api/agent/settings":
+                return self.send_json(200, AGENT_SETTINGS.get())
         elif method == "POST":
             m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
             if m: return self.hook(m.group(1))
@@ -1538,6 +2651,19 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/downloads/started":
                 if b.get("hash") and b.get("title"): DOWNLOADS.remember(str(b["hash"]), str(b["title"]))
                 return self.send_json(200, {"ok": True, "app": NOTIFY.live_kick(clip(b.get("source") or "", 20))})
+            if path == "/api/vpn":
+                if not isinstance(b.get("enabled"), bool):
+                    return self.send_json(400, {"error": "enabled must be true or false"})
+                try:
+                    return self.send_json(200, VPN.set_enabled(b["enabled"]))
+                except Exception as e:
+                    return self.send_json(502, {"error": clip(f"qBittorrent did not take the change: {e}", 240)})
+            if path == "/api/agent":
+                return self.send_json(*AGENT.switch(b.get("engine")))
+            if path == "/api/agent/settings":
+                return self.send_json(*AGENT_SETTINGS.update(b))
+            if path == "/api/agent/reset":
+                return self.send_json(*agent_reset())
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
@@ -1636,10 +2762,11 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER
+    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER, VPN
     PUSH = Push()
     NOTIFY = Notify(PUSH)
     DOWNLOADS = Downloads()
+    VPN = VpnManager(NOTIFY, qbt=DOWNLOADS).start()
     hook_secret()
     HUB = Hub()
     WATCHER = ServiceWatcher(NOTIFY).start()

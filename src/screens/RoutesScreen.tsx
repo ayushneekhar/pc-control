@@ -1,6 +1,6 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import { useCallback, useState } from 'react';
-import { Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { type ComponentType, useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, AppState, Image, InteractionManager, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   Banner,
   Card,
@@ -15,16 +15,17 @@ import {
 import { PcNative } from '../../modules/pc-native';
 import { get, Health, Info, Route, serverUrl, Vitals } from '../lib/api';
 import { CAMS, CamId, NAMES } from '../lib/cams/config';
-import { ago, bytes, duration, rate } from '../lib/format';
+import { prepareCamsOnce } from '../lib/cams/prepare';
+import { rate } from '../lib/format';
 import { DownloadsReply } from '../lib/live';
-import { radius, space, useTheme } from '../theme';
+import { space, useTheme } from '../theme';
 
 /** Routes the app plays natively instead of opening the browser (the screen keeps a link to the web page). */
 const NATIVE: Record<string, string> = { '/cams/': 'Cams', '/agentview': 'AgentView' };
 
 /** Phone-side names for routes that open a native screen. */
-const TILE: Record<string, Partial<Pick<Route, 'name' | 'icon' | 'subtitle'>>> = {
-  '/agentview': { name: 'Agent view', icon: 'robot-outline', subtitle: 'What agents see' },
+const TILE: Record<string, Partial<Pick<Route, 'name' | 'icon'>>> = {
+  '/agentview': { name: 'Agent view', icon: 'robot-outline' },
 };
 
 type DetState = {
@@ -61,60 +62,57 @@ function routeView(r: Route) {
   return {
     name: view?.name ?? r.name,
     icon: view?.icon ?? r.icon,
-    subtitle: view?.subtitle ?? r.subtitle,
     screen: r.port === 443 ? NATIVE[r.path] : undefined,
   };
 }
 
-function RouteTile({ r }: { r: Route }) {
-  const t = useTheme();
-  const nav = useNavigation<any>();
-  const view = routeView(r);
-  return (
-    <Card
-      onPress={() => (view.screen ? nav.navigate(view.screen) : open(r))}
-      style={{ gap: space(2.5), minHeight: 104, justifyContent: 'space-between' }}
-    >
-      <Icon name={view.icon} size={22} color={t.textDim} />
-      <View style={{ gap: 2 }}>
-        <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '500' }} numberOfLines={1}>
-          {view.name}
-        </Text>
-        <Text style={{ color: t.textFaint, fontSize: 11.5, fontFamily: t.mono }} numberOfLines={1}>
-          {r.kind === 'app' ? 'app' : r.port === 443 ? r.path : `:${r.port}`}
-        </Text>
-      </View>
-    </Card>
-  );
+function shortHost(host: string) {
+  return host.replace(/^ayushlive-/i, '').toLowerCase();
+}
+
+function upShort(secs: number) {
+  const d = Math.floor(secs / 86400);
+  if (d) return `${d} d`;
+  const h = Math.floor((secs % 86400) / 3600);
+  if (h) return `${h} h`;
+  return `${Math.floor((secs % 3600) / 60)} min`;
+}
+
+function seenAgo(ts: number) {
+  const s = Date.now() / 1000 - ts;
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? 'yesterday' : `${d} days ago`;
 }
 
 function CameraTile({
-  id,
   name,
-  tick,
+  uri,
   failed,
-  onFail,
+  style,
 }: {
-  id: CamId;
   name: string;
-  tick: number;
+  uri: string | null;
   failed: boolean;
-  onFail: () => void;
+  style?: object;
 }) {
   const t = useTheme();
   return (
-    <View style={st.cam}>
-      {failed ? (
+    <View style={[st.cam, style]}>
+      {uri ? (
+        <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" fadeDuration={0} />
+      ) : failed ? (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
           <Icon name="video-off-outline" size={20} color={t.onMediaDim} />
         </View>
       ) : (
-        <Image
-          source={{ uri: `${serverUrl()}/api/frame.jpeg?src=${id}&t=${tick}` }}
-          style={StyleSheet.absoluteFill}
-          resizeMode="cover"
-          onError={onFail}
-        />
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <ActivityIndicator size="small" color={t.onMediaDim} />
+        </View>
       )}
       <View style={[st.camName, { backgroundColor: t.mediaChip }]}>
         <Text style={{ color: t.onMedia, fontSize: 11 }} numberOfLines={1}>
@@ -125,12 +123,72 @@ function CameraTile({
   );
 }
 
+function CamTile({
+  cam,
+  live,
+  active,
+  frames,
+  failedCams,
+  style,
+}: {
+  cam: (typeof CAMS)[number];
+  live: LiveTileModule | null;
+  active: boolean;
+  frames: Partial<Record<CamId, string>>;
+  failedCams: Partial<Record<CamId, boolean>>;
+  style?: object;
+}) {
+  const poster = frames[cam.id] ?? null;
+  const failed = !!failedCams[cam.id];
+  if (!live) return <CameraTile name={cam.name} uri={poster} failed={failed} style={style} />;
+  const Live = live.LiveTile;
+  return <Live stream={cam.id} label={cam.name} poster={poster} posterFailed={failed} active={active} style={style} />;
+}
+
+type LiveTileProps = {
+  stream: string;
+  label: string;
+  poster: string | null;
+  posterFailed: boolean;
+  active: boolean;
+  style?: object;
+};
+type LiveTileModule = {
+  LiveTile: ComponentType<LiveTileProps>;
+  stopHomeLive: () => void;
+};
+
+function useLazyLiveTile() {
+  const [mod, setMod] = useState<LiveTileModule | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const task = InteractionManager.runAfterInteractions(() => {
+      if (cancelled) return;
+      prepareCamsOnce();
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const m = require('../components/LiveTile') as LiveTileModule;
+        if (!cancelled) setMod(m);
+      } catch {
+        /* keep the snapshots */
+      }
+    });
+    return () => {
+      cancelled = true;
+      task.cancel();
+    };
+  }, []);
+  return mod;
+}
+
 function StatusLine({ tone, label }: { tone: 'ok' | 'warn' | 'bad' | 'faint'; label: string }) {
   const t = useTheme();
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 }}>
       <StatusDot tone={tone} />
-      <Text style={{ color: t.textDim, fontSize: 12.5 }}>{label}</Text>
+      <Text style={{ color: t.textDim, fontSize: 12.5, flexShrink: 1 }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+        {label}
+      </Text>
     </View>
   );
 }
@@ -145,9 +203,14 @@ export default function RoutesScreen() {
   const [det, setDet] = useState<DetState | null>(null);
   const [downloads, setDownloads] = useState<DownloadsReply | null>(null);
   const [tick, setTick] = useState(0);
-  const [failedCams, setFailedCams] = useState<Record<string, boolean>>({});
+  const [frames, setFrames] = useState<Partial<Record<CamId, string>>>({});
+  const [failedCams, setFailedCams] = useState<Partial<Record<CamId, boolean>>>({});
+  const framesRef = useRef<Partial<Record<CamId, string>>>({});
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [appActive, setAppActive] = useState(AppState.currentState === 'active');
+  const live = useLazyLiveTile();
 
   const load = useCallback(async () => {
     const [i, v, h, r, d, dl] = await Promise.all([
@@ -167,18 +230,64 @@ export default function RoutesScreen() {
     setLoaded(true);
   }, []);
 
+  useEffect(() => {
+    framesRef.current = frames;
+  }, [frames]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => setAppActive(st === 'active'));
+    return () => sub.remove();
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
+      setFocused(true);
       load();
-      setFailedCams({});
-      const id = setInterval(() => {
-        setTick((n) => n + 1);
-        setFailedCams({});
-      }, 5000);
-      return () => clearInterval(id);
+      setTick((n) => n + 1);
+      const id = setInterval(() => setTick((n) => n + 1), 3000);
+      return () => {
+        setFocused(false);
+        clearInterval(id);
+      };
     }, [load]),
   );
 
+  useEffect(() => {
+    let cancelled = false;
+    for (const c of CAMS) {
+      const next = `${serverUrl()}/api/frame.jpeg?src=${c.id}&t=${tick}`;
+      Image.prefetch(next)
+        .then((ok) => {
+          if (cancelled) return;
+          if (ok) {
+            setFrames((f) => ({ ...f, [c.id]: next }));
+            setFailedCams((m) => {
+              if (!m[c.id]) return m;
+              const copy = { ...m };
+              delete copy[c.id];
+              return copy;
+            });
+          } else if (!framesRef.current[c.id]) {
+            setFailedCams((m) => ({ ...m, [c.id]: true }));
+          }
+        })
+        .catch(() => {
+          if (!cancelled && !framesRef.current[c.id]) setFailedCams((m) => ({ ...m, [c.id]: true }));
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [tick]);
+
+  const openCams = useCallback(
+    (params?: { tab?: 'replay' | 'music'; tabRequest?: number }) => {
+      live?.stopHomeLive();
+      nav.navigate('Cams', params);
+    },
+    [live, nav],
+  );
+  const liveActive = focused && appActive;
   const latest = lastSighting(det);
   const problems = health?.problems?.length ?? 0;
   const offline = loaded && !info && !vitals && !routes;
@@ -186,13 +295,18 @@ export default function RoutesScreen() {
   const statusLabel = offline
     ? "Can't reach the laptop"
     : info
-      ? `Connected · ${info.host}`
+      ? `${shortHost(info.host)}${vitals ? ` · up ${upShort(vitals.uptime)}` : ''}`
       : 'Connecting to the laptop…';
   const temp = vitals
     ? Object.values(vitals.temps ?? {}).reduce<number | null>((m, v) => (v == null ? m : m == null ? v : Math.max(m, v)), null)
     : null;
+  const cpuTemp = vitals?.temps?.cpu ?? temp;
   const active = downloads?.downloads ?? [];
-  const openScreen = routes?.length ? routes : [];
+  const total = downloads?.total;
+  const openScreen = (routes ?? []).filter((r) => r.path !== '/cams/' && r.name !== 'Cat cams');
+  const loadedCams = CAMS.filter((c) => !!frames[c.id]).length;
+  const hasDownloads = active.length > 0;
+  const progress = total?.progress == null ? null : Math.round(total.progress * 100);
 
   return (
     <Screen
@@ -216,9 +330,12 @@ export default function RoutesScreen() {
           onPress={() => nav.navigate('Vitals')}
           items={[
             { label: 'CPU', value: Math.round(vitals.cpu), unit: '%' },
-            { label: 'Memory', value: Math.round(vitals.mem.pct), unit: '%' },
-            { label: 'Temp', value: temp == null ? '–' : Math.round(temp), unit: temp == null ? undefined : '°C' },
-            { label: 'Uptime', value: duration(vitals.uptime) },
+            {
+              label: 'Memory',
+              value: (vitals.mem.used / 1024 ** 3).toFixed(1),
+              unit: `/${Math.round(vitals.mem.total / 1024 ** 3)}G`,
+            },
+            { label: 'Temp', value: cpuTemp == null ? '–' : Math.round(cpuTemp), unit: cpuTemp == null ? undefined : '°C' },
           ]}
         />
       ) : !loaded ? (
@@ -230,88 +347,81 @@ export default function RoutesScreen() {
       <Section
         label="Cameras"
         right={
-          <Pressable onPress={() => nav.navigate('Cams')} hitSlop={10}>
-            <Text style={{ color: t.accent, fontSize: 12.5, fontWeight: '500' }}>Open</Text>
-          </Pressable>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            <Pressable onPress={() => openCams({ tab: 'replay', tabRequest: Date.now() })} hitSlop={8}>
+              <Text style={{ color: t.textFaint, fontSize: 12.5 }}>Replay</Text>
+            </Pressable>
+            <Text style={{ color: t.textFaint, fontSize: 12.5 }}>·</Text>
+            <Pressable onPress={() => openCams({ tab: 'music', tabRequest: Date.now() })} hitSlop={8}>
+              <Text style={{ color: t.textFaint, fontSize: 12.5 }}>Music</Text>
+            </Pressable>
+          </View>
         }
       >
-        <Card style={{ padding: space(2), gap: space(2) }}>
-          <View style={{ flexDirection: 'row', gap: space(2) }}>
-            {CAMS.map((c) => (
-              <CameraTile
-                key={c.id}
-                id={c.id}
-                name={c.name}
-                tick={tick}
-                failed={!!failedCams[c.id]}
-                onFail={() => setFailedCams((m) => ({ ...m, [c.id]: true }))}
-              />
-            ))}
+        <Card onPress={() => openCams()} style={{ padding: 0 }}>
+          <View style={st.camWall}>
+            <View style={{ flexDirection: 'row', gap: 2, flex: 1 }}>
+              <CamTile cam={CAMS[0]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 2 }} />
+              <View style={{ flex: 1, gap: 2 }}>
+                <CamTile cam={CAMS[1]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 1 }} />
+                <CamTile cam={CAMS[2]} live={live} active={liveActive} frames={frames} failedCams={failedCams} style={{ flex: 1 }} />
+              </View>
+            </View>
           </View>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: space(1) }}>
-            <StatusDot tone={latest ? 'ok' : 'faint'} size={6} />
-            <Text style={{ color: t.textDim, fontSize: 12 }} numberOfLines={1}>
-              {latest ? `Cat seen ${ago(latest.ts)} · ${latest.name}` : det ? 'No cats yet' : 'Detector offline'}
+          <View style={st.camFoot}>
+            <Text style={{ color: t.text, fontSize: 13.5, fontWeight: '600' }}>{loadedCams} cams</Text>
+            <Text style={{ color: t.textDim, fontSize: 12.5 }} numberOfLines={1}>
+              {latest ? `Cat seen ${seenAgo(latest.ts)} · ${latest.name}` : det ? 'No cats yet' : 'Detector offline'}
             </Text>
           </View>
         </Card>
       </Section>
 
-      {active.length ? (
-        <Section label="Downloads">
+      <Section label="Open">
+        {openScreen.length || hasDownloads ? (
           <List>
-            {active.slice(0, 4).map((d, i) => (
+            {openScreen.map((r, i) => {
+              const view = routeView(r);
+              return (
+                <ListRow
+                  key={r.id}
+                  icon={view.icon}
+                  title={view.name}
+                  chevron
+                  last={!hasDownloads && i === openScreen.length - 1}
+                  onPress={() => (view.screen ? nav.navigate(view.screen) : open(r))}
+                />
+              );
+            })}
+            {hasDownloads ? (
               <ListRow
-                key={d.id}
-                icon={d.state === 'stalled' ? 'alert-circle-outline' : 'download-outline'}
-                title={d.name}
-                subtitle={`${Math.round(d.progress * 100)}% · ${rate(d.speed)}${
-                  d.state === 'stalled' ? ' · stalled' : ''
-                }`}
-                trailing={d.eta == null ? undefined : duration(d.eta)}
-                last={i === Math.min(active.length, 4) - 1}
+                icon="download-outline"
+                title="Downloads"
+                subtitle={`${active.length} active · ${rate(total?.speed ?? 0)}`}
+                trailing={
+                  progress == null ? undefined : (
+                    <Text style={{ color: t.warn, fontSize: 12, fontWeight: '500', fontVariant: ['tabular-nums'] }}>
+                      {progress}%
+                    </Text>
+                  )
+                }
+                last
               />
-            ))}
+            ) : null}
           </List>
-        </Section>
-      ) : null}
-
-      <Section label="Shortcuts">
-        {openScreen.length ? (
-          <View style={st.grid}>
-            {openScreen.map((r) => (
-              <View key={r.id} style={st.cell}>
-                <RouteTile r={r} />
-              </View>
-            ))}
-          </View>
         ) : (
           <Card>
             <Text style={{ color: t.textFaint }}>{loaded ? 'No shortcuts on this server.' : 'Loading…'}</Text>
           </Card>
         )}
       </Section>
-
-      {health?.downloads.total && health.downloads.total.downloading > 0 ? (
-        <Text style={{ color: t.textFaint, fontSize: 12, textAlign: 'center' }}>
-          {health.downloads.total.downloading} downloading · {bytes(health.downloads.total.done, 0)} of{' '}
-          {bytes(health.downloads.total.size, 0)}
-        </Text>
-      ) : null}
     </Screen>
   );
 }
 
 const st = StyleSheet.create({
-  grid: { flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -space(1) },
-  cell: { width: '50%', padding: space(1) },
-  cam: {
-    flex: 1,
-    aspectRatio: 4 / 3,
-    borderRadius: radius.sm,
-    overflow: 'hidden',
-    alignItems: 'stretch',
-    justifyContent: 'flex-end',
-  },
-  camName: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 6, margin: 5, alignSelf: 'flex-start' },
+  camWall: { height: 176, flexDirection: 'row' },
+  cam: { overflow: 'hidden', alignItems: 'stretch', justifyContent: 'flex-end' },
+  camName: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 6, margin: 6, alignSelf: 'flex-start' },
+  camFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(3), padding: 14 },
 });

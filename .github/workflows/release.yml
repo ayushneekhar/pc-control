@@ -5,6 +5,12 @@ name: Release APK
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "apk: build + sign + publish an APK. ota: publish a JS-only update for the current build."
+        required: true
+        type: choice
+        options: [apk, ota]
+        default: apk
       notes:
         description: Release notes (optional)
         required: false
@@ -22,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
+      MODE: ${{ inputs.mode }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PCC_KEYSTORE_BASE64: ${{ secrets.PCC_KEYSTORE_BASE64 }}
       PCC_KEY_ALIAS: ${{ secrets.PCC_KEY_ALIAS }}
@@ -44,7 +51,11 @@ jobs:
       - name: Validate required secrets
         run: |
           missing=0
-          for name in PCC_KEYSTORE_BASE64 PCC_KEY_ALIAS PCC_STORE_PASSWORD PCC_KEY_PASSWORD OTA_SIGNING_KEY_PEM; do
+          names="OTA_SIGNING_KEY_PEM"
+          if [ "${MODE:-apk}" = "apk" ]; then
+            names="PCC_KEYSTORE_BASE64 PCC_KEY_ALIAS PCC_STORE_PASSWORD PCC_KEY_PASSWORD OTA_SIGNING_KEY_PEM"
+          fi
+          for name in $names; do
             if [ -z "${!name:-}" ]; then
               echo "::error::Missing required repository secret: $name"
               missing=1
@@ -58,12 +69,14 @@ jobs:
           node-version: 22
 
       - name: Set up JDK 21
+        if: inputs.mode == 'apk'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Locate the JDK 17 toolchain
+        if: inputs.mode == 'apk'
         run: |
           if [ -x "${JAVA_HOME_17_X64:-}/bin/javac" ]; then
             echo "JDK17=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
@@ -72,9 +85,13 @@ jobs:
           fi
 
       - name: Set up Android SDK
+        if: inputs.mode == 'apk'
         uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
 
       - name: Install Android SDK packages
+        if: inputs.mode == 'apk'
         run: |
           sdkmanager --install \
             "platforms;android-35" \
@@ -83,31 +100,40 @@ jobs:
             "cmake;3.22.1" >/dev/null
 
       - name: Install ccache
+        if: inputs.mode == 'apk'
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: release-apk-${{ runner.os }}-${{ hashFiles('yarn.lock', 'package.json') }}
           max-size: 2G
 
       - name: Cache Gradle
+        if: inputs.mode == 'apk'
         uses: gradle/actions/setup-gradle@v4
 
       - name: Install dependencies
         run: yarn install --frozen-lockfile --network-timeout 600000
 
-      - name: Restore signing material from secrets
+      - name: Restore the OTA signing key
         run: |
           umask 077
           DIR="$HOME/.config/pc-control"
           mkdir -p "$DIR"
-          printf '%s' "$PCC_KEYSTORE_BASE64" | base64 --decode > "$DIR/release.jks"
           printf '%s\n' "$OTA_SIGNING_KEY_PEM" > "$DIR/ota-signing-key.pem"
+          chmod 600 "$DIR/ota-signing-key.pem"
+
+      - name: Restore Android signing material
+        if: inputs.mode == 'apk'
+        run: |
+          umask 077
+          DIR="$HOME/.config/pc-control"
+          printf '%s' "$PCC_KEYSTORE_BASE64" | base64 --decode > "$DIR/release.jks"
           {
             printf 'PCC_KEYSTORE=%q\n' "$DIR/release.jks"
             printf 'PCC_KEY_ALIAS=%q\n' "$PCC_KEY_ALIAS"
             printf 'PCC_STORE_PASSWORD=%q\n' "$PCC_STORE_PASSWORD"
             printf 'PCC_KEY_PASSWORD=%q\n' "$PCC_KEY_PASSWORD"
           } > "$DIR/keystore.env"
-          chmod 600 "$DIR/release.jks" "$DIR/ota-signing-key.pem" "$DIR/keystore.env"
+          chmod 600 "$DIR/release.jks" "$DIR/keystore.env"
           if [ -n "${GOOGLE_SERVICES_JSON:-}" ]; then
             printf '%s\n' "$GOOGLE_SERVICES_JSON" > "$DIR/google-services.json"
             chmod 600 "$DIR/google-services.json"
@@ -116,6 +142,7 @@ jobs:
           keytool -list -keystore "$DIR/release.jks" -storepass "$PCC_STORE_PASSWORD" -alias "$PCC_KEY_ALIAS" >/dev/null
 
       - name: Fail early if the release tag exists
+        if: inputs.mode == 'apk'
         run: |
           VERSION=$(node -p 'require("./app.json").expo.version')
           REPO=$(node -p 'require("./app.json").expo.extra.github.repo')
@@ -125,17 +152,27 @@ jobs:
           fi
 
       - name: Compute the bundled OTA version
+        if: inputs.mode == 'apk'
         run: |
           OTA=$(( $(node -p 'require("./scripts/ota/ota-bundle-version.json").android') + 1 ))
           echo "EXPO_PUBLIC_BUNDLED_OTA_VERSION=$OTA" >> "$GITHUB_ENV"
 
-      - name: Build, sign and publish the release
-        env:
-          NOTES: ${{ inputs.notes }}
+      - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          scripts/release-apk.sh "$NOTES"
 
-      - name: Push the OTA counter bump
+      - name: Build, sign and publish the APK release
+        if: inputs.mode == 'apk'
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: scripts/release-apk.sh "$NOTES"
+
+      - name: Publish the JS-only OTA
+        if: inputs.mode == 'ota'
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: scripts/ota-publish.sh "$NOTES"
+
+      - name: Push the version counter bump
         run: git push origin "HEAD:${{ github.ref_name }}"

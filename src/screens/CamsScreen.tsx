@@ -7,13 +7,18 @@
 // - Everything starts muted: audio connections exist only while Listen / the cam mic / Talk are on.
 // - Leaving the screen or backgrounding the app closes every connection (and Talk/Listen); coming back
 //   reconnects at once.
-import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
-import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useFocusEffect,
+  useNavigation,
+  useRoute,
+} from "@react-navigation/native";
+import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Animated,
   AppState,
   BackHandler,
+  GestureResponderEvent,
   Linking,
   Modal,
   NativeModules,
@@ -26,30 +31,70 @@ import {
   useWindowDimensions,
   Vibration,
   View,
-} from 'react-native';
-import { RTCRtpReceiver, RTCView } from 'react-native-webrtc';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { PcNative } from '../../modules/pc-native';
-import { Banner, Button, Icon } from '../components/ui';
-import { serverUrl } from '../lib/api';
-import { CamLink, LinkKind, LinkState } from '../lib/cams/link';
-import { CAM_MIC_STREAM, CamId, CAMS, HD_STREAM, HD_WAIT_MS, LAPTOP_MIC_STREAM, NAMES, TALK_STREAM, WEB_PATH } from '../lib/cams/config';
-import { parseSightingTarget } from '../lib/cams/replay';
-import { radius, space, useTheme } from '../theme';
-import { MusicTab } from './cams/MusicTab';
-import { ReplayTab } from './cams/ReplayTab';
+} from "react-native";
+import { RTCRtpReceiver, RTCView } from "react-native-webrtc";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { PcNative } from "../../modules/pc-native";
+import { PinchZoom, type PinchZoomHandle } from "../components/PinchZoom";
+import { Banner, Button, Icon } from "../components/ui";
+import { serverUrl } from "../lib/api";
+import { LinkState } from "../lib/cams/link";
+import {
+  CAM_MIC_STREAM,
+  CamId,
+  CAMS,
+  HD_STREAM,
+  HD_WAIT_MS,
+  LAPTOP_MIC_STREAM,
+  NAMES,
+  TALK_STREAM,
+  WEB_PATH,
+} from "../lib/cams/config";
+import { parseSightingTarget } from "../lib/cams/replay";
+import { useLiveCam } from "../lib/cams/useLiveCam";
+import { radius, screenPad, space, useTheme } from "../theme";
+import { MusicTab } from "./cams/MusicTab";
+import { LivePlayer } from "./cams/LivePlayer";
+import { ReplayTab } from "./cams/ReplayTab";
 
-export type CamsTab = 'live' | 'replay' | 'music';
+// Live cam video: TextureView renderer, so PinchZoom can scale/pan it (the background-drawable crash is fixed in
+// pc-native's LivePlayerView). Flip to false to fall back to RTCView.
+const USE_ZOOMABLE_LIVE = true;
+
+export type CamsTab = "live" | "replay" | "music";
 export type CamsParams =
-  | { tab?: CamsTab; share?: string; shareId?: number; cam?: string; ts?: string | number }
+  | {
+      tab?: CamsTab;
+      tabRequest?: number;
+      share?: string;
+      shareId?: number;
+      cam?: string;
+      ts?: string | number;
+    }
   | undefined;
 const TABS: { id: CamsTab; label: string; icon: string }[] = [
-  { id: 'live', label: 'Live', icon: 'access-point' },
-  { id: 'replay', label: 'Replay', icon: 'history' },
-  { id: 'music', label: 'Music', icon: 'music' },
+  { id: "live", label: "Live", icon: "access-point" },
+  { id: "replay", label: "Replay", icon: "history" },
+  { id: "music", label: "Music", icon: "music" },
 ];
 
 type Stream = { toURL(): string };
+
+const DEFAULT_VIDEO_ASPECT = 16 / 9;
+
+/** LinkState.size looks like "1280×720" (stats) or "1280x720"; fall back to 16:9 until the first frame. */
+function videoAspect(size: string | null): number {
+  const m = /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/i.exec(size ?? "");
+  if (!m) return DEFAULT_VIDEO_ASPECT;
+  const w = Number(m[1]),
+    h = Number(m[2]);
+  return w > 0 && h > 0 ? w / h : DEFAULT_VIDEO_ASPECT;
+}
+
+/** The largest box with this aspect that fits inside the available area (letterbox/pillarbox). */
+function containBox(w: number, h: number, aspect: number) {
+  return w / h > aspect ? { w: h * aspect, h } : { w, h: w / aspect };
+}
 
 // ---------------------------------------------------------------- capability check (once)
 
@@ -57,80 +102,48 @@ function hdSupport(): { ok: boolean; why: string; decoder: string | null } {
   let decoder: string | null = null;
   try {
     const hw = PcNative?.camsHardware();
-    if (hw && !hw.configured) return { ok: false, why: hw.error ?? 'WebRTC options not set', decoder };
-    if (!hw?.h265) return { ok: false, why: 'This phone has no hardware H.265 decoder', decoder };
+    if (hw && !hw.configured)
+      return { ok: false, why: hw.error ?? "WebRTC options not set", decoder };
+    if (!hw?.h265)
+      return {
+        ok: false,
+        why: "This phone has no hardware H.265 decoder",
+        decoder,
+      };
     decoder = hw.h265.name;
-    if (!hw.h265.hd) return { ok: false, why: `${hw.h265.name} can't decode 2304×1296`, decoder };
+    if (!hw.h265.hd)
+      return {
+        ok: false,
+        why: `${hw.h265.name} can't decode 2304×1296`,
+        decoder,
+      };
   } catch {
-    return { ok: false, why: 'No native cams support in this build', decoder };
+    return { ok: false, why: "No native cams support in this build", decoder };
   }
   try {
-    const caps = RTCRtpReceiver.getCapabilities('video');
-    if (!caps?.codecs?.some((c: { mimeType: string }) => /^video\/h265$/i.test(c.mimeType)))
-      return { ok: false, why: "This build's WebRTC doesn't offer H.265", decoder };
+    const caps = RTCRtpReceiver.getCapabilities("video");
+    if (
+      !caps?.codecs?.some((c: { mimeType: string }) =>
+        /^video\/h265$/i.test(c.mimeType),
+      )
+    )
+      return {
+        ok: false,
+        why: "This build's WebRTC doesn't offer H.265",
+        decoder,
+      };
   } catch {
     return { ok: false, why: "Couldn't read WebRTC's codecs", decoder };
   }
-  return { ok: true, why: '', decoder };
+  return { ok: true, why: "", decoder };
 }
 
 // ---------------------------------------------------------------- hooks
 
-const IDLE: LinkState = {
-  phase: 'stopped',
-  fps: 0,
-  codec: null,
-  decoder: null,
-  size: null,
-  bufferMs: null,
-  rttMs: null,
-  everPlayed: false,
-  error: null,
-  retryIn: null,
-  attempt: 0,
-};
-
-/** A CamLink that runs while `src` is set. Returns its state and (video) stream. */
-function useLink(
-  src: string | null,
-  kind: LinkKind,
-  opts?: { firstFrameMs?: number; maxAttempts?: number; onState?: (s: LinkState) => void },
-) {
-  const [state, setState] = useState<LinkState>(IDLE);
-  const [stream, setStream] = useState<Stream | null>(null);
-  const cb = useRef(opts?.onState);
-  useEffect(() => {
-    cb.current = opts?.onState;
-  });
-  const firstFrameMs = opts?.firstFrameMs;
-  const maxAttempts = opts?.maxAttempts;
-  useEffect(() => {
-    if (!src) return;
-    const l = new CamLink({
-      base: serverUrl(),
-      src,
-      kind,
-      onState: (s) => {
-        setState(s);
-        cb.current?.(s);
-      },
-      onStream: (s) => setStream(s as Stream | null),
-      firstFrameMs,
-      maxAttempts,
-    });
-    l.start();
-    return () => {
-      l.stop();
-      setStream(null);
-    };
-  }, [src, kind, firstFrameMs, maxAttempts]);
-  return src ? { state, stream } : { state: IDLE, stream: null };
-}
-
 /** True while this screen is focused and the app is in the foreground. */
 function useActive(onInactive: () => void) {
   const [focused, setFocused] = useState(false);
-  const [fg, setFg] = useState(AppState.currentState === 'active');
+  const [fg, setFg] = useState(AppState.currentState === "active");
   const cb = useRef(onInactive);
   useEffect(() => {
     cb.current = onInactive;
@@ -145,9 +158,9 @@ function useActive(onInactive: () => void) {
     }, []),
   );
   useEffect(() => {
-    const s = AppState.addEventListener('change', (st) => {
-      setFg(st === 'active');
-      if (st !== 'active') cb.current();
+    const s = AppState.addEventListener("change", (st) => {
+      setFg(st === "active");
+      if (st !== "active") cb.current();
     });
     return () => s.remove();
   }, []);
@@ -155,16 +168,28 @@ function useActive(onInactive: () => void) {
 }
 
 function useToast() {
-  const [msg, setMsg] = useState<{ text: string; action?: { label: string; run: () => void } } | null>(null);
+  const [msg, setMsg] = useState<{
+    text: string;
+    action?: { label: string; run: () => void };
+  } | null>(null);
   const [op] = useState(() => new Animated.Value(0));
   const tid = useRef<ReturnType<typeof setTimeout> | null>(null);
   const show = useCallback(
     (text: string, ms = 2600, action?: { label: string; run: () => void }) => {
       setMsg({ text, action });
-      Animated.timing(op, { toValue: 1, duration: 160, useNativeDriver: true }).start();
+      Animated.timing(op, {
+        toValue: 1,
+        duration: 160,
+        useNativeDriver: true,
+      }).start();
       if (tid.current) clearTimeout(tid.current);
       tid.current = setTimeout(
-        () => Animated.timing(op, { toValue: 0, duration: 200, useNativeDriver: true }).start(() => setMsg(null)),
+        () =>
+          Animated.timing(op, {
+            toValue: 0,
+            duration: 200,
+            useNativeDriver: true,
+          }).start(() => setMsg(null)),
         ms,
       );
     },
@@ -174,11 +199,19 @@ function useToast() {
   return { msg, op, show };
 }
 
-async function hit(path: string, method: 'GET' | 'POST' = 'POST', timeoutMs = 6000): Promise<Response> {
+async function hit(
+  path: string,
+  method: "GET" | "POST" = "POST",
+  timeoutMs = 6000,
+): Promise<Response> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    return await fetch(serverUrl() + path, { method, signal: ctrl.signal, headers: { 'Cache-Control': 'no-store' } });
+    return await fetch(serverUrl() + path, {
+      method,
+      signal: ctrl.signal,
+      headers: { "Cache-Control": "no-store" },
+    });
   } finally {
     clearTimeout(t);
   }
@@ -194,12 +227,12 @@ type DetState = {
 
 function ago(ts: number) {
   const m = Math.floor((Date.now() / 1000 - ts) / 60);
-  if (m < 1) return 'just now';
+  if (m < 1) return "just now";
   if (m < 60) return `${m} min ago`;
   const h = Math.floor(m / 60);
   if (h < 24) return `${h} h ago`;
   const d = Math.floor(h / 24);
-  return d === 1 ? 'yesterday' : `${d} days ago`;
+  return d === 1 ? "yesterday" : `${d} days ago`;
 }
 
 function useDetector(active: boolean, toast: (m: string, ms?: number) => void) {
@@ -210,9 +243,9 @@ function useDetector(active: boolean, toast: (m: string, ms?: number) => void) {
   const poll = useCallback(async () => {
     if (busy.current) return;
     try {
-      const r = await hit('/detect/state', 'GET');
+      const r = await hit("/detect/state", "GET");
       const j = r.ok ? await r.json() : null;
-      if (!busy.current) setDet(j && typeof j.enabled === 'boolean' ? j : null);
+      if (!busy.current) setDet(j && typeof j.enabled === "boolean" ? j : null);
     } catch {
       if (!busy.current) setDet(null);
     }
@@ -234,9 +267,9 @@ function useDetector(active: boolean, toast: (m: string, ms?: number) => void) {
     try {
       const r = await hit(`/detect/toggle?on=${on ? 1 : 0}`);
       const j = r.ok ? await r.json() : null;
-      if (!j || typeof j.enabled !== 'boolean') throw new Error('bad state');
+      if (!j || typeof j.enabled !== "boolean") throw new Error("bad state");
       setDet(j);
-      toast(on ? 'Cat alerts on' : 'Cat alerts off: detector paused', 1800);
+      toast(on ? "Cat alerts on" : "Cat alerts off: detector paused", 1800);
     } catch {
       setDet(prev);
       toast("Couldn't reach the cat detector. Nothing changed.");
@@ -244,14 +277,21 @@ function useDetector(active: boolean, toast: (m: string, ms?: number) => void) {
     busy.current = false;
     setBusyUi(false);
   };
-  let line = loaded ? 'Detector offline' : 'Connecting to detector…';
+  let line = loaded ? "Detector offline" : "Connecting to detector…";
   if (det) {
     let best: { ts: number; name: string } | null = null;
     for (const [k, c] of Object.entries(det.cams ?? {}))
-      if (c.last_seen_ts && (!best || c.last_seen_ts > best.ts)) best = { ts: c.last_seen_ts, name: NAMES[k] || c.name || k };
+      if (c.last_seen_ts && (!best || c.last_seen_ts > best.ts))
+        best = { ts: c.last_seen_ts, name: NAMES[k] || c.name || k };
     if (!best && det.last_alert)
-      best = { ts: det.last_alert.ts, name: NAMES[det.last_alert.cam] || det.last_alert.name || det.last_alert.cam };
-    line = best ? `Cat seen ${ago(best.ts)} · ${best.name}` : 'No cats yet';
+      best = {
+        ts: det.last_alert.ts,
+        name:
+          NAMES[det.last_alert.cam] ||
+          det.last_alert.name ||
+          det.last_alert.cam,
+      };
+    line = best ? `Cat seen ${ago(best.ts)} · ${best.name}` : "No cats yet";
   }
   return { det, line, toggle, busy: busyUi };
 }
@@ -260,16 +300,16 @@ function useDetector(active: boolean, toast: (m: string, ms?: number) => void) {
 
 function usePtz() {
   const moving = useRef(false);
-  const send = (p: string) => hit('/ptz/' + p).catch(() => undefined);
+  const send = (p: string) => hit("/ptz/" + p).catch(() => undefined);
   const start = (dir: string) => {
     moving.current = true;
     Vibration.vibrate(12);
-    send('move?dir=' + dir);
+    send("move?dir=" + dir);
   };
   const stop = useCallback(() => {
     if (!moving.current) return;
     moving.current = false;
-    send('stop');
+    send("stop");
   }, []);
   useEffect(() => stop, [stop]); // leaving the screen mid-move (the server also stops after 3 s)
   return { start, stop };
@@ -278,18 +318,37 @@ function usePtz() {
 // ---------------------------------------------------------------- UI pieces
 
 const DIRS: { dir: string; icon: string; area: object }[] = [
-  { dir: 'up', icon: 'chevron-up', area: { top: 0, left: '33.3%' } },
-  { dir: 'left', icon: 'chevron-left', area: { top: '33.3%', left: 0 } },
-  { dir: 'right', icon: 'chevron-right', area: { top: '33.3%', right: 0 } },
-  { dir: 'down', icon: 'chevron-down', area: { bottom: 0, left: '33.3%' } },
+  { dir: "up", icon: "chevron-up", area: { top: 0, left: "33.3%" } },
+  { dir: "left", icon: "chevron-left", area: { top: "33.3%", left: 0 } },
+  { dir: "right", icon: "chevron-right", area: { top: "33.3%", right: 0 } },
+  { dir: "down", icon: "chevron-down", area: { bottom: 0, left: "33.3%" } },
 ];
 
-function PtzPad({ size, onClose, ptz }: { size: number; onClose: () => void; ptz: ReturnType<typeof usePtz> }) {
+function PtzPad({
+  size,
+  onClose,
+  ptz,
+}: {
+  size: number;
+  onClose: () => void;
+  ptz: ReturnType<typeof usePtz>;
+}) {
   const t = useTheme();
   const [on, setOn] = useState<string | null>(null);
   const cell = size / 3;
   return (
-    <View style={[st.pad, { width: size, height: size, borderRadius: size / 2, backgroundColor: t.mediaChip, borderColor: t.mediaChipBorder }]}>
+    <View
+      style={[
+        st.pad,
+        {
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          backgroundColor: t.mediaChip,
+          borderColor: t.mediaChipBorder,
+        },
+      ]}
+    >
       {DIRS.map((d) => (
         <Pressable
           key={d.dir}
@@ -302,15 +361,34 @@ function PtzPad({ size, onClose, ptz }: { size: number; onClose: () => void; ptz
             setOn(null);
             ptz.stop();
           }}
-          style={[st.padBtn, { width: cell, height: cell, borderRadius: cell / 2 }, d.area, on === d.dir && { backgroundColor: t.accent }]}
+          style={[
+            st.padBtn,
+            { width: cell, height: cell, borderRadius: cell / 2 },
+            d.area,
+            on === d.dir && { backgroundColor: t.accent },
+          ]}
         >
-          <Icon name={d.icon} size={cell * 0.62} color={on === d.dir ? t.onAccent : t.onMedia} />
+          <Icon
+            name={d.icon}
+            size={cell * 0.62}
+            color={on === d.dir ? t.onAccent : t.onMedia}
+          />
         </Pressable>
       ))}
       <Pressable
         onPress={onClose}
         accessibilityLabel="Close pan / tilt"
-        style={[st.padBtn, { width: cell * 0.8, height: cell * 0.8, borderRadius: cell, top: cell * 1.1, left: cell * 1.1, backgroundColor: t.ripple }]}
+        style={[
+          st.padBtn,
+          {
+            width: cell * 0.8,
+            height: cell * 0.8,
+            borderRadius: cell,
+            top: cell * 1.1,
+            left: cell * 1.1,
+            backgroundColor: t.ripple,
+          },
+        ]}
       >
         <Icon name="close" size={cell * 0.38} color={t.onMedia} />
       </Pressable>
@@ -318,7 +396,19 @@ function PtzPad({ size, onClose, ptz }: { size: number; onClose: () => void; ptz
   );
 }
 
-function Chip({ icon, on, onPress, label, text }: { icon: string; on?: boolean; onPress: () => void; label: string; text?: string }) {
+function Chip({
+  icon,
+  on,
+  onPress,
+  label,
+  text,
+}: {
+  icon: string;
+  on?: boolean;
+  onPress: () => void;
+  label: string;
+  text?: string;
+}) {
   const t = useTheme();
   return (
     <Pressable
@@ -335,12 +425,32 @@ function Chip({ icon, on, onPress, label, text }: { icon: string; on?: boolean; 
       ]}
     >
       <Icon name={icon} size={20} color={on ? t.onAccent : t.onMedia} />
-      {text ? <Text style={{ color: on ? t.onAccent : t.onMedia, fontWeight: '500', fontSize: 13 }}>{text}</Text> : null}
+      {text ? (
+        <Text
+          style={{
+            color: on ? t.onAccent : t.onMedia,
+            fontWeight: "500",
+            fontSize: 13,
+          }}
+        >
+          {text}
+        </Text>
+      ) : null}
     </Pressable>
   );
 }
 
-function IconBtn({ icon, onPress, label, busy }: { icon: string; onPress: () => void; label: string; busy?: boolean }) {
+function IconBtn({
+  icon,
+  onPress,
+  label,
+  busy,
+}: {
+  icon: string;
+  onPress: () => void;
+  label: string;
+  busy?: boolean;
+}) {
   const t = useTheme();
   return (
     <Pressable
@@ -349,30 +459,34 @@ function IconBtn({ icon, onPress, label, busy }: { icon: string; onPress: () => 
       hitSlop={2}
       style={({ pressed }) => [st.ib, pressed && { backgroundColor: t.ripple }]}
     >
-      {busy ? <ActivityIndicator size="small" color={t.onMedia} /> : <Icon name={icon} size={22} color={t.onMedia} />}
+      {busy ? (
+        <ActivityIndicator size="small" color={t.onMedia} />
+      ) : (
+        <Icon name={icon} size={22} color={t.onMedia} />
+      )}
     </Pressable>
   );
 }
 
 function badgeOf(s: LinkState, mode?: string) {
-  const tone = s.fps >= 4 ? 'ok' : s.fps > 0 ? 'slow' : 'bad';
+  const tone = s.fps >= 4 ? "ok" : s.fps > 0 ? "slow" : "bad";
   const text =
     s.fps > 0
-      ? `${s.fps} fps${mode ? ` · ${mode}` : ''}`
-      : s.phase === 'retrying'
+      ? `${s.fps} fps${mode ? ` · ${mode}` : ""}`
+      : s.phase === "retrying"
         ? `retry in ${s.retryIn}s`
-        : s.phase === 'error'
-          ? 'offline'
-          : s.phase === 'stalled'
-            ? 'stalled'
-            : 'connecting';
+        : s.phase === "error"
+          ? "offline"
+          : s.phase === "stalled"
+            ? "stalled"
+            : "connecting";
   return { tone, text };
 }
 
 function Badge({ s, mode }: { s: LinkState; mode?: string }) {
   const t = useTheme();
   const b = badgeOf(s, mode);
-  const dot = b.tone === 'ok' ? t.ok : b.tone === 'slow' ? t.warn : t.bad;
+  const dot = b.tone === "ok" ? t.ok : b.tone === "slow" ? t.warn : t.bad;
   return (
     <View style={[st.badge, { backgroundColor: t.mediaChip }]}>
       <View style={[st.badgeDot, { backgroundColor: dot }]} />
@@ -395,35 +509,139 @@ type CardProps = {
   style?: object;
 };
 
-function CamCard({ name, link, mode, compact, fullscreen, onPress, children, style }: CardProps) {
+function CamCard({
+  id,
+  name,
+  link,
+  mode,
+  compact,
+  fullscreen,
+  onPress,
+  children,
+  style,
+}: CardProps) {
   const t = useTheme();
   const { state, stream } = link;
   const showMsg = !stream || state.fps === 0;
+  const zoom = useRef<PinchZoomHandle | null>(null);
+  const lastTap = useRef<{ x: number; y: number; t: number } | null>(null);
+  const [area, setArea] = useState({ w: 0, h: 0 });
+  const streamURL = stream ? stream.toURL() : null;
+  // The native renderer fills its view and center-crops to the view aspect, so the view itself must be the
+  // video's aspect ratio. The card stays fixed; the bars around the box are just its t.media background.
+  const box =
+    area.w > 0 && area.h > 0
+      ? containBox(area.w, area.h, videoAspect(state.size))
+      : null;
+  useEffect(() => {
+    lastTap.current = null;
+  }, [id, fullscreen, streamURL]);
+
+  const tap = (x: number, y: number, now: number) => {
+    const prev = lastTap.current;
+    if (prev && now - prev.t < 280 && Math.hypot(x - prev.x, y - prev.y) < 30) {
+      lastTap.current = null;
+      zoom.current?.toggleAt(x, y);
+      return;
+    }
+    lastTap.current = { x, y, t: now };
+  };
+
+  const onCardPress = (e: GestureResponderEvent) => {
+    if (!fullscreen) {
+      onPress?.();
+      return;
+    }
+    const { locationX: x, locationY: y, timestamp: now } = e.nativeEvent;
+    tap(x, y, now);
+  };
+
   return (
-    <Pressable onPress={onPress} style={[fullscreen ? st.fsCard : st.card, { backgroundColor: t.media }, compact && st.cardCompact, style]}>
-      {stream ? <RTCView streamURL={stream.toURL()} objectFit="contain" zOrder={0} style={StyleSheet.absoluteFill} /> : null}
+    <Pressable
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        setArea((old) =>
+          old.w === width && old.h === height ? old : { w: width, h: height },
+        );
+      }}
+      onPress={onCardPress}
+      style={[
+        fullscreen ? st.fsCard : st.card,
+        { backgroundColor: t.media },
+        compact && st.cardCompact,
+        style,
+      ]}
+    >
+      {streamURL ? (
+        USE_ZOOMABLE_LIVE ? (
+          <PinchZoom
+            ref={zoom}
+            resetKey={`${id}:${fullscreen ? "full" : compact ? "thumb" : "card"}:${streamURL}`}
+            style={StyleSheet.absoluteFill}
+            onTap={(x, y, now) => fullscreen && tap(x, y, now)}
+          >
+            <View
+              pointerEvents="none"
+              style={[
+                StyleSheet.absoluteFill,
+                { alignItems: "center", justifyContent: "center" },
+              ]}
+            >
+              <View
+                style={
+                  box
+                    ? { width: box.w, height: box.h }
+                    : StyleSheet.absoluteFill
+                }
+              >
+                <LivePlayer
+                  streamURL={streamURL}
+                  style={StyleSheet.absoluteFill}
+                />
+              </View>
+            </View>
+          </PinchZoom>
+        ) : (
+          <RTCView
+            streamURL={streamURL}
+            objectFit="contain"
+            zOrder={0}
+            style={StyleSheet.absoluteFill}
+          />
+        )
+      ) : null}
       {showMsg && !compact ? (
         <View style={st.msg} pointerEvents="none">
-          {state.phase === 'error' ? (
+          {state.phase === "error" ? (
             <Icon name="video-off-outline" size={28} color={t.onMediaDim} />
           ) : (
             <ActivityIndicator color={t.onMediaDim} />
           )}
           <Text style={[st.msgText, { color: t.onMediaDim }]}>
-            {state.phase === 'retrying'
-              ? `${state.error ?? 'Disconnected'} · retrying in ${state.retryIn}s`
-              : state.phase === 'error'
-                ? (state.error ?? 'Offline')
-                : state.phase === 'stalled'
-                  ? 'Stalled: waiting for frames…'
+            {state.phase === "retrying"
+              ? `${state.error ?? "Disconnected"} · retrying in ${state.retryIn}s`
+              : state.phase === "error"
+                ? (state.error ?? "Offline")
+                : state.phase === "stalled"
+                  ? "Stalled: waiting for frames…"
                   : state.attempt > 1
-                    ? 'Reconnecting…'
-                    : 'Connecting…'}
+                    ? "Reconnecting…"
+                    : "Connecting…"}
           </Text>
         </View>
       ) : null}
-      <View style={[st.tl, compact && { top: 5, left: 7, right: 7 }]} pointerEvents="none">
-        <Text style={[st.name, { color: t.onMedia, textShadowColor: t.media }, compact && { fontSize: 12 }]} numberOfLines={1}>
+      <View
+        style={[st.tl, compact && { top: 5, left: 7, right: 7 }]}
+        pointerEvents="none"
+      >
+        <Text
+          style={[
+            st.name,
+            { color: t.onMedia, textShadowColor: t.media },
+            compact && { fontSize: 12 },
+          ]}
+          numberOfLines={1}
+        >
           {name}
         </Text>
         {!compact ? <Badge s={state} mode={mode} /> : null}
@@ -442,38 +660,64 @@ function ActButton({
   onPressIn,
   onPressOut,
 }: {
-  state: 'off' | 'on' | 'busy' | 'talking' | 'blocked';
+  state: "off" | "on" | "busy" | "talking" | "blocked";
   icon: string;
   t1: string;
-  t2: string;
+  t2?: string | null;
   onPress?: () => void;
   onPressIn?: () => void;
   onPressOut?: () => void;
 }) {
   const t = useTheme();
-  const bg = state === 'talking' ? t.bad : state === 'on' ? t.okSoft : state === 'blocked' ? t.warnSoft : t.card;
-  const icBg = state === 'talking' ? t.onMedia : state === 'on' ? t.ok : t.cardAlt;
-  const icFg = state === 'talking' ? t.bad : state === 'on' ? t.onAccent : t.textDim;
-  const fg = state === 'talking' ? t.onMedia : t.text;
-  const fg2 = state === 'talking' ? t.onMediaDim : state === 'on' ? t.ok : t.textDim;
+  const bg =
+    state === "talking"
+      ? t.bad
+      : state === "on"
+        ? t.okSoft
+        : state === "blocked"
+          ? t.warnSoft
+          : t.card;
+  const icBg =
+    state === "talking" ? t.onMedia : state === "on" ? t.ok : t.cardAlt;
+  const icFg =
+    state === "talking" ? t.bad : state === "on" ? t.onAccent : t.textDim;
+  const fg = state === "talking" ? t.onMedia : t.text;
+  const fg2 =
+    state === "talking" ? t.onMediaDim : state === "on" ? t.ok : t.textDim;
   return (
     <Pressable
       onPress={onPress}
       onPressIn={onPressIn}
       onPressOut={onPressOut}
       android_ripple={{ color: t.ripple, foreground: true }}
-      style={[st.act, { backgroundColor: bg, borderColor: state === 'off' || state === 'busy' ? t.border : 'transparent' }]}
+      style={[
+        st.act,
+        {
+          backgroundColor: bg,
+          borderColor:
+            state === "off" || state === "busy" ? t.border : "transparent",
+        },
+      ]}
     >
       <View style={[st.actIc, { backgroundColor: icBg }]}>
-        {state === 'busy' ? <ActivityIndicator size="small" color={icFg} /> : <Icon name={icon} size={22} color={icFg} />}
+        {state === "busy" ? (
+          <ActivityIndicator size="small" color={icFg} />
+        ) : (
+          <Icon name={icon} size={22} color={icFg} />
+        )}
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={{ color: fg, fontWeight: '500', fontSize: 15 }} numberOfLines={1}>
+        <Text
+          style={{ color: fg, fontWeight: "500", fontSize: 15 }}
+          numberOfLines={1}
+        >
           {t1}
         </Text>
-        <Text style={{ color: fg2, fontSize: 12 }} numberOfLines={1}>
-          {t2}
-        </Text>
+        {t2 ? (
+          <Text style={{ color: fg2, fontSize: 12 }} numberOfLines={1}>
+            {t2}
+          </Text>
+        ) : null}
       </View>
     </Pressable>
   );
@@ -491,26 +735,34 @@ export default function CamsScreen() {
   const showToast = toast.show;
   const [hd] = useState(hdSupport);
   const webrtcOk = !!NativeModules.WebRTCModule;
-  const [tab, setTab] = useState<CamsTab>(params?.tab ?? 'live');
+  const [tab, setTab] = useState<CamsTab>(params?.tab ?? "live");
+  useEffect(() => {
+    if (!params?.tab || !params?.tabRequest) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTab(params.tab);
+  }, [params?.tab, params?.tabRequest]);
   // a YouTube link shared into the app (App.tsx navigates here with it): the Music tab plays it once
   const [shared, setShared] = useState<string | null>(params?.share ?? null);
   const shareId = params?.shareId;
   useEffect(() => {
     if (!shareId || !params?.share) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setTab('music');
+    setTab("music");
     setShared(params.share);
   }, [shareId, params?.share]);
   const clearShared = useCallback(() => setShared(null), []);
   // A cat notification (pccontrol://cams?tab=replay&cam=cat&ts=<ms>): open Replay and seek there.
-  const [replayTarget, setReplayTarget] = useState<{ cam: string; ts: number } | null>(null);
+  const [replayTarget, setReplayTarget] = useState<{
+    cam: string;
+    ts: number;
+  } | null>(null);
   const replayCam = params?.cam;
   const replayTs = params?.ts;
   useEffect(() => {
     const target = parseSightingTarget(replayCam, replayTs);
     if (!target) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setTab('replay');
+    setTab("replay");
     setReplayTarget(target);
   }, [replayCam, replayTs]);
   const clearReplayTarget = useCallback(() => setReplayTarget(null), []);
@@ -532,9 +784,14 @@ export default function CamsScreen() {
   const [menu, setMenu] = useState(false);
   const [camMic, setCamMic] = useState(false);
   const [listen, setListen] = useState(false);
-  const [talk, setTalk] = useState<'off' | 'held' | 'latched'>('off');
+  const [talk, setTalk] = useState<"off" | "held" | "latched">("off");
   const [snapBusy, setSnapBusy] = useState<CamId | null>(null);
-  const talkPress = useRef<{ at: number; started: boolean; wasOn: boolean; released: boolean }>({
+  const talkPress = useRef<{
+    at: number;
+    started: boolean;
+    wasOn: boolean;
+    released: boolean;
+  }>({
     at: 0,
     started: false,
     wasOn: false,
@@ -549,46 +806,56 @@ export default function CamsScreen() {
   const active = useActive(() => {
     setCamMic(false);
     setListen(false);
-    setTalk('off');
+    setTalk("off");
     setPadOpen(false);
     setFull(null);
     stopPtz();
   });
 
   // live video only on the Live tab (frees the decoders and the link for Replay); Listen/Talk keep running
-  const run = active && webrtcOk && tab === 'live';
+  const run = active && webrtcOk && tab === "live";
   const audioRun = active && webrtcOk;
   const links = {
-    cat: useLink(run ? 'cat' : null, 'video'),
-    cat2: useLink(run ? 'cat2' : null, 'video'),
+    cat: useLiveCam(run ? "cat" : null, "video"),
+    cat2: useLiveCam(run ? "cat2" : null, "video"),
     // HD gets one try with a deadline, then SD; SD retries forever
-    cat3: useLink(run ? (cat3Hd ? HD_STREAM : 'cat3') : null, 'video', {
+    cat3: useLiveCam(run ? (cat3Hd ? HD_STREAM : "cat3") : null, "video", {
       firstFrameMs: cat3Hd ? HD_WAIT_MS : undefined,
       maxAttempts: cat3Hd ? 2 : undefined,
       onState: (s) => {
         // HD that shows nothing: SD
-        if (!cat3Hd || s.phase !== 'error') return;
+        if (!cat3Hd || s.phase !== "error") return;
         setCat3Hd(false);
         showToast("HD didn't start, so this is the standard stream.", 4000);
       },
     }),
   };
-  useLink(audioRun && camMic ? CAM_MIC_STREAM : null, 'audio', {
+  useLiveCam(audioRun && camMic ? CAM_MIC_STREAM : null, "audio", {
     onState: (s) => {
-      if (s.phase !== 'retrying' || s.attempt <= 2) return;
+      if (s.phase !== "retrying" || s.attempt <= 2) return;
       setCamMic(false);
-      showToast(`Cam's mic didn't connect (${s.error ?? 'error'}).`, 3500);
+      showToast(`Cam's mic didn't connect (${s.error ?? "error"}).`, 3500);
     },
   });
-  const ear = useLink(audioRun && listen ? LAPTOP_MIC_STREAM : null, 'audio');
-  const mic = useLink(audioRun && talk !== 'off' ? TALK_STREAM : null, 'talk', {
-    maxAttempts: 2,
-    onState: (s) => {
-      if (s.phase !== 'error') return;
-      setTalk('off');
-      showToast(`Talk dropped: ${s.error ?? 'connection failed'}. Try again.`, 3500);
+  const ear = useLiveCam(
+    audioRun && listen ? LAPTOP_MIC_STREAM : null,
+    "audio",
+  );
+  const mic = useLiveCam(
+    audioRun && talk !== "off" ? TALK_STREAM : null,
+    "talk",
+    {
+      maxAttempts: 2,
+      onState: (s) => {
+        if (s.phase !== "error") return;
+        setTalk("off");
+        showToast(
+          `Talk dropped: ${s.error ?? "connection failed"}. Try again.`,
+          3500,
+        );
+      },
     },
-  });
+  );
   const det = useDetector(active, toast.show);
 
   // crash guard (CamsWebrtc): a marker while live video starts, cleared after 15 s of it or when it stops. If the
@@ -620,17 +887,25 @@ export default function CamsScreen() {
     } catch {
       return;
     }
-    showToast('Cat cams crashed last time, so it now uses safe mode (default WebRTC settings). Menu → Leave safe mode.', 7000);
+    showToast(
+      "Cat cams crashed last time, so it now uses safe mode (default WebRTC settings). Menu → Leave safe mode.",
+      7000,
+    );
   }, [showToast]);
   const toggleSafe = () => {
     setMenu(false);
     try {
-      PcNative?.camsSetSetting('safeMode', !safeMode);
+      PcNative?.camsSetSetting("safeMode", !safeMode);
     } catch {
       return;
     }
     setSafeMode(!safeMode);
-    showToast(safeMode ? 'Safe mode off from the next app start.' : 'Safe mode on from the next app start.', 4000);
+    showToast(
+      safeMode
+        ? "Safe mode off from the next app start."
+        : "Safe mode on from the next app start.",
+      4000,
+    );
   };
 
   // keep the screen on while watching
@@ -644,7 +919,7 @@ export default function CamsScreen() {
   useEffect(() => {
     if (!full) return;
     PcNative?.camsSetFullscreen(true).catch(() => undefined);
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
       setFull(null);
       return true;
     });
@@ -655,12 +930,12 @@ export default function CamsScreen() {
   }, [full]);
 
   useEffect(() => {
-    if (talk === 'off') return;
+    if (talk === "off") return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [talk]);
 
-  const cat3Mode = `${cat3Hd ? 'HD' : 'SD'}·WebRTC`;
+  const cat3Mode = `${cat3Hd ? "HD" : "SD"}·WebRTC`;
   const liveCount = CAMS.filter((c) => links[c.id].state.fps > 0).length;
 
   const snapshot = async (id: CamId) => {
@@ -669,7 +944,10 @@ export default function CamsScreen() {
     try {
       // CP Plus: always cat3 (go2rtc's frame.jpeg fails on cat3hd)
       const uri = await PcNative.camsSaveSnapshot(id, NAMES[id] ?? id);
-      toast.show('Saved to Pictures/PC Control', 4500, { label: 'Share', run: () => PcNative?.camsShare(uri).catch(() => undefined) });
+      toast.show("Saved to Pictures/PC Control", 4500, {
+        label: "Share",
+        run: () => PcNative?.camsShare(uri).catch(() => undefined),
+      });
     } catch (e) {
       toast.show(`Snapshot failed: ${(e as Error)?.message ?? e}`, 4000);
     }
@@ -677,9 +955,16 @@ export default function CamsScreen() {
   };
 
   const toggleHd = () => {
-    if (!cat3Hd && !hd.ok) return toast.show(`HD needs hardware H.265 over WebRTC. ${hd.why}.`, 5000);
+    if (!cat3Hd && !hd.ok)
+      return toast.show(
+        `HD needs hardware H.265 over WebRTC. ${hd.why}.`,
+        5000,
+      );
     setCat3Hd(!cat3Hd);
-    toast.show(cat3Hd ? 'Back to the standard stream' : 'Switching to HD (3MP)', 1800);
+    toast.show(
+      cat3Hd ? "Back to the standard stream" : "Switching to HD (3MP)",
+      1800,
+    );
   };
 
   // Talk: hold to talk (released = off), or a quick tap to latch it on until the next tap.
@@ -687,13 +972,23 @@ export default function CamsScreen() {
     const p = PermissionsAndroid.PERMISSIONS.RECORD_AUDIO;
     if (await PermissionsAndroid.check(p)) return true;
     const r = await PermissionsAndroid.request(p);
-    if (r === PermissionsAndroid.RESULTS.GRANTED) toast.show('Microphone allowed. Hold Talk to speak.', 3000);
-    else toast.show('Talk needs the microphone permission (Android settings → Apps → PC Control).', 4500);
+    if (r === PermissionsAndroid.RESULTS.GRANTED)
+      toast.show("Microphone allowed. Hold Talk to speak.", 3000);
+    else
+      toast.show(
+        "Talk needs the microphone permission (Android settings → Apps → PC Control).",
+        4500,
+      );
     return false; // the dialog took the press: start on the next one
   };
   const talkIn = async () => {
-    const wasOn = talk !== 'off';
-    const press: { at: number; started: boolean; wasOn: boolean; released: boolean } = {
+    const wasOn = talk !== "off";
+    const press: {
+      at: number;
+      started: boolean;
+      wasOn: boolean;
+      released: boolean;
+    } = {
       at: Date.now(),
       started: false,
       wasOn,
@@ -706,18 +1001,18 @@ export default function CamsScreen() {
     Vibration.vibrate(20);
     setTalkSince(Date.now());
     setNow(Date.now());
-    setTalk(press.released ? 'latched' : 'held'); // released before the permission check answered: a tap
+    setTalk(press.released ? "latched" : "held"); // released before the permission check answered: a tap
   };
   const talkOut = () => {
     const p = talkPress.current;
     p.released = true;
-    if (p.wasOn) return setTalk('off');
+    if (p.wasOn) return setTalk("off");
     if (!p.started) return;
-    if (Date.now() - p.at < 400) setTalk('latched');
-    else setTalk('off');
+    if (Date.now() - p.at < 400) setTalk("latched");
+    else setTalk("off");
   };
 
-  const openWeb = (hash = '') => {
+  const openWeb = (hash = "") => {
     setMenu(false);
     Linking.openURL(serverUrl() + WEB_PATH + hash);
   };
@@ -725,35 +1020,61 @@ export default function CamsScreen() {
   const cardButtons = (id: CamId, isFull: boolean) => (
     <>
       <View style={st.tr}>
-        <IconBtn icon="camera-outline" label="Save snapshot" busy={snapBusy === id} onPress={() => snapshot(id)} />
         <IconBtn
-          icon={isFull ? 'fullscreen-exit' : 'fullscreen'}
-          label={isFull ? 'Exit fullscreen' : 'Fullscreen'}
+          icon="camera-outline"
+          label="Save snapshot"
+          busy={snapBusy === id}
+          onPress={() => snapshot(id)}
+        />
+        <IconBtn
+          icon={isFull ? "fullscreen-exit" : "fullscreen"}
+          label={isFull ? "Exit fullscreen" : "Fullscreen"}
           onPress={() => setFull(isFull ? null : id)}
         />
         {!isFull ? (
           <IconBtn
-            icon={focus === id ? 'arrow-collapse' : 'arrow-expand'}
-            label={focus === id ? 'Back to all cameras' : 'Focus this camera'}
+            icon={focus === id ? "arrow-collapse" : "arrow-expand"}
+            label={focus === id ? "Back to all cameras" : "Focus this camera"}
             onPress={() => setFocus(focus === id ? null : id)}
           />
         ) : null}
       </View>
-      {id === 'cat3' ? (
+      {id === "cat3" ? (
         <>
-          <View style={[st.bl, isFull && { left: 16 + insets.left, bottom: 16 }]}>
+          <View
+            style={[st.bl, isFull && { left: 16 + insets.left, bottom: 16 }]}
+          >
             <Chip
-              icon={camMic ? 'volume-high' : 'volume-off'}
+              icon={camMic ? "volume-high" : "volume-off"}
               on={camMic}
               label={camMic ? "Cam's mic: on" : "Cam's mic: off"}
               onPress={() => setCamMic(!camMic)}
             />
-            <Chip icon="high-definition" on={cat3Hd} label={cat3Hd ? 'HD on' : 'HD off'} onPress={toggleHd} />
-            <Chip icon="arrow-all" on={padOpen} label="Pan / tilt" onPress={() => setPadOpen(!padOpen)} />
+            <Chip
+              icon="high-definition"
+              on={cat3Hd}
+              label={cat3Hd ? "HD on" : "HD off"}
+              onPress={toggleHd}
+            />
+            <Chip
+              icon="arrow-all"
+              on={padOpen}
+              label="Pan / tilt"
+              onPress={() => setPadOpen(!padOpen)}
+            />
           </View>
           {padOpen ? (
-            <View style={[st.padWrap, isFull && { right: 24 + insets.right, bottom: 24 }]}>
-              <PtzPad size={isFull ? 180 : 150} ptz={ptz} onClose={() => setPadOpen(false)} />
+            <View
+              style={[
+                st.padWrap,
+                isFull && { right: 24 + insets.right, bottom: 24 },
+              ]}
+            >
+              <PtzPad
+                size={isFull ? 180 : 150}
+                ptz={ptz}
+                onClose={() => setPadOpen(false)}
+              />
             </View>
           ) : null}
         </>
@@ -766,7 +1087,13 @@ export default function CamsScreen() {
     const c = CAMS.find((x) => x.id === full)!;
     return (
       <View style={{ flex: 1, backgroundColor: t.media }}>
-        <CamCard id={c.id} name={c.name} link={links[c.id]} mode={c.id === 'cat3' ? cat3Mode : undefined} fullscreen>
+        <CamCard
+          id={c.id}
+          name={c.name}
+          link={links[c.id]}
+          mode={c.id === "cat3" ? cat3Mode : undefined}
+          fullscreen
+        >
           {cardButtons(c.id, true)}
         </CamCard>
         <Toast toast={toast} bottom={24} />
@@ -774,21 +1101,38 @@ export default function CamsScreen() {
     );
   }
 
-  const ordered = focus ? [CAMS.find((c) => c.id === focus)!, ...CAMS.filter((c) => c.id !== focus)] : CAMS;
-  const talkSecs = talkSince ? Math.max(0, Math.floor((now - talkSince) / 1000)) : 0;
-  const talkLive = mic.state.phase === 'live';
+  const ordered = focus
+    ? [CAMS.find((c) => c.id === focus)!, ...CAMS.filter((c) => c.id !== focus)]
+    : CAMS;
+  const talkSecs = talkSince
+    ? Math.max(0, Math.floor((now - talkSince) / 1000))
+    : 0;
+  const talkLive = mic.state.phase === "live";
   const big = focus ? links[focus].state : null;
-  const thumbW = (win.width - space(4) * 2 - space(2.5)) / 2;
-  const showBar = tab === 'live' || listen || talk !== 'off';
+  const thumbW = (win.width - screenPad * 2 - space(2.5)) / 2;
+  const showBar = tab === "live" || listen || talk !== "off";
 
   return (
     <View style={{ flex: 1, backgroundColor: t.bg }}>
       {/* header */}
-      <View style={[st.header, { paddingTop: insets.top + space(2), borderBottomColor: t.border }]}>
-        <Pressable onPress={() => nav.goBack()} hitSlop={8} accessibilityLabel="Back" style={st.hBtn}>
+      <View
+        style={[
+          st.header,
+          { paddingTop: insets.top + space(2), borderBottomColor: t.border },
+        ]}
+      >
+        <Pressable
+          onPress={() => nav.goBack()}
+          hitSlop={8}
+          accessibilityLabel="Back"
+          style={st.hBtn}
+        >
           <Icon name="arrow-left" size={24} color={t.text} />
         </Pressable>
-        <View style={[st.seg, { backgroundColor: t.card }]} accessibilityRole="tablist">
+        <View
+          style={[st.seg, { backgroundColor: t.card }]}
+          accessibilityRole="tablist"
+        >
           {TABS.map((x) => {
             const on = tab === x.id;
             return (
@@ -799,28 +1143,56 @@ export default function CamsScreen() {
                 accessibilityState={{ selected: on }}
                 style={[st.segBtn, on && { backgroundColor: t.cardAlt }]}
               >
-                {x.id === 'live' && on ? (
-                  <View style={[st.liveDot, { backgroundColor: liveCount ? t.ok : t.textFaint }]} />
+                {x.id === "live" && on ? (
+                  <View
+                    style={[
+                      st.liveDot,
+                      { backgroundColor: liveCount ? t.ok : t.textFaint },
+                    ]}
+                  />
                 ) : (
-                  <Icon name={x.icon} size={15} color={on ? t.text : t.textDim} />
+                  <Icon
+                    name={x.icon}
+                    size={15}
+                    color={on ? t.text : t.textDim}
+                  />
                 )}
-                <Text style={{ color: on ? t.text : t.textDim, fontWeight: '500', fontSize: 13 }} numberOfLines={1}>
-                  {x.id === 'live' && on ? `${x.label} ${liveCount}/${CAMS.length}` : x.label}
+                <Text
+                  style={{
+                    color: on ? t.text : t.textDim,
+                    fontWeight: "500",
+                    fontSize: 13,
+                  }}
+                  numberOfLines={1}
+                >
+                  {x.id === "live" && on
+                    ? `${x.label} ${liveCount}/${CAMS.length}`
+                    : x.label}
                 </Text>
               </Pressable>
             );
           })}
         </View>
-        <Pressable onPress={() => setMenu(true)} hitSlop={8} accessibilityLabel="More" style={st.hBtn}>
+        <Pressable
+          onPress={() => setMenu(true)}
+          hitSlop={8}
+          accessibilityLabel="More"
+          style={st.hBtn}
+        >
           <Icon name="dots-vertical" size={24} color={t.text} />
         </Pressable>
       </View>
 
       <ScrollView
         keyboardShouldPersistTaps="handled"
-        contentContainerStyle={{ padding: space(4), paddingBottom: (showBar ? 110 : space(6)) + insets.bottom, gap: space(3) }}
+        contentContainerStyle={{
+          paddingHorizontal: screenPad,
+          paddingVertical: space(4),
+          paddingBottom: (showBar ? 110 : space(6)) + insets.bottom,
+          gap: space(3),
+        }}
       >
-        {tab === 'replay' ? (
+        {tab === "replay" ? (
           <ReplayTab
             visible={active}
             hevcOk={recHevc}
@@ -829,8 +1201,15 @@ export default function CamsScreen() {
             onTargetConsumed={clearReplayTarget}
           />
         ) : null}
-        {tab === 'music' ? <MusicTab visible={active} toast={toast.show} shared={shared} onSharedDone={clearShared} /> : null}
-        {tab !== 'live' ? null : (
+        {tab === "music" ? (
+          <MusicTab
+            visible={active}
+            toast={toast.show}
+            shared={shared}
+            onSharedDone={clearShared}
+          />
+        ) : null}
+        {tab !== "live" ? null : (
           <>
             {!webrtcOk ? (
               <Banner tone="bad" title="Native player unavailable">
@@ -844,21 +1223,38 @@ export default function CamsScreen() {
                 disabled={!det.det || det.busy}
                 style={[
                   st.detTog,
-                  { backgroundColor: det.det?.enabled ? t.accentSoft : t.card, opacity: det.det ? 1 : 0.5 },
+                  {
+                    backgroundColor: det.det?.enabled ? t.accentSoft : t.card,
+                    opacity: det.det ? 1 : 0.5,
+                  },
                 ]}
               >
-                <Icon name="cctv" size={18} color={det.det?.enabled ? t.accent : t.textDim} />
-                <Text style={{ color: det.det?.enabled ? t.text : t.textDim, fontWeight: '500', fontSize: 14 }}>Cat alerts</Text>
+                <Icon
+                  name="cctv"
+                  size={18}
+                  color={det.det?.enabled ? t.accent : t.textDim}
+                />
+                <Text
+                  style={{
+                    color: det.det?.enabled ? t.text : t.textDim,
+                    fontWeight: "500",
+                    fontSize: 14,
+                  }}
+                >
+                  Cat alerts
+                </Text>
                 <Switch
                   value={!!det.det?.enabled}
                   onValueChange={(v) => det.toggle(v)}
                   disabled={!det.det || det.busy}
                   trackColor={{ true: t.accent, false: t.border }}
                   thumbColor={t.onMedia}
-                  style={{ marginVertical: -8 }}
                 />
               </Pressable>
-              <Text style={{ color: t.textDim, fontSize: 12.5, flex: 1 }} numberOfLines={2}>
+              <Text
+                style={{ color: t.textDim, fontSize: 12.5, flex: 1 }}
+                numberOfLines={2}
+              >
                 {det.line}
               </Text>
             </View>
@@ -870,13 +1266,18 @@ export default function CamsScreen() {
                   id={focus}
                   name={NAMES[focus]}
                   link={links[focus]}
-                  mode={focus === 'cat3' ? cat3Mode : undefined}
+                  mode={focus === "cat3" ? cat3Mode : undefined}
                   onPress={() => setFocus(null)}
                 >
                   {cardButtons(focus, false)}
                 </CamCard>
-                {big ? <StreamInfo s={big} hdDecoder={focus === 'cat3' && cat3Hd ? hd.decoder : null} /> : null}
-                <View style={{ flexDirection: 'row', gap: space(2.5) }}>
+                {big ? (
+                  <StreamInfo
+                    s={big}
+                    hdDecoder={focus === "cat3" && cat3Hd ? hd.decoder : null}
+                  />
+                ) : null}
+                <View style={{ flexDirection: "row", gap: space(2.5) }}>
                   {ordered.slice(1).map((c) => (
                     <CamCard
                       key={c.id}
@@ -897,7 +1298,7 @@ export default function CamsScreen() {
                   id={c.id}
                   name={c.name}
                   link={links[c.id]}
-                  mode={c.id === 'cat3' ? cat3Mode : undefined}
+                  mode={c.id === "cat3" ? cat3Mode : undefined}
                   onPress={() => setFocus(c.id)}
                 >
                   {cardButtons(c.id, false)}
@@ -905,7 +1306,15 @@ export default function CamsScreen() {
               ))
             )}
             {!hd.ok && webrtcOk ? (
-              <Text style={{ color: t.textFaint, fontSize: 12, textAlign: 'center' }}>Food bowl HD unavailable: {hd.why}.</Text>
+              <Text
+                style={{
+                  color: t.textFaint,
+                  fontSize: 12,
+                  textAlign: "center",
+                }}
+              >
+                Food bowl HD unavailable: {hd.why}.
+              </Text>
             ) : null}
           </>
         )}
@@ -913,30 +1322,47 @@ export default function CamsScreen() {
 
       {/* Listen / Talk (on Replay / Music only while one of them is on, like the page) */}
       {showBar ? (
-        <View style={[st.bar, { paddingBottom: insets.bottom + space(3), backgroundColor: t.bg, borderTopColor: t.border }]}>
+        <View
+          style={[
+            st.bar,
+            {
+              paddingBottom: insets.bottom + space(3),
+              backgroundColor: t.bg,
+              borderTopColor: t.border,
+            },
+          ]}
+        >
           <ActButton
-            state={!listen ? 'off' : ear.state.phase === 'live' ? 'on' : ear.state.phase === 'error' ? 'blocked' : 'busy'}
-            icon={listen ? 'volume-high' : 'volume-off'}
-            t1={listen ? 'Listening' : 'Listen'}
+            state={
+              !listen
+                ? "off"
+                : ear.state.phase === "live"
+                  ? "on"
+                  : ear.state.phase === "error"
+                    ? "blocked"
+                    : "busy"
+            }
+            icon={listen ? "volume-high" : "volume-off"}
+            t1={listen ? "Listening" : "Listen"}
             t2={
               !listen
-                ? 'Laptop mic is off'
-                : ear.state.phase === 'live'
-                  ? 'Tap to stop'
-                  : ear.state.phase === 'error'
-                    ? (ear.state.error ?? 'Failed')
-                    : 'Connecting…'
+                ? "Mic off"
+                : ear.state.phase === "live"
+                  ? null
+                  : ear.state.phase === "error"
+                    ? (ear.state.error ?? "Failed")
+                    : "Connecting…"
             }
             onPress={() => setListen(!listen)}
           />
           <ActButton
-            state={talk === 'off' ? 'off' : talkLive ? 'talking' : 'busy'}
-            icon={talk === 'off' ? 'microphone-off' : 'microphone'}
-            t1={talk === 'off' ? 'Talk' : talkLive ? 'Talking' : 'Connecting…'}
+            state={talk === "off" ? "off" : talkLive ? "talking" : "busy"}
+            icon={talk === "off" ? "microphone-off" : "microphone"}
+            t1={talk === "off" ? "Talk" : talkLive ? "Talking" : "Connecting…"}
             t2={
-              talk === 'off'
-                ? 'Hold to talk · tap to latch'
-                : `${Math.floor(talkSecs / 60)}:${String(talkSecs % 60).padStart(2, '0')} · ${talk === 'held' ? 'release to stop' : 'tap to stop'}`
+              talk === "off"
+                ? null
+                : `${Math.floor(talkSecs / 60)}:${String(talkSecs % 60).padStart(2, "0")}`
             }
             onPressIn={talkIn}
             onPressOut={talkOut}
@@ -946,16 +1372,45 @@ export default function CamsScreen() {
 
       <Toast toast={toast} bottom={insets.bottom + (showBar ? 96 : 24)} />
 
-      <Modal visible={menu} transparent animationType="fade" onRequestClose={() => setMenu(false)}>
-        <Pressable style={[st.menuBg, { backgroundColor: t.overlay }]} onPress={() => setMenu(false)}>
-          <View style={[st.menu, { top: insets.top + 52, backgroundColor: t.card }]}>
+      <Modal
+        visible={menu}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMenu(false)}
+      >
+        <Pressable
+          style={[st.menuBg, { backgroundColor: t.overlay }]}
+          onPress={() => setMenu(false)}
+        >
+          <View
+            style={[st.menu, { top: insets.top + 52, backgroundColor: t.card }]}
+          >
             {[
-              { icon: 'web', label: 'Open the web page', run: () => openWeb(tab === 'live' ? '' : '#' + tab) },
-              { icon: 'shield-check-outline', label: safeMode ? 'Leave safe mode' : 'Safe mode (WebRTC defaults)', run: toggleSafe },
+              {
+                icon: "web",
+                label: "Open the web page",
+                run: () => openWeb(tab === "live" ? "" : "#" + tab),
+              },
+              {
+                icon: "shield-check-outline",
+                label: safeMode
+                  ? "Leave safe mode"
+                  : "Safe mode (WebRTC defaults)",
+                run: toggleSafe,
+              },
             ].map((m) => (
-              <Pressable key={m.label} onPress={m.run} android_ripple={{ color: t.ripple }} style={st.menuItem}>
+              <Pressable
+                key={m.label}
+                onPress={m.run}
+                android_ripple={{ color: t.ripple }}
+                style={st.menuItem}
+              >
                 <Icon name={m.icon} size={20} color={t.textDim} />
-                <Text style={{ color: t.text, fontSize: 15, fontWeight: '500' }}>{m.label}</Text>
+                <Text
+                  style={{ color: t.text, fontSize: 15, fontWeight: "500" }}
+                >
+                  {m.label}
+                </Text>
               </Pressable>
             ))}
           </View>
@@ -965,7 +1420,13 @@ export default function CamsScreen() {
   );
 }
 
-function StreamInfo({ s, hdDecoder }: { s: LinkState; hdDecoder: string | null }) {
+function StreamInfo({
+  s,
+  hdDecoder,
+}: {
+  s: LinkState;
+  hdDecoder: string | null;
+}) {
   const t = useTheme();
   const bits = [
     s.codec,
@@ -976,13 +1437,22 @@ function StreamInfo({ s, hdDecoder }: { s: LinkState; hdDecoder: string | null }
   ].filter(Boolean);
   if (!bits.length) return null;
   return (
-    <Text style={{ color: t.textFaint, fontSize: 11.5, fontFamily: t.mono, marginTop: -space(1) }} numberOfLines={2}>
-      {bits.join(' · ')}
+    <Text
+      style={{ color: t.textFaint, fontSize: 11.5, fontFamily: t.mono }}
+      numberOfLines={2}
+    >
+      {bits.join(" · ")}
     </Text>
   );
 }
 
-function Toast({ toast, bottom }: { toast: ReturnType<typeof useToast>; bottom: number }) {
+function Toast({
+  toast,
+  bottom,
+}: {
+  toast: ReturnType<typeof useToast>;
+  bottom: number;
+}) {
   const t = useTheme();
   if (!toast.msg) return null;
   const a = toast.msg.action;
@@ -992,112 +1462,168 @@ function Toast({ toast, bottom }: { toast: ReturnType<typeof useToast>; bottom: 
       pointerEvents="box-none"
     >
       <Icon name="information-outline" size={18} color={t.accent} />
-      <Text style={{ color: t.text, fontSize: 13.5, flexShrink: 1 }}>{toast.msg.text}</Text>
-      {a ? <Button label={a.label} kind="ghost" compact onPress={a.run} /> : null}
+      <Text style={{ color: t.text, fontSize: 13.5, flexShrink: 1 }}>
+        {toast.msg.text}
+      </Text>
+      {a ? (
+        <Button label={a.label} kind="ghost" compact onPress={a.run} />
+      ) : null}
     </Animated.View>
   );
 }
 
 const st = StyleSheet.create({
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: space(2),
-    paddingHorizontal: space(2),
+    paddingHorizontal: screenPad,
     paddingBottom: space(2),
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  hBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 22 },
-  seg: { flex: 1, flexDirection: 'row', padding: 3, borderRadius: radius.sm, gap: 2 },
+  hBtn: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 22,
+  },
+  seg: {
+    flex: 1,
+    flexDirection: "row",
+    padding: 3,
+    borderRadius: radius.sm,
+    gap: 2,
+  },
   segBtn: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
     gap: 5,
     height: 36,
     borderRadius: 10,
     paddingHorizontal: 6,
   },
   liveDot: { width: 8, height: 8, borderRadius: 4 },
-  detRow: { flexDirection: 'row', alignItems: 'center', gap: space(3) },
+  detRow: { flexDirection: "row", alignItems: "center", gap: space(3) },
   detTog: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 8,
     height: 42,
     paddingLeft: 12,
     paddingRight: 4,
     borderRadius: radius.pill,
   },
-  card: { aspectRatio: 16 / 9, borderRadius: radius.lg, overflow: 'hidden' },
+  card: { aspectRatio: 16 / 9, borderRadius: radius.lg, overflow: "hidden" },
   cardCompact: { borderRadius: radius.md },
-  fsCard: { flex: 1 },
-  msg: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 16 },
-  msgText: { fontSize: 13, textAlign: 'center' },
-  tl: { position: 'absolute', top: 10, left: 12, right: 150, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  fsCard: { flex: 1, overflow: "hidden" },
+  msg: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    padding: 16,
+  },
+  msgText: { fontSize: 13, textAlign: "center" },
+  tl: {
+    position: "absolute",
+    top: 10,
+    left: 12,
+    right: 150,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   name: {
-    fontWeight: '500',
+    fontWeight: "500",
     fontSize: 15,
     textShadowRadius: 3,
     textShadowOffset: { width: 0, height: 1 },
     flexShrink: 1,
   },
   badge: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 6,
     height: 22,
     paddingHorizontal: 8,
     borderRadius: radius.pill,
   },
   badgeDot: { width: 7, height: 7, borderRadius: 4 },
-  badgeText: { fontSize: 11, fontVariant: ['tabular-nums'] },
-  tr: { position: 'absolute', top: 4, right: 4, flexDirection: 'row', gap: 2 },
-  ib: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  bl: { position: 'absolute', bottom: 8, left: 8, flexDirection: 'row', gap: 6 },
+  badgeText: { fontSize: 11, fontVariant: ["tabular-nums"] },
+  tr: { position: "absolute", top: 4, right: 4, flexDirection: "row", gap: 2 },
+  ib: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  bl: {
+    position: "absolute",
+    bottom: 8,
+    left: 8,
+    flexDirection: "row",
+    gap: 6,
+  },
   chip: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    flexDirection: 'row',
+    flexDirection: "row",
     gap: 6,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     borderWidth: StyleSheet.hairlineWidth,
   },
-  padWrap: { position: 'absolute', right: 10, bottom: 10 },
+  padWrap: { position: "absolute", right: 10, bottom: 10 },
   pad: { borderWidth: StyleSheet.hairlineWidth },
-  padBtn: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
+  padBtn: {
+    position: "absolute",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   bar: {
-    position: 'absolute',
+    position: "absolute",
     left: 0,
     right: 0,
     bottom: 0,
-    flexDirection: 'row',
+    flexDirection: "row",
     gap: space(2.5),
-    paddingHorizontal: space(4),
+    paddingHorizontal: screenPad,
     paddingTop: space(3),
     borderTopWidth: StyleSheet.hairlineWidth,
   },
   act: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 12,
     height: 60,
     paddingHorizontal: 12,
     borderRadius: radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    overflow: 'hidden',
+    overflow: "hidden",
   },
-  actIc: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  actIc: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   toast: {
-    position: 'absolute',
-    alignSelf: 'center',
-    maxWidth: '92%',
-    flexDirection: 'row',
-    alignItems: 'center',
+    position: "absolute",
+    alignSelf: "center",
+    maxWidth: "92%",
+    flexDirection: "row",
+    alignItems: "center",
     gap: 10,
     paddingVertical: 10,
     paddingHorizontal: 14,
@@ -1106,13 +1632,19 @@ const st = StyleSheet.create({
   },
   menuBg: { flex: 1 },
   menu: {
-    position: 'absolute',
-    right: space(3),
+    position: "absolute",
+    right: screenPad,
     minWidth: 230,
     borderRadius: radius.md,
     paddingVertical: 6,
     elevation: 10,
-    overflow: 'hidden',
+    overflow: "hidden",
   },
-  menuItem: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 16, height: 48 },
+  menuItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    paddingHorizontal: 16,
+    height: 48,
+  },
 });

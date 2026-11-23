@@ -5,6 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { Alert, AppState, StyleSheet, Text, View } from 'react-native';
 import { PcNative } from './modules/pc-native';
+import { prepareCamsOnce } from './src/lib/cams/prepare';
 import { youtubeLink } from './src/lib/cams/youtube';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SystemInsetsProvider } from './src/components/SystemInsets';
@@ -15,6 +16,7 @@ import { uploadCrashes } from './src/lib/crash';
 import { askNotificationPermission, registerPush } from './src/lib/push';
 import { pendingList, startRootStore, useRootStore } from './src/lib/rootStore';
 import AgentRuleScreen from './src/screens/AgentRuleScreen';
+import AgentSettingsScreen from './src/screens/AgentSettingsScreen';
 import AgentViewScreen from './src/screens/AgentViewScreen';
 import HealthScreen from './src/screens/HealthScreen';
 import RootScreen from './src/screens/RootScreen';
@@ -62,6 +64,7 @@ const linking: LinkingOptions<any> = {
       },
       Cams: 'cams',
       ServiceDetail: 'service/:unit',
+      AgentSettings: 'agent-settings',
     },
   },
 };
@@ -121,16 +124,13 @@ export default function App() {
             {/* loaded on first open: react-native-webrtc stays out of app start */}
             <Stack.Screen name="AgentView" component={AgentViewScreen} />
             <Stack.Screen name="AgentRule" component={AgentRuleScreen} />
+            <Stack.Screen name="AgentSettings" component={AgentSettingsScreen} />
             <Stack.Screen name="ServiceDetail" component={ServiceDetailScreen} />
             <Stack.Screen
               name="Cams"
               getComponent={() => {
                 // WebRTC options + crash marker, before react-native-webrtc's module is created (CamsWebrtc)
-                try {
-                  PcNative?.camsPrepare();
-                } catch {
-                  // defaults
-                }
+                prepareCamsOnce();
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 return require('./src/screens/CamsScreen').default;
               }}
@@ -178,12 +178,12 @@ function Tabs() {
     >
       <Tab.Screen name="Routes" component={RoutesScreen} />
       <Tab.Screen name="Vitals" component={VitalsScreen} />
+      <Tab.Screen name="Health" component={HealthScreen} />
       <Tab.Screen
         name="Root"
         component={RootScreen}
         options={{ tabBarBadge: waiting || undefined, tabBarBadgeStyle: { backgroundColor: t.warn, color: t.bg, fontWeight: '600' } }}
       />
-      <Tab.Screen name="Health" component={HealthScreen} />
       <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
   );

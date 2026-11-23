@@ -76,18 +76,90 @@ export function otaSnapshot() {
   };
 }
 
-/** GET a small JSON file from GitHub (no auth; 10 s timeout) -> [status, body]. Throws one clean message offline. */
-async function getText(url: string, what: string): Promise<[number, string]> {
+type Fetched = { status: number; body: string };
+
+/** Second attempt for the GitHub JSON files: RN's own networking module over XHR, which does not go through
+ *  expo/fetch, its OkHttp interceptor stack or the WebView cookie jar. Resolves 4xx/5xx too, so the manifest
+ *  parser can report the HTTP status. */
+function getTextXhr(url: string, timeoutMs: number): Promise<Fetched> {
+  return new Promise((resolve, reject) => {
+    const fail = (name: string, message: string) => {
+      const e = new Error(message);
+      e.name = name;
+      reject(e);
+    };
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url);
+    xhr.withCredentials = false;
+    xhr.timeout = timeoutMs;
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('Cache-Control', 'no-cache');
+    xhr.onload = () => resolve({ status: xhr.status, body: xhr.responseText ?? '' });
+    xhr.onerror = () => fail('TypeError', 'Network request failed');
+    xhr.ontimeout = () => fail('TimeoutError', `timed out after ${Math.round(timeoutMs / 1000)} s`);
+    xhr.onabort = () => fail('AbortError', 'aborted');
+    try {
+      xhr.send();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+/** GET a small JSON file from GitHub -> [status, body]. Tries expo/fetch first (no cookies, gzip only) and falls
+ *  back once to XHR. Throws one readable message naming the host, the attempts' timings and the underlying errors. */
+async function getText(url: string, what: string, timeoutMs = 10000, xhrTimeoutMs = 8000): Promise<[number, string]> {
+  const host = url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('/')[0];
+  const attempts: string[] = [];
+  let timedOut = false;
+
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 10000);
+  const started = Date.now();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { signal: ctrl.signal, headers: { 'Cache-Control': 'no-cache', Accept: 'application/json' } });
-    return [r.status, await r.text()];
+    // expo/fetch shares RN's cookie handler (the WebView CookieManager since react-native-webview arrived) and
+    // otherwise negotiates zstd/br. Both are suspects for the 10 s stall on github.com: NO_COOKIES + gzip only.
+    const r = await fetch(url, {
+      signal: ctrl.signal,
+      credentials: 'omit',
+      headers: { 'Cache-Control': 'no-cache', Accept: 'application/json', 'Accept-Encoding': 'gzip' },
+    });
+    const body = await r.text();
+    console.warn(`[ota] GET ${url} ok via fetch in ${Date.now() - started} ms (HTTP ${r.status})`);
+    return [r.status, body];
   } catch (e) {
-    throw new Error((e as Error)?.name === 'AbortError' ? `Couldn't check for ${what} (timed out)` : `Couldn't check for ${what} (offline?)`);
+    const elapsed = Date.now() - started;
+    const err = e as Error;
+    // RN's abort does not always surface as name 'AbortError' (it can be 'TypeError: ... canceled'), so trust
+    // the signal we aborted ourselves.
+    timedOut = err?.name === 'AbortError' || ctrl.signal.aborted;
+    const detail = `${err?.name || 'Error'}: ${err?.message || String(e)}`;
+    attempts.push(`fetch ${timedOut ? 'timed out' : 'failed'} after ${elapsed} ms: ${detail}`);
+    console.warn(`[ota] GET ${url} ${timedOut ? 'timed out' : 'failed'} via fetch after ${elapsed} ms (${detail}); retrying via XHR`);
   } finally {
     clearTimeout(t);
   }
+
+  const startedXhr = Date.now();
+  try {
+    const r = await getTextXhr(url, xhrTimeoutMs);
+    console.warn(`[ota] GET ${url} ok via XHR in ${Date.now() - startedXhr} ms (HTTP ${r.status})`);
+    return [r.status, r.body];
+  } catch (e) {
+    const elapsed = Date.now() - startedXhr;
+    const err = e as Error;
+    const xhrTimedOut = err?.name === 'TimeoutError';
+    timedOut = timedOut || xhrTimedOut;
+    const detail = `${err?.name || 'Error'}: ${err?.message || String(e)}`;
+    attempts.push(`XHR ${xhrTimedOut ? 'timed out' : 'failed'} after ${elapsed} ms: ${detail}`);
+    console.warn(`[ota] GET ${url} ${xhrTimedOut ? 'timed out' : 'failed'} via XHR after ${elapsed} ms (${detail})`);
+  }
+
+  throw new Error(
+    timedOut
+      ? `Couldn't check for ${what} (timed out via ${host}: ${attempts.join('; ')})`
+      : `Couldn't check for ${what} (network error via ${host}: ${attempts.join('; ')})`,
+  );
 }
 
 /** Fetches and validates the OTA manifest ourselves (nitro's check takes an HTML error page as a version).

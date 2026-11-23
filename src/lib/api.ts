@@ -222,4 +222,132 @@ export type Health = {
   sonarr: ArrQueue;
   jellyfin: { available: boolean; error?: string; streams?: JellyfinStream[] };
   disks: { available: boolean; error?: string; disks?: HealthDisk[] };
+  vpn?: VpnState & { available?: boolean; error?: string };
+  agent?: AgentState & { error?: string };
 };
+
+export type VpnState = {
+  enabled: boolean;
+  tunnel_up: boolean;
+  forwarded_port: number | null;
+  qbt_interface: string;
+  public_ip: string | null;
+  last_error: string | null;
+};
+
+export type AgentEngine = 'claude' | 'gemini';
+
+export type AgentOption = {
+  id: AgentEngine;
+  label: string;
+  model: string;
+};
+
+export type AgentState = {
+  engine: AgentEngine;
+  claude_active: boolean;
+  gemini_active: boolean;
+  available: boolean;
+  switching: boolean;
+  options: AgentOption[];
+};
+
+export const getAgent = () => get<AgentState>('/pc/api/agent');
+export const setAgent = (engine: AgentEngine) => post<AgentState>('/pc/api/agent', { engine });
+
+export type AgentUsageWindow = {
+  remaining_pct: number | null;
+  used_pct: number | null;
+  refreshes_in?: string | null;
+  resets_at?: string | null;
+  status?: string | null;
+};
+
+export type AgentUsageDeepSeek = {
+  is_available?: boolean;
+  currency?: string;
+  total_balance?: number;
+  formatted?: string;
+  error?: string;
+};
+
+export type AgentUsageZenModel = {
+  model: string;
+  messages: number;
+  cost?: string | null;
+};
+
+export type AgentUsageZen = {
+  status: string;
+  days?: number;
+  sessions?: number;
+  messages?: number;
+  total_cost?: string;
+  zen_messages?: number;
+  models?: AgentUsageZenModel[];
+  error?: string;
+};
+
+export type AgentUsageAccount = {
+  id: string;
+  harness: AgentEngine | 'opencode';
+  label: string;
+  email: string | null;
+  signed_in: boolean;
+  status: string | null;
+  error: string | null;
+  five_hour: AgentUsageWindow | null;
+  weekly: AgentUsageWindow | null;
+  deepseek?: AgentUsageDeepSeek | null;
+  zen?: AgentUsageZen | null;
+};
+
+export type AgentUsageResponse = {
+  ts: number;
+  cached: boolean;
+  stale?: boolean;
+  accounts: AgentUsageAccount[];
+};
+
+export type AgentModelOption = {
+  id: string;
+  label: string;
+};
+
+export type GeminiInstanceOption = {
+  id: string;
+  label: string;
+  signed_in: boolean;
+  email: string | null;
+};
+
+export type AgentSettings = {
+  claude: {
+    account: string | null;
+    model: string;
+    effort: string;
+    models: AgentModelOption[];
+    efforts: string[];
+  };
+  gemini: {
+    instance_id: string;
+    model: string;
+    thought_level: string;
+    auto_rotate: boolean;
+    instances: GeminiInstanceOption[];
+    models: AgentModelOption[];
+    efforts: string[];
+  };
+};
+
+export type AgentSettingsPatch = {
+  claude?: { model?: string; effort?: string };
+  gemini?: { instance_id?: string; model?: string; thought_level?: string; auto_rotate?: boolean };
+};
+
+export const getAgentUsage = (refresh = false) =>
+  get<AgentUsageResponse>(refresh ? '/pc/api/agent/usage?refresh=1' : '/pc/api/agent/usage', 50000);
+export const getAgentSettings = () => get<AgentSettings>('/pc/api/agent/settings');
+export const updateAgentSettings = (patch: AgentSettingsPatch) =>
+  post<AgentSettings>('/pc/api/agent/settings', patch);
+export const resetAgent = () => post<{ ok: boolean; message: string }>('/pc/api/agent/reset', {});

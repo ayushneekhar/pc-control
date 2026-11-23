@@ -236,9 +236,7 @@ export default function HealthScreen() {
             <StatusDot tone={problems.length ? (bad ? 'bad' : 'warn') : 'ok'} />
             <Text style={{ color: t.textDim, fontSize: 12.5 }}>Checked {clock(h.ts)}</Text>
           </View>
-        ) : (
-          'Home server at a glance'
-        )
+        ) : undefined
       }
       refreshing={refreshing}
       onRefresh={async () => {
@@ -253,62 +251,14 @@ export default function HealthScreen() {
         <Card style={{ gap: space(3) }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3.5) }}>
             <StatusRing tone={summaryTone} icon={problems.length ? 'alert-outline' : 'check'} />
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={{ color: t.text, fontSize: 16, fontWeight: '600' }}>
-                {problems.length
-                  ? `${problems.length} problem${problems.length === 1 ? '' : 's'}`
-                  : `All ${counts?.running ?? units.filter((s) => s.active === 'active').length} running`}
-              </Text>
-              <Text style={{ color: t.textDim, fontSize: 12.5 }}>
-                {problems.length ? (bad ? 'Needs attention' : 'A few things to check') : 'No issues found'}
-              </Text>
-            </View>
+            <Text style={{ color: t.text, fontSize: 16, fontWeight: '600', flex: 1 }}>
+              {problems.length
+                ? `${problems.length} problem${problems.length === 1 ? '' : 's'}`
+                : `All ${counts?.running ?? units.filter((s) => s.active === 'active').length} running`}
+            </Text>
           </View>
           {problems.length ? <ProblemList problems={problems} /> : null}
         </Card>
-      ) : null}
-
-      {h?.services.available && units.length ? (
-        <Segmented
-          value={filter}
-          onChange={setFilter}
-          options={[
-            { id: 'all', label: 'All' },
-            { id: 'media', label: 'Media' },
-            { id: 'cams', label: 'Cams' },
-            { id: 'agents', label: 'Agents' },
-          ]}
-        />
-      ) : null}
-
-      {h ? (
-        !h.services.available ? (
-          <Unavailable label="Services" error={h.services.error} />
-        ) : (
-          <List>
-            {shownUnits.length ? (
-              shownUnits.map((s, i) => {
-                const tn = tone(s);
-                return (
-                  <ListRow
-                    key={s.unit}
-                    leading={<StatusDot tone={tn === 'dim' ? 'faint' : tn} />}
-                    title={pretty(s.unit)}
-                    subtitle={s.description}
-                    trailing={s.active === 'active' ? since(s.since) : statusLabel(s)}
-                    chevron
-                    last={i === shownUnits.length - 1}
-                    onPress={() => nav.navigate('ServiceDetail', { service: s })}
-                  />
-                );
-              })
-            ) : (
-              <View style={{ padding: space(4) }}>
-                <Text style={{ color: t.textFaint, fontSize: 13 }}>No services in this group.</Text>
-              </View>
-            )}
-          </List>
-        )
       ) : null}
 
       <Section label="Downloads">
@@ -439,6 +389,48 @@ export default function HealthScreen() {
           </Card>
         )}
       </Section>
+
+      {h?.services.available && units.length ? (
+        <Segmented
+          value={filter}
+          onChange={setFilter}
+          options={[
+            { id: 'all', label: 'All' },
+            { id: 'media', label: 'Media' },
+            { id: 'cams', label: 'Cams' },
+            { id: 'agents', label: 'Agents' },
+          ]}
+        />
+      ) : null}
+
+      {h ? (
+        !h.services.available ? (
+          <Unavailable label="Services" error={h.services.error} />
+        ) : (
+          <List>
+            {shownUnits.length ? (
+              shownUnits.map((s, i) => {
+                const tn = tone(s);
+                return (
+                  <ListRow
+                    key={s.unit}
+                    leading={<StatusDot tone={tn === 'dim' ? 'faint' : tn} />}
+                    title={pretty(s.unit)}
+                    trailing={s.active === 'active' ? since(s.since) : statusLabel(s)}
+                    chevron
+                    last={i === shownUnits.length - 1}
+                    onPress={() => nav.navigate('ServiceDetail', { service: s })}
+                  />
+                );
+              })
+            ) : (
+              <View style={{ padding: space(4) }}>
+                <Text style={{ color: t.textFaint, fontSize: 13 }}>No services in this group.</Text>
+              </View>
+            )}
+          </List>
+        )
+      ) : null}
     </Screen>
   );
 }

@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for Proton WireGuard watchdog kicks from pc-api
+After=systemd-tmpfiles-setup.service
+
+[Path]
+PathModified=/run/proton-wg-kick/kick
+Unit=proton-wg-watchdog.service
+
+[Install]
+WantedBy=paths.target

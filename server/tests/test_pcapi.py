@@ -1,6 +1,7 @@
 """pc-api route classification (API-only routes hidden server-side, overridable via routes.json)."""
-import json, os, sys, tempfile, threading, time, unittest, urllib.parse
+import json, os, struct, sys, tempfile, threading, time, unittest, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pcapi  # noqa: E402
@@ -832,3 +833,835 @@ class ServiceWatcherTests(unittest.TestCase):
         w = pcapi.ServiceWatcher(self.n, list_fn=lambda: (_ for _ in ()).throw(OSError("systemctl down")))
         with self.assertRaises(OSError):
             w.check()
+
+
+# ---------------------------------------------------------------- torrent VPN (qBittorrent -> Proton)
+
+class FakeVpnQbt:
+    def __init__(self, listen=28655):
+        self.prefs = {"listen_port": listen, "current_network_interface": "", "upnp": True}
+        self.calls = []
+
+    def preferences(self): return dict(self.prefs)
+
+    def set_preferences(self, p):
+        self.calls.append(dict(p))
+        self.prefs.update(p)
+        return {}
+
+
+class NatPmpTests(unittest.TestCase):
+    def test_mapping_request_uses_the_rfc6886_wire_format(self):
+        sent = []
+
+        class Sock:
+            def __init__(self, *a): pass
+            def bind(self, addr): pass
+            def settimeout(self, timeout): pass
+            def sendto(self, data, addr): sent.append((data, addr))
+            def recvfrom(self, n):
+                return struct.pack("!BBHIHHI", 0, 129, 0, 0, 43124, 43124, 60), ("10.2.0.1", 5351)
+            def close(self): pass
+
+        with mock.patch.object(pcapi.socket, "socket", Sock):
+            r = pcapi.NatPmp().request(1, 0, 1, 60)
+        self.assertEqual(sent[0][0], struct.pack("!BBHHHI", 0, 1, 0, 0, 1, 60))
+        self.assertEqual(sent[0][1], ("10.2.0.1", 5351))
+        self.assertEqual(r, {"internal": 43124, "external": 43124, "lifetime": 60})
+        with self.assertRaises(ValueError):
+            pcapi.NatPmp().request(0, 28655)
+
+
+class FakeNatPmp:
+    def __init__(self, external=None, fail=False, result=None, udp=None, tcp=None):
+        self.calls, self.external, self.fail, self.result = [], external, fail, result
+        self.udp, self.tcp = udp, tcp
+
+    def request(self, opcode, internal, suggested=0, lifetime=60):
+        self.calls.append((opcode, internal, suggested, lifetime))
+        if self.fail: raise OSError("no NAT-PMP gateway")
+        if self.result is not None: raise pcapi.NatPmpError(self.result)
+        external = self.external
+        if external is None: external = self.udp if opcode == 1 else self.tcp
+        self.assert_lifetime = lifetime
+        return {"internal": internal, "external": external or 28655, "lifetime": lifetime}
+
+
+class VpnTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.conf = os.path.join(self.dir, "pcapi.json")
+        self.kick_dir = os.path.join(self.dir, "kick")
+        os.makedirs(self.kick_dir)
+        self.kick = os.path.join(self.kick_dir, "kick")
+        self.notif = FakeNotifier()
+        self.qbt = FakeVpnQbt()
+        self.net = FakeNatPmp()
+        self.ip_calls = []
+        self.v = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net,
+                                  ip_fetcher=lambda: (self.ip_calls.append(1), "203.0.113.9")[1],
+                                  kick_file=self.kick)
+        self.v._iface_exists = lambda: True
+        self.v._handshake_age = lambda: 5
+
+    def test_enable_sets_interface_keeps_natpmp_for_both_protocols_and_persists(self):
+        st = self.v.set_enabled(True)
+        self.assertTrue(st["enabled"])
+        self.assertEqual(self.qbt.prefs["current_network_interface"], "proton0")
+        self.assertFalse(self.qbt.prefs["upnp"])
+        self.assertEqual({c[0] for c in self.net.calls}, {1, 2})
+        self.assertEqual({(c[1], c[2]) for c in self.net.calls}, {(0, 1)})   # Proton: internal 0, suggest 1
+        self.assertEqual({c[3] for c in self.net.calls}, {60})
+        self.assertEqual((st["forwarded_port"], st["qbt_interface"]), (28655, "proton0"))
+        with open(self.conf) as f: self.assertTrue(json.load(f)["torrent_vpn_enabled"])
+
+    def test_public_port_change_moves_qbt_and_disable_restores_previous_port(self):
+        self.net.external = 40000
+        st = self.v.set_enabled(True)
+        self.assertEqual((st["forwarded_port"], self.qbt.prefs["listen_port"]), (40000, 40000))
+        self.assertTrue(all(c[1] == 0 and c[2] == 1 for c in self.net.calls))
+        st = self.v.set_enabled(False)
+        self.assertEqual(self.qbt.prefs["current_network_interface"], "")
+        self.assertEqual(self.qbt.prefs["listen_port"], 28655)
+        self.assertEqual((st["forwarded_port"], st["qbt_interface"], st["enabled"]), (None, "", False))
+        with open(self.conf) as f: self.assertFalse(json.load(f)["torrent_vpn_enabled"])
+
+    def test_restart_while_enabled_keeps_the_real_previous_port(self):
+        self.net.external = 40000
+        self.v.set_enabled(True)
+        self.assertEqual(self.qbt.prefs["listen_port"], 40000)
+        v2 = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net, kick_file=self.kick)
+        v2._iface_exists = lambda: True
+        v2._handshake_age = lambda: 5
+        v2._enable_locked(persist=False)
+        self.assertEqual(v2.previous_port, 28655)                       # not the forwarded port
+        v2.set_enabled(False)
+        self.assertEqual(self.qbt.prefs["listen_port"], 28655)
+
+    def test_udp_and_tcp_mismatch_uses_the_udp_port(self):
+        self.v.net = FakeNatPmp(udp=50000, tcp=50001)
+        st = self.v.set_enabled(True)
+        self.assertEqual(st["forwarded_port"], 50000)
+        self.assertEqual(self.qbt.prefs["listen_port"], 50000)
+
+    def test_natpmp_result_4_backs_off_for_sixty_seconds(self):
+        self.net.result = 4
+        self.v.set_enabled(True)
+        self.assertFalse(self.v.natpmp_ok)
+        self.assertIn("4", self.v.last_error)
+        self.assertGreaterEqual(self.v._next_renew, time.time() + 55)
+
+    def test_natpmp_failure_is_reported_but_enabling_still_binds_the_kill_switch(self):
+        self.net.fail = True
+        self.v._handshake_age = lambda: None       # `wg` unreadable: fall back to NAT-PMP health
+        st = self.v.set_enabled(True)
+        self.assertTrue(st["enabled"])
+        self.assertFalse(st["tunnel_up"])
+        self.assertIn("NAT-PMP", st["last_error"])
+        self.assertEqual(self.qbt.prefs["current_network_interface"], "proton0")
+
+    def test_public_ip_is_cached_for_ten_minutes_and_only_from_the_tunnel(self):
+        self.v.set_enabled(True)
+        self.v._refresh_public_ip_locked()
+        self.v._refresh_public_ip_locked()
+        self.assertEqual(len(self.ip_calls), 1)
+        self.assertEqual(self.v.status()["public_ip"], "203.0.113.9")
+        self.v._ip_at = 0
+        self.v._refresh_public_ip_locked()
+        self.assertEqual(len(self.ip_calls), 2)
+        self.v._iface_exists = lambda: False
+        self.v._ip_at = 0
+        self.v._refresh_public_ip_locked()
+        self.assertEqual(len(self.ip_calls), 2)
+
+    def test_public_ip_retries_until_natpmp_and_the_fetch_succeed(self):
+        self.net.fail = True
+        self.v.set_enabled(True)
+        self.v._refresh_public_ip_locked()
+        self.assertEqual((self.v.public_ip, self.v._ip_at, len(self.ip_calls)), (None, 0, 0))
+
+        attempts = []
+        def flaky():
+            attempts.append(1)
+            if len(attempts) == 1: raise OSError("temporary")
+            return "203.0.113.9"
+
+        self.v.natpmp_ok = True
+        self.v.ip_fetcher = flaky
+        self.v._refresh_public_ip_locked()
+        self.assertEqual((self.v.public_ip, self.v._ip_at, len(attempts)), (None, 0, 1))
+        self.v._refresh_public_ip_locked()
+        self.assertEqual((self.v.public_ip, len(attempts)), ("203.0.113.9", 2))
+
+    def test_one_down_alert_after_three_minutes_and_one_recovery(self):
+        self.v.set_enabled(True)
+        self.v._iface_exists = lambda: False
+        self.v.natpmp_ok = False
+        self.v._unhealthy_since = time.time() - pcapi.VPN_ALERT_AFTER - 1
+        self.v._status_check_locked()
+        self.assertEqual(len(self.notif.calls), 1)
+        self.assertEqual(self.notif.calls[0][0], "vpn_down")
+        self.assertIn("down", self.notif.calls[0][1].lower())
+        self.v._status_check_locked()
+        self.assertEqual(len(self.notif.calls), 1)                       # one alert per outage
+        self.v._iface_exists = lambda: True
+        self.v._handshake_age = lambda: 5
+        self.v.natpmp_ok = True
+        self.v._status_check_locked()
+        self.assertEqual(len(self.notif.calls), 2)
+        self.assertIn("back up", self.notif.calls[1][1].lower())
+        self.v._status_check_locked()
+        self.assertEqual(len(self.notif.calls), 2)                       # recovery is sent once
+
+    def test_health_exposes_vpn_and_reports_it_down(self):
+        class FakeVpn:
+            def status(self):
+                return {"enabled": True, "tunnel_up": False, "forwarded_port": None,
+                        "qbt_interface": "proton0", "public_ip": None, "last_error": "no NAT-PMP gateway"}
+        saved, pcapi.VPN = pcapi.VPN, FakeVpn()
+        try:
+            sources = HealthTests().sources()
+            sources["vpn"] = pcapi.vpn_health
+            r = pcapi.health_report(sources=sources, timeout=1)
+        finally:
+            pcapi.VPN = saved
+        self.assertTrue(r["vpn"]["available"])
+        problem = next(p for p in r["problems"] if p["kind"] == "vpn")
+        self.assertEqual(problem["title"], "Torrent VPN is down")
+        self.assertIn("NAT-PMP", problem["detail"])
+
+    def test_failed_natpmp_renewal_writes_kick_file_and_success_does_not(self):
+        kick_dir = os.path.join(self.dir, "env-kick")
+        os.makedirs(kick_dir)
+        kick_path = os.path.join(kick_dir, "kick")
+        with mock.patch.dict(os.environ, {"PCAPI_WG_KICK": kick_path}):
+            v = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net)
+            v._iface_exists = lambda: True
+            v._handshake_age = lambda: 5
+
+            # Successful renewal must not create the kick file.
+            v.set_enabled(True)
+            self.assertTrue(v.natpmp_ok)
+            self.assertFalse(os.path.exists(kick_path))
+
+            # Failed/timed-out renewal while enabled writes current unix time atomically.
+            self.net.fail = True
+            before = int(time.time())
+            v._renew_locked()
+            after = int(time.time())
+            self.assertFalse(v.natpmp_ok)
+            self.assertTrue(os.path.exists(kick_path))
+            self.assertFalse(os.path.exists(kick_path + ".tmp"))
+            with open(kick_path, "r", encoding="utf-8") as f:
+                ts = int(f.read().strip())
+            self.assertGreaterEqual(ts, before)
+            self.assertLessEqual(ts, after)
+
+            # A subsequent successful renewal must not write or recreate the kick file.
+            os.remove(kick_path)
+            self.net.fail = False
+            v._renew_locked()
+            self.assertTrue(v.natpmp_ok)
+            self.assertFalse(os.path.exists(kick_path))
+
+            # A failed renewal when VPN is disabled must not write the kick file.
+            v.set_enabled(False)
+            self.net.fail = True
+            v._renew_locked()
+            self.assertFalse(os.path.exists(kick_path))
+
+    def test_missing_kick_dir_never_raises_and_logs_once(self):
+        import io
+        missing_kick = os.path.join(self.dir, "does-not-exist", "kick")
+        with mock.patch.dict(os.environ, {"PCAPI_WG_KICK": missing_kick}):
+            v = pcapi.VpnManager(self.notif, qbt=self.qbt, conf_file=self.conf, net=self.net)
+            v._iface_exists = lambda: True
+            v._handshake_age = lambda: 5
+            v.set_enabled(True)
+            self.net.fail = True
+            err = io.StringIO()
+            with mock.patch.object(sys, "stderr", err):
+                v._renew_locked()
+                v._renew_locked()
+            lines = [line for line in err.getvalue().splitlines() if "watchdog kick" in line]
+            self.assertEqual(len(lines), 1)
+            self.assertFalse(os.path.exists(missing_kick))
+
+
+class VpnHttpTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = pcapi.ALLOWED_LOGINS, pcapi.VPN
+        pcapi.ALLOWED_LOGINS = {"me@example.com"}
+        cls.api = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        threading.Thread(target=cls.api.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.api.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.api.shutdown()
+        pcapi.ALLOWED_LOGINS, pcapi.VPN = cls.saved
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.qbt = FakeVpnQbt()
+        self.v = pcapi.VpnManager(FakeNotifier(), qbt=self.qbt, conf_file=os.path.join(self.dir, "pcapi.json"),
+                                  net=FakeNatPmp(), kick_file=os.path.join(self.dir, "kick"))
+        self.v._iface_exists = lambda: True
+        self.v._handshake_age = lambda: 5
+        pcapi.VPN = self.v
+
+    def call(self, method, path, body=None, headers=None):
+        import urllib.request, urllib.error
+        req = urllib.request.Request(self.url + path, method=method,
+                                     headers={"Content-Type": "application/json", **(headers or {})},
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.load(e)
+
+    def test_get_and_post_same_auth_as_other_write_endpoints(self):
+        self.assertEqual(self.call("GET", "/pc/api/vpn")[0], 200)
+        self.assertEqual(self.call("POST", "/pc/api/vpn", {"enabled": True},
+                                   {"Tailscale-User-Login": "x@evil.com"})[0], 403)
+        self.assertEqual(self.call("POST", "/pc/api/vpn", {"enabled": "yes"})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/vpn", {"enabled": True})[0], 200)
+        self.assertTrue(self.call("GET", "/pc/api/vpn")[1]["enabled"])
+        self.assertEqual(self.call("POST", "/pc/api/vpn", {"enabled": False})[0], 200)
+        self.assertFalse(self.call("GET", "/pc/api/vpn")[1]["enabled"])
+
+
+class AgentTests(unittest.TestCase):
+    def _make_script(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "agent-switch")
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(p, 0o755)
+        return p
+
+    def test_missing_script_reports_unavailable_claude_and_rejects_switch(self):
+        missing = os.path.join(tempfile.mkdtemp(), "agent-switch")
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return pcapi.subprocess.CompletedProcess(argv, 0, "", "")
+
+        mgr = pcapi.AgentManager(script=missing, run_fn=fake_run)
+        st = mgr.status()
+        self.assertEqual(st["engine"], "claude")
+        self.assertFalse(st["claude_active"])
+        self.assertFalse(st["gemini_active"])
+        self.assertFalse(st["available"])
+        self.assertFalse(st["switching"])
+        self.assertEqual(st["options"], [
+            {"id": "claude", "label": "Claude", "model": "Opus 5.5"},
+            {"id": "gemini", "label": "Gemini", "model": "Gemini 4 Neon"},
+        ])
+        code, body = mgr.switch("gemini")
+        self.assertEqual(code, 503)
+        self.assertIn("error", body)
+        self.assertEqual(calls, [])
+
+    def test_status_and_detached_switch_lifecycle(self):
+        script = self._make_script()
+        now = [100.0]
+        state = {"engine": "claude", "claude_active": True, "gemini_active": False}
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append((argv, kw))
+            if argv[-1] == "status":
+                return pcapi.subprocess.CompletedProcess(argv, 0, json.dumps(state), "")
+            return pcapi.subprocess.CompletedProcess(argv, 0, "", "")
+
+        mgr = pcapi.AgentManager(script=script, run_fn=fake_run, clock=lambda: now[0], switch_ttl=30.0)
+        st = mgr.status()
+        self.assertEqual((st["engine"], st["claude_active"], st["gemini_active"], st["available"], st["switching"]),
+                         ("claude", True, False, True, False))
+        self.assertEqual(calls[-1][0], [os.path.abspath(script), "status"])
+
+        code, res = mgr.switch("gemini")
+        self.assertEqual(code, 202)
+        self.assertEqual((res["engine"], res["available"], res["switching"]), ("gemini", True, True))
+        self.assertEqual(calls[-1][0], ["systemd-run", "--user", "--collect", "--quiet", os.path.abspath(script), "gemini"])
+
+        # Still transitioning: target unit not active yet
+        self.assertTrue(mgr.status()["switching"])
+
+        # Target unit active and old unit stopped -> switching clears
+        state.update({"engine": "gemini", "claude_active": False, "gemini_active": True})
+        done = mgr.status()
+        self.assertEqual((done["engine"], done["claude_active"], done["gemini_active"], done["switching"]),
+                         ("gemini", False, True, False))
+
+        # Switching flag expires after TTL even if unit never flips
+        code, _ = mgr.switch("claude")
+        self.assertEqual(code, 202)
+        self.assertTrue(mgr.status()["switching"])
+        now[0] += 31.0
+        self.assertFalse(mgr.status()["switching"])
+
+    def test_rejects_unknown_engines_and_reports_subprocess_errors(self):
+        script = self._make_script()
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return pcapi.subprocess.CompletedProcess(argv, 1, "", "systemd bus down")
+
+        mgr = pcapi.AgentManager(script=script, run_fn=fake_run)
+        for bad in ("gpt", "", None, 42, ["claude"]):
+            code, body = mgr.switch(bad)
+            self.assertEqual(code, 400)
+            self.assertIn("error", body)
+        self.assertEqual(calls, [])
+
+        code, body = mgr.switch("claude")
+        self.assertEqual(code, 502)
+        self.assertIn("systemd bus down", body["error"])
+        with self.assertRaises(RuntimeError):
+            mgr.status()
+
+    def test_health_includes_agent_section(self):
+        script = self._make_script()
+        mgr = pcapi.AgentManager(
+            script=script,
+            run_fn=lambda argv, **kw: pcapi.subprocess.CompletedProcess(
+                argv, 0, json.dumps({"engine": "gemini", "claude_active": False, "gemini_active": True}), ""),
+        )
+        saved, pcapi.AGENT = pcapi.AGENT, mgr
+        try:
+            sources = HealthTests().sources()
+            sources["agent"] = pcapi.agent_health
+            r = pcapi.health_report(sources=sources, timeout=1)
+        finally:
+            pcapi.AGENT = saved
+        self.assertTrue(r["agent"]["available"])
+        self.assertEqual(r["agent"]["engine"], "gemini")
+        self.assertTrue(r["agent"]["gemini_active"])
+        self.assertFalse(any(p["title"] == "Agent unavailable" for p in r["problems"]))
+
+        # Missing script should not raise a health problem
+        missing = os.path.join(tempfile.mkdtemp(), "agent-switch")
+        saved, pcapi.AGENT = pcapi.AGENT, pcapi.AgentManager(script=missing)
+        try:
+            sources = HealthTests().sources()
+            sources["agent"] = pcapi.agent_health
+            r2 = pcapi.health_report(sources=sources, timeout=1)
+        finally:
+            pcapi.AGENT = saved
+        self.assertFalse(r2["agent"]["available"])
+        self.assertEqual(r2["agent"]["engine"], "claude")
+        self.assertFalse(any(p["title"] == "Agent unavailable" for p in r2["problems"]))
+
+    def test_uses_subprocess_run_with_detached_systemd_run_args(self):
+        script = self._make_script()
+        mgr = pcapi.AgentManager(script=script)
+        with mock.patch.object(pcapi.subprocess, "run") as mrun:
+            mrun.return_value = pcapi.subprocess.CompletedProcess([], 0, "", "")
+            code, res = mgr.switch("claude")
+        self.assertEqual((code, res["engine"], res["switching"]), (202, "claude", True))
+        mrun.assert_called_once_with(
+            ["systemd-run", "--user", "--collect", "--quiet", os.path.abspath(script), "claude"],
+            stdin=pcapi.subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
+        )
+
+
+class AgentHttpTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = pcapi.ALLOWED_LOGINS, pcapi.AGENT
+        pcapi.ALLOWED_LOGINS = {"me@example.com"}
+        cls.api = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        threading.Thread(target=cls.api.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.api.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.api.shutdown()
+        cls.api.server_close()
+        pcapi.ALLOWED_LOGINS, pcapi.AGENT = cls.saved
+
+    def setUp(self):
+        d = tempfile.mkdtemp()
+        self.script = os.path.join(d, "agent-switch")
+        with open(self.script, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(self.script, 0o755)
+        self.calls = []
+        self.state = {"engine": "claude", "claude_active": True, "gemini_active": False}
+
+        def fake_run(argv, **kw):
+            self.calls.append(argv)
+            if argv[-1] == "status":
+                return pcapi.subprocess.CompletedProcess(argv, 0, json.dumps(self.state), "")
+            return pcapi.subprocess.CompletedProcess(argv, 0, "", "")
+
+        pcapi.AGENT = pcapi.AgentManager(script=self.script, run_fn=fake_run)
+
+    def call(self, method, path, body=None, headers=None):
+        import urllib.request, urllib.error
+        req = urllib.request.Request(self.url + path, method=method,
+                                     headers={"Content-Type": "application/json", **(headers or {})},
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.load(e)
+
+    def test_get_and_post_auth_validation_and_detached_switch(self):
+        # Auth checks mirror /pc/api/vpn
+        self.assertEqual(self.call("GET", "/pc/api/agent", headers={"Tailscale-User-Login": "x@evil.com"})[0], 403)
+        self.assertEqual(self.call("POST", "/pc/api/agent", {"engine": "gemini"},
+                                   {"Tailscale-User-Login": "x@evil.com"})[0], 403)
+        self.assertEqual(self.call("POST", "/pc/api/agent", {"engine": "gemini"},
+                                   {"X-Forwarded-For": "100.64.0.9"})[0], 403)
+
+        # GET returns full status + options
+        code, r = self.call("GET", "/pc/api/agent", headers={"Tailscale-User-Login": "me@example.com"})
+        self.assertEqual(code, 200)
+        self.assertEqual((r["engine"], r["claude_active"], r["gemini_active"], r["available"], r["switching"]),
+                         ("claude", True, False, True, False))
+        self.assertEqual([o["id"] for o in r["options"]], ["claude", "gemini"])
+
+        # Unknown engine rejected with 400
+        self.assertEqual(self.call("POST", "/pc/api/agent", {"engine": "unknown"})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/agent", {})[0], 400)
+
+        # Valid POST returns 202 and invokes detached systemd-run
+        code, r = self.call("POST", "/pc/api/agent", {"engine": "gemini"})
+        self.assertEqual(code, 202)
+        self.assertEqual((r["engine"], r["switching"], r["available"]), ("gemini", True, True))
+        self.assertEqual(self.calls[-1],
+                         ["systemd-run", "--user", "--collect", "--quiet", os.path.abspath(self.script), "gemini"])
+
+        # Subsequent GET reflects switching until gemini_active flips True
+        code, r = self.call("GET", "/pc/api/agent")
+        self.assertEqual((code, r["switching"]), (200, True))
+        self.state.update({"engine": "gemini", "claude_active": False, "gemini_active": True})
+        code, r = self.call("GET", "/pc/api/agent")
+        self.assertEqual((code, r["engine"], r["gemini_active"], r["switching"]), (200, "gemini", True, False))
+
+
+class AgentUsageAndSettingsHttpTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.saved = (
+            pcapi.ALLOWED_LOGINS,
+            pcapi.AGENT_USAGE,
+            pcapi.AGENT_SETTINGS,
+            pcapi.AGENT_RESET_BIN,
+        )
+        pcapi.ALLOWED_LOGINS = {"me@example.com"}
+        cls.api = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        threading.Thread(target=cls.api.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.api.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.api.shutdown()
+        (
+            pcapi.ALLOWED_LOGINS,
+            pcapi.AGENT_USAGE,
+            pcapi.AGENT_SETTINGS,
+            pcapi.AGENT_RESET_BIN,
+        ) = cls.saved
+
+    def setUp(self):
+        import hashlib
+
+        self.dir = tempfile.mkdtemp()
+        self.usage_script = os.path.join(self.dir, "ai-usage")
+        with open(self.usage_script, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(self.usage_script, 0o755)
+
+        self.reset_script = os.path.join(self.dir, "agent-reset")
+        with open(self.reset_script, "w") as f:
+            f.write("#!/bin/sh\necho 'fresh started'\n")
+        os.chmod(self.reset_script, 0o755)
+        pcapi.AGENT_RESET_BIN = self.reset_script
+
+        self.t3_settings = os.path.join(self.dir, "t3-settings.json")
+        self.t3_providers = os.path.join(self.dir, "t3-providers")
+        with open(self.t3_settings, "w") as f:
+            json.dump({
+                "providerInstances": {
+                    "opencode": {"driver": "opencode", "displayName": "OpenCode", "enabled": True},
+                    "antigravity": {"driver": "antigravity", "displayName": "Antigravity 1", "enabled": True},
+                    "antigravity-2": {"driver": "antigravity", "displayName": "Antigravity 2", "enabled": True},
+                }
+            }, f)
+        h2 = hashlib.sha256(b"antigravity-2").hexdigest()
+        tok2 = os.path.join(self.t3_providers, h2, "antigravity-acp", "antigravity-oauth-token")
+        os.makedirs(os.path.dirname(tok2), exist_ok=True)
+        with open(tok2, "w") as f:
+            f.write("secret-token-never-returned")
+
+        self.claude_cfg = os.path.join(self.dir, "claude.json")
+        with open(self.claude_cfg, "w") as f:
+            json.dump({"oauthAccount": {"emailAddress": "claude@example.com"}}, f)
+
+        self.now = [1000.0]
+        self.usage_calls = 0
+        self.usage_report = {
+            "antigravity_accounts": [
+                {
+                    "instance_id": "antigravity",
+                    "display_name": "Antigravity 1",
+                    "signed_in": False,
+                    "status": "not signed in",
+                    "account": None,
+                    "sections": {},
+                },
+                {
+                    "instance_id": "antigravity-2",
+                    "display_name": "Antigravity 2",
+                    "signed_in": True,
+                    "account": "gem2@gmail.com",
+                    "sections": {
+                        "gemini": {
+                            "five_hour": {"remaining_pct": 88.0, "used_pct": 12.0, "refreshes_in": "4h 10m"},
+                            "weekly": {"remaining_pct": 95.0, "used_pct": 5.0, "refreshes_in": "160h"},
+                        }
+                    },
+                },
+            ],
+            "claude": {
+                "account": "claude@example.com",
+                "signed_in": True,
+                "five_hour": {
+                    "remaining_pct": 70.0,
+                    "used_pct": 30.0,
+                    "refreshes_in": "2h",
+                    "resets_at": "2026-11-23T08:30:00Z",
+                },
+                "weekly": {
+                    "remaining_pct": 60.0,
+                    "used_pct": 40.0,
+                    "refreshes_in": "5d",
+                    "resets_at": "2026-11-28T06:30:00Z",
+                },
+            },
+            "opencode": {
+                "deepseek": {
+                    "is_available": True,
+                    "currency": "USD",
+                    "total_balance": 3.38,
+                    "granted_balance": 0.0,
+                    "topped_up_balance": 3.38,
+                },
+                "zen": {
+                    "status": "ok",
+                    "days": 7,
+                    "sessions": 8,
+                    "messages": 929,
+                    "total_cost": "$0.62",
+                    "zen_messages": 607,
+                    "models": [
+                        {"model": "opencode/deepseek-v4.1-flash-free", "messages": 607, "cost": "$0.0000"},
+                        {"model": "deepseek/deepseek-flash", "messages": 276, "cost": "$0.6153"},
+                    ],
+                },
+            },
+        }
+
+        def fake_usage_run(argv, **kw):
+            self.usage_calls += 1
+            return pcapi.subprocess.CompletedProcess(argv, 0, json.dumps(self.usage_report), "")
+
+        self.usage_cache_file = os.path.join(self.dir, "agent-usage-cache.json")
+        pcapi.AGENT_USAGE = pcapi.AgentUsageManager(
+            script=self.usage_script,
+            run_fn=fake_usage_run,
+            clock=lambda: self.now[0],
+            ttl=60.0,
+            claude_config_path=self.claude_cfg,
+            cache_path=self.usage_cache_file,
+        )
+        self.claude_agent_cfg = os.path.join(self.dir, "claude-agent.json")
+        self.gemini_agent_cfg = os.path.join(self.dir, "gemini-agent.json")
+        self.fresh_flag = os.path.join(self.dir, ".fresh-gemini")
+        pcapi.AGENT_SETTINGS = pcapi.AgentSettingsManager(
+            claude_path=self.claude_agent_cfg,
+            gemini_path=self.gemini_agent_cfg,
+            gemini_fresh_flag=self.fresh_flag,
+            t3_settings_path=self.t3_settings,
+            t3_providers_dir=self.t3_providers,
+            claude_config_path=self.claude_cfg,
+            usage_mgr=pcapi.AGENT_USAGE,
+        )
+
+    def call(self, method, path, body=None, headers=None):
+        import urllib.request, urllib.error
+        req = urllib.request.Request(self.url + path, method=method,
+                                     headers={"Content-Type": "application/json", **(headers or {})},
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r: return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.load(e)
+
+    def test_usage_endpoint_caching_and_normalization(self):
+        code, r = self.call("GET", "/pc/api/agent/usage")
+        self.assertEqual(code, 200)
+        self.assertFalse(r["cached"])
+        self.assertFalse(r["stale"])
+        self.assertEqual(self.usage_calls, 1)
+        self.assertEqual(len(r["accounts"]), 4)
+        self.assertEqual(r["accounts"][0]["status"], "not signed in")
+        self.assertFalse(r["accounts"][0]["signed_in"])
+        self.assertEqual(r["accounts"][1]["email"], "gem2@gmail.com")
+        self.assertEqual(r["accounts"][1]["five_hour"]["remaining_pct"], 88.0)
+        # Duration-only window still gets an absolute UTC resets_at
+        self.assertIsNotNone(r["accounts"][1]["five_hour"]["resets_at"])
+        self.assertTrue(r["accounts"][1]["five_hour"]["resets_at"].endswith("Z"))
+        self.assertEqual(r["accounts"][2]["harness"], "claude")
+        self.assertEqual(r["accounts"][2]["email"], "claude@example.com")
+        self.assertTrue(r["accounts"][2]["signed_in"])
+        self.assertEqual(r["accounts"][2]["five_hour"]["resets_at"], "2026-11-23T08:30:00Z")
+
+        # OpenCode / DeepSeek normalization
+        oc = r["accounts"][3]
+        self.assertEqual(oc["id"], "opencode")
+        self.assertEqual(oc["harness"], "opencode")
+        self.assertEqual(oc["label"], "OpenCode / DeepSeek")
+        self.assertIsNone(oc["five_hour"])
+        self.assertIsNone(oc["weekly"])
+        self.assertEqual(oc["deepseek"]["formatted"], "$3.38")
+        self.assertAlmostEqual(oc["deepseek"]["total_balance"], 3.38)
+        self.assertEqual(oc["zen"]["days"], 7)
+        self.assertEqual(oc["zen"]["messages"], 929)
+        self.assertEqual(oc["zen"]["total_cost"], "$0.62")
+        self.assertEqual(len(oc["zen"]["models"]), 2)
+        self.assertEqual(oc["zen"]["models"][0]["messages"], 607)
+
+        # Second call within 60 s hits fresh cache
+        self.now[0] += 30.0
+        code, r2 = self.call("GET", "/pc/api/agent/usage")
+        self.assertEqual(code, 200)
+        self.assertTrue(r2["cached"])
+        self.assertFalse(r2["stale"])
+        self.assertEqual(self.usage_calls, 1)
+
+        # ?refresh=1 bypasses cache synchronously
+        code, r3 = self.call("GET", "/pc/api/agent/usage?refresh=1")
+        self.assertEqual(code, 200)
+        self.assertFalse(r3["cached"])
+        self.assertFalse(r3["stale"])
+        self.assertEqual(self.usage_calls, 2)
+
+        # TTL expiry serves stale-while-revalidate immediately & refreshes in background
+        self.now[0] += 61.0
+        code, r4 = self.call("GET", "/pc/api/agent/usage")
+        self.assertEqual(code, 200)
+        self.assertTrue(r4["cached"])
+        self.assertTrue(r4["stale"])
+        # Wait briefly for background refresh thread to finish
+        deadline = time.monotonic() + 3.0
+        while self.usage_calls < 3 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.usage_calls, 3)
+        code, r5 = self.call("GET", "/pc/api/agent/usage")
+        self.assertEqual(code, 200)
+        self.assertTrue(r5["cached"])
+        self.assertFalse(r5["stale"])
+
+    def test_usage_disk_cache_survives_restart_without_blocking(self):
+        # Prime disk cache
+        code, _ = self.call("GET", "/pc/api/agent/usage")
+        self.assertEqual(code, 200)
+        self.assertTrue(os.path.isfile(self.usage_cache_file))
+
+        # Simulate restart with a slow/blocking ai-usage
+        unblock = threading.Event()
+        bg_started = threading.Event()
+
+        def slow_run(argv, **kw):
+            bg_started.set()
+            unblock.wait(timeout=5.0)
+            self.usage_calls += 1
+            return pcapi.subprocess.CompletedProcess(argv, 0, json.dumps(self.usage_report), "")
+
+        pcapi.AGENT_USAGE = pcapi.AgentUsageManager(
+            script=self.usage_script,
+            run_fn=slow_run,
+            clock=lambda: self.now[0],
+            ttl=60.0,
+            claude_config_path=self.claude_cfg,
+            cache_path=self.usage_cache_file,
+        )
+        t0 = time.monotonic()
+        code, r = self.call("GET", "/pc/api/agent/usage")
+        elapsed = time.monotonic() - t0
+        self.assertEqual(code, 200)
+        self.assertTrue(r["cached"])
+        self.assertTrue(r["stale"])
+        self.assertEqual(len(r["accounts"]), 4)
+        self.assertLess(elapsed, 1.0)
+        self.assertTrue(bg_started.wait(timeout=2.0))
+        unblock.set()
+
+    def test_settings_get_update_validation_and_fresh_flag(self):
+        # Populate cached emails first
+        self.assertEqual(self.call("GET", "/pc/api/agent/usage")[0], 200)
+
+        code, s = self.call("GET", "/pc/api/agent/settings")
+        self.assertEqual(code, 200)
+        self.assertEqual(s["claude"]["account"], "claude@example.com")
+        self.assertEqual(s["claude"]["model"], "claude-opus-5-5")
+        self.assertEqual(s["claude"]["effort"], "high")
+        self.assertEqual(s["gemini"]["instance_id"], "antigravity-2")
+        self.assertEqual(s["gemini"]["instances"][1]["email"], "gem2@gmail.com")
+        self.assertFalse(s["gemini"]["auto_rotate"])
+
+        # Reject invalid model / effort / instance
+        self.assertEqual(self.call("POST", "/pc/api/agent/settings", {"claude": {"model": "nope"}})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/agent/settings", {"claude": {"effort": "ultra"}})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/agent/settings", {"gemini": {"instance_id": "unknown"}})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/agent/settings", {"gemini": {"thought_level": "max"}})[0], 400)
+        self.assertEqual(self.call("POST", "/pc/api/agent/settings", {"gemini": {"auto_rotate": "yes"}})[0], 400)
+
+        # Valid update persists both configs and touches .fresh-gemini on instance change
+        code, u = self.call("POST", "/pc/api/agent/settings", {
+            "claude": {"model": "claude-sonnet-5-5", "effort": "xhigh"},
+            "gemini": {
+                "instance_id": "antigravity",
+                "model": "gemini-4-argon",
+                "thought_level": "high",
+                "auto_rotate": True,
+            },
+        })
+        self.assertEqual(code, 200)
+        self.assertEqual(u["claude"]["model"], "claude-sonnet-5-5")
+        self.assertEqual(u["claude"]["effort"], "xhigh")
+        self.assertEqual(u["gemini"]["instance_id"], "antigravity")
+        self.assertEqual(u["gemini"]["model"], "gemini-4-argon")
+        self.assertEqual(u["gemini"]["thought_level"], "high")
+        self.assertTrue(u["gemini"]["auto_rotate"])
+        self.assertTrue(os.path.exists(self.fresh_flag))
+
+        # Verify files on disk
+        with open(self.claude_agent_cfg) as f:
+            self.assertEqual(json.load(f), {"model": "claude-sonnet-5-5", "effort": "xhigh"})
+        with open(self.gemini_agent_cfg) as f:
+            self.assertEqual(json.load(f), {
+                "instance_id": "antigravity",
+                "model": "gemini-4-argon",
+                "thought_level": "high",
+                "auto_rotate": True,
+            })
+
+    def test_reset_endpoint(self):
+        code, r = self.call("POST", "/pc/api/agent/reset", {})
+        self.assertEqual(code, 200)
+        self.assertTrue(r["ok"])
+        self.assertIn("fresh started", r["message"])
+
+        pcapi.AGENT_RESET_BIN = os.path.join(self.dir, "missing-reset")
+        code, r2 = self.call("POST", "/pc/api/agent/reset", {})
+        self.assertEqual(code, 503)
+        self.assertIn("error", r2)

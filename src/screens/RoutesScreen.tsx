@@ -1,5 +1,5 @@
 import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
-import { type ComponentType, useCallback, useEffect, useRef, useState } from 'react';
+import { type ComponentType, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, Image, InteractionManager, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { KeyringUnlockModal } from '../components/KeyringUnlockModal';
 import {
@@ -15,14 +15,16 @@ import {
   StatusDot,
 } from '../components/ui';
 import { PcNative } from '../../modules/pc-native';
-import { get, Health, Info, Route, serverUrl, Vitals } from '../lib/api';
+import { DriveStatusResponse, get, Health, Info, Route, serverUrl, TransferJob, Vitals } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
 import { refreshCatCam, useCatCam } from '../lib/catcam';
 import { clearKeyringFeedback, refreshKeyring, unlockKeyringWithSaved, useKeyring } from '../lib/keyring';
 import { CAMS, CamId, NAMES } from '../lib/cams/config';
 import { prepareCamsOnce } from '../lib/cams/prepare';
-import { bytes, rate } from '../lib/format';
+import { bytes } from '../lib/format';
+import { summarizeHomeTransfers } from '../lib/homeTransfers';
 import { DownloadsReply } from '../lib/live';
+import { subscribeSpaceJobs } from '../lib/spaceJobsStream';
 import { space, useTheme } from '../theme';
 
 /** Routes the app plays natively instead of opening the browser (the screen keeps a link to the web page). */
@@ -212,6 +214,9 @@ export default function RoutesScreen() {
   const [health, setHealth] = useState<Health | null>(() => cacheGet<Health>('health:report'));
   const [det, setDet] = useState<DetState | null>(() => cacheGet<DetState>('home:det'));
   const [downloads, setDownloads] = useState<DownloadsReply | null>(() => cacheGet<DownloadsReply>('home:downloads'));
+  const [driveJobs, setDriveJobs] = useState<TransferJob[]>(
+    () => cacheGet<TransferJob[]>('home:driveJobs') ?? cacheGet<DriveStatusResponse>('space:drive')?.jobs ?? [],
+  );
   const [tick, setTick] = useState(0);
   const [frames, setFrames] = useState<Partial<Record<CamId, string>>>({});
   const [failedCams, setFailedCams] = useState<Partial<Record<CamId, boolean>>>({});
@@ -286,6 +291,14 @@ export default function RoutesScreen() {
   );
 
   useEffect(() => {
+    if (!focused || !appActive) return;
+    return subscribeSpaceJobs((nextJobs) => {
+      cacheSet('home:driveJobs', nextJobs);
+      setDriveJobs(nextJobs);
+    });
+  }, [focused, appActive]);
+
+  useEffect(() => {
     if (!catCam.enabled) return;
     let cancelled = false;
     for (const c of CAMS) {
@@ -352,12 +365,11 @@ export default function RoutesScreen() {
     ? Object.values(vitals.temps ?? {}).reduce<number | null>((m, v) => (v == null ? m : m == null ? v : Math.max(m, v)), null)
     : null;
   const cpuTemp = vitals?.temps?.cpu ?? temp;
-  const active = downloads?.downloads ?? [];
-  const total = downloads?.total;
   const openScreen = (routes ?? []).filter((r) => r.path !== '/cams/' && r.name !== 'Cat cams');
   const loadedCams = CAMS.filter((c) => !!frames[c.id]).length;
-  const hasDownloads = active.length > 0;
-  const progress = total?.progress == null ? null : Math.round(total.progress * 100);
+  const transfers = useMemo(() => summarizeHomeTransfers(downloads, driveJobs), [downloads, driveJobs]);
+  const transfersTrailingColor =
+    transfers.trailingTone === 'accent' ? t.accent : transfers.trailingTone === 'warn' ? t.warn : t.textDim;
   const hddDisk = health?.disks?.disks?.find((d) => d.kind === 'HDD');
   const hddFree = hddDisk ? Math.max(0, hddDisk.total - hddDisk.used) : null;
 
@@ -480,11 +492,27 @@ export default function RoutesScreen() {
           <ListRow
             icon="download"
             title="Downloads"
-            subtitle={hasDownloads ? `${active.length} active · ${rate(total?.speed ?? 0)}` : undefined}
+            subtitle={
+              transfers.subtitle ? (
+                <Text
+                  style={{ color: t.textFaint, fontSize: 12.5, fontVariant: ['tabular-nums'] }}
+                  numberOfLines={1}
+                >
+                  {transfers.subtitle}
+                </Text>
+              ) : undefined
+            }
             trailing={
-              hasDownloads && progress != null ? (
-                <Text style={{ color: t.warn, fontSize: 12, fontWeight: '500', fontVariant: ['tabular-nums'] }}>
-                  {progress}%
+              transfers.trailing ? (
+                <Text
+                  style={{
+                    color: transfersTrailingColor,
+                    fontSize: 12,
+                    fontWeight: '500',
+                    fontVariant: ['tabular-nums'],
+                  }}
+                >
+                  {transfers.trailing}
                 </Text>
               ) : undefined
             }

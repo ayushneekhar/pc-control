@@ -101,8 +101,8 @@ const ICONS: Record<string, [string, string]> = {
 };
 
 const TAB_LABEL: Record<string, string> = { Routes: 'Home', Chat: 'Chat', System: 'System', Root: 'Root', Settings: 'Settings' };
-/** Material 3 Navigation Bar content height (12pt top + 32pt pill + 4pt gap + 16pt label + 16pt bottom). */
-const TAB_BAR_HEIGHT = 80;
+/** Material 3 Expressive Navigation Bar content height (6pt top + 32pt pill + 4pt gap + 16pt label + 6pt bottom). */
+const TAB_BAR_HEIGHT = 64;
 
 export default function App() {
   const t = useTheme();
@@ -184,7 +184,7 @@ function M3TabBar({ state, descriptors, navigation, insets }: BottomTabBarProps)
         {
           backgroundColor: t.bg,
           borderTopColor: t.border,
-          paddingBottom: 16 + insets.bottom,
+          paddingBottom: 6 + insets.bottom,
         },
       ]}
     >
@@ -332,7 +332,7 @@ const st = StyleSheet.create({
   tabBar: {
     flexDirection: 'row',
     borderTopWidth: StyleSheet.hairlineWidth,
-    paddingTop: 12,
+    paddingTop: 6,
   },
   tabItem: {
     flex: 1,

@@ -10,6 +10,7 @@ Supports:
 - Live SSE pub/sub stream for real-time transfer progress
 """
 import collections
+import concurrent.futures
 import json
 import os
 import posixpath
@@ -17,6 +18,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -48,6 +50,9 @@ MAX_JOB_HISTORY = 30
 ACTIVE_STATUSES = {"queued", "copying", "verifying", "cleaning"}
 TERMINAL_STATUSES = {"done", "failed", "cancelled"}
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".ts", ".webm", ".wmv", ".mpg", ".mpeg"}
+# Fast-fail flags for read-only metadata queries (about/lsjson) so Google Drive rate-limit
+# backoff never stalls pull-to-refresh for minutes.
+RCLONE_META_FLAGS = ["--retries", "1", "--low-level-retries", "2", "--contimeout", "5s", "--timeout", "8s"]
 
 
 def _clip(text, limit=240):
@@ -173,8 +178,8 @@ def _default_notify(category, title, body):
     """Best-effort notification via localagent pcnotify module when running standalone."""
     try:
         localagent_dir = space_mod.LOCALAGENT_DIR
-        if localagent_dir and localagent_dir not in os.sys.path:
-            os.sys.path.insert(0, localagent_dir)
+        if localagent_dir and localagent_dir not in sys.path:
+            sys.path.insert(0, localagent_dir)
         import pcnotify  # type: ignore
 
         pcnotify.notify(category, title, body)
@@ -334,12 +339,13 @@ class GDriveOffloadManager:
     def get_quota(self, force_refresh=False):
         now = time.monotonic()
         with self._lock:
-            if not force_refresh and self._quota_cache is not None and (now - self._quota_ts) < QUOTA_TTL:
-                return dict(self._quota_cache), None
+            cached_quota = dict(self._quota_cache) if self._quota_cache is not None else None
+            if not force_refresh and cached_quota is not None and (now - self._quota_ts) < QUOTA_TTL:
+                return cached_quota, None
         try:
-            res = self._run_rclone(["about", f"{self.remote}:", "--json"], timeout=20)
+            res = self._run_rclone(["about", f"{self.remote}:", "--json", *RCLONE_META_FLAGS], timeout=12)
             if res.returncode != 0:
-                return None, _clip(res.stderr or f"rclone about exited {res.returncode}")
+                return cached_quota, _clip(res.stderr or f"rclone about exited {res.returncode}")
             raw = json.loads(res.stdout or "{}")
             quota = {
                 "total_bytes": int(raw["total"]) if raw.get("total") is not None else None,
@@ -352,11 +358,14 @@ class GDriveOffloadManager:
                 self._quota_ts = now
             return dict(quota), None
         except Exception as e:
-            return None, _clip(f"Drive quota failed: {e}")
+            return cached_quota, _clip(f"Drive quota failed: {e}")
 
     def _lsjson_subdir(self, subdir):
         target = f"{self._remote_root()}/{subdir}"
-        res = self._run_rclone(["lsjson", "-R", "--files-only", target], timeout=45)
+        try:
+            res = self._run_rclone(["lsjson", "-R", "--files-only", *RCLONE_META_FLAGS, target], timeout=15)
+        except Exception as e:
+            return None, _clip(f"rclone lsjson {subdir} failed: {e}")
         if res.returncode != 0:
             stderr = (res.stderr or "").lower()
             # rclone exit code 3 = directory not found
@@ -372,16 +381,27 @@ class GDriveOffloadManager:
     def list_drive_items(self, force_refresh=False):
         now = time.monotonic()
         with self._lock:
-            if not force_refresh and self._items_cache is not None and (now - self._items_ts) < ITEMS_TTL:
-                return [dict(it) for it in self._items_cache], {}
+            cached_items = [dict(it) for it in self._items_cache] if self._items_cache is not None else None
+            if not force_refresh and cached_items is not None and (now - self._items_ts) < ITEMS_TTL:
+                return cached_items, {}
 
         errors = {}
         meta = self._read_metadata()
         grouped = {}
 
-        movies_files, err_m = self._lsjson_subdir("Movies")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            f_movies = pool.submit(self._lsjson_subdir, "Movies")
+            f_shows = pool.submit(self._lsjson_subdir, "Shows")
+            movies_files, err_m = f_movies.result()
+            shows_files, err_s = f_shows.result()
+
         if err_m:
             errors["movies"] = err_m
+        if err_s:
+            errors["shows"] = err_s
+        if err_m and err_s and cached_items is not None:
+            return cached_items, errors
+
         for entry in movies_files or []:
             p = str(entry.get("Path") or "").strip("/")
             if not p or "/" not in p:
@@ -394,9 +414,6 @@ class GDriveOffloadManager:
             if Path(p).suffix.lower() in VIDEO_EXTS:
                 rec["video_files"] += 1
 
-        shows_files, err_s = self._lsjson_subdir("Shows")
-        if err_s:
-            errors["shows"] = err_s
         for entry in shows_files or []:
             p = str(entry.get("Path") or "").strip("/")
             if not p:
@@ -475,10 +492,13 @@ class GDriveOffloadManager:
         items = []
 
         if configured:
-            quota, q_err = self.get_quota(force_refresh=force_refresh)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                f_quota = pool.submit(self.get_quota, force_refresh)
+                f_items = pool.submit(self.list_drive_items, force_refresh)
+                quota, q_err = f_quota.result()
+                items, i_errs = f_items.result()
             if q_err:
                 errors["quota"] = q_err
-            items, i_errs = self.list_drive_items(force_refresh=force_refresh)
             errors.update(i_errs)
 
         return 200, {
@@ -611,18 +631,22 @@ class GDriveOffloadManager:
         errors = []
         movies_by_id = {}
         series_by_id = {}
-        try:
-            for m in (watched_mod.radarr("GET", "/movie") or []):
-                if m.get("id") is not None:
-                    movies_by_id[int(m["id"])] = m
-        except Exception:
-            pass
-        try:
-            for s in (watched_mod.sonarr_series() or []):
-                if s.get("id") is not None:
-                    series_by_id[int(s["id"])] = s
-        except Exception:
-            pass
+        has_movies = any(it["kind"] == "movie" for it in items)
+        has_seasons = any(it["kind"] == "season" for it in items)
+        if has_movies:
+            try:
+                for m in (watched_mod.radarr("GET", "/movie") or []):
+                    if m.get("id") is not None:
+                        movies_by_id[int(m["id"])] = m
+            except Exception:
+                pass
+        if has_seasons:
+            try:
+                for s in (watched_mod.sonarr_series() or []):
+                    if s.get("id") is not None:
+                        series_by_id[int(s["id"])] = s
+            except Exception:
+                pass
 
         for it in items:
             try:
@@ -684,7 +708,9 @@ class GDriveOffloadManager:
                         "size_bytes": int(sum(int(f.size or 0) for f in p.files)),
                     })
             except Exception as e:
-                errors.append({"id": it["id"], "error": _clip(e)})
+                msg = _clip(e)
+                print(f"gdrive-offload: enqueue failed for {it['id']}: {msg}", file=sys.stderr, flush=True)
+                errors.append({"id": it["id"], "error": msg})
 
         if not planned:
             msg = errors[0]["error"] if errors else "no valid items to offload"
@@ -988,6 +1014,8 @@ class GDriveOffloadManager:
             dst,
             "--stats",
             "1s",
+            "--stats-log-level",
+            "NOTICE",
             "--use-json-log",
             "--transfers",
             "2",
@@ -996,7 +1024,7 @@ class GDriveOffloadManager:
         ]
         proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
@@ -1094,8 +1122,10 @@ class GDriveOffloadManager:
                     job["status"] = "cancelled"
                     job["error"] = None
                 else:
+                    msg = _clip(e)
+                    print(f"gdrive-offload: job {job_id} ({op} {job.get('rel_path')}) failed: {msg}", file=sys.stderr, flush=True)
                     job["status"] = "failed"
-                    job["error"] = _clip(e)
+                    job["error"] = msg
                     self._batch_failed += 1
                     self._batch_ops.add(op)
                 job["speed_bps"] = 0
@@ -1245,8 +1275,14 @@ class GDriveOffloadManager:
                 job["status"] = "cancelled"
                 job["error"] = None
             else:
+                msg = _clip(err)
+                print(
+                    f"gdrive-offload: job {job['id']} ({job['op']} {job.get('rel_path')}) aborted: {msg}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 job["status"] = "failed"
-                job["error"] = _clip(err)
+                job["error"] = msg
                 self._batch_failed += 1
                 self._batch_ops.add(job["op"])
             job["speed_bps"] = 0

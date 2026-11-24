@@ -1,12 +1,15 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, Linking, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import { Banner, Bar, Button, Card, Empty, Icon, Pill, Screen, Section, Tone } from '../components/ui';
 import {
   ArrQueue,
+  cancelSpaceJob,
   deleteTorrent,
   DownloadsAllResponse,
+  DriveStatusResponse,
   getDownloadsAll,
+  getSpaceDrive,
   pauseTorrent,
   refreshJellyfinLibrary,
   resumeTorrent,
@@ -14,12 +17,21 @@ import {
   serverUrl,
   setAltSpeed,
   TorrentItem,
+  TransferJob,
 } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
 import { bytes, duration, rate } from '../lib/format';
+import {
+  activeTransferJobs,
+  mergeEnqueuedJobs,
+  transferStatusLabel,
+  visibleDownloadDriveJobs,
+} from '../lib/spaceHelpers';
+import { subscribeSpaceJobs } from '../lib/spaceJobsStream';
 import { radius, space, useTheme } from '../theme';
 
 const CACHE_KEY = 'downloads:all';
+const DRIVE_CACHE_KEY = 'space:drive';
 
 function stateTone(state: string): Tone {
   if (state === 'downloading') return 'accent';
@@ -196,10 +208,119 @@ function StuckArrCard({
   );
 }
 
+function driveJobTone(job: TransferJob): Tone {
+  switch (job.status) {
+    case 'copying':
+    case 'cleaning':
+      return 'accent';
+    case 'verifying':
+      return 'warn';
+    case 'done':
+      return 'ok';
+    case 'failed':
+      return 'bad';
+    default:
+      return 'dim';
+  }
+}
+
+function DriveTransferCard({
+  job,
+  cancelling,
+  onCancel,
+}: {
+  job: TransferJob;
+  cancelling: boolean;
+  onCancel: (jobId: string) => void;
+}) {
+  const t = useTheme();
+  const isActive =
+    job.status === 'queued' ||
+    job.status === 'copying' ||
+    job.status === 'verifying' ||
+    job.status === 'cleaning';
+  const isCopying = job.status === 'copying';
+  const isVerifying = job.status === 'verifying';
+  const canCancel = isActive && job.status !== 'cleaning';
+  const totalBytes = job.bytes_total || job.size_bytes;
+
+  const leftParts: string[] = [];
+  if (isCopying) {
+    leftParts.push(`${job.pct.toFixed(0)}%`);
+    if (totalBytes > 0) leftParts.push(`${bytes(job.bytes_done, 1)} / ${bytes(totalBytes, 1)}`);
+    if (job.eta_s != null && job.eta_s > 0) leftParts.push(`${duration(job.eta_s)} left`);
+  } else if (isVerifying) {
+    leftParts.push('Checking MD5 hashes');
+  } else if (job.status === 'cleaning') {
+    leftParts.push(job.op === 'offload' ? 'Removing local copy' : 'Cleaning remote copy');
+  } else if (totalBytes > 0) {
+    leftParts.push(bytes(totalBytes, 1));
+  }
+
+  const speedText =
+    isCopying && job.speed_bps > 0 ? `${job.op === 'restore' ? '↓' : '↑'} ${rate(job.speed_bps)}` : '';
+
+  return (
+    <Card style={{ gap: space(2.5) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
+        <Icon
+          name={job.op === 'restore' ? 'cloud-download' : 'cloud-upload'}
+          size={18}
+          color={isCopying ? t.accent : job.status === 'failed' ? t.bad : t.textDim}
+        />
+        <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600', flex: 1 }} numberOfLines={2}>
+          {job.title}
+          {job.subtitle ? ` · ${job.subtitle}` : ''}
+        </Text>
+        <Pill label={transferStatusLabel(job)} tone={driveJobTone(job)} />
+      </View>
+
+      {isActive ? (
+        <Bar
+          pct={job.status === 'queued' ? 0 : isVerifying || job.status === 'cleaning' ? 100 : job.pct}
+          color={isVerifying ? t.warn : t.accent}
+          height={5}
+        />
+      ) : null}
+
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
+        <Text style={{ color: t.textDim, fontSize: 12, flex: 1, fontVariant: ['tabular-nums'] }} numberOfLines={1}>
+          {leftParts.join(' · ')}
+        </Text>
+        {speedText ? (
+          <Text style={{ color: t.textFaint, fontSize: 12, fontVariant: ['tabular-nums'] }} numberOfLines={1}>
+            {speedText}
+          </Text>
+        ) : null}
+      </View>
+
+      {job.status === 'failed' && job.error ? (
+        <Text style={{ color: t.bad, fontSize: 12.5, lineHeight: 17 }}>{job.error}</Text>
+      ) : null}
+
+      {canCancel ? (
+        <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+          <Button
+            label="Cancel"
+            kind="subtle"
+            compact
+            busy={cancelling}
+            onPress={() => onCancel(job.id)}
+          />
+        </View>
+      ) : null}
+    </Card>
+  );
+}
+
 export default function DownloadsScreen() {
   const t = useTheme();
   const nav = useNavigation<any>();
   const [data, setData] = useState<DownloadsAllResponse | null>(() => cacheGet<DownloadsAllResponse>(CACHE_KEY));
+  const [driveJobs, setDriveJobs] = useState<TransferJob[]>(
+    () => cacheGet<DriveStatusResponse>(DRIVE_CACHE_KEY)?.jobs ?? [],
+  );
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [busyHash, setBusyHash] = useState<string | null>(null);
@@ -208,6 +329,7 @@ export default function DownloadsScreen() {
   const [retryingApp, setRetryingApp] = useState<'radarr' | 'sonarr' | null>(null);
   const [jfBusy, setJfBusy] = useState(false);
   const [jfDone, setJfDone] = useState(false);
+  const driveSeqRef = useRef(0);
 
   const load = useCallback(async () => {
     try {
@@ -220,6 +342,20 @@ export default function DownloadsScreen() {
     }
   }, []);
 
+  const loadDriveJobs = useCallback(async () => {
+    const seq = driveSeqRef.current;
+    try {
+      const res = await getSpaceDrive(false);
+      cacheSet(DRIVE_CACHE_KEY, res);
+      if (driveSeqRef.current === seq) {
+        driveSeqRef.current += 1;
+        setDriveJobs(res.jobs);
+      }
+    } catch {
+      // SSE stream handles live Drive job updates independently
+    }
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       let off = false;
@@ -229,12 +365,33 @@ export default function DownloadsScreen() {
         if (!off) timer = setTimeout(tick, 4000);
       };
       void tick();
+      void loadDriveJobs();
+      const unsubDrive = subscribeSpaceJobs((nextJobs) => {
+        driveSeqRef.current += 1;
+        setDriveJobs(nextJobs);
+      });
       return () => {
         off = true;
         if (timer) clearTimeout(timer);
+        unsubDrive();
       };
-    }, [load]),
+    }, [load, loadDriveJobs]),
   );
+
+  const onCancelDriveJob = useCallback(async (jobId: string) => {
+    setCancellingJobId(jobId);
+    try {
+      const res = await cancelSpaceJob(jobId);
+      if (res?.job) {
+        driveSeqRef.current += 1;
+        setDriveJobs((prev) => mergeEnqueuedJobs(prev, [res.job]));
+      }
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setCancellingJobId(null);
+    }
+  }, []);
 
   const onToggleAltSpeed = async (enabled: boolean) => {
     if (altBusy) return;
@@ -324,6 +481,12 @@ export default function DownloadsScreen() {
   const torrents = data?.torrents ?? [];
   const total = data?.total;
   const hasStuck = Boolean((data?.radarr?.needs_action ?? 0) > 0 || (data?.sonarr?.needs_action ?? 0) > 0);
+  const visibleDriveJobs = useMemo(() => visibleDownloadDriveJobs(driveJobs), [driveJobs]);
+  const activeDriveJobs = useMemo(() => activeTransferJobs(visibleDriveJobs), [visibleDriveJobs]);
+  const driveSpeedBps = useMemo(
+    () => activeDriveJobs.reduce((sum, j) => sum + (j.status === 'copying' ? j.speed_bps : 0), 0),
+    [activeDriveJobs],
+  );
 
   return (
     <Screen
@@ -332,8 +495,11 @@ export default function DownloadsScreen() {
       refreshing={refreshing}
       onRefresh={async () => {
         setRefreshing(true);
-        await load();
-        setRefreshing(false);
+        try {
+          await Promise.all([load(), loadDriveJobs()]);
+        } finally {
+          setRefreshing(false);
+        }
       }}
     >
       {err ? <Banner tone="bad" title="Downloads">{err}</Banner> : null}
@@ -383,6 +549,34 @@ export default function DownloadsScreen() {
             retrying={retryingApp === 'sonarr'}
             onRetry={onRetryArr}
           />
+        </Section>
+      ) : null}
+
+      {visibleDriveJobs.length > 0 ? (
+        <Section
+          label={
+            activeDriveJobs.length > 0
+              ? `Drive transfers (${activeDriveJobs.length} active)`
+              : `Drive transfers (${visibleDriveJobs.length})`
+          }
+          right={
+            driveSpeedBps > 0 ? (
+              <Text style={{ color: t.textFaint, fontSize: 12, fontVariant: ['tabular-nums'] }}>
+                {rate(driveSpeedBps)}
+              </Text>
+            ) : undefined
+          }
+        >
+          <View style={{ gap: space(2.5) }}>
+            {visibleDriveJobs.map((job) => (
+              <DriveTransferCard
+                key={job.id}
+                job={job}
+                cancelling={cancellingJobId === job.id}
+                onCancel={(id) => void onCancelDriveJob(id)}
+              />
+            ))}
+          </View>
         </Section>
       ) : null}
 

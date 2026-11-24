@@ -672,7 +672,7 @@ export const getSpace = (scope: SpaceScope = 'watched') =>
 export const freeSpace = (items: SpaceFreeItemRequest[]) =>
   post<SpaceFreeResponse>('/pc/api/space/free', { items }, 120000);
 export const getSpaceDrive = (refresh = false) =>
-  get<DriveStatusResponse>(refresh ? '/pc/api/space/drive?refresh=1' : '/pc/api/space/drive', 45000);
+  get<DriveStatusResponse>(refresh ? '/pc/api/space/drive?refresh=1' : '/pc/api/space/drive', 20000);
 export const offloadSpaceItems = (items: SpaceFreeItemRequest[]) =>
   post<SpaceJobEnqueueResponse>('/pc/api/space/offload', { items }, 30000);
 export const restoreDriveItems = (items: { rel_path: string }[]) =>

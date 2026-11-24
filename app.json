@@ -2,7 +2,7 @@
   "expo": {
     "name": "PC Control",
     "slug": "pc-control",
-    "version": "1.6.3",
+    "version": "1.6.4",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "pccontrol",
@@ -10,7 +10,7 @@
     "backgroundColor": "#0B0D12",
     "android": {
       "package": "com.neekhar.pccontrol",
-      "versionCode": 19,
+      "versionCode": 20,
       "allowBackup": false,
       "predictiveBackGestureEnabled": false,
       "adaptiveIcon": {

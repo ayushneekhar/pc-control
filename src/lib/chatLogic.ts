@@ -167,6 +167,108 @@ export type MessageSegment =
   | { kind: 'text'; text: string }
   | { kind: 'codeblock'; lang: string; code: string };
 
+export type InlineToken =
+  | { kind: 'text'; text: string }
+  | { kind: 'code'; code: string }
+  | { kind: 'bold'; text: string }
+  | { kind: 'link'; label: string; url: string; external: boolean };
+
+export type LinkPreview = {
+  url: string;
+  domain: string;
+  title: string | null;
+  description: string | null;
+  image: string | null;
+  site_name: string | null;
+};
+
+export function isHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
+function trimBareUrl(raw: string): { url: string; trailing: string } {
+  let end = raw.length;
+  while (end > 0) {
+    const ch = raw[end - 1];
+    if (ch === ')') {
+      const slice = raw.slice(0, end);
+      const opens = (slice.match(/\(/g) ?? []).length;
+      const closes = (slice.match(/\)/g) ?? []).length;
+      if (closes > opens) {
+        end -= 1;
+        continue;
+      }
+      break;
+    }
+    if (/[.,;:!?'"\]}]/.test(ch)) {
+      end -= 1;
+      continue;
+    }
+    break;
+  }
+  return { url: raw.slice(0, end), trailing: raw.slice(end) };
+}
+
+/** Tokenize inline code, Markdown `[label](url)` links, bare http(s) URLs, and `**bold**` spans. */
+export function parseInlineTokens(text: string): InlineToken[] {
+  if (!text) return [];
+  const tokens: InlineToken[] = [];
+  const pushText = (chunk: string) => {
+    if (!chunk) return;
+    const prev = tokens[tokens.length - 1];
+    if (prev && prev.kind === 'text') {
+      prev.text += chunk;
+    } else {
+      tokens.push({ kind: 'text', text: chunk });
+    }
+  };
+
+  const pattern =
+    /`([^`\n]+)`|\[([^\]\n]+)\]\(([a-zA-Z][a-zA-Z0-9+.-]*:\/\/(?:[^()\s]|\([^()\s]*\))+)\)|(https?:\/\/[^\s<>]+)|\*\*([^*\n]+)\*\*/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      pushText(text.slice(lastIndex, match.index));
+    }
+    if (match[1] !== undefined) {
+      tokens.push({ kind: 'code', code: match[1] });
+    } else if (match[2] !== undefined && match[3] !== undefined) {
+      const url = match[3];
+      tokens.push({ kind: 'link', label: match[2], url, external: isHttpUrl(url) });
+    } else if (match[4] !== undefined) {
+      const { url, trailing } = trimBareUrl(match[4]);
+      if (url && /^https?:\/\/[^/\s]+/i.test(url)) {
+        tokens.push({ kind: 'link', label: url, url, external: true });
+        pushText(trailing);
+      } else {
+        pushText(match[4]);
+      }
+    } else if (match[5] !== undefined) {
+      tokens.push({ kind: 'bold', text: match[5] });
+    }
+    lastIndex = pattern.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    pushText(text.slice(lastIndex));
+  }
+  return tokens;
+}
+
+/** Return the first external http(s) URL in a message (ignoring code blocks and inline code). */
+export function extractPreviewUrl(text: string): string | null {
+  if (!text) return null;
+  for (const seg of parseMessageSegments(text)) {
+    if (seg.kind !== 'text') continue;
+    for (const tok of parseInlineTokens(seg.text)) {
+      if (tok.kind === 'link' && tok.external) {
+        return tok.url;
+      }
+    }
+  }
+  return null;
+}
+
 /** Split message text into plain text and fenced code blocks (```lang ... ```). */
 export function parseMessageSegments(text: string): MessageSegment[] {
   if (!text) return [];

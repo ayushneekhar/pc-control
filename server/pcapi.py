@@ -69,6 +69,7 @@ _SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 import chat as chat_mod  # noqa: E402
+import link_preview as link_preview_mod  # noqa: E402
 
 CHAT = None
 
@@ -3930,6 +3931,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send_ota_file(path.rsplit("/", 1)[1])
             if path == "/api/chat/messages":
                 return self.send_json(*_chat_manager().handle_get_messages(qs))
+            if path == "/api/chat/link-preview":
+                return self.send_json(*link_preview_mod.handle_link_preview((qs.get("url") or [""])[0]))
             m = re.fullmatch(r"/api/chat/file/([0-9a-f]{16})", path)
             if m:
                 res = _chat_manager().handle_get_file(m.group(1))

@@ -1,11 +1,13 @@
 import { PcNative } from '../../modules/pc-native';
 import { ApiError, serverUrl } from './api';
+import { cacheGet, cacheSet } from './cache';
 import {
   ChatAttachment,
   ChatMessagesResponse,
   ChatNewResponse,
   ChatSendResponse,
   getChatEndpoint,
+  LinkPreview,
   resolveChatTarget,
 } from './chatLogic';
 
@@ -111,4 +113,106 @@ export function resolveChatAttachmentSource(url: string): { uri: string; headers
 
 export function startNewChat(): Promise<ChatNewResponse> {
   return chatRequest<ChatNewResponse>('POST', '/pc/api/chat/new', {});
+}
+
+type LinkPreviewCacheEntry = {
+  preview: LinkPreview | null;
+  expiresAt: number;
+};
+
+type LinkPreviewResponse = {
+  ok: boolean;
+  preview: LinkPreview | null;
+};
+
+const LINK_PREVIEW_CACHE_KEY = 'chat:link-previews';
+const LINK_PREVIEW_MAX_ENTRIES = 128;
+const LINK_PREVIEW_HIT_TTL_MS = 6 * 60 * 60 * 1000;
+const LINK_PREVIEW_MISS_TTL_MS = 10 * 60 * 1000;
+
+let previewMemCache: Map<string, LinkPreviewCacheEntry> | null = null;
+const previewInFlight = new Map<string, Promise<LinkPreview | null>>();
+
+function getPreviewStore(): Map<string, LinkPreviewCacheEntry> {
+  if (previewMemCache) return previewMemCache;
+  previewMemCache = new Map<string, LinkPreviewCacheEntry>();
+  const stored = cacheGet<Record<string, LinkPreviewCacheEntry>>(LINK_PREVIEW_CACHE_KEY);
+  if (stored && typeof stored === 'object') {
+    const now = Date.now();
+    for (const [k, v] of Object.entries(stored)) {
+      if (v && typeof v === 'object' && typeof v.expiresAt === 'number' && v.expiresAt > now) {
+        previewMemCache.set(k, v);
+      }
+    }
+  }
+  return previewMemCache;
+}
+
+function persistPreviewStore(store: Map<string, LinkPreviewCacheEntry>): void {
+  while (store.size > LINK_PREVIEW_MAX_ENTRIES) {
+    const oldest = store.keys().next().value;
+    if (oldest === undefined) break;
+    store.delete(oldest);
+  }
+  const obj: Record<string, LinkPreviewCacheEntry> = {};
+  for (const [k, v] of store.entries()) {
+    obj[k] = v;
+  }
+  cacheSet(LINK_PREVIEW_CACHE_KEY, obj);
+}
+
+/**
+ * Synchronous lookup from the in-memory + MMKV link preview cache.
+ * Returns `undefined` on cache miss, `null` on cached negative result, or the `LinkPreview`.
+ */
+export function getCachedLinkPreview(url: string): LinkPreview | null | undefined {
+  const key = url.trim();
+  if (!key) return null;
+  const store = getPreviewStore();
+  const entry = store.get(key);
+  if (!entry) return undefined;
+  if (Date.now() >= entry.expiresAt) {
+    store.delete(key);
+    return undefined;
+  }
+  return entry.preview;
+}
+
+export async function fetchLinkPreview(url: string): Promise<LinkPreview | null> {
+  const key = url.trim();
+  if (!key) return null;
+
+  const cached = getCachedLinkPreview(key);
+  if (cached !== undefined) return cached;
+
+  const existing = previewInFlight.get(key);
+  if (existing) return existing;
+
+  const promise = (async (): Promise<LinkPreview | null> => {
+    try {
+      const params = new URLSearchParams();
+      params.set('url', key);
+      const res = await chatRequest<LinkPreviewResponse>(
+        'GET',
+        `/pc/api/chat/link-preview?${params.toString()}`,
+        undefined,
+        8000,
+      );
+      const preview = res?.preview ?? null;
+      const store = getPreviewStore();
+      store.set(key, {
+        preview,
+        expiresAt: Date.now() + (preview ? LINK_PREVIEW_HIT_TTL_MS : LINK_PREVIEW_MISS_TTL_MS),
+      });
+      persistPreviewStore(store);
+      return preview;
+    } catch {
+      return null;
+    } finally {
+      previewInFlight.delete(key);
+    }
+  })();
+
+  previewInFlight.set(key, promise);
+  return promise;
 }

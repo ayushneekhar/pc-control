@@ -13,6 +13,7 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   LayoutChangeEvent,
+  Linking,
   Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
@@ -32,6 +33,8 @@ import { AgentSettings, getAgentSettings, setAgent, updateAgentSettings } from '
 import { cacheGet, cacheSet } from '../lib/cache';
 import {
   fetchChatMessages,
+  fetchLinkPreview,
+  getCachedLinkPreview,
   resolveChatAttachmentSource,
   sendChatMessage,
   startNewChat,
@@ -45,13 +48,17 @@ import {
   ChatEngine,
   ChatMessage,
   computeAndroidKeyboardOffset,
+  extractPreviewUrl,
   findPrecedingUserMessage,
   formatAttachmentSize,
   formatChatTime,
   formatComposerChipLabel,
   formatMessagePreview,
+  isHttpUrl,
+  LinkPreview,
   makeClientId,
   mergeChatMessages,
+  parseInlineTokens,
   parseMessageSegments,
   prependOlderMessages,
   shouldPollChat,
@@ -71,6 +78,11 @@ function engineLabel(engine: ChatEngine): string {
   return engine === 'gemini' ? 'Gemini' : 'Claude';
 }
 
+function openExternalUrl(url: string): void {
+  if (!isHttpUrl(url)) return;
+  Linking.openURL(url).catch(() => {});
+}
+
 function InlineText({
   text,
   isUser,
@@ -81,12 +93,12 @@ function InlineText({
   trailingTime?: string;
 }) {
   const t = useTheme();
-  const parts = useMemo(() => text.split(/(`[^`\n]+`)/g), [text]);
+  const tokens = useMemo(() => parseInlineTokens(text), [text]);
   const spacer = trailingTime ? '\u00A0'.repeat(Math.ceil(trailingTime.length * 1.9) + 2) : '';
   return (
     <Text selectable style={[st.msgText, { color: t.text }]}>
-      {parts.map((part, i) => {
-        if (part.length >= 2 && part.startsWith('`') && part.endsWith('`')) {
+      {tokens.map((tok, i) => {
+        if (tok.kind === 'code') {
           return (
             <Text
               key={i}
@@ -95,11 +107,36 @@ function InlineText({
                 { fontFamily: t.mono, backgroundColor: isUser ? t.bg : t.cardAlt, color: t.text },
               ]}
             >
-              {part.slice(1, -1)}
+              {tok.code}
             </Text>
           );
         }
-        return <React.Fragment key={i}>{part}</React.Fragment>;
+        if (tok.kind === 'bold') {
+          return (
+            <Text key={i} style={st.inlineBold}>
+              {tok.text}
+            </Text>
+          );
+        }
+        if (tok.kind === 'link') {
+          if (tok.external) {
+            return (
+              <Text
+                key={i}
+                style={[st.inlineLink, { color: t.accent }]}
+                onPress={() => openExternalUrl(tok.url)}
+              >
+                {tok.label}
+              </Text>
+            );
+          }
+          return (
+            <Text key={i} style={[st.inlineInternalRef, { color: t.accent }]}>
+              {tok.label}
+            </Text>
+          );
+        }
+        return <React.Fragment key={i}>{tok.text}</React.Fragment>;
       })}
       {spacer ? (
         <Text style={st.timeSpacer} accessibilityElementsHidden importantForAccessibility="no">
@@ -109,6 +146,86 @@ function InlineText({
     </Text>
   );
 }
+
+const LinkPreviewCard = React.memo(function LinkPreviewCard({
+  url,
+  isUser,
+}: {
+  url: string;
+  isUser: boolean;
+}) {
+  const t = useTheme();
+  const cached = getCachedLinkPreview(url);
+  const [fetched, setFetched] = useState<{ url: string; preview: LinkPreview | null } | null>(null);
+  const [failedImg, setFailedImg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (cached !== undefined) return;
+    let cancelled = false;
+    fetchLinkPreview(url).then((res) => {
+      if (!cancelled) setFetched({ url, preview: res });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [url, cached]);
+
+  const preview = cached !== undefined ? cached : fetched?.url === url ? fetched.preview : null;
+  const imgUrl = preview?.image ?? null;
+  const showImage = Boolean(imgUrl && failedImg !== imgUrl);
+  if (!preview || (!preview.title && !showImage)) {
+    return null;
+  }
+
+  const targetUrl = isHttpUrl(preview.url) ? preview.url : url;
+  const hostLabel = preview.site_name || preview.domain;
+
+  return (
+    <Pressable
+      onPress={() => openExternalUrl(targetUrl)}
+      accessibilityRole="link"
+      accessibilityLabel={preview.title || hostLabel || targetUrl}
+      android_ripple={{ color: t.ripple, foreground: true }}
+      style={({ pressed }) => [
+        st.linkCard,
+        {
+          backgroundColor: isUser ? t.bg : t.cardAlt,
+          borderColor: t.border,
+          opacity: pressed ? 0.86 : 1,
+        },
+      ]}
+    >
+      <View style={[st.linkCardBar, { backgroundColor: t.accent }]} />
+      <View style={st.linkCardBody}>
+        <View style={st.linkCardText}>
+          {hostLabel ? (
+            <Text numberOfLines={1} style={[st.linkCardDomain, { color: t.textFaint }]}>
+              {hostLabel}
+            </Text>
+          ) : null}
+          {preview.title ? (
+            <Text numberOfLines={2} style={[st.linkCardTitle, { color: t.text }]}>
+              {preview.title}
+            </Text>
+          ) : null}
+          {preview.description ? (
+            <Text numberOfLines={2} style={[st.linkCardDesc, { color: t.textDim }]}>
+              {preview.description}
+            </Text>
+          ) : null}
+        </View>
+        {showImage && imgUrl ? (
+          <Image
+            source={{ uri: imgUrl }}
+            style={[st.linkCardThumb, { backgroundColor: t.card, borderColor: t.border }]}
+            resizeMode="cover"
+            onError={() => setFailedImg(imgUrl)}
+          />
+        ) : null}
+      </View>
+    </Pressable>
+  );
+});
 
 function MessageBody({ text, isUser, timeStr }: { text: string; isUser: boolean; timeStr: string }) {
   const t = useTheme();
@@ -289,6 +406,10 @@ const MessageBubble = React.memo(function MessageBubble({
 }: MessageBubbleProps) {
   const t = useTheme();
   const timeStr = formatChatTime(msg.created_at);
+  const previewUrl = useMemo(
+    () => (msg.role !== 'system' && msg.status !== 'pending' && msg.status !== 'error' ? extractPreviewUrl(msg.text) : null),
+    [msg.role, msg.status, msg.text],
+  );
 
   if (msg.role === 'system') {
     return (
@@ -365,7 +486,10 @@ const MessageBubble = React.memo(function MessageBubble({
             </View>
           </>
         ) : hasText ? (
-          <MessageBody text={msg.text} isUser={isUser} timeStr={timeStr} />
+          <>
+            <MessageBody text={msg.text} isUser={isUser} timeStr={timeStr} />
+            {previewUrl ? <LinkPreviewCard url={previewUrl} isUser={isUser} /> : null}
+          </>
         ) : timeStr ? (
           <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text>
         ) : null}
@@ -1692,6 +1816,51 @@ const st = StyleSheet.create({
   },
   msgText: { fontSize: 15, lineHeight: 20 },
   inlineCode: { fontSize: 13, paddingHorizontal: 4, borderRadius: 4 },
+  inlineBold: { fontWeight: '600' },
+  inlineLink: { textDecorationLine: 'underline' },
+  inlineInternalRef: { fontWeight: '500' },
+  linkCard: {
+    flexDirection: 'row',
+    borderWidth: 1,
+    borderRadius: radius.sm,
+    overflow: 'hidden',
+    marginTop: 6,
+  },
+  linkCardBar: {
+    width: 3,
+  },
+  linkCardBody: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  linkCardText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  linkCardDomain: {
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  linkCardTitle: {
+    fontSize: 13.5,
+    fontWeight: '600',
+    lineHeight: 18,
+  },
+  linkCardDesc: {
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  linkCardThumb: {
+    width: 64,
+    height: 64,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
   codeBlock: {
     borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,

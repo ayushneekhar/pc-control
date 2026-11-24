@@ -4,6 +4,7 @@ import { _setCacheBackendForTests, CacheBackend } from './cache';
 import {
   ChatMessage,
   computeAndroidKeyboardOffset,
+  extractPreviewUrl,
   findPrecedingUserMessage,
   formatAttachmentSize,
   formatChatTime,
@@ -12,6 +13,7 @@ import {
   getChatEndpoint,
   mergeChatMessages,
   normalizeChatUrl,
+  parseInlineTokens,
   parseMessageSegments,
   prependOlderMessages,
   resolveChatTarget,
@@ -282,4 +284,66 @@ test('formatMessagePreview collapses whitespace and falls back to error or attac
     }),
     '2 attachments',
   );
+});
+
+test('parseInlineTokens parses Markdown links, bare URLs, t3-thread refs, inline code, and bold', () => {
+  assert.deepEqual(
+    parseInlineTokens('See [GitHub](https://github.com/org/repo) and **important** `https://ignored.dev`!'),
+    [
+      { kind: 'text', text: 'See ' },
+      { kind: 'link', label: 'GitHub', url: 'https://github.com/org/repo', external: true },
+      { kind: 'text', text: ' and ' },
+      { kind: 'bold', text: 'important' },
+      { kind: 'text', text: ' ' },
+      { kind: 'code', code: 'https://ignored.dev' },
+      { kind: 'text', text: '!' },
+    ],
+  );
+
+  // Bare URL trims trailing punctuation but preserves balanced parentheses
+  assert.deepEqual(
+    parseInlineTokens('Read (https://en.wikipedia.org/wiki/Rust_(programming_language)).'),
+    [
+      { kind: 'text', text: 'Read (' },
+      {
+        kind: 'link',
+        label: 'https://en.wikipedia.org/wiki/Rust_(programming_language)',
+        url: 'https://en.wikipedia.org/wiki/Rust_(programming_language)',
+        external: true,
+      },
+      { kind: 'text', text: ').' },
+    ],
+  );
+
+  // Internal/custom scheme like t3-thread:// is marked external: false with clean label
+  assert.deepEqual(
+    parseInlineTokens('Started [Fix chat links](t3-thread://v2/9a8fddd7-1c1a-4aab-a3ed-aed0696731e0) for you.'),
+    [
+      { kind: 'text', text: 'Started ' },
+      {
+        kind: 'link',
+        label: 'Fix chat links',
+        url: 't3-thread://v2/9a8fddd7-1c1a-4aab-a3ed-aed0696731e0',
+        external: false,
+      },
+      { kind: 'text', text: ' for you.' },
+    ],
+  );
+});
+
+test('extractPreviewUrl finds first external http(s) URL and skips internal schemes and code', () => {
+  assert.equal(
+    extractPreviewUrl('Check [Thread](t3-thread://v2/abc) and [Docs](https://docs.example.com/guide).'),
+    'https://docs.example.com/guide',
+  );
+  assert.equal(
+    extractPreviewUrl('Bare link: https://example.com/page, and https://second.example.com'),
+    'https://example.com/page',
+  );
+  assert.equal(
+    extractPreviewUrl('```\nhttps://in-codeblock.example.com\n```\nInline `https://in-code.example.com`'),
+    null,
+  );
+  assert.equal(extractPreviewUrl('Only [internal](t3-thread://v2/1234)'), null);
+  assert.equal(extractPreviewUrl('Plain message with no links'), null);
 });

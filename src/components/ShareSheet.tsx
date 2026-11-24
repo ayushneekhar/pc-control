@@ -46,7 +46,11 @@ function ShareSheetInner({
         if (cancelled) return;
         setResolved(item);
         if (item.mediaType === 'tv') {
-          setSelectedSeasons((item.seasons ?? []).filter((s) => s.status === 'none').map((s) => s.seasonNumber));
+          setSelectedSeasons(
+            (item.seasons ?? [])
+              .filter((s) => s.status === 'none' || s.status === 'deleted')
+              .map((s) => s.seasonNumber),
+          );
         }
       })
       .catch((e) => {
@@ -69,7 +73,7 @@ function ShareSheetInner({
         const res = await addMagnet(target.uri);
         setDoneMsg(res.already_exists ? 'Already in qBittorrent' : 'Added to qBittorrent');
         onDone?.('magnet');
-      } else if (resolved) {
+      } else if (resolved && resolved.mediaType !== 'collection') {
         await createSeerrRequest(
           resolved.mediaType,
           resolved.id,
@@ -153,7 +157,7 @@ function ShareSheetInner({
                   <ScrollView style={{ maxHeight: 220 }}>
                     <List>
                       {resolved.seasons!.map((s, idx, arr) => {
-                        const locked = s.status !== 'none';
+                        const locked = s.status !== 'none' && s.status !== 'deleted';
                         const on = selectedSeasons.includes(s.seasonNumber);
                         return (
                           <ListRow

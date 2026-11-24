@@ -1,5 +1,5 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -15,9 +15,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Banner, Button, Card, Empty, Icon, List, ListRow, Pill, Screen, Section, Tone } from '../components/ui';
 import {
   createSeerrRequest,
+  getSeerrCollection,
   getSeerrDetails,
   getSeerrRequests,
   searchSeerr,
+  SeerrCollection,
+  SeerrCollectionRef,
   SeerrItem,
   SeerrRequestItem,
   SeerrStatus,
@@ -27,6 +30,8 @@ import { ago } from '../lib/format';
 import { radius, screenPad, space, useTheme } from '../theme';
 
 const CACHE_REQUESTS = 'seerr:requests';
+const SEARCH_DEBOUNCE_MS = 350;
+const MIN_AUTO_SEARCH_LEN = 3;
 
 function statusMeta(st: SeerrStatus): { label: string; tone: Tone } | null {
   switch (st) {
@@ -38,11 +43,25 @@ function statusMeta(st: SeerrStatus): { label: string; tone: Tone } | null {
       return { label: 'Partial', tone: 'warn' };
     case 'requested':
       return { label: 'Requested', tone: 'dim' };
+    case 'deleted':
+      return { label: 'Deleted', tone: 'faint' };
+    case 'blocklisted':
+      return { label: 'Blocklisted', tone: 'warn' };
+    case 'failed':
+      return { label: 'Failed', tone: 'bad' };
     case 'declined':
       return { label: 'Declined', tone: 'bad' };
     default:
       return null;
   }
+}
+
+function isRequestableMovie(status: SeerrStatus): boolean {
+  return status === 'none' || status === 'deleted';
+}
+
+function isRequestableSeason(status: SeerrStatus): boolean {
+  return status === 'none' || status === 'deleted';
 }
 
 function isoAge(iso: string): string {
@@ -51,16 +70,26 @@ function isoAge(iso: string): string {
   return ago(ms / 1000);
 }
 
-function Poster({ uri }: { uri: string | null }) {
+function Poster({
+  uri,
+  size = 'sm',
+  kind = 'movie',
+}: {
+  uri: string | null;
+  size?: 'sm' | 'md';
+  kind?: 'movie' | 'tv' | 'collection';
+}) {
   const t = useTheme();
+  const dim = size === 'md' ? st.posterMd : st.poster;
   if (!uri) {
+    const iconName = kind === 'collection' ? 'layers-outline' : kind === 'tv' ? 'television' : 'movie-outline';
     return (
-      <View style={[st.poster, { backgroundColor: t.cardAlt, alignItems: 'center', justifyContent: 'center' }]}>
-        <Icon name="movie-outline" size={20} color={t.textFaint} />
+      <View style={[dim, { backgroundColor: t.cardAlt, alignItems: 'center', justifyContent: 'center' }]}>
+        <Icon name={iconName} size={size === 'md' ? 24 : 20} color={t.textFaint} />
       </View>
     );
   }
-  return <Image source={{ uri }} style={[st.poster, { backgroundColor: t.cardAlt }]} resizeMode="cover" />;
+  return <Image source={{ uri }} style={[dim, { backgroundColor: t.cardAlt }]} resizeMode="cover" />;
 }
 
 function RowSkeleton() {
@@ -99,7 +128,7 @@ function SeasonSheet({
   const t = useTheme();
   const insets = useSafeAreaInsets();
   const seasons = item?.seasons ?? [];
-  const availableToPick = seasons.filter((s) => s.status === 'none');
+  const availableToPick = seasons.filter((s) => isRequestableSeason(s.status));
   const allPicked = availableToPick.length > 0 && availableToPick.every((s) => selected.includes(s.seasonNumber));
 
   return (
@@ -135,7 +164,7 @@ function SeasonSheet({
             <ScrollView contentContainerStyle={{ paddingHorizontal: screenPad, paddingBottom: space(3) }}>
               <List>
                 {seasons.map((s, idx) => {
-                  const locked = s.status !== 'none';
+                  const locked = !isRequestableSeason(s.status);
                   const on = selected.includes(s.seasonNumber);
                   const badge = statusMeta(s.status);
                   return (
@@ -150,11 +179,14 @@ function SeasonSheet({
                         locked && badge ? (
                           <Pill label={badge.label} tone={badge.tone} />
                         ) : (
-                          <Icon
-                            name={on ? 'checkbox-marked' : 'checkbox-blank-outline'}
-                            size={22}
-                            color={on ? t.accent : t.textFaint}
-                          />
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
+                            {badge ? <Pill label={badge.label} tone={badge.tone} /> : null}
+                            <Icon
+                              name={on ? 'checkbox-marked' : 'checkbox-blank-outline'}
+                              size={22}
+                              color={on ? t.accent : t.textFaint}
+                            />
+                          </View>
                         )
                       }
                     />
@@ -180,6 +212,244 @@ function SeasonSheet({
   );
 }
 
+function MovieDetailSheet({
+  item,
+  loading,
+  submitting,
+  onRequest,
+  onOpenCollection,
+  onClose,
+}: {
+  item: SeerrItem | null;
+  loading: boolean;
+  submitting: boolean;
+  onRequest: () => void;
+  onOpenCollection: (col: SeerrCollectionRef) => void;
+  onClose: () => void;
+}) {
+  const t = useTheme();
+  const insets = useSafeAreaInsets();
+  const badge = item ? statusMeta(item.status) : null;
+  const canRequest = item ? isRequestableMovie(item.status) : false;
+
+  return (
+    <Modal
+      visible={!!item}
+      animationType="slide"
+      onRequestClose={onClose}
+      transparent
+      statusBarTranslucent
+      navigationBarTranslucent
+    >
+      <View style={[st.sheetWrap, { backgroundColor: t.overlay }]}>
+        <Pressable style={{ flex: 1 }} onPress={onClose} />
+        <View style={[st.sheet, { backgroundColor: t.bg, paddingBottom: insets.bottom + space(4) }]}>
+          <View style={[st.grabber, { backgroundColor: t.border }]} />
+          <ScrollView contentContainerStyle={{ paddingHorizontal: screenPad, paddingTop: space(3), paddingBottom: space(3), gap: space(3) }}>
+            {item ? (
+              <>
+                <View style={{ flexDirection: 'row', gap: space(3), alignItems: 'flex-start' }}>
+                  <Poster uri={item.poster} size="md" kind="movie" />
+                  <View style={{ flex: 1, gap: space(1.5) }}>
+                    <Text style={{ color: t.text, fontSize: 18, fontWeight: '600' }}>{item.title}</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(1.5), flexWrap: 'wrap' }}>
+                      <Pill label="Movie" tone="faint" />
+                      {item.year ? (
+                        <Text style={[st.num, { color: t.textFaint, fontSize: 12.5 }]}>{item.year}</Text>
+                      ) : null}
+                      {badge ? <Pill label={badge.label} tone={badge.tone} /> : null}
+                    </View>
+                  </View>
+                </View>
+
+                {item.overview ? (
+                  <Text style={{ color: t.textDim, fontSize: 13.5, lineHeight: 20 }}>{item.overview}</Text>
+                ) : loading ? (
+                  <View style={{ paddingVertical: space(2), alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color={t.accent} />
+                  </View>
+                ) : null}
+
+                {item.collection ? (
+                  <Card
+                    onPress={() => onOpenCollection(item.collection!)}
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: space(3), padding: space(3) }}
+                  >
+                    <Poster uri={item.collection.poster} size="sm" kind="collection" />
+                    <View style={{ flex: 1, gap: 2 }}>
+                      <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600' }} numberOfLines={2}>
+                        Part of {item.collection.name}
+                      </Text>
+                      <Text style={{ color: t.textFaint, fontSize: 12.5 }}>View collection</Text>
+                    </View>
+                    <Text style={{ color: t.textFaint, fontSize: 20, fontWeight: '400' }}>›</Text>
+                  </Card>
+                ) : null}
+              </>
+            ) : null}
+          </ScrollView>
+
+          <View style={{ flexDirection: 'row', gap: space(2), paddingHorizontal: screenPad }}>
+            <Button label="Close" kind="subtle" style={{ flex: 1 }} disabled={submitting} onPress={onClose} />
+            {canRequest ? (
+              <Button
+                label="Request"
+                icon="plus"
+                style={{ flex: 1 }}
+                busy={submitting}
+                disabled={submitting}
+                onPress={onRequest}
+              />
+            ) : null}
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function CollectionSheet({
+  collection,
+  seedTitle,
+  seedPoster,
+  loading,
+  error,
+  busyId,
+  batchSubmitting,
+  onRequestMovie,
+  onRequestAllMissing,
+  onSelectMovie,
+  onClose,
+}: {
+  collection: SeerrCollection | null;
+  seedTitle: string;
+  seedPoster: string | null;
+  loading: boolean;
+  error: string | null;
+  busyId: string | null;
+  batchSubmitting: boolean;
+  onRequestMovie: (movie: SeerrItem) => void;
+  onRequestAllMissing: () => void;
+  onSelectMovie: (movie: SeerrItem) => void;
+  onClose: () => void;
+}) {
+  const t = useTheme();
+  const insets = useSafeAreaInsets();
+  const visible = loading || !!collection || !!error;
+  const parts = collection?.parts ?? [];
+  const availCount = parts.filter((p) => p.status === 'available').length;
+  const missingParts = parts.filter((p) => isRequestableMovie(p.status));
+  const title = collection?.name || seedTitle || 'Collection';
+  const poster = collection?.poster ?? seedPoster;
+
+  const summary =
+    parts.length > 0
+      ? availCount > 0
+        ? `${availCount} of ${parts.length} available`
+        : `${parts.length} ${parts.length === 1 ? 'movie' : 'movies'}`
+      : '';
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      onRequestClose={onClose}
+      transparent
+      statusBarTranslucent
+      navigationBarTranslucent
+    >
+      <View style={[st.sheetWrap, { backgroundColor: t.overlay }]}>
+        <Pressable style={{ flex: 1 }} onPress={onClose} />
+        <View style={[st.sheet, st.collectionSheet, { backgroundColor: t.bg, paddingBottom: insets.bottom + space(4) }]}>
+          <View style={[st.grabber, { backgroundColor: t.border }]} />
+          <View style={{ paddingHorizontal: screenPad, paddingTop: space(3), paddingBottom: space(2), gap: space(2.5) }}>
+            <View style={{ flexDirection: 'row', gap: space(3), alignItems: 'center' }}>
+              <Poster uri={poster} size="md" kind="collection" />
+              <View style={{ flex: 1, gap: space(1) }}>
+                <Text style={{ color: t.text, fontSize: 18, fontWeight: '600' }} numberOfLines={2}>
+                  {title}
+                </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(1.5), flexWrap: 'wrap' }}>
+                  <Pill label="Collection" tone="accent" />
+                  {summary ? (
+                    <Text style={[st.num, { color: t.textDim, fontSize: 12.5, fontWeight: '500' }]}>{summary}</Text>
+                  ) : null}
+                </View>
+              </View>
+            </View>
+            {collection?.overview ? (
+              <Text style={{ color: t.textDim, fontSize: 13, lineHeight: 19 }} numberOfLines={3}>
+                {collection.overview}
+              </Text>
+            ) : null}
+            {error ? <Banner tone="bad" title="Collection">{error}</Banner> : null}
+          </View>
+
+          {loading && !collection ? (
+            <View style={{ padding: space(6), alignItems: 'center' }}>
+              <ActivityIndicator size="small" color={t.accent} />
+            </View>
+          ) : (
+            <ScrollView contentContainerStyle={{ paddingHorizontal: screenPad, paddingBottom: space(3), gap: space(2) }}>
+              {parts.map((movie) => {
+                const badge = statusMeta(movie.status);
+                const canReq = isRequestableMovie(movie.status);
+                const key = `movie:${movie.id}`;
+                return (
+                  <Card
+                    key={movie.id}
+                    onPress={() => onSelectMovie(movie)}
+                    style={{ flexDirection: 'row', gap: space(3), alignItems: 'center', padding: space(3) }}
+                  >
+                    <Poster uri={movie.poster} size="sm" kind="movie" />
+                    <View style={{ flex: 1, gap: 4 }}>
+                      <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600' }} numberOfLines={2}>
+                        {movie.title}
+                      </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(1.5), flexWrap: 'wrap' }}>
+                        {movie.year ? (
+                          <Text style={[st.num, { color: t.textFaint, fontSize: 12 }]}>{movie.year}</Text>
+                        ) : (
+                          <Text style={{ color: t.textFaint, fontSize: 12 }}>TBA</Text>
+                        )}
+                        {badge ? <Pill label={badge.label} tone={badge.tone} /> : null}
+                      </View>
+                    </View>
+                    {canReq ? (
+                      <Button
+                        label="Request"
+                        kind="primary"
+                        compact
+                        busy={busyId === key}
+                        disabled={batchSubmitting}
+                        onPress={() => onRequestMovie(movie)}
+                      />
+                    ) : null}
+                  </Card>
+                );
+              })}
+            </ScrollView>
+          )}
+
+          <View style={{ flexDirection: 'row', gap: space(2), paddingHorizontal: screenPad, paddingTop: space(1) }}>
+            <Button label="Close" kind="subtle" style={{ flex: missingParts.length > 0 ? 0.55 : 1 }} disabled={batchSubmitting} onPress={onClose} />
+            {missingParts.length > 0 ? (
+              <Button
+                label={`Request all missing (${missingParts.length})`}
+                icon="plus"
+                style={{ flex: 1 }}
+                busy={batchSubmitting}
+                disabled={loading || batchSubmitting}
+                onPress={onRequestAllMissing}
+              />
+            ) : null}
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 export default function SeerrScreen() {
   const t = useTheme();
   const nav = useNavigation<any>();
@@ -191,11 +461,38 @@ export default function SeerrScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
+  // Debounce & race-condition guard for search
+  const searchSeqRef = useRef(0);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // TV season picker state
   const [tvItem, setTvItem] = useState<SeerrItem | null>(null);
   const [tvLoading, setTvLoading] = useState(false);
   const [tvSelected, setTvSelected] = useState<number[]>([]);
   const [tvSubmitting, setTvSubmitting] = useState(false);
+
+  // Movie detail sheet state
+  const [movieDetail, setMovieDetail] = useState<SeerrItem | null>(null);
+  const [movieLoading, setMovieLoading] = useState(false);
+  const [movieSubmitting, setMovieSubmitting] = useState(false);
+  const movieSeqRef = useRef(0);
+
+  // Collection detail sheet state
+  const [collection, setCollection] = useState<SeerrCollection | null>(null);
+  const [collectionSeed, setCollectionSeed] = useState<{ title: string; poster: string | null }>({
+    title: '',
+    poster: null,
+  });
+  const [collectionLoading, setCollectionLoading] = useState(false);
+  const [collectionErr, setCollectionErr] = useState<string | null>(null);
+  const [collectionBatchBusy, setCollectionBatchBusy] = useState(false);
+  const collectionSeqRef = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   const loadRequests = useCallback(async () => {
     try {
@@ -214,57 +511,212 @@ export default function SeerrScreen() {
     }, [loadRequests]),
   );
 
-  const runSearch = async (text?: string) => {
-    const q = (text ?? query).trim();
-    if (!q) {
+  const syncMovieStatus = useCallback((movieId: number, status: SeerrStatus) => {
+    setResults((prev) =>
+      prev ? prev.map((x) => (x.id === movieId && x.mediaType === 'movie' ? { ...x, status } : x)) : prev,
+    );
+    setMovieDetail((prev) => (prev && prev.id === movieId && prev.mediaType === 'movie' ? { ...prev, status } : prev));
+    setCollection((prev) =>
+      prev
+        ? {
+            ...prev,
+            parts: prev.parts.map((p) => (p.id === movieId ? { ...p, status } : p)),
+          }
+        : prev,
+    );
+  }, []);
+
+  const runSearch = useCallback(
+    async (text?: string) => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
+      const q = (text ?? query).trim();
+      if (!q) {
+        searchSeqRef.current += 1;
+        setSearching(false);
+        setResults(null);
+        return;
+      }
+      const seq = ++searchSeqRef.current;
+      setSearching(true);
+      setErr(null);
+      try {
+        const res = await searchSeerr(q);
+        if (seq !== searchSeqRef.current) return;
+        setResults(res.results);
+      } catch (e) {
+        if (seq !== searchSeqRef.current) return;
+        setErr((e as Error).message);
+      } finally {
+        if (seq === searchSeqRef.current) {
+          setSearching(false);
+        }
+      }
+    },
+    [query],
+  );
+
+  const handleQueryChange = (v: string) => {
+    setQuery(v);
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    const trimmed = v.trim();
+    if (!trimmed) {
+      searchSeqRef.current += 1;
+      setSearching(false);
       setResults(null);
       return;
     }
-    setSearching(true);
-    setErr(null);
-    try {
-      const res = await searchSeerr(q);
-      setResults(res.results);
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setSearching(false);
+    if (trimmed.length >= MIN_AUTO_SEARCH_LEN) {
+      debounceRef.current = setTimeout(() => {
+        debounceRef.current = null;
+        void runSearch(trimmed);
+      }, SEARCH_DEBOUNCE_MS);
     }
   };
 
-  const requestItem = async (item: SeerrItem) => {
-    if (item.mediaType === 'tv') {
-      setTvItem(item);
-      setTvLoading(true);
-      setTvSelected([]);
-      try {
-        const det = await getSeerrDetails('tv', item.id);
-        setTvItem(det);
-        const pickable = (det.seasons ?? []).filter((s) => s.status === 'none').map((s) => s.seasonNumber);
-        setTvSelected(pickable);
-      } catch (e) {
-        setTvItem(null);
-        setErr((e as Error).message);
-      } finally {
-        setTvLoading(false);
-      }
-      return;
+  const clearSearch = () => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
     }
+    searchSeqRef.current += 1;
+    setQuery('');
+    setSearching(false);
+    setResults(null);
+  };
 
-    const key = `${item.mediaType}:${item.id}`;
+  const openTvSeasons = async (item: SeerrItem) => {
+    setTvItem(item);
+    setTvLoading(true);
+    setTvSelected([]);
+    try {
+      const det = await getSeerrDetails('tv', item.id);
+      setTvItem(det);
+      const pickable = (det.seasons ?? []).filter((s) => isRequestableSeason(s.status)).map((s) => s.seasonNumber);
+      setTvSelected(pickable);
+    } catch (e) {
+      setTvItem(null);
+      setErr((e as Error).message);
+    } finally {
+      setTvLoading(false);
+    }
+  };
+
+  const openMovieDetail = async (seed: SeerrItem) => {
+    const seq = ++movieSeqRef.current;
+    setMovieDetail(seed);
+    setMovieLoading(true);
+    try {
+      const det = await getSeerrDetails('movie', seed.id);
+      if (seq !== movieSeqRef.current) return;
+      setMovieDetail(det);
+    } catch (e) {
+      if (seq !== movieSeqRef.current) return;
+      setErr((e as Error).message);
+    } finally {
+      if (seq === movieSeqRef.current) {
+        setMovieLoading(false);
+      }
+    }
+  };
+
+  const openCollection = async (collectionId: number, seed?: { title?: string; poster?: string | null }) => {
+    const seq = ++collectionSeqRef.current;
+    setMovieDetail(null);
+    setCollection(null);
+    setCollectionErr(null);
+    setCollectionSeed({ title: seed?.title ?? '', poster: seed?.poster ?? null });
+    setCollectionLoading(true);
+    try {
+      const col = await getSeerrCollection(collectionId);
+      if (seq !== collectionSeqRef.current) return;
+      setCollection(col);
+    } catch (e) {
+      if (seq !== collectionSeqRef.current) return;
+      setCollectionErr((e as Error).message);
+    } finally {
+      if (seq === collectionSeqRef.current) {
+        setCollectionLoading(false);
+      }
+    }
+  };
+
+  const requestMovie = async (movieId: number) => {
+    const key = `movie:${movieId}`;
     setBusyId(key);
     setErr(null);
     try {
-      await createSeerrRequest('movie', item.id);
-      setResults((prev) =>
-        prev ? prev.map((x) => (x.id === item.id && x.mediaType === 'movie' ? { ...x, status: 'requested' } : x)) : prev,
-      );
+      await createSeerrRequest('movie', movieId);
+      syncMovieStatus(movieId, 'requested');
       void loadRequests();
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusyId(null);
     }
+  };
+
+  const requestMovieFromDetail = async () => {
+    if (!movieDetail || movieSubmitting) return;
+    setMovieSubmitting(true);
+    setErr(null);
+    try {
+      await createSeerrRequest('movie', movieDetail.id);
+      syncMovieStatus(movieDetail.id, 'requested');
+      void loadRequests();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setMovieSubmitting(false);
+    }
+  };
+
+  const requestAllMissingInCollection = async () => {
+    if (!collection || collectionBatchBusy) return;
+    const missing = collection.parts.filter((p) => isRequestableMovie(p.status));
+    if (!missing.length) return;
+    setCollectionBatchBusy(true);
+    setCollectionErr(null);
+    const failed: string[] = [];
+    for (const m of missing) {
+      try {
+        await createSeerrRequest('movie', m.id);
+        syncMovieStatus(m.id, 'requested');
+      } catch (e) {
+        failed.push(`${m.title}: ${(e as Error).message}`);
+      }
+    }
+    try {
+      const refreshed = await getSeerrCollection(collection.id);
+      setCollection(refreshed);
+      for (const p of refreshed.parts) {
+        syncMovieStatus(p.id, p.status);
+      }
+    } catch {
+      // Keep optimistic updates if refresh fails
+    }
+    void loadRequests();
+    if (failed.length) {
+      setCollectionErr(failed.join('\n'));
+    }
+    setCollectionBatchBusy(false);
+  };
+
+  const requestItem = async (item: SeerrItem) => {
+    if (item.mediaType === 'collection') {
+      await openCollection(item.id, { title: item.title, poster: item.poster });
+      return;
+    }
+    if (item.mediaType === 'tv') {
+      await openTvSeasons(item);
+      return;
+    }
+    await requestMovie(item.id);
   };
 
   const submitTvRequest = async () => {
@@ -290,9 +742,17 @@ export default function SeerrScreen() {
   };
 
   const toggleAllSeasons = () => {
-    const pickable = (tvItem?.seasons ?? []).filter((s) => s.status === 'none').map((s) => s.seasonNumber);
+    const pickable = (tvItem?.seasons ?? []).filter((s) => isRequestableSeason(s.status)).map((s) => s.seasonNumber);
     const allPicked = pickable.every((sn) => tvSelected.includes(sn));
     setTvSelected(allPicked ? [] : pickable);
+  };
+
+  const closeCollection = () => {
+    if (collectionBatchBusy) return;
+    collectionSeqRef.current += 1;
+    setCollection(null);
+    setCollectionLoading(false);
+    setCollectionErr(null);
   };
 
   return (
@@ -313,13 +773,10 @@ export default function SeerrScreen() {
         <Icon name="magnify" size={20} color={t.textFaint} />
         <TextInput
           value={query}
-          onChangeText={(v) => {
-            setQuery(v);
-            if (!v.trim()) setResults(null);
-          }}
+          onChangeText={handleQueryChange}
           onSubmitEditing={() => void runSearch()}
           returnKeyType="search"
-          placeholder="Search movies or TV"
+          placeholder="Search movies, TV, or collections"
           placeholderTextColor={t.textFaint}
           selectionColor={t.accent}
           style={[st.searchInput, { color: t.text }]}
@@ -327,14 +784,7 @@ export default function SeerrScreen() {
         {searching ? (
           <ActivityIndicator size="small" color={t.accent} />
         ) : query ? (
-          <Pressable
-            onPress={() => {
-              setQuery('');
-              setResults(null);
-            }}
-            hitSlop={8}
-            accessibilityLabel="Clear search"
-          >
+          <Pressable onPress={clearSearch} hitSlop={8} accessibilityLabel="Clear search">
             <Icon name="close-circle" size={18} color={t.textFaint} />
           </Pressable>
         ) : null}
@@ -345,23 +795,49 @@ export default function SeerrScreen() {
           {results.length ? (
             <View style={{ gap: space(2.5) }}>
               {results.map((item) => {
-                const badge = statusMeta(item.status);
-                const canRequest = item.status === 'none' || (item.mediaType === 'tv' && item.status === 'partial');
+                const isCollection = item.mediaType === 'collection';
+                const badge = isCollection ? null : statusMeta(item.status);
+                const canRequest =
+                  item.mediaType === 'movie'
+                    ? isRequestableMovie(item.status)
+                    : item.mediaType === 'tv'
+                      ? item.status === 'none' || item.status === 'partial' || item.status === 'deleted'
+                      : false;
                 const key = `${item.mediaType}:${item.id}`;
                 return (
-                  <Card key={key} style={{ flexDirection: 'row', gap: space(3), alignItems: 'center' }}>
-                    <Poster uri={item.poster} />
+                  <Card
+                    key={key}
+                    onPress={() => {
+                      if (isCollection) {
+                        void openCollection(item.id, { title: item.title, poster: item.poster });
+                      } else if (item.mediaType === 'movie') {
+                        void openMovieDetail(item);
+                      } else {
+                        void openTvSeasons(item);
+                      }
+                    }}
+                    style={{ flexDirection: 'row', gap: space(3), alignItems: 'center' }}
+                  >
+                    <Poster uri={item.poster} kind={item.mediaType} />
                     <View style={{ flex: 1, gap: 4 }}>
                       <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600' }} numberOfLines={2}>
                         {item.title}
                       </Text>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(1.5), flexWrap: 'wrap' }}>
-                        <Pill label={item.mediaType === 'tv' ? 'TV' : 'Movie'} tone="faint" />
-                        {item.year ? <Text style={{ color: t.textFaint, fontSize: 12 }}>{item.year}</Text> : null}
+                        {isCollection ? (
+                          <Pill label="Collection" tone="accent" />
+                        ) : (
+                          <Pill label={item.mediaType === 'tv' ? 'TV' : 'Movie'} tone="faint" />
+                        )}
+                        {item.year ? (
+                          <Text style={[st.num, { color: t.textFaint, fontSize: 12 }]}>{item.year}</Text>
+                        ) : null}
                         {badge ? <Pill label={badge.label} tone={badge.tone} /> : null}
                       </View>
                     </View>
-                    {canRequest ? (
+                    {isCollection ? (
+                      <Text style={{ color: t.textFaint, fontSize: 20, fontWeight: '400' }}>›</Text>
+                    ) : canRequest ? (
                       <Button
                         label="Request"
                         kind="primary"
@@ -399,13 +875,32 @@ export default function SeerrScreen() {
                       ? 'TV'
                       : 'Movie';
                 return (
-                  <Card key={r.id} style={{ flexDirection: 'row', gap: space(3), alignItems: 'center' }}>
-                    <Poster uri={r.poster} />
+                  <Card
+                    key={r.id}
+                    onPress={() => {
+                      const seed: SeerrItem = {
+                        id: r.tmdbId,
+                        mediaType: r.mediaType,
+                        title: r.title,
+                        year: r.year,
+                        poster: r.poster,
+                        overview: '',
+                        status: r.status,
+                      };
+                      if (r.mediaType === 'movie') {
+                        void openMovieDetail(seed);
+                      } else {
+                        void openTvSeasons(seed);
+                      }
+                    }}
+                    style={{ flexDirection: 'row', gap: space(3), alignItems: 'center' }}
+                  >
+                    <Poster uri={r.poster} kind={r.mediaType} />
                     <View style={{ flex: 1, gap: 4 }}>
                       <Text style={{ color: t.text, fontSize: 14.5, fontWeight: '600' }} numberOfLines={2}>
                         {r.title}
                       </Text>
-                      <Text style={{ color: t.textFaint, fontSize: 12 }} numberOfLines={1}>
+                      <Text style={[st.num, { color: t.textFaint, fontSize: 12 }]} numberOfLines={1}>
                         {seasonTag}
                         {r.year ? ` · ${r.year}` : ''}
                         {r.requestedBy ? ` · ${r.requestedBy}` : ''}
@@ -435,6 +930,37 @@ export default function SeerrScreen() {
         onSubmit={() => void submitTvRequest()}
         onClose={() => !tvSubmitting && setTvItem(null)}
       />
+
+      <MovieDetailSheet
+        item={movieDetail}
+        loading={movieLoading}
+        submitting={movieSubmitting}
+        onRequest={() => void requestMovieFromDetail()}
+        onOpenCollection={(col) => void openCollection(col.id, { title: col.name, poster: col.poster })}
+        onClose={() => {
+          if (movieSubmitting) return;
+          movieSeqRef.current += 1;
+          setMovieDetail(null);
+          setMovieLoading(false);
+        }}
+      />
+
+      <CollectionSheet
+        collection={collection}
+        seedTitle={collectionSeed.title}
+        seedPoster={collectionSeed.poster}
+        loading={collectionLoading}
+        error={collectionErr}
+        busyId={busyId}
+        batchSubmitting={collectionBatchBusy}
+        onRequestMovie={(m) => void requestMovie(m.id)}
+        onRequestAllMissing={() => void requestAllMissingInCollection()}
+        onSelectMovie={(m) => {
+          closeCollection();
+          void openMovieDetail(m);
+        }}
+        onClose={closeCollection}
+      />
     </Screen>
   );
 }
@@ -451,9 +977,12 @@ const st = StyleSheet.create({
   },
   searchInput: { flex: 1, fontSize: 15, height: '100%' },
   poster: { width: 44, height: 64, borderRadius: 8 },
+  posterMd: { width: 56, height: 82, borderRadius: 10 },
   skel: { borderRadius: 4 },
+  num: { fontVariant: ['tabular-nums'] },
   sheetWrap: { flex: 1, justifyContent: 'flex-end' },
   sheet: { maxHeight: '78%', borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, paddingTop: space(2) },
+  collectionSheet: { maxHeight: '85%' },
   grabber: { width: 38, height: 4, borderRadius: 2, alignSelf: 'center' },
   sheetHead: {
     flexDirection: 'row',

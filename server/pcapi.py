@@ -61,7 +61,7 @@ pc-api is NOT a security boundary for root: it runs as the agent's user, so it i
 by rootd. Only the phone's signature releases a command. The tailnet identity check below just keeps
 other tailnet nodes/users away from the service controls.
 """
-import base64, datetime, glob, hashlib, ipaddress, json, os, queue, secrets, re, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse
+import base64, concurrent.futures, datetime, glob, hashlib, ipaddress, json, os, queue, secrets, re, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -3363,12 +3363,12 @@ class SeerrClient:
         return json.loads(raw) if raw.strip() else {}
 
     @staticmethod
-    def _poster(path):
+    def _poster(path, size="w300"):
         if not path or not isinstance(path, str):
             return None
         if path.startswith("http://") or path.startswith("https://"):
             return path
-        return f"https://image.tmdb.org/t/p/w300{path}"
+        return f"https://image.tmdb.org/t/p/{size}{path}"
 
     @staticmethod
     def _media_status(media_info):
@@ -3378,6 +3378,10 @@ class SeerrClient:
         dl = media_info.get("downloadStatus") or []
         if st == 5:
             return "available"
+        if st == 7:
+            return "deleted"
+        if st == 6:
+            return "blocklisted"
         if st == 4:
             return "partial"
         if dl:
@@ -3391,8 +3395,38 @@ class SeerrClient:
         m = re.match(r"^(\d{4})", str(date_str or ""))
         return int(m.group(1)) if m else None
 
+    def _extract_collection(self, d):
+        col = d.get("collection") or d.get("belongs_to_collection")
+        if not isinstance(col, dict):
+            return None
+        try:
+            cid = int(col.get("id") or 0)
+        except (TypeError, ValueError):
+            return None
+        if cid <= 0:
+            return None
+        cname = col.get("name") or col.get("title") or ""
+        if not cname:
+            return None
+        return {
+            "id": cid,
+            "name": clip(cname, 160),
+            "poster": self._poster(col.get("posterPath") or col.get("poster_path")),
+        }
+
     def _normalize_item(self, x, forced_type=None):
         mtype = forced_type or x.get("mediaType")
+        if mtype == "collection":
+            title = x.get("name") or x.get("title") or "Untitled Collection"
+            return {
+                "id": int(x.get("id") or 0),
+                "mediaType": "collection",
+                "title": clip(title, 160),
+                "year": None,
+                "poster": self._poster(x.get("posterPath")),
+                "overview": clip(x.get("overview") or "", 240),
+                "status": "none",
+            }
         if mtype not in ("movie", "tv"):
             return None
         title = x.get("title") or x.get("name") or x.get("originalTitle") or x.get("originalName") or "Untitled"
@@ -3406,6 +3440,59 @@ class SeerrClient:
             "overview": clip(x.get("overview") or "", 240),
             "status": self._media_status(x.get("mediaInfo")),
         }
+
+    def _discover_collections(self, query, items):
+        seen_ids = {item["id"] for item in items if item.get("mediaType") == "collection"}
+        top_movies = [item for item in items if item.get("mediaType") == "movie"][:4]
+        if not top_movies:
+            return []
+
+        def _fetch_col(movie_id):
+            try:
+                meta = self._meta("movie", movie_id)
+                return meta.get("collection") if isinstance(meta, dict) else None
+            except Exception:
+                return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            cols = list(pool.map(_fetch_col, [m["id"] for m in top_movies]))
+
+        discovered = {}
+        for idx, col in enumerate(cols):
+            if not isinstance(col, dict):
+                continue
+            cid = col.get("id")
+            if not cid or cid in seen_ids:
+                continue
+            if cid not in discovered:
+                discovered[cid] = {"col": col, "count": 0, "first": idx}
+            discovered[cid]["count"] += 1
+
+        if not discovered:
+            return []
+
+        q_lower = str(query or "").strip().lower()
+        q_tokens = [tok for tok in re.split(r"\s+", q_lower) if len(tok) >= 2]
+
+        def _rank(entry):
+            name_lower = str(entry["col"].get("name") or "").lower()
+            exact_sub = bool(q_lower and q_lower in name_lower)
+            all_tokens = bool(q_tokens and all(tok in name_lower for tok in q_tokens))
+            return (1 if exact_sub else 0, 1 if all_tokens else 0, entry["count"], -entry["first"])
+
+        ranked = sorted(discovered.values(), key=_rank, reverse=True)[:2]
+        return [
+            {
+                "id": entry["col"]["id"],
+                "mediaType": "collection",
+                "title": entry["col"]["name"],
+                "year": None,
+                "poster": entry["col"].get("poster"),
+                "overview": "",
+                "status": "none",
+            }
+            for entry in ranked
+        ]
 
     def search(self, query):
         q = str(query or "").strip()
@@ -3424,6 +3511,9 @@ class SeerrClient:
                 out.append(item)
             if len(out) >= 20:
                 break
+        discovered = self._discover_collections(q, out)
+        if discovered:
+            out = discovered + out
         return 200, {"results": out}
 
     def details(self, media_type, tmdb_id):
@@ -3444,9 +3534,12 @@ class SeerrClient:
         item = self._normalize_item(d, forced_type=media_type)
         if not item:
             return 404, {"error": "not found"}
+        col = self._extract_collection(d) if media_type == "movie" else None
+        if col:
+            item["collection"] = col
         with self._lock:
             self._meta_cache[(media_type, tid)] = {
-                "title": item["title"], "year": item["year"], "poster": item["poster"],
+                "title": item["title"], "year": item["year"], "poster": item["poster"], "collection": col,
             }
         if media_type == "tv":
             info_seasons = {
@@ -3462,7 +3555,14 @@ class SeerrClient:
                 if not isinstance(sn, int) or sn < 1:
                     continue
                 st_code = info_seasons.get(sn)
-                s_status = "available" if st_code == 5 else "partial" if st_code == 4 else "requested" if st_code in (2, 3) else "none"
+                s_status = (
+                    "available" if st_code == 5 else
+                    "deleted" if st_code == 7 else
+                    "blocklisted" if st_code == 6 else
+                    "partial" if st_code == 4 else
+                    "requested" if st_code in (2, 3) else
+                    "none"
+                )
                 seasons.append({
                     "seasonNumber": sn,
                     "name": clip(s.get("name") or f"Season {sn}", 80),
@@ -3472,6 +3572,41 @@ class SeerrClient:
             item["seasons"] = seasons
         return 200, item
 
+    def collection(self, collection_id):
+        try:
+            cid = int(collection_id)
+            if cid <= 0:
+                raise ValueError("bad id")
+        except (TypeError, ValueError):
+            return 400, {"error": "invalid collection id"}
+        try:
+            d = self._req("GET", f"/collection/{cid}")
+        except urllib.error.HTTPError as e:
+            return (404 if e.code == 404 else 502), {"error": f"Seerr HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": clip(f"Seerr collection failed: {e}", 240)}
+        if not isinstance(d, dict):
+            return 404, {"error": "not found"}
+        raw_parts = []
+        for idx, p in enumerate(d.get("parts") or []):
+            if not isinstance(p, dict):
+                continue
+            item = self._normalize_item(p, forced_type="movie")
+            if not item or not item["id"]:
+                continue
+            rel = str(p.get("releaseDate") or "").strip()
+            has_date = bool(re.match(r"^\d{4}", rel))
+            raw_parts.append(((0, rel, idx) if has_date else (1, "", idx), item))
+        raw_parts.sort(key=lambda pair: pair[0])
+        return 200, {
+            "id": int(d.get("id") or cid),
+            "name": clip(d.get("name") or f"Collection #{cid}", 160),
+            "overview": clip(d.get("overview") or "", 600),
+            "poster": self._poster(d.get("posterPath")),
+            "backdrop": self._poster(d.get("backdropPath"), "w780"),
+            "parts": [item for _, item in raw_parts],
+        }
+
     def _meta(self, media_type, tmdb_id):
         key = (media_type, tmdb_id)
         with self._lock:
@@ -3479,8 +3614,11 @@ class SeerrClient:
                 return self._meta_cache[key]
         code, d = self.details(media_type, tmdb_id)
         if code == 200:
-            return {"title": d["title"], "year": d["year"], "poster": d["poster"]}
-        return {"title": f"TMDB #{tmdb_id}", "year": None, "poster": None}
+            return {
+                "title": d["title"], "year": d["year"], "poster": d["poster"],
+                "collection": d.get("collection"),
+            }
+        return {"title": f"TMDB #{tmdb_id}", "year": None, "poster": None, "collection": None}
 
     def requests(self, take=25):
         try:
@@ -3501,12 +3639,18 @@ class SeerrClient:
             dl = media.get("downloadStatus") or []
             if m_st == 5:
                 status = "available"
+            elif m_st == 7:
+                status = "deleted"
+            elif m_st == 6:
+                status = "blocklisted"
             elif dl:
                 status = "grabbing"
             elif m_st == 4:
                 status = "partial"
             elif r.get("status") == 3:
                 status = "declined"
+            elif r.get("status") == 4:
+                status = "failed"
             else:
                 status = "requested"
             req_by = r.get("requestedBy") or {}
@@ -3634,8 +3778,9 @@ class SeerrClient:
             if query:
                 code, srch = self.search(query)
                 if code == 200 and srch.get("results"):
-                    top = srch["results"][0]
-                    return self.details(top["mediaType"], top["id"])
+                    top = next((r for r in srch["results"] if r.get("mediaType") in ("movie", "tv")), None)
+                    if top:
+                        return self.details(top["mediaType"], top["id"])
             return 404, {"error": "Could not resolve Letterboxd link"}
         return 400, {"error": "Unsupported media link (use IMDb, TMDB, or Letterboxd)"}
 
@@ -3765,6 +3910,8 @@ def route_round4_get(path, qs):
         return SEERR.search(qs.get("q", [""])[0])
     if path == "/api/seerr/details":
         return SEERR.details(qs.get("type", [""])[0], qs.get("id", [""])[0])
+    if path == "/api/seerr/collection":
+        return SEERR.collection(qs.get("id", [""])[0])
     if path == "/api/seerr/requests":
         return SEERR.requests()
     if path == "/api/agent/threads":

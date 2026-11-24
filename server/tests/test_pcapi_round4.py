@@ -181,6 +181,23 @@ class FakeSeerrAndT3Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.log.append(("GET", self.path, self.headers.get("X-Api-Key")))
         if self.path.startswith("/api/v1/search"):
+            if "ice%20age" in self.path.lower():
+                return self.reply(200, {"results": [
+                    {"id": 425, "mediaType": "movie", "title": "Ice Age", "releaseDate": "2002-03-10",
+                     "posterPath": "/ia1.jpg", "overview": "Mammoth", "mediaInfo": {"status": 5}},
+                    {"id": 950, "mediaType": "movie", "title": "Ice Age: The Meltdown", "releaseDate": "2006-03-23",
+                     "posterPath": "/ia2.jpg", "overview": "Meltdown", "mediaInfo": {"status": 7}},
+                    {"id": 8355, "mediaType": "movie", "title": "Ice Age: Dawn of the Dinosaurs", "releaseDate": "2009-06-29",
+                     "posterPath": "/ia3.jpg", "overview": "Dinos"},
+                    {"id": 57800, "mediaType": "movie", "title": "Ice Age: Continental Drift", "releaseDate": "2012-06-26",
+                     "posterPath": "/ia4.jpg", "overview": "Drift"},
+                ]})
+            if "directcol" in self.path.lower():
+                return self.reply(200, {"results": [
+                    {"id": 8354, "mediaType": "collection", "name": "Ice Age Collection", "posterPath": "/iacol.jpg"},
+                    {"id": 425, "mediaType": "movie", "title": "Ice Age", "releaseDate": "2002-03-10",
+                     "posterPath": "/ia1.jpg", "overview": "Mammoth", "mediaInfo": {"status": 5}},
+                ]})
             return self.reply(200, {"results": [
                 {"id": 27205, "mediaType": "movie", "title": "Inception", "releaseDate": "2010-07-15",
                  "posterPath": "/inc.jpg", "overview": "Dreams", "mediaInfo": {"status": 5}},
@@ -189,6 +206,40 @@ class FakeSeerrAndT3Handler(BaseHTTPRequestHandler):
         if self.path == "/api/v1/movie/27205":
             return self.reply(200, {"id": 27205, "title": "Inception", "releaseDate": "2010-07-15",
                                     "posterPath": "/inc.jpg", "overview": "Dreams", "mediaInfo": {"status": 5}})
+        if self.path in ("/api/v1/movie/425", "/api/v1/movie/950", "/api/v1/movie/8355", "/api/v1/movie/57800"):
+            mid = int(self.path.rsplit("/", 1)[1])
+            titles = {
+                425: ("Ice Age", "2002-03-10", "/ia1.jpg", 5),
+                950: ("Ice Age: The Meltdown", "2006-03-23", "/ia2.jpg", 7),
+                8355: ("Ice Age: Dawn of the Dinosaurs", "2009-06-29", "/ia3.jpg", 1),
+                57800: ("Ice Age: Continental Drift", "2012-06-26", "/ia4.jpg", 1),
+            }
+            title, rdate, poster, st = titles[mid]
+            return self.reply(200, {
+                "id": mid, "title": title, "releaseDate": rdate, "posterPath": poster, "overview": "Ice Age movie",
+                "mediaInfo": {"status": st},
+                "collection": {"id": 8354, "name": "Ice Age Collection", "posterPath": "/iacol.jpg"},
+            })
+        if self.path == "/api/v1/movie/4553":
+            return self.reply(200, {"id": 4553, "title": "The Machinist", "releaseDate": "2004-10-22",
+                                    "posterPath": "/mach.jpg", "overview": "Insomnia", "mediaInfo": {"status": 7}})
+        if self.path == "/api/v1/collection/8354":
+            return self.reply(200, {
+                "id": 8354,
+                "name": "Ice Age Collection",
+                "overview": "Prehistoric adventures",
+                "posterPath": "/iacol.jpg",
+                "backdropPath": "/iabg.jpg",
+                "parts": [
+                    {"id": 99999, "title": "Ice Age: Boiling Point", "releaseDate": "", "posterPath": "/ia6.jpg"},
+                    {"id": 8355, "title": "Ice Age: Dawn of the Dinosaurs", "releaseDate": "2009-06-29",
+                     "posterPath": "/ia3.jpg", "mediaInfo": {"status": 6}},
+                    {"id": 425, "title": "Ice Age", "releaseDate": "2002-03-10",
+                     "posterPath": "/ia1.jpg", "mediaInfo": {"status": 5}},
+                    {"id": 950, "title": "Ice Age: The Meltdown", "releaseDate": "2006-03-23",
+                     "posterPath": "/ia2.jpg", "mediaInfo": {"status": 7}},
+                ],
+            })
         if self.path == "/api/v1/tv/1396":
             return self.reply(200, {
                 "id": 1396, "name": "Breaking Bad", "firstAirDate": "2008-01-20", "posterPath": "/bb.jpg",
@@ -204,6 +255,21 @@ class FakeSeerrAndT3Handler(BaseHTTPRequestHandler):
                 {
                     "id": 10, "status": 2, "type": "movie", "createdAt": "2026-11-23T10:00:00.000Z",
                     "media": {"tmdbId": 27205, "mediaType": "movie", "status": 3, "downloadStatus": [{"title": "x"}]},
+                    "seasons": [], "requestedBy": {"displayName": "Ayush"},
+                },
+                {
+                    "id": 11, "status": 2, "type": "movie", "createdAt": "2026-11-22T10:00:00.000Z",
+                    "media": {"tmdbId": 4553, "mediaType": "movie", "status": 7, "downloadStatus": []},
+                    "seasons": [], "requestedBy": {"displayName": "Ayush"},
+                },
+                {
+                    "id": 12, "status": 2, "type": "movie", "createdAt": "2026-11-21T10:00:00.000Z",
+                    "media": {"tmdbId": 425, "mediaType": "movie", "status": 6, "downloadStatus": []},
+                    "seasons": [], "requestedBy": {"displayName": "Ayush"},
+                },
+                {
+                    "id": 13, "status": 4, "type": "movie", "createdAt": "2026-11-20T10:00:00.000Z",
+                    "media": {"tmdbId": 950, "mediaType": "movie", "status": 2, "downloadStatus": []},
                     "seasons": [], "requestedBy": {"displayName": "Ayush"},
                 },
             ]})
@@ -282,6 +348,10 @@ class SeerrArrJellyfinT3Tests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(reqs["requests"][0]["title"], "Inception")
         self.assertEqual(reqs["requests"][0]["status"], "grabbing")
+        self.assertEqual(reqs["requests"][1]["title"], "The Machinist")
+        self.assertEqual(reqs["requests"][1]["status"], "deleted")
+        self.assertEqual(reqs["requests"][2]["status"], "blocklisted")
+        self.assertEqual(reqs["requests"][3]["status"], "failed")
 
         self.assertEqual(c.create_request({"mediaType": "tv", "mediaId": 1396, "seasons": [2]})[0], 200)
         self.assertEqual(c.create_request({"mediaType": "tv", "mediaId": 1396, "seasons": []})[0], 400)
@@ -292,6 +362,71 @@ class SeerrArrJellyfinT3Tests(unittest.TestCase):
         with mock.patch.object(c, "_arr_imdb_lookup", return_value=("tv", 1396)):
             code, resolved = c.resolve_url({"url": "https://www.imdb.com/title/tt0903747/"})
             self.assertEqual((code, resolved["title"]), (200, "Breaking Bad"))
+
+    def test_seerr_media_status_deleted_blocklisted_and_collections(self):
+        c = pcapi.SeerrClient(url=self.base, settings_file=self.seerr_conf)
+
+        # Direct _media_status mapping
+        self.assertEqual(c._media_status({"status": 5}), "available")
+        self.assertEqual(c._media_status({"status": 7}), "deleted")
+        self.assertEqual(c._media_status({"status": 6}), "blocklisted")
+        self.assertEqual(c._media_status({"status": 4}), "partial")
+        self.assertEqual(c._media_status({"status": 3, "downloadStatus": [{"title": "x"}]}), "grabbing")
+        self.assertEqual(c._media_status({"status": 2}), "requested")
+        self.assertEqual(c._media_status({"status": 1}), "none")
+        self.assertEqual(c._media_status(None), "none")
+
+        # Movie details includes collection metadata and caches it in _meta_cache
+        code, det = c.details("movie", 425)
+        self.assertEqual(code, 200)
+        self.assertEqual(det["collection"], {
+            "id": 8354,
+            "name": "Ice Age Collection",
+            "poster": "https://image.tmdb.org/t/p/w300/iacol.jpg",
+        })
+        self.assertEqual(c._meta_cache[("movie", 425)]["collection"]["id"], 8354)
+
+        # Collection endpoint sorts parts chronologically with undated at the end
+        code, col = c.collection(8354)
+        self.assertEqual(code, 200)
+        self.assertEqual(col["id"], 8354)
+        self.assertEqual(col["name"], "Ice Age Collection")
+        self.assertEqual(col["backdrop"], "https://image.tmdb.org/t/p/w780/iabg.jpg")
+        self.assertEqual([p["id"] for p in col["parts"]], [425, 950, 8355, 99999])
+        self.assertEqual([p["status"] for p in col["parts"]], ["available", "deleted", "blocklisted", "none"])
+        self.assertEqual(c.collection("bad")[0], 400)
+        self.assertEqual(c.collection(999999)[0], 404)
+
+        # Search discovers collection from top movie results and prepends it
+        FakeSeerrAndT3Handler.log.clear()
+        code, srch = c.search("Ice Age")
+        self.assertEqual(code, 200)
+        self.assertEqual(srch["results"][0]["mediaType"], "collection")
+        self.assertEqual(srch["results"][0]["id"], 8354)
+        self.assertEqual(srch["results"][0]["title"], "Ice Age Collection")
+        self.assertEqual(srch["results"][2]["status"], "deleted")
+        # Movie 425 was already in _meta_cache so it should not be re-fetched
+        fetched_paths = [p for _, p, _ in FakeSeerrAndT3Handler.log]
+        self.assertNotIn("/api/v1/movie/425", fetched_paths)
+
+        # Repeated search hits _meta_cache for all 4 top movies (no extra /movie/{id} fetches)
+        FakeSeerrAndT3Handler.log.clear()
+        code, srch2 = c.search("Ice Age")
+        self.assertEqual(code, 200)
+        self.assertEqual(srch2["results"][0]["mediaType"], "collection")
+        self.assertFalse(any(p.startswith("/api/v1/movie/") for _, p, _ in FakeSeerrAndT3Handler.log))
+
+        # Direct collection from Seerr search is accepted and not duplicated
+        code, direct = c.search("directcol")
+        self.assertEqual(code, 200)
+        col_items = [x for x in direct["results"] if x["mediaType"] == "collection"]
+        self.assertEqual(len(col_items), 1)
+        self.assertEqual(col_items[0]["id"], 8354)
+
+        # Route wiring for /api/seerr/collection
+        with mock.patch.object(pcapi, "SEERR", c):
+            code, routed = pcapi.route_round4_get("/api/seerr/collection", {"id": ["8354"]})
+            self.assertEqual((code, routed["id"]), (200, 8354))
 
     def test_arr_retry_and_jellyfin_refresh(self):
         with mock.patch.object(pcapi, "ARR", {"radarr": ("radarr", self.base, self.arr_xml)}):

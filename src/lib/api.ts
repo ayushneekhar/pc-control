@@ -448,7 +448,16 @@ export type KbdLockState = {
 export const getKbdLock = () => get<KbdLockState>('/pc/api/kbd-lock');
 export const setKbdLock = (enabled: boolean) => post<KbdLockState>('/pc/api/kbd-lock', { enabled }, 15000);
 
-export type SeerrStatus = 'available' | 'partial' | 'grabbing' | 'requested' | 'declined' | 'none';
+export type SeerrStatus =
+  | 'available'
+  | 'partial'
+  | 'grabbing'
+  | 'requested'
+  | 'declined'
+  | 'deleted'
+  | 'blocklisted'
+  | 'failed'
+  | 'none';
 
 export type SeerrSeason = {
   seasonNumber: number;
@@ -457,15 +466,31 @@ export type SeerrSeason = {
   status: SeerrStatus;
 };
 
+export type SeerrCollectionRef = {
+  id: number;
+  name: string;
+  poster: string | null;
+};
+
 export type SeerrItem = {
   id: number;
-  mediaType: 'movie' | 'tv';
+  mediaType: 'movie' | 'tv' | 'collection';
   title: string;
   year: number | null;
   poster: string | null;
   overview: string;
   status: SeerrStatus;
   seasons?: SeerrSeason[];
+  collection?: SeerrCollectionRef | null;
+};
+
+export type SeerrCollection = {
+  id: number;
+  name: string;
+  overview: string;
+  poster: string | null;
+  backdrop: string | null;
+  parts: SeerrItem[];
 };
 
 export type SeerrRequestItem = {
@@ -485,6 +510,8 @@ export const searchSeerr = (q: string) =>
   get<{ results: SeerrItem[] }>(`/pc/api/seerr/search?q=${encodeURIComponent(q)}`, 15000);
 export const getSeerrDetails = (type: 'movie' | 'tv', id: number) =>
   get<SeerrItem>(`/pc/api/seerr/details?type=${type}&id=${id}`, 15000);
+export const getSeerrCollection = (id: number) =>
+  get<SeerrCollection>(`/pc/api/seerr/collection?id=${id}`, 15000);
 export const getSeerrRequests = () => get<{ requests: SeerrRequestItem[] }>('/pc/api/seerr/requests', 15000);
 export const createSeerrRequest = (mediaType: 'movie' | 'tv', mediaId: number, seasons?: number[] | 'all') =>
   post<{ ok: boolean; id?: number; status?: number }>(

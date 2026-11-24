@@ -288,8 +288,8 @@ function Tabs() {
       })}
     >
       <Tab.Screen name="Routes" component={RoutesScreen} />
-      <Tab.Screen name="Chat" component={ChatScreen} />
       <Tab.Screen name="System" component={SystemScreen} />
+      <Tab.Screen name="Chat" component={ChatScreen} />
       <Tab.Screen
         name="Root"
         component={RootScreen}

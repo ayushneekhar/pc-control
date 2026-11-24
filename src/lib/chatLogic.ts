@@ -121,6 +121,26 @@ export function resolveChatTarget(
   };
 }
 
+export function buildChatAttachmentSource(
+  url: string,
+  defaultBaseUrl: string,
+  endpoint: ChatEndpointConfig,
+): { uri: string; headers?: Record<string, string> } {
+  const target = resolveChatTarget(defaultBaseUrl, endpoint);
+  const trimmed = url.trim();
+  const isAbsolute = /^https?:\/\//i.test(trimmed);
+  const uri = isAbsolute ? trimmed : `${target.baseUrl}${trimmed.startsWith('/') ? trimmed : `/${trimmed}`}`;
+  const hasHeaders = Object.keys(target.headers).length > 0;
+  if (!hasHeaders) return { uri };
+  if (!isAbsolute) return { uri, headers: target.headers };
+  const baseLower = target.baseUrl.toLowerCase();
+  const uriLower = uri.toLowerCase();
+  if (uriLower === baseLower || uriLower.startsWith(`${baseLower}/`)) {
+    return { uri, headers: target.headers };
+  }
+  return { uri };
+}
+
 export function makeClientId(): string {
   const rand = Math.random().toString(36).slice(2, 10);
   return `c-${Date.now()}-${rand}`;

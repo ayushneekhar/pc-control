@@ -884,16 +884,117 @@ class ChatHttpAndScopeIsolationTests(unittest.TestCase):
             ("GET", "/pc/api/root/history"),
             ("GET", "/pc/api/info"),
             ("GET", "/pc/api/agent"),
+            ("GET", "/pc/api/agent/settings"),
+            ("GET", "/pc/api/agent/usage"),
             ("GET", "/pc/api/services"),
             ("GET", "/pc/api/notify/settings"),
             ("GET", "/pc/api/chat-other"),
             ("GET", "/pc/api/chat/../info"),
+            ("GET", "/pc/api/chat/../agent/settings"),
             ("POST", "/pc/api/agent"),
+            ("POST", "/pc/api/agent/settings"),
+            ("POST", "/pc/api/agent/reset"),
             ("POST", "/pc/api/root/approve"),
         ]
         for method, ep in forbidden_endpoints:
             code, _ = self._req(method, ep, {} if method == "POST" else None, headers=cf_headers)
             self.assertEqual(code, 403, f"chat-token must be rejected on {method} {ep}")
+
+    def test_chat_agent_endpoints_accept_chat_token_and_tailnet(self):
+        cf_headers = {
+            "X-Forwarded-For": "203.0.113.10",
+            "Authorization": f"Bearer {self.secret}",
+        }
+        ts_headers = {"Tailscale-User-Login": "ayush@example.com"}
+
+        class FakeAgentSettings:
+            def __init__(self):
+                self.updated = []
+                self.state = {
+                    "claude": {"model": "claude-opus-4-7", "effort": "high", "models": [], "efforts": []},
+                    "gemini": {"instance_id": "antigravity", "model": "gemini-4-neon", "thought_level": "medium", "models": [], "thought_levels": []},
+                }
+
+            def get(self):
+                return self.state
+
+            def update(self, body):
+                self.updated.append(body)
+                if isinstance(body.get("claude"), dict):
+                    self.state["claude"].update(body["claude"])
+                return 200, self.state
+
+        class FakeAgent:
+            def __init__(self):
+                self.switched = []
+
+            def switch(self, engine):
+                self.switched.append(engine)
+                if engine not in ("claude", "gemini"):
+                    return 400, {"error": "invalid engine"}
+                return 202, {"engine": engine, "switching": True}
+
+        fake_settings = FakeAgentSettings()
+        fake_agent = FakeAgent()
+        orig_settings = pcapi.AGENT_SETTINGS
+        orig_agent = pcapi.AGENT
+        pcapi.AGENT_SETTINGS = fake_settings
+        pcapi.AGENT = fake_agent
+        try:
+            # GET /pc/api/chat/agent with chat bearer token
+            code, data = self._req("GET", "/pc/api/chat/agent", headers=cf_headers)
+            self.assertEqual(code, 200)
+            self.assertEqual(data["claude"]["model"], "claude-opus-4-7")
+
+            # POST /pc/api/chat/agent with chat bearer token
+            code, data = self._req(
+                "POST",
+                "/pc/api/chat/agent",
+                {"claude": {"effort": "medium"}},
+                headers=cf_headers,
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(data["claude"]["effort"], "medium")
+            self.assertEqual(fake_settings.updated, [{"claude": {"effort": "medium"}}])
+
+            # POST /pc/api/chat/agent/switch with chat bearer token
+            code, data = self._req(
+                "POST",
+                "/pc/api/chat/agent/switch",
+                {"engine": "gemini"},
+                headers=cf_headers,
+            )
+            self.assertEqual(code, 202)
+            self.assertEqual(data["engine"], "gemini")
+            self.assertEqual(fake_agent.switched, ["gemini"])
+
+            # Tailnet auth also works on /pc/api/chat/agent*
+            code, data = self._req("GET", "/pc/api/chat/agent", headers=ts_headers)
+            self.assertEqual(code, 200)
+            self.assertEqual(data["gemini"]["model"], "gemini-4-neon")
+
+            # Wrong bearer token rejected on chat agent endpoints
+            bad_headers = {"X-Forwarded-For": "203.0.113.10", "Authorization": "Bearer wrong"}
+            for method, ep in (
+                ("GET", "/pc/api/chat/agent"),
+                ("POST", "/pc/api/chat/agent"),
+                ("POST", "/pc/api/chat/agent/switch"),
+            ):
+                code, _ = self._req(method, ep, {} if method == "POST" else None, headers=bad_headers)
+                self.assertEqual(code, 403)
+
+            # Non-chat /pc/api/agent* endpoints still reject chat bearer token
+            for method, ep in (
+                ("GET", "/pc/api/agent"),
+                ("GET", "/pc/api/agent/settings"),
+                ("POST", "/pc/api/agent"),
+                ("POST", "/pc/api/agent/settings"),
+            ):
+                code, _ = self._req(method, ep, {} if method == "POST" else None, headers=cf_headers)
+                self.assertEqual(code, 403, f"chat-token must be rejected on {method} {ep}")
+        finally:
+            pcapi.AGENT_SETTINGS = orig_settings
+            pcapi.AGENT = orig_agent
 
     def test_wrong_or_missing_chat_token_rejected_and_tailnet_still_works(self):
         # Wrong bearer token via CF -> 403

@@ -4212,6 +4212,8 @@ class H(BaseHTTPRequestHandler):
                     return self.send_ota_file(ota_name)
             if path == "/api/chat/messages":
                 return self.send_json(*_chat_manager().handle_get_messages(qs))
+            if path == "/api/chat/agent":
+                return self.send_json(200, AGENT_SETTINGS.get())
             if path == "/api/chat/link-preview":
                 return self.send_json(*link_preview_mod.handle_link_preview((qs.get("url") or [""])[0]))
             m = re.fullmatch(r"/api/chat/file/([0-9a-f]{16})", path)
@@ -4307,6 +4309,10 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*_chat_manager().handle_push(b))
             if path == "/api/chat/new":
                 return self.send_json(*_chat_manager().handle_new(b))
+            if path == "/api/chat/agent":
+                return self.send_json(*AGENT_SETTINGS.update(b))
+            if path == "/api/chat/agent/switch":
+                return self.send_json(*AGENT.switch(b.get("engine")))
             r4 = route_round4_post(path, b)
             if r4 is not None:
                 return self.send_json(*r4)

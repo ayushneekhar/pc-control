@@ -1,7 +1,15 @@
 import { PcNative } from '../../modules/pc-native';
-import { ApiError, serverUrl } from './api';
+import {
+  AgentEngine,
+  AgentSettings,
+  AgentSettingsPatch,
+  AgentState,
+  ApiError,
+  serverUrl,
+} from './api';
 import { cacheGet, cacheSet } from './cache';
 import {
+  buildChatAttachmentSource,
   ChatAttachment,
   ChatMessagesResponse,
   ChatNewResponse,
@@ -109,14 +117,23 @@ export function uploadChatAttachment(file: {
 }
 
 export function resolveChatAttachmentSource(url: string): { uri: string; headers?: Record<string, string> } {
-  const target = resolveChatTarget(serverUrl(), getChatEndpoint());
-  const uri = /^https?:\/\//i.test(url) ? url : `${target.baseUrl}${url.startsWith('/') ? url : `/${url}`}`;
-  const hasHeaders = Object.keys(target.headers).length > 0;
-  return hasHeaders ? { uri, headers: target.headers } : { uri };
+  return buildChatAttachmentSource(url, serverUrl(), getChatEndpoint());
 }
 
 export function startNewChat(): Promise<ChatNewResponse> {
   return chatRequest<ChatNewResponse>('POST', '/pc/api/chat/new', {});
+}
+
+export function getChatAgentSettings(): Promise<AgentSettings> {
+  return chatRequest<AgentSettings>('GET', '/pc/api/chat/agent');
+}
+
+export function updateChatAgentSettings(patch: AgentSettingsPatch): Promise<AgentSettings> {
+  return chatRequest<AgentSettings>('POST', '/pc/api/chat/agent', patch);
+}
+
+export function switchChatAgent(engine: AgentEngine): Promise<AgentState> {
+  return chatRequest<AgentState>('POST', '/pc/api/chat/agent/switch', { engine });
 }
 
 type LinkPreviewCacheEntry = {

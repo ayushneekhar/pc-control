@@ -32,16 +32,19 @@ import {
 import { PcNative, PickedAttachment } from '../../modules/pc-native';
 import { AgentModelPickerModal, AgentSelectionResult } from '../components/AgentModelPickerModal';
 import { Banner, Button, Icon, Screen } from '../components/ui';
-import { AgentSettings, getAgentSettings, setAgent, updateAgentSettings } from '../lib/api';
+import { AgentSettings } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
 import {
   fetchChatMessages,
   fetchLinkPreview,
   getCachedLinkPreview,
+  getChatAgentSettings,
   resolveChatAttachmentSource,
   sendChatMessage,
   startNewChat,
+  switchChatAgent,
   syncNativeChatConfig,
+  updateChatAgentSettings,
   uploadChatAttachment,
 } from '../lib/chatApi';
 import {
@@ -992,7 +995,7 @@ export default function ChatScreen() {
     setSettingsLoading(true);
     setSettingsErr(null);
     try {
-      const next = await getAgentSettings();
+      const next = await getChatAgentSettings();
       if (!mountedRef.current) return;
       cacheSet(CACHE_AGENT_SETTINGS, next);
       setAgentSettings(next);
@@ -1488,13 +1491,13 @@ export default function ChatScreen() {
       setApplyModelErr(null);
       try {
         if (patch.claude || patch.gemini) {
-          const updated = await updateAgentSettings(patch);
+          const updated = await updateChatAgentSettings(patch);
           if (!mountedRef.current) return;
           cacheSet(CACHE_AGENT_SETTINGS, updated);
           setAgentSettings(updated);
         }
         if (nextEngine !== engine) {
-          const nextState = await setAgent(nextEngine);
+          const nextState = await switchChatAgent(nextEngine);
           if (!mountedRef.current) return;
           cacheSet(CACHE_AGENT_STATE, nextState);
           setEngine(nextEngine);

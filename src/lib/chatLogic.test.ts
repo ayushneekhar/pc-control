@@ -3,6 +3,7 @@ import test from 'node:test';
 import { _setCacheBackendForTests, CacheBackend } from './cache';
 import {
   applyChatListAutoFormat,
+  buildChatAttachmentSource,
   buildReplyRef,
   ChatMessage,
   computeAndroidKeyboardOffset,
@@ -64,6 +65,62 @@ test('chat endpoint config round-trips and normalizes URLs', () => {
   assert.equal(defaultTarget.custom, false);
   assert.equal(defaultTarget.baseUrl, 'https://tailnet.ts.net');
   assert.deepEqual(defaultTarget.headers, {});
+});
+
+test('buildChatAttachmentSource resolves relative and absolute URLs with Bearer token only for chat origin', () => {
+  const customEndpoint = { url: 'https://agent.neekhar.dev/', token: 'tok-123' };
+  const defaultBase = 'https://tailnet.ts.net/';
+
+  // Relative path uses custom chat endpoint + Authorization header
+  assert.deepEqual(
+    buildChatAttachmentSource('/pc/api/chat/file/0123456789abcdef', defaultBase, customEndpoint),
+    {
+      uri: 'https://agent.neekhar.dev/pc/api/chat/file/0123456789abcdef',
+      headers: { Authorization: 'Bearer tok-123' },
+    },
+  );
+
+  // Relative path without leading slash is normalized
+  assert.deepEqual(
+    buildChatAttachmentSource('pc/api/chat/file/0123456789abcdef', defaultBase, customEndpoint),
+    {
+      uri: 'https://agent.neekhar.dev/pc/api/chat/file/0123456789abcdef',
+      headers: { Authorization: 'Bearer tok-123' },
+    },
+  );
+
+  // Absolute URL on the same custom chat origin keeps Authorization header
+  assert.deepEqual(
+    buildChatAttachmentSource('https://agent.neekhar.dev/pc/api/chat/file/0123456789abcdef', defaultBase, customEndpoint),
+    {
+      uri: 'https://agent.neekhar.dev/pc/api/chat/file/0123456789abcdef',
+      headers: { Authorization: 'Bearer tok-123' },
+    },
+  );
+
+  // Absolute URL on an unrelated external origin MUST NOT receive the chat Bearer token
+  assert.deepEqual(
+    buildChatAttachmentSource('https://cdn.example.com/photo.png', defaultBase, customEndpoint),
+    {
+      uri: 'https://cdn.example.com/photo.png',
+    },
+  );
+
+  // Without a custom chat endpoint, falls back to Tailnet base URL with no Authorization header
+  assert.deepEqual(
+    buildChatAttachmentSource('/pc/api/chat/file/0123456789abcdef', defaultBase, { url: '', token: 'tok-123' }),
+    {
+      uri: 'https://tailnet.ts.net/pc/api/chat/file/0123456789abcdef',
+    },
+  );
+
+  // Custom URL without token omits headers
+  assert.deepEqual(
+    buildChatAttachmentSource('/pc/api/chat/file/0123456789abcdef', defaultBase, { url: 'https://agent.neekhar.dev', token: '' }),
+    {
+      uri: 'https://agent.neekhar.dev/pc/api/chat/file/0123456789abcdef',
+    },
+  );
 });
 
 test('mergeChatMessages deduplicates optimistic messages by client_id', () => {

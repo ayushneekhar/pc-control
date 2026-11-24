@@ -317,25 +317,25 @@ export function extractPreviewUrl(text: string): string | null {
 export function parseMessageSegments(text: string): MessageSegment[] {
   if (!text) return [];
   const out: MessageSegment[] = [];
-  const fence = /```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g;
+  const fence = /```(?:([a-zA-Z0-9_+#.-]+)[ \t]*\r?\n|[ \t]*\r?\n)?([\s\S]*?)```/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = fence.exec(text)) !== null) {
     if (match.index > lastIndex) {
       const plain = text.slice(lastIndex, match.index);
       if (plain.trim().length > 0) {
-        out.push({ kind: 'text', text: plain.replace(/^\n+|\n+$/g, '') });
+        out.push({ kind: 'text', text: plain.replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, '') });
       }
     }
     const lang = (match[1] || '').trim();
-    const code = (match[2] || '').replace(/\n$/, '');
+    const code = (match[2] || '').replace(/\r?\n$/, '');
     out.push({ kind: 'codeblock', lang, code });
     lastIndex = fence.lastIndex;
   }
   if (lastIndex < text.length) {
     const tail = text.slice(lastIndex);
     if (tail.trim().length > 0 || out.length === 0) {
-      out.push({ kind: 'text', text: tail.replace(/^\n+|\n+$/g, '') });
+      out.push({ kind: 'text', text: tail.replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, '') });
     }
   }
   return out;

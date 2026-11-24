@@ -203,12 +203,36 @@ test('shouldPollChat polls only when in-flight, focused, and active', () => {
   assert.equal(shouldPollChat([pendMsg], true, true, false), false);
 });
 
-test('parseMessageSegments extracts fenced code blocks and surrounding text', () => {
+test('parseMessageSegments extracts fenced code blocks with and without language tags', () => {
   const segs = parseMessageSegments('Before:\n```ts\nconst x = 1;\n```\nAfter');
   assert.deepEqual(segs, [
     { kind: 'text', text: 'Before:' },
     { kind: 'codeblock', lang: 'ts', code: 'const x = 1;' },
     { kind: 'text', text: 'After' },
+  ]);
+
+  // Fenced code block without language tag, preserving internal indentation
+  assert.deepEqual(
+    parseMessageSegments('Run:\n```\n  echo "hi"\n  echo "bye"\n```'),
+    [
+      { kind: 'text', text: 'Run:' },
+      { kind: 'codeblock', lang: '', code: '  echo "hi"\n  echo "bye"' },
+    ],
+  );
+
+  // CRLF line endings, trailing spaces after language tag, and multiple fenced blocks
+  assert.deepEqual(
+    parseMessageSegments('```bash  \r\nnpm run lint\r\n```\r\nThen:\r\n```\r\nnpm test\r\n```'),
+    [
+      { kind: 'codeblock', lang: 'bash', code: 'npm run lint' },
+      { kind: 'text', text: 'Then:' },
+      { kind: 'codeblock', lang: '', code: 'npm test' },
+    ],
+  );
+
+  // Single-line triple-backtick without newline does not swallow first word as language tag
+  assert.deepEqual(parseMessageSegments('```const a = 1```'), [
+    { kind: 'codeblock', lang: '', code: 'const a = 1' },
   ]);
 
   assert.deepEqual(parseMessageSegments('Plain only'), [{ kind: 'text', text: 'Plain only' }]);
@@ -396,6 +420,64 @@ test('parseInlineTokens parses Markdown links, bare URLs, t3-thread refs, inline
       { kind: 'text', text: ' for you.' },
     ],
   );
+});
+
+test('parseInlineTokens handles multiple inline code spans, mixed links, and unmatched backticks', () => {
+  // Single inline code span
+  assert.deepEqual(parseInlineTokens('Run `git status` now'), [
+    { kind: 'text', text: 'Run ' },
+    { kind: 'code', code: 'git status' },
+    { kind: 'text', text: ' now' },
+  ]);
+
+  // Multiple inline code spans in one message
+  assert.deepEqual(parseInlineTokens('Use `npm run lint` and `npx tsc --noEmit` before `git commit`.'), [
+    { kind: 'text', text: 'Use ' },
+    { kind: 'code', code: 'npm run lint' },
+    { kind: 'text', text: ' and ' },
+    { kind: 'code', code: 'npx tsc --noEmit' },
+    { kind: 'text', text: ' before ' },
+    { kind: 'code', code: 'git commit' },
+    { kind: 'text', text: '.' },
+  ]);
+
+  // Inline code mixed with bare URLs, Markdown links, and T3 thread links
+  assert.deepEqual(
+    parseInlineTokens(
+      'Open [Thread](t3-thread://v2/env-1/thr-2), run `curl https://api.example.com`, or check [Docs](https://docs.example.com) and https://example.com/status.',
+    ),
+    [
+      { kind: 'text', text: 'Open ' },
+      { kind: 'link', label: 'Thread', url: 't3-thread://v2/env-1/thr-2', external: false },
+      { kind: 'text', text: ', run ' },
+      { kind: 'code', code: 'curl https://api.example.com' },
+      { kind: 'text', text: ', or check ' },
+      { kind: 'link', label: 'Docs', url: 'https://docs.example.com', external: true },
+      { kind: 'text', text: ' and ' },
+      { kind: 'link', label: 'https://example.com/status', url: 'https://example.com/status', external: true },
+      { kind: 'text', text: '.' },
+    ],
+  );
+
+  // Unmatched single backticks stay plain text
+  assert.deepEqual(parseInlineTokens('A stray ` backtick stays plain'), [
+    { kind: 'text', text: 'A stray ` backtick stays plain' },
+  ]);
+
+  // Valid inline code followed by an unmatched backtick
+  assert.deepEqual(parseInlineTokens('Valid `foo` and stray `bar'), [
+    { kind: 'text', text: 'Valid ' },
+    { kind: 'code', code: 'foo' },
+    { kind: 'text', text: ' and stray `bar' },
+  ]);
+
+  // Empty backticks and backticks across newlines stay plain text
+  assert.deepEqual(parseInlineTokens('Empty `` stays plain'), [
+    { kind: 'text', text: 'Empty `` stays plain' },
+  ]);
+  assert.deepEqual(parseInlineTokens('Backtick `across\nlines` stays plain'), [
+    { kind: 'text', text: 'Backtick `across\nlines` stays plain' },
+  ]);
 });
 
 test('extractPreviewUrl finds first external http(s) URL and skips internal schemes and code', () => {

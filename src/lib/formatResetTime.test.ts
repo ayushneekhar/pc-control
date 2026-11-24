@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { formatResetTime } from './formatResetTime';
+import {
+  formatCompactDuration,
+  formatCompactResetDuration,
+  formatResetTime,
+  parseDurationMs,
+} from './formatResetTime';
 
 // Helper: construct a Date in local timezone so tests pass regardless of host TZ.
 function localDate(y: number, m: number, d: number, h: number, min: number, s = 0): Date {
@@ -64,4 +69,36 @@ test('formatResetTime: future days include weekday, ordinal day, short month', (
     formatResetTime(localDate(2026, 12, 11, 8, 0).toISOString(), now),
     'Resets Fri 11th Dec, 8:00 am',
   );
+});
+
+test('formatCompactDuration: formats minutes, hours, and days cleanly', () => {
+  assert.equal(formatCompactDuration(0), null);
+  assert.equal(formatCompactDuration(-5000), null);
+  assert.equal(formatCompactDuration(Number.NaN), null);
+  assert.equal(formatCompactDuration(30_000), '1m');
+  assert.equal(formatCompactDuration(42 * 60_000), '42m');
+  assert.equal(formatCompactDuration(2 * 3_600_000), '2h');
+  assert.equal(formatCompactDuration((2 * 60 + 44) * 60_000), '2h 44m');
+  assert.equal(formatCompactDuration(24 * 3_600_000), '1d');
+  // 155h 9m == 6d 11h 9m -> "6d 11h"
+  assert.equal(formatCompactDuration((155 * 60 + 9) * 60_000), '6d 11h');
+  assert.equal(formatCompactDuration((4 * 24 + 10) * 3_600_000), '4d 10h');
+});
+
+test('formatCompactResetDuration: formats future ISO timestamps and rejects past/invalid', () => {
+  const now = new Date('2026-11-24T10:00:00Z');
+  assert.equal(formatCompactResetDuration(null, now), null);
+  assert.equal(formatCompactResetDuration('invalid', now), null);
+  assert.equal(formatCompactResetDuration('2026-11-24T09:59:00Z', now), null);
+  assert.equal(formatCompactResetDuration('2026-11-24T12:38:00Z', now), '2h 38m');
+  assert.equal(formatCompactResetDuration('2026-11-30T21:09:00Z', now), '6d 11h');
+});
+
+test('parseDurationMs: parses hour/day/minute strings including >=24h hours', () => {
+  assert.equal(parseDurationMs(null), null);
+  assert.equal(parseDurationMs(''), null);
+  assert.equal(parseDurationMs('155h 9m'), (155 * 3600 + 9 * 60) * 1000);
+  assert.equal(formatCompactDuration(parseDurationMs('155h 9m')!), '6d 11h');
+  assert.equal(parseDurationMs('4d 10h'), (4 * 86400 + 10 * 3600) * 1000);
+  assert.equal(parseDurationMs('2h 38m'), (2 * 3600 + 38 * 60) * 1000);
 });

@@ -4,7 +4,6 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
-  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -16,15 +15,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Banner, Button, Card, Icon, List, ListRow, Pill, Screen, Section, StatusDot, Tone } from '../components/ui';
 import { ChatEndpointSection } from '../components/ChatEndpointSection';
+import { BrandIcon, GroupedUsageSection, UsageSkeletonCard } from '../components/UsageSection';
 import {
   AgentEngine,
   AgentOption,
   AgentSettings,
   AgentSettingsPatch,
   AgentState,
-  AgentUsageAccount,
   AgentUsageResponse,
-  AgentUsageWindow,
   getAgent,
   getAgentSettings,
   getAgentUsage,
@@ -34,18 +32,13 @@ import {
   updateAgentSettings,
 } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
-import { formatResetTime } from '../lib/formatResetTime';
 import { radius, screenPad, space, useTheme } from '../theme';
-
-const ANTHROPIC_ICON = require('../../assets/brand-anthropic.png');
-const GEMINI_ICON = require('../../assets/brand-gemini.png');
 
 const CACHE_AGENT_STATE = 'agent:state';
 const CACHE_AGENT_SETTINGS = 'agent:settings';
 const CACHE_AGENT_USAGE = 'agent:usage';
 const FIVE_HOUR_THRESHOLDS = [10, 15, 20, 25, 30, 40, 50];
 const WEEKLY_THRESHOLDS = [5, 10, 15, 20, 25, 30];
-let lastAccountCount = 5;
 
 const DEFAULT_AGENT_OPTIONS: AgentOption[] = [
   { id: 'claude', label: 'Claude', model: 'Opus 5.5' },
@@ -55,21 +48,6 @@ const AGENT_POLL_MS = 2000;
 const AGENT_POLL_MAX_ATTEMPTS = 15; // 30 s
 const STALE_REPOLL_MS = 2500;
 const STALE_REPOLL_MAX = 4;
-
-type Brand = 'claude' | 'gemini' | 'opencode';
-
-function BrandIcon({ brand, size = 18, color }: { brand: Brand; size?: number; color: string }) {
-  if (brand === 'opencode') {
-    return <Icon name="code-tags" size={size} color={color} />;
-  }
-  return (
-    <Image
-      source={brand === 'claude' ? ANTHROPIC_ICON : GEMINI_ICON}
-      style={{ width: size, height: size, tintColor: color }}
-      resizeMode="contain"
-    />
-  );
-}
 
 function useAppActiveTick() {
   const [tick, setTick] = useState(0);
@@ -150,193 +128,6 @@ function PickerSheet({ state, onClose }: { state: PickerState | null; onClose: (
         </View>
       </View>
     </Modal>
-  );
-}
-
-function fmtPct(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v)) return '—';
-  const rounded = Math.round(v);
-  return `${rounded}%`;
-}
-
-function UsageBar({ label, win }: { label: string; win: AgentUsageWindow | null }) {
-  const t = useTheme();
-  const rem = win?.remaining_pct;
-  const pct = rem == null ? 0 : Math.max(0, Math.min(100, rem));
-  const barColor = rem == null ? t.textFaint : rem < 15 ? t.bad : rem < 40 ? t.warn : t.ok;
-  const isFullAvailable = rem != null && rem >= 100 && win?.status?.toLowerCase() === 'quota available';
-  const formattedReset = isFullAvailable ? null : formatResetTime(win?.resets_at);
-  const refreshText = isFullAvailable
-    ? 'Quota available'
-    : formattedReset
-      ? formattedReset
-      : win?.refreshes_in
-        ? `Refreshes in ${win.refreshes_in}`
-        : win?.status && win.status.toLowerCase() !== 'quota available'
-          ? win.status
-          : rem != null
-            ? 'Quota available'
-            : '—';
-
-  return (
-    <View style={{ gap: 5 }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}>
-        <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500' }}>{label}</Text>
-        <Text style={{ color: t.text, fontSize: 12.5, fontWeight: '600', fontVariant: ['tabular-nums'] }}>
-          {fmtPct(rem)} left
-        </Text>
-      </View>
-      <View style={[st.barTrack, { backgroundColor: t.cardAlt }]}>
-        <View style={[st.barFill, { width: `${pct}%`, backgroundColor: barColor }]} />
-      </View>
-      <Text style={{ color: t.textFaint, fontSize: 11.5 }}>{refreshText}</Text>
-    </View>
-  );
-}
-
-function UsageSkeletonCard() {
-  const t = useTheme();
-  return (
-    <Card style={{ gap: space(3) }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2.5) }}>
-        <View style={[st.skelCircle, { backgroundColor: t.cardAlt }]} />
-        <View style={{ flex: 1, gap: 6 }}>
-          <View style={[st.skelLine, { width: '58%', height: 14, backgroundColor: t.cardAlt }]} />
-          <View style={[st.skelLine, { width: '32%', height: 11, backgroundColor: t.cardAlt }]} />
-        </View>
-        <View style={[st.skelPill, { backgroundColor: t.cardAlt }]} />
-      </View>
-      <View style={{ gap: space(2.5) }}>
-        {[0, 1].map((i) => (
-          <View key={i} style={{ gap: 5 }}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-              <View style={[st.skelLine, { width: 76, height: 12, backgroundColor: t.cardAlt }]} />
-              <View style={[st.skelLine, { width: 48, height: 12, backgroundColor: t.cardAlt }]} />
-            </View>
-            <View style={[st.barTrack, { backgroundColor: t.cardAlt }]} />
-            <View style={[st.skelLine, { width: 116, height: 11, backgroundColor: t.cardAlt }]} />
-          </View>
-        ))}
-      </View>
-    </Card>
-  );
-}
-
-function shortModelName(model: string): string {
-  const idx = model.indexOf('/');
-  return idx >= 0 ? model.slice(idx + 1) : model;
-}
-
-function OpenCodeUsageCard({ acc }: { acc: AgentUsageAccount }) {
-  const t = useTheme();
-  const ds = acc.deepseek;
-  const zen = acc.zen;
-  const active = acc.signed_in && !acc.error;
-
-  return (
-    <Card style={{ gap: space(3) }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2.5) }}>
-        <BrandIcon brand="opencode" size={20} color={active ? t.accent : t.textFaint} />
-        <View style={{ flex: 1, gap: 1 }}>
-          <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }} numberOfLines={1}>
-            {acc.label}
-          </Text>
-        </View>
-        <Pill label="OpenCode" tone="dim" />
-      </View>
-
-      {acc.error ? (
-        <Text style={{ color: t.bad, fontSize: 12.5, lineHeight: 18 }}>{acc.error}</Text>
-      ) : (
-        <View style={{ gap: space(2.5) }}>
-          <View style={st.ocRow}>
-            <Text style={{ color: t.textDim, fontSize: 13 }}>DeepSeek balance</Text>
-            {ds?.error ? (
-              <Text style={{ color: t.bad, fontSize: 12.5, flexShrink: 1, textAlign: 'right' }} numberOfLines={1}>
-                {ds.error}
-              </Text>
-            ) : ds?.formatted ? (
-              <Text style={{ color: t.text, fontSize: 14, fontWeight: '600', fontVariant: ['tabular-nums'] }}>
-                {ds.formatted} left
-              </Text>
-            ) : (
-              <Text style={{ color: t.textFaint, fontSize: 13 }}>—</Text>
-            )}
-          </View>
-
-          {zen?.status === 'ok' ? (
-            <View style={[st.ocZenBox, { backgroundColor: t.cardAlt }]}>
-              <View style={st.ocRow}>
-                <Text style={{ color: t.textDim, fontSize: 12.5, fontWeight: '500' }}>
-                  Zen ({zen.days ?? 7}d)
-                </Text>
-                <Text style={{ color: t.text, fontSize: 12.5, fontWeight: '600', fontVariant: ['tabular-nums'] }}>
-                  {(zen.messages ?? 0).toLocaleString()} msgs · {zen.total_cost ?? '$0.00'}
-                </Text>
-              </View>
-              {zen.models?.length ? (
-                <View style={{ gap: 4, marginTop: 2 }}>
-                  {zen.models.map((m) => (
-                    <View key={m.model} style={st.ocRow}>
-                      <Text style={{ color: t.textFaint, fontSize: 12, flex: 1 }} numberOfLines={1}>
-                        {shortModelName(m.model)}
-                      </Text>
-                      <Text style={{ color: t.textDim, fontSize: 12, fontVariant: ['tabular-nums'] }}>
-                        {m.messages.toLocaleString()} msgs
-                      </Text>
-                    </View>
-                  ))}
-                </View>
-              ) : null}
-            </View>
-          ) : zen?.error ? (
-            <Text style={{ color: t.textFaint, fontSize: 12 }}>Zen: {zen.error}</Text>
-          ) : null}
-        </View>
-      )}
-    </Card>
-  );
-}
-
-function UsageAccountCard({ acc }: { acc: AgentUsageAccount }) {
-  const t = useTheme();
-  if (acc.harness === 'opencode') {
-    return <OpenCodeUsageCard acc={acc} />;
-  }
-  const harnessLabel = acc.harness === 'claude' ? 'Claude' : 'Gemini';
-
-  return (
-    <Card style={{ gap: space(3) }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2.5) }}>
-        <BrandIcon
-          brand={acc.harness}
-          size={19}
-          color={acc.signed_in && !acc.error ? t.accent : t.textFaint}
-        />
-        <View style={{ flex: 1, gap: 1 }}>
-          <Text style={{ color: t.text, fontSize: 15, fontWeight: '600' }} numberOfLines={1}>
-            {acc.email || acc.label}
-          </Text>
-          {acc.email ? (
-            <Text style={{ color: t.textFaint, fontSize: 12 }} numberOfLines={1}>
-              {acc.label}
-            </Text>
-          ) : null}
-        </View>
-        <Pill label={harnessLabel} tone={acc.harness === 'claude' ? 'accent' : 'dim'} />
-      </View>
-
-      {!acc.signed_in ? (
-        <Text style={{ color: t.textFaint, fontSize: 13 }}>{acc.status || 'Not signed in'}</Text>
-      ) : acc.error ? (
-        <Text style={{ color: t.bad, fontSize: 12.5, lineHeight: 18 }}>{acc.error}</Text>
-      ) : (
-        <View style={{ gap: space(2.5) }}>
-          <UsageBar label="5-hour limit" win={acc.five_hour} />
-          <UsageBar label="Weekly limit" win={acc.weekly} />
-        </View>
-      )}
-    </Card>
   );
 }
 
@@ -498,9 +289,6 @@ export default function AgentSettingsScreen() {
         const next = await getAgentUsage(doForce);
         if (!mounted.current) return;
         cacheSet(CACHE_AGENT_USAGE, next);
-        if (next.accounts.length > 0) {
-          lastAccountCount = next.accounts.length;
-        }
         setUsage(next);
         setUsageErr(null);
         // Reload settings once usage completes so newly discovered emails appear in the Gemini instance picker.
@@ -724,16 +512,11 @@ export default function AgentSettingsScreen() {
         {usageErr ? <Banner tone="bad" title="Usage unavailable">{usageErr}</Banner> : null}
         {!usage && usageLoading ? (
           <View style={{ gap: space(2.5) }}>
-            {Array.from({ length: lastAccountCount }, (_, i) => (
-              <UsageSkeletonCard key={i} />
-            ))}
+            <UsageSkeletonCard segments={1} />
+            <UsageSkeletonCard segments={4} />
           </View>
         ) : usage?.accounts?.length ? (
-          <View style={{ gap: space(2.5) }}>
-            {usage.accounts.map((acc) => (
-              <UsageAccountCard key={acc.id} acc={acc} />
-            ))}
-          </View>
+          <GroupedUsageSection accounts={usage.accounts} />
         ) : !usageErr ? (
           <Card>
             <Text style={{ color: t.textFaint, fontSize: 13 }}>No accounts reported.</Text>
@@ -980,13 +763,6 @@ const st = StyleSheet.create({
     overflow: 'hidden',
   },
   agentSegText: { fontSize: 13.5, fontWeight: '600', textAlign: 'center' },
-  barTrack: { height: 6, borderRadius: 3, overflow: 'hidden' },
-  barFill: { height: '100%', borderRadius: 3 },
-  skelCircle: { width: 20, height: 20, borderRadius: 10 },
-  skelLine: { borderRadius: 4 },
-  skelPill: { width: 54, height: 22, borderRadius: radius.pill },
-  ocRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) },
-  ocZenBox: { borderRadius: radius.sm, padding: space(3), gap: 6 },
   sheetWrap: { flex: 1, justifyContent: 'flex-end' },
   sheet: { maxHeight: '78%', borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, paddingTop: space(2) },
   grabber: { width: 38, height: 4, borderRadius: 2, alignSelf: 'center' },

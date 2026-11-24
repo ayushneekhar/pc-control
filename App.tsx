@@ -36,6 +36,7 @@ import ServiceDetailScreen from './src/screens/ServiceDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import SpaceScreen from './src/screens/SpaceScreen';
 import SystemScreen from './src/screens/SystemScreen';
+import UsageAccountDetailScreen from './src/screens/UsageAccountDetailScreen';
 import { radius, screenPad, space, useTheme } from './src/theme';
 
 const Tab = createBottomTabNavigator();
@@ -88,6 +89,7 @@ const linking: LinkingOptions<any> = {
       Space: 'space',
       ServiceDetail: 'service/:unit',
       AgentSettings: 'agent-settings',
+      UsageAccountDetail: 'agent-usage/:accountId',
     },
   },
 };
@@ -152,6 +154,7 @@ export default function App() {
             <Stack.Screen name="AgentView" component={AgentViewScreen} />
             <Stack.Screen name="AgentRule" component={AgentRuleScreen} />
             <Stack.Screen name="AgentSettings" component={AgentSettingsScreen} />
+            <Stack.Screen name="UsageAccountDetail" component={UsageAccountDetailScreen} />
             <Stack.Screen name="Downloads" component={DownloadsScreen} />
             <Stack.Screen name="Seerr" component={SeerrScreen} />
             <Stack.Screen name="Space" component={SpaceScreen} />

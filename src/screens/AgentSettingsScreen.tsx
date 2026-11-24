@@ -1,4 +1,4 @@
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -32,11 +32,11 @@ import {
   updateAgentSettings,
 } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
+import { CACHE_AGENT_USAGE } from '../lib/usageSummary';
 import { radius, screenPad, space, useTheme } from '../theme';
 
 const CACHE_AGENT_STATE = 'agent:state';
 const CACHE_AGENT_SETTINGS = 'agent:settings';
-const CACHE_AGENT_USAGE = 'agent:usage';
 const FIVE_HOUR_THRESHOLDS = [10, 15, 20, 25, 30, 40, 50];
 const WEEKLY_THRESHOLDS = [5, 10, 15, 20, 25, 30];
 
@@ -324,6 +324,13 @@ export default function AgentSettingsScreen() {
     void loadUsage(false);
   }, [loadSettings, loadUsage]);
 
+  useFocusEffect(
+    useCallback(() => {
+      const cached = cacheGet<AgentUsageResponse>(CACHE_AGENT_USAGE);
+      if (cached) setUsage(cached);
+    }, []),
+  );
+
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -516,7 +523,16 @@ export default function AgentSettingsScreen() {
             <UsageSkeletonCard segments={4} />
           </View>
         ) : usage?.accounts?.length ? (
-          <GroupedUsageSection accounts={usage.accounts} />
+          <GroupedUsageSection
+            accounts={usage.accounts}
+            onSelectAccount={(account, windowKey) =>
+              nav.navigate('UsageAccountDetail', {
+                accountId: account.id,
+                initialWindow: windowKey,
+                usageSnapshot: usage,
+              })
+            }
+          />
         ) : !usageErr ? (
           <Card>
             <Text style={{ color: t.textFaint, fontSize: 13 }}>No accounts reported.</Text>

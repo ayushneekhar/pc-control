@@ -1,4 +1,4 @@
-import { Image, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Card, Icon } from './ui';
 import type { AgentUsageAccount } from '../lib/api';
 import {
@@ -15,7 +15,7 @@ const GEMINI_ICON = require('../../assets/brand-gemini.png');
 
 // Fixed stripe offsets (in px) for the pure-RN diagonal hatch on the used portion of a segment.
 const MULTI_HATCH_OFFSETS = Array.from({ length: 16 }, (_, i) => i * 8 - 12);
-const SINGLE_HATCH_OFFSETS = Array.from({ length: 46 }, (_, i) => i * 8 - 12);
+const SINGLE_HATCH_OFFSETS = Array.from({ length: 54 }, (_, i) => i * 8 - 12);
 
 export function BrandIcon({ brand, size = 18, color }: { brand: UsageProviderKey; size?: number; color: string }) {
   if (brand === 'opencode') {
@@ -30,8 +30,12 @@ export function BrandIcon({ brand, size = 18, color }: { brand: UsageProviderKey
   );
 }
 
-function segmentColors(t: Theme, row: AccountWindowState) {
-  if (row.state !== 'ok' || row.remainingPct == null) {
+export function usageSegmentColors(
+  t: Theme,
+  state: AccountWindowState['state'],
+  remainingPct: number | null,
+) {
+  if (state !== 'ok' || remainingPct == null) {
     return {
       fill: 'transparent',
       badgeBg: t.cardAlt,
@@ -39,7 +43,7 @@ function segmentColors(t: Theme, row: AccountWindowState) {
       pctFg: t.textFaint,
     };
   }
-  if (row.remainingPct < 15) {
+  if (remainingPct < 15) {
     return {
       fill: t.dark ? 'rgba(242, 104, 90, 0.28)' : 'rgba(210, 57, 43, 0.22)',
       badgeBg: t.badSoft,
@@ -47,7 +51,7 @@ function segmentColors(t: Theme, row: AccountWindowState) {
       pctFg: t.bad,
     };
   }
-  if (row.remainingPct < 40) {
+  if (remainingPct < 40) {
     return {
       fill: t.dark ? 'rgba(242, 181, 68, 0.26)' : 'rgba(184, 120, 0, 0.20)',
       badgeBg: t.warnSoft,
@@ -63,7 +67,68 @@ function segmentColors(t: Theme, row: AccountWindowState) {
   };
 }
 
-function SegmentedBar({ rows }: { rows: AccountWindowState[] }) {
+function segmentColors(t: Theme, row: AccountWindowState) {
+  return usageSegmentColors(t, row.state, row.remainingPct);
+}
+
+export function UsageProgressBar({
+  state,
+  remainingPct,
+  expectedRemainingPct,
+  height = 24,
+}: {
+  state: AccountWindowState['state'];
+  remainingPct: number | null;
+  expectedRemainingPct: number | null;
+  height?: number;
+}) {
+  const t = useTheme();
+  const trackBg = t.dark ? '#1B1B1B' : '#EAEAEA';
+  const hatchColor = t.dark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)';
+  const colors = usageSegmentColors(t, state, remainingPct);
+  const fillPct = state === 'ok' && remainingPct != null ? remainingPct : 0;
+  const showHatch = state === 'ok' && fillPct < 100;
+
+  return (
+    <View style={[st.singleBar, { height, backgroundColor: trackBg }]}>
+      {showHatch ? (
+        <View pointerEvents="none" style={[st.hatchClip, { width: `${100 - fillPct}%` }]}>
+          {SINGLE_HATCH_OFFSETS.map((left) => (
+            <View key={left} style={[st.hatchStripe, { left, backgroundColor: hatchColor }]} />
+          ))}
+        </View>
+      ) : null}
+
+      {fillPct > 0 ? (
+        <View
+          pointerEvents="none"
+          style={[st.segFill, { width: `${fillPct}%`, backgroundColor: colors.fill }]}
+        />
+      ) : null}
+
+      {expectedRemainingPct != null ? (
+        <View
+          pointerEvents="none"
+          style={[
+            st.paceTick,
+            {
+              left: `${expectedRemainingPct}%`,
+              backgroundColor: t.text,
+            },
+          ]}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+function SegmentedBar({
+  rows,
+  onSelect,
+}: {
+  rows: AccountWindowState[];
+  onSelect?: (account: AgentUsageAccount) => void;
+}) {
   const t = useTheme();
   const trackBg = t.dark ? '#1B1B1B' : '#EAEAEA';
   const hatchColor = t.dark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)';
@@ -76,8 +141,8 @@ function SegmentedBar({ rows }: { rows: AccountWindowState[] }) {
         const fillPct = row.state === 'ok' && row.remainingPct != null ? row.remainingPct : 0;
         const showHatch = row.state === 'ok' && fillPct < 100;
 
-        return (
-          <View key={row.account.id} style={[st.segment, { backgroundColor: trackBg }]}>
+        const inner = (
+          <>
             {showHatch ? (
               <View
                 pointerEvents="none"
@@ -120,7 +185,34 @@ function SegmentedBar({ rows }: { rows: AccountWindowState[] }) {
             >
               {row.index}
             </Text>
-          </View>
+          </>
+        );
+
+        if (!onSelect) {
+          return (
+            <View key={row.account.id} style={[st.segment, { backgroundColor: trackBg }]}>
+              {inner}
+            </View>
+          );
+        }
+
+        return (
+          <Pressable
+            key={row.account.id}
+            onPress={() => onSelect(row.account)}
+            accessibilityRole="button"
+            accessibilityLabel={`${row.account.label}, ${
+              row.state === 'ok' && row.remainingPct != null ? `${Math.round(row.remainingPct)}% left` : row.state
+            }`}
+            android_ripple={{ color: t.ripple, borderless: false }}
+            style={({ pressed }) => [
+              st.segment,
+              { backgroundColor: trackBg },
+              pressed && { opacity: 0.8 },
+            ]}
+          >
+            {inner}
+          </Pressable>
         );
       })}
     </View>
@@ -130,13 +222,16 @@ function SegmentedBar({ rows }: { rows: AccountWindowState[] }) {
 function WindowUsageCard({
   accounts,
   windowKey,
+  onSelectAccount,
 }: {
   accounts: AgentUsageAccount[];
   windowKey: UsageWindowKey;
+  onSelectAccount?: (account: AgentUsageAccount, windowKey: UsageWindowKey) => void;
 }) {
   const t = useTheme();
   const summary = summarizeWindowGroup(accounts, windowKey);
   const errorRows = windowKey === 'five_hour' ? summary.rows.filter((r) => r.state === 'error' && r.account.error) : [];
+  const handleSelect = onSelectAccount ? (acc: AgentUsageAccount) => onSelectAccount(acc, windowKey) : undefined;
 
   return (
     <Card style={{ gap: space(3) }}>
@@ -169,13 +264,13 @@ function WindowUsageCard({
         ) : null}
       </View>
 
-      <SegmentedBar rows={summary.rows} />
+      <SegmentedBar rows={summary.rows} onSelect={handleSelect} />
 
-      <View style={{ gap: 9 }}>
+      <View style={{ gap: handleSelect ? 2 : 9 }}>
         {summary.rows.map((row) => {
           const colors = segmentColors(t, row);
-          return (
-            <View key={row.account.id} style={st.accRow}>
+          const rowContent = (
+            <>
               <View style={[st.badge, { backgroundColor: colors.badgeBg }]}>
                 <Text style={[st.badgeText, { color: colors.badgeFg }]}>{row.index}</Text>
               </View>
@@ -210,8 +305,30 @@ function WindowUsageCard({
                     ) : null}
                   </>
                 )}
+                {handleSelect ? <Icon name="chevron-right" size={16} color={t.textFaint} /> : null}
               </View>
-            </View>
+            </>
+          );
+
+          if (!handleSelect) {
+            return (
+              <View key={row.account.id} style={st.accRow}>
+                {rowContent}
+              </View>
+            );
+          }
+
+          return (
+            <Pressable
+              key={row.account.id}
+              onPress={() => handleSelect(row.account)}
+              accessibilityRole="button"
+              accessibilityLabel={`${row.account.label} details`}
+              android_ripple={{ color: t.ripple, borderless: false }}
+              style={({ pressed }) => [st.accRowPressable, pressed && { opacity: 0.78 }]}
+            >
+              {rowContent}
+            </Pressable>
           );
         })}
       </View>
@@ -294,7 +411,13 @@ function OpenCodeUsageCard({ acc }: { acc: AgentUsageAccount }) {
   );
 }
 
-export function GroupedUsageSection({ accounts }: { accounts: AgentUsageAccount[] }) {
+export function GroupedUsageSection({
+  accounts,
+  onSelectAccount,
+}: {
+  accounts: AgentUsageAccount[];
+  onSelectAccount?: (account: AgentUsageAccount, windowKey: UsageWindowKey) => void;
+}) {
   const t = useTheme();
   const groups = groupAccountsByProvider(accounts);
 
@@ -315,8 +438,16 @@ export function GroupedUsageSection({ accounts }: { accounts: AgentUsageAccount[
             </View>
           ) : (
             <View style={{ gap: space(2.5) }}>
-              <WindowUsageCard accounts={group.accounts} windowKey="five_hour" />
-              <WindowUsageCard accounts={group.accounts} windowKey="weekly" />
+              <WindowUsageCard
+                accounts={group.accounts}
+                windowKey="five_hour"
+                onSelectAccount={onSelectAccount}
+              />
+              <WindowUsageCard
+                accounts={group.accounts}
+                windowKey="weekly"
+                onSelectAccount={onSelectAccount}
+              />
             </View>
           )}
         </View>
@@ -400,6 +531,11 @@ const st = StyleSheet.create({
     flexDirection: 'row',
     gap: 6,
   },
+  singleBar: {
+    width: '100%',
+    borderRadius: 7,
+    overflow: 'hidden',
+  },
   segment: {
     flex: 1,
     height: 28,
@@ -446,6 +582,16 @@ const st = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+  },
+  accRowPressable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginHorizontal: -space(2),
+    paddingHorizontal: space(2),
+    paddingVertical: 6,
+    borderRadius: 10,
+    overflow: 'hidden',
   },
   badge: {
     width: 20,

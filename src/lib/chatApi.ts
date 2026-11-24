@@ -9,8 +9,11 @@ import {
 } from './api';
 import { cacheGet, cacheSet } from './cache';
 import {
+  attachmentImageCacheKey,
+  buildAttachmentDataUri,
   buildChatAttachmentSource,
   ChatAttachment,
+  chatAttachmentRequiresFetch,
   ChatMessagesResponse,
   ChatNewResponse,
   ChatSendResponse,
@@ -118,6 +121,131 @@ export function uploadChatAttachment(file: {
 
 export function resolveChatAttachmentSource(url: string): { uri: string; headers?: Record<string, string> } {
   return buildChatAttachmentSource(url, serverUrl(), getChatEndpoint());
+}
+
+const ATTACHMENT_IMAGE_CACHE_MAX_ENTRIES = 40;
+const ATTACHMENT_IMAGE_CACHE_MAX_BYTES = 24 * 1024 * 1024;
+const ATTACHMENT_IMAGE_TIMEOUT_MS = 20000;
+
+const attachmentImageCache = new Map<string, string>();
+let attachmentImageCacheBytes = 0;
+const attachmentImageInFlight = new Map<string, Promise<string>>();
+
+function putAttachmentImageCache(key: string, dataUri: string): void {
+  const existing = attachmentImageCache.get(key);
+  if (existing !== undefined) {
+    attachmentImageCacheBytes -= existing.length;
+    attachmentImageCache.delete(key);
+  }
+  attachmentImageCache.set(key, dataUri);
+  attachmentImageCacheBytes += dataUri.length;
+  while (
+    attachmentImageCache.size > 1 &&
+    (attachmentImageCache.size > ATTACHMENT_IMAGE_CACHE_MAX_ENTRIES ||
+      attachmentImageCacheBytes > ATTACHMENT_IMAGE_CACHE_MAX_BYTES)
+  ) {
+    const oldest = attachmentImageCache.entries().next().value;
+    if (!oldest) break;
+    attachmentImageCache.delete(oldest[0]);
+    attachmentImageCacheBytes -= oldest[1].length;
+  }
+}
+
+function readBlobAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string' && reader.result.length > 0) {
+        resolve(reader.result);
+      } else {
+        reject(new Error('Empty image data'));
+      }
+    };
+    reader.onerror = () => {
+      reject(reader.error ?? new Error('Failed to decode image blob'));
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** Synchronous lookup in the in-memory authenticated image cache (returns `data:` URI or null). */
+export function getCachedChatAttachmentImage(url: string): string | null {
+  const source = resolveChatAttachmentSource(url);
+  const key = attachmentImageCacheKey(source);
+  const hit = attachmentImageCache.get(key);
+  if (hit === undefined) return null;
+  // Refresh LRU recency.
+  attachmentImageCache.delete(key);
+  attachmentImageCache.set(key, hit);
+  return hit;
+}
+
+/** Seed the image cache immediately after uploading a local image so preview renders with no extra fetch. */
+export function primeChatAttachmentImageCache(url: string, base64: string, mimeType?: string): void {
+  if (!url || !base64) return;
+  const source = resolveChatAttachmentSource(url);
+  const key = attachmentImageCacheKey(source);
+  putAttachmentImageCache(key, buildAttachmentDataUri(base64, mimeType));
+}
+
+/**
+ * Load a chat image attachment for `<Image>`.
+ * When the endpoint requires auth headers (off-Tailscale Bearer token), fetches the bytes via JS
+ * `fetch` and converts them to a `data:` URI, working around RN 0.86 Android Fabric dropping
+ * `source.headers` on `<Image>`.
+ */
+export function loadChatAttachmentImage(url: string, mimeHint?: string): Promise<string> {
+  const source = resolveChatAttachmentSource(url);
+  if (!chatAttachmentRequiresFetch(source)) {
+    return Promise.resolve(source.uri);
+  }
+  const key = attachmentImageCacheKey(source);
+  const cached = attachmentImageCache.get(key);
+  if (cached !== undefined) {
+    attachmentImageCache.delete(key);
+    attachmentImageCache.set(key, cached);
+    return Promise.resolve(cached);
+  }
+  const existing = attachmentImageInFlight.get(key);
+  if (existing) return existing;
+
+  const task = (async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ATTACHMENT_IMAGE_TIMEOUT_MS);
+    try {
+      const res = await fetch(source.uri, {
+        method: 'GET',
+        headers: {
+          Accept: 'image/*,*/*;q=0.8',
+          ...source.headers,
+        },
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        throw new ApiError(res.status, `HTTP ${res.status}`);
+      }
+      const contentType = res.headers.get('content-type') || mimeHint || undefined;
+      const blob = await res.blob();
+      try {
+        const rawDataUrl = await readBlobAsDataUrl(blob);
+        const dataUri = buildAttachmentDataUri(rawDataUrl, contentType);
+        putAttachmentImageCache(key, dataUri);
+        return dataUri;
+      } finally {
+        (blob as unknown as { close?: () => void }).close?.();
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+
+  attachmentImageInFlight.set(key, task);
+  void task.finally(() => {
+    if (attachmentImageInFlight.get(key) === task) {
+      attachmentImageInFlight.delete(key);
+    }
+  });
+  return task;
 }
 
 export function startNewChat(): Promise<ChatNewResponse> {

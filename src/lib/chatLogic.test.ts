@@ -3,8 +3,11 @@ import test from 'node:test';
 import { _setCacheBackendForTests, CacheBackend } from './cache';
 import {
   applyChatListAutoFormat,
+  attachmentImageCacheKey,
+  buildAttachmentDataUri,
   buildChatAttachmentSource,
   buildReplyRef,
+  chatAttachmentRequiresFetch,
   ChatMessage,
   computeAndroidKeyboardOffset,
   computeSwipeReplyOffset,
@@ -120,6 +123,52 @@ test('buildChatAttachmentSource resolves relative and absolute URLs with Bearer 
     {
       uri: 'https://agent.neekhar.dev/pc/api/chat/file/0123456789abcdef',
     },
+  );
+});
+
+test('chatAttachmentRequiresFetch, attachmentImageCacheKey, and buildAttachmentDataUri handle authenticated image sources', () => {
+  const authed = {
+    uri: 'https://agent.neekhar.dev/pc/api/chat/file/0123456789abcdef',
+    headers: { Authorization: 'Bearer tok-123' },
+  };
+  const authedOther = {
+    uri: 'https://agent.neekhar.dev/pc/api/chat/file/0123456789abcdef',
+    headers: { Authorization: 'Bearer tok-999' },
+  };
+  const plain = {
+    uri: 'https://tailnet.ts.net/pc/api/chat/file/0123456789abcdef',
+  };
+
+  assert.equal(chatAttachmentRequiresFetch(authed), true);
+  assert.equal(chatAttachmentRequiresFetch(plain), false);
+  assert.equal(chatAttachmentRequiresFetch({ uri: plain.uri, headers: {} }), false);
+
+  assert.equal(attachmentImageCacheKey(plain), plain.uri);
+  assert.notEqual(attachmentImageCacheKey(authed), attachmentImageCacheKey(authedOther));
+  assert.equal(
+    attachmentImageCacheKey({ uri: 'https://a/x', headers: { B: '2', A: '1' } }),
+    attachmentImageCacheKey({ uri: 'https://a/x', headers: { A: '1', B: '2' } }),
+  );
+
+  // Raw base64 -> data URI with provided or default MIME
+  assert.equal(buildAttachmentDataUri('AQID', 'image/png'), 'data:image/png;base64,AQID');
+  assert.equal(buildAttachmentDataUri('AQID', 'image/jpeg; charset=binary'), 'data:image/jpeg;base64,AQID');
+  assert.equal(buildAttachmentDataUri('AQID'), 'data:image/jpeg;base64,AQID');
+  assert.equal(buildAttachmentDataUri('AQID', 'application/octet-stream'), 'data:image/jpeg;base64,AQID');
+
+  // Existing data URL with generic MIME gets upgraded when specific MIME is known
+  assert.equal(
+    buildAttachmentDataUri('data:application/octet-stream;base64,AQID', 'image/webp'),
+    'data:image/webp;base64,AQID',
+  );
+  assert.equal(
+    buildAttachmentDataUri('data:;base64,AQID', 'image/png'),
+    'data:image/png;base64,AQID',
+  );
+  // Existing data URL with specific MIME stays intact
+  assert.equal(
+    buildAttachmentDataUri('data:image/png;base64,AQID', 'image/jpeg'),
+    'data:image/png;base64,AQID',
   );
 });
 

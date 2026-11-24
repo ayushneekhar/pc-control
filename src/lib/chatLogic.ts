@@ -141,6 +141,55 @@ export function buildChatAttachmentSource(
   return { uri };
 }
 
+/**
+ * React Native 0.86 Android Fabric's `<Image>` drops `source.headers` (both in
+ * `Image.android.js` for single-object sources and in Fabric's `ImageProps` /
+ * `ReactImageView.setSource`), so any attachment source that requires custom
+ * request headers (e.g. `Authorization: Bearer ...`) must be fetched via JS
+ * `fetch` and rendered as a `data:` URI.
+ */
+export function chatAttachmentRequiresFetch(source: {
+  uri: string;
+  headers?: Record<string, string>;
+}): boolean {
+  return Boolean(source.headers && Object.keys(source.headers).length > 0);
+}
+
+/** Stable cache key for an attachment image source, scoped to its URI and auth headers. */
+export function attachmentImageCacheKey(source: {
+  uri: string;
+  headers?: Record<string, string>;
+}): string {
+  const headers = source.headers;
+  if (!headers) return source.uri;
+  const keys = Object.keys(headers).sort();
+  if (keys.length === 0) return source.uri;
+  const sig = keys.map((k) => `${k}:${headers[k]}`).join('\n');
+  return `${source.uri}\n${sig}`;
+}
+
+/** Build or normalize a `data:<mime>;base64,...` URI from raw base64 or a FileReader data URL. */
+export function buildAttachmentDataUri(base64OrDataUrl: string, mimeType?: string | null): string {
+  const cleanMime = (mimeType || '').split(';')[0].trim().toLowerCase();
+  const fallbackMime = cleanMime && cleanMime !== 'application/octet-stream' ? cleanMime : 'image/jpeg';
+  const trimmed = base64OrDataUrl.trim();
+  if (/^data:/i.test(trimmed)) {
+    const comma = trimmed.indexOf(',');
+    if (comma > 0) {
+      const header = trimmed.slice(5, comma).toLowerCase();
+      if (
+        cleanMime &&
+        cleanMime !== 'application/octet-stream' &&
+        (header === ';base64' || header === 'application/octet-stream;base64')
+      ) {
+        return `data:${cleanMime};base64,${trimmed.slice(comma + 1)}`;
+      }
+    }
+    return trimmed;
+  }
+  return `data:${fallbackMime};base64,${trimmed}`;
+}
+
 export function makeClientId(): string {
   const rand = Math.random().toString(36).slice(2, 10);
   return `c-${Date.now()}-${rand}`;

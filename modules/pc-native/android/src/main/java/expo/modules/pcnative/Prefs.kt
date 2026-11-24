@@ -32,4 +32,14 @@ object Prefs {
     sp(ctx).edit().putString("keyringCiphertext", ciphertext).putString("keyringIv", iv).apply()
   fun clearKeyringBlob(ctx: Context) =
     sp(ctx).edit().remove("keyringCiphertext").remove("keyringIv").apply()
+
+  /** Optional custom chat endpoint URL & bearer token (used by inline notification replies). */
+  fun chatBaseUrl(ctx: Context): String =
+    sp(ctx).getString("chatBaseUrl", null)?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } ?: serverUrl(ctx)
+  fun chatToken(ctx: Context): String = sp(ctx).getString("chatToken", null)?.trim().orEmpty()
+  fun setChatConfig(ctx: Context, baseUrl: String, token: String) =
+    sp(ctx).edit()
+      .putString("chatBaseUrl", baseUrl.trim().trimEnd('/'))
+      .putString("chatToken", token.trim())
+      .apply()
 }

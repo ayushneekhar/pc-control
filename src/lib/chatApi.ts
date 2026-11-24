@@ -1,3 +1,4 @@
+import { PcNative } from '../../modules/pc-native';
 import { ApiError, serverUrl } from './api';
 import {
   ChatAttachment,
@@ -7,6 +8,15 @@ import {
   getChatEndpoint,
   resolveChatTarget,
 } from './chatLogic';
+
+export function syncNativeChatConfig(): void {
+  try {
+    const endpoint = getChatEndpoint();
+    PcNative?.setChatConfig?.(endpoint.url, endpoint.url ? endpoint.token : '');
+  } catch {
+    // Ignore on older APKs without setChatConfig.
+  }
+}
 
 async function chatRequest<T>(
   method: 'GET' | 'POST',

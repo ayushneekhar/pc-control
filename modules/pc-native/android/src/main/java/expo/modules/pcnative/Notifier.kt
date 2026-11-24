@@ -14,6 +14,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.RemoteInput
 
 /** Notification channels + display for push messages from pc-api (see PushService). */
 object Notifier {
@@ -136,15 +137,46 @@ object Notifier {
       else -> open(ctx, "routes", id.hashCode())
     }
     val b = base(ctx, ch, title, body).setPriority(NotificationCompat.PRIORITY_HIGH).setContentIntent(tap)
+    val tag = if (cat == "chat") "$TAG_CHAT_PREFIX$id" else id
     if (cat == "chat") {
       b.setCategory(NotificationCompat.CATEGORY_MESSAGE)
       b.addExtras(Bundle().apply { putString(EXTRA_CATEGORY, "chat") })
+      val remoteInput = RemoteInput.Builder(ChatReplyReceiver.KEY_TEXT_REPLY)
+        .setLabel("Reply")
+        .build()
+      val replyIntent = Intent(ctx, ChatReplyReceiver::class.java).apply {
+        action = ChatReplyReceiver.ACTION_CHAT_REPLY
+        putExtra(ChatReplyReceiver.EXTRA_NOTIF_TAG, tag)
+        putExtra(ChatReplyReceiver.EXTRA_NOTIF_ID, ID_MESSAGE)
+      }
+      val replyPendingIntent = PendingIntent.getBroadcast(
+        ctx,
+        ("reply_$id").hashCode(),
+        replyIntent,
+        PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+      )
+      val replyAction = NotificationCompat.Action.Builder(0, "Reply", replyPendingIntent)
+        .addRemoteInput(remoteInput)
+        .setAllowGeneratedReplies(true)
+        .build()
+      b.addAction(replyAction)
     }
     val pic = image?.let { fetchImage(ctx, it) }
     if (pic != null) b.setLargeIcon(pic).setStyle(NotificationCompat.BigPictureStyle().bigPicture(pic)
       .bigLargeIcon(null as Bitmap?).setSummaryText(body))
-    val tag = if (cat == "chat") "$TAG_CHAT_PREFIX$id" else id
     post(ctx, tag, ID_MESSAGE, b)
+  }
+
+  /** Replace an inline-reply chat notification with a concise error so Android's reply spinner always resolves. */
+  fun chatReplyError(ctx: Context, tag: String?, notifId: Int, errorText: String) {
+    val resolvedTag = tag?.takeIf { it.isNotEmpty() } ?: "${TAG_CHAT_PREFIX}reply_err"
+    val resolvedId = if (notifId != 0) notifId else ID_MESSAGE
+    val b = base(ctx, CH_CHAT, "Reply not sent", errorText)
+      .setPriority(NotificationCompat.PRIORITY_HIGH)
+      .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+      .setContentIntent(open(ctx, "chat", resolvedTag.hashCode()))
+      .addExtras(Bundle().apply { putString(EXTRA_CATEGORY, "chat") })
+    post(ctx, resolvedTag, resolvedId, b)
   }
 
   /** The notification's picture from pc-api ("/pc/api/notify/image/<id>"), over the tailnet; null on any failure

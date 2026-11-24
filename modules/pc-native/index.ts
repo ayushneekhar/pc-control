@@ -116,6 +116,15 @@ export type PcNativeModule = {
   openNotificationSettings(): void;
   /** Cancel all active chat notifications without touching root approvals or download notifications. */
   clearChatNotifications?(): number;
+  /** Track whether the Chat screen is actively visible in the foreground (suppresses Android chat notifications). */
+  setChatVisible?(visible: boolean): void;
+  /** Persist optional custom chat endpoint URL + bearer token for inline notification replies. */
+  setChatConfig?(baseUrl: string, token: string): void;
+  /** Subscribe to native module events (e.g. 'onChatPush' when an FCM chat message arrives). */
+  addListener?(
+    eventName: 'onChatPush',
+    listener: (event: { id: string; title: string; body: string }) => void,
+  ): { remove(): void };
   /** Pick up to 4 images or files via Android's system document picker (max 15 MB each). Empty array on cancel. */
   pickAttachments?(kind: 'image' | 'file'): Promise<PickedAttachment[]>;
   liveStatus(): LiveStatus;

@@ -150,6 +150,7 @@ class ChatManagerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.tmp.name, "chat-history.jsonl")
+        self.last_channel_path = os.path.join(self.tmp.name, "state", "last-channel.json")
         self.store = chat_mod.ChatHistoryStore(self.path)
         self.notify = FakeNotify()
 
@@ -166,6 +167,7 @@ class ChatManagerTests(unittest.TestCase):
             gemini_adapter=gem,
             claude_adapter=cla,
             notify=self.notify,
+            last_channel_file=self.last_channel_path,
         )
 
         # Send returns 202 immediately without blocking on adapter.
@@ -177,7 +179,13 @@ class ChatManagerTests(unittest.TestCase):
         self.assertFalse(res["deduped"])
         self.assertTrue(res["running"])
         self.assertEqual(res["engine"], "gemini")
-        self.assertEqual(res["assistant_message"]["status"], "pending")
+        self.assertIsNone(res["assistant_message"])
+
+        # While in flight, no placeholder pending assistant bubble is stored
+        _, mid_list = mgr.handle_get_messages({})
+        self.assertTrue(mid_list["running"])
+        self.assertEqual(len(mid_list["messages"]), 1)
+        self.assertEqual(mid_list["messages"][0]["role"], "user")
 
         # Duplicate client_id returns 200 without re-dispatching.
         code2, res2 = mgr.handle_send({"text": "Check status", "client_id": "c-100"})
@@ -229,6 +237,7 @@ class ChatManagerTests(unittest.TestCase):
             engine_fn=lambda: "claude",
             claude_adapter=cla,
             notify=self.notify,
+            last_channel_file=self.last_channel_path,
         )
         code, _ = mgr.handle_send({"text": "do thing"})
         self.assertEqual(code, 202)
@@ -237,6 +246,127 @@ class ChatManagerTests(unittest.TestCase):
         asst = listed["messages"][-1]
         self.assertEqual(asst["status"], "error")
         self.assertIn("boom failure", asst["error"])
+
+    def test_back_to_back_sends_append_replies_chronologically_at_end(self):
+        replies = ["First reply", "Second reply"]
+        calls_started = []
+        release_first = threading.Event()
+
+        class SequentialAdapter:
+            def send(self, text, *, fresh=False, attachments=None):
+                idx = len(calls_started)
+                calls_started.append(text)
+                if idx == 0:
+                    release_first.wait(timeout=2.0)
+                return replies[idx]
+
+        mgr = chat_mod.ChatManager(
+            store=self.store,
+            engine_fn=lambda: "gemini",
+            gemini_adapter=SequentialAdapter(),
+            notify=self.notify,
+            last_channel_file=self.last_channel_path,
+        )
+
+        code1, _ = mgr.handle_send({"text": "msg 1", "client_id": "seq-1"})
+        code2, _ = mgr.handle_send({"text": "msg 2", "client_id": "seq-2"})
+        self.assertEqual((code1, code2), (202, 202))
+
+        # Both user messages stored, zero pending assistant placeholders
+        _, during = mgr.handle_get_messages({})
+        self.assertTrue(during["running"])
+        self.assertEqual([(m["role"], m["text"]) for m in during["messages"]], [("user", "msg 1"), ("user", "msg 2")])
+
+        release_first.set()
+        self.assertTrue(mgr.wait_idle(timeout=3.0))
+
+        _, after = mgr.handle_get_messages({})
+        self.assertFalse(after["running"])
+        self.assertEqual(
+            [(m["role"], m["text"], m["status"]) for m in after["messages"]],
+            [
+                ("user", "msg 1", "done"),
+                ("user", "msg 2", "done"),
+                ("assistant", "First reply", "done"),
+                ("assistant", "Second reply", "done"),
+            ],
+        )
+
+    def test_handle_push_stores_completed_message_and_triggers_notify(self):
+        mgr = chat_mod.ChatManager(
+            store=self.store,
+            engine_fn=lambda: "gemini",
+            notify=self.notify,
+            last_channel_file=self.last_channel_path,
+        )
+
+        # Validation errors
+        self.assertEqual(mgr.handle_push({})[0], 400)
+        self.assertEqual(mgr.handle_push({"text": "   "})[0], 400)
+        self.assertEqual(mgr.handle_push({"text": "hi", "engine": "unknown"})[0], 400)
+
+        # Default engine (gemini)
+        code, res = mgr.handle_push({"text": "Proactive wake update"})
+        self.assertEqual(code, 200)
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["pushed"])
+        self.assertEqual(res["message"]["role"], "assistant")
+        self.assertEqual(res["message"]["status"], "done")
+        self.assertEqual(res["message"]["engine"], "gemini")
+        self.assertEqual(res["message"]["text"], "Proactive wake update")
+
+        self.assertEqual(len(self.notify.calls), 1)
+        cat, title, body, kw = self.notify.calls[-1]
+        self.assertEqual((cat, title), ("chat", "Gemini"))
+        self.assertIn("Proactive wake update", body)
+        self.assertEqual(kw.get("link"), "pccontrol://chat")
+
+        # Explicit engine (claude)
+        code2, res2 = mgr.handle_push({"text": "Claude proactive", "engine": "claude"})
+        self.assertEqual(code2, 200)
+        self.assertTrue(res2["pushed"])
+        self.assertEqual(res2["message"]["engine"], "claude")
+        self.assertEqual(self.notify.calls[-1][1], "Claude")
+
+    def test_last_channel_written_atomically_and_best_effort(self):
+        now = [1700000123.5]
+        gem = FakeAdapter(reply="ok")
+        target_file = os.path.join(self.tmp.name, "nested", "dir", "last-channel.json")
+        with mock.patch.dict(os.environ, {"PCAPI_LAST_CHANNEL_FILE": target_file}):
+            mgr = chat_mod.ChatManager(
+                store=self.store,
+                engine_fn=lambda: "gemini",
+                gemini_adapter=gem,
+                notify=self.notify,
+                clock=lambda: now[0],
+            )
+            code, _ = mgr.handle_send({"text": "hello app"})
+            self.assertEqual(code, 202)
+            self.assertTrue(mgr.wait_idle(timeout=3.0))
+
+        self.assertTrue(os.path.isfile(target_file))
+        self.assertEqual(stat.S_IMODE(os.stat(target_file).st_mode), 0o600)
+        with open(target_file, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["channel"], "app")
+        self.assertAlmostEqual(data["ts"], 1700000123.5)
+
+        # Best-effort: failure writing last-channel file never breaks chat send
+        bad_dir = os.path.join(self.tmp.name, "is-a-file")
+        with open(bad_dir, "w", encoding="utf-8") as f:
+            f.write("block")
+        bad_target = os.path.join(bad_dir, "last-channel.json")
+        mgr_bad = chat_mod.ChatManager(
+            store=self.store,
+            engine_fn=lambda: "gemini",
+            gemini_adapter=gem,
+            notify=self.notify,
+            last_channel_file=bad_target,
+        )
+        code_ok, res_ok = mgr_bad.handle_send({"text": "still succeeds"})
+        self.assertEqual(code_ok, 202)
+        self.assertTrue(res_ok["ok"])
+        self.assertTrue(mgr_bad.wait_idle(timeout=3.0))
 
 
 class AdapterTests(unittest.TestCase):
@@ -571,6 +701,7 @@ class ChatHttpAndScopeIsolationTests(unittest.TestCase):
         self.local_tok_file = os.path.join(self.tmp.name, "local-token")
         self.hist_file = os.path.join(self.tmp.name, "chat-history.jsonl")
         self.uploads_dir = os.path.join(self.tmp.name, "chat-uploads")
+        self.last_channel_file = os.path.join(self.tmp.name, "last-channel.json")
         self.secret = "super-secret-chat-only-token-12345"
         with open(self.tok_file, "w", encoding="utf-8") as f:
             f.write(self.secret + "\n")
@@ -584,6 +715,7 @@ class ChatHttpAndScopeIsolationTests(unittest.TestCase):
             claude_adapter=self.adapter,
             notify=self.notify,
             uploads_dir=self.uploads_dir,
+            last_channel_file=self.last_channel_file,
         )
 
         self.orig_chat_tok = chat_mod.CHAT_TOKEN_FILE
@@ -811,6 +943,45 @@ class ChatHttpAndScopeIsolationTests(unittest.TestCase):
             headers=cf_headers,
         )
         self.assertEqual(code_bad, 400)
+
+    def test_chat_push_requires_local_token_only(self):
+        local_tok = pcapi.local_token()
+        cf_headers = {
+            "X-Forwarded-For": "203.0.113.10",
+            "Authorization": f"Bearer {self.secret}",
+        }
+        ts_headers = {"Tailscale-User-Login": "ayush@example.com"}
+
+        # Rejected without headers, with chat bearer token, with Tailscale login only, or proxied with local token
+        for hdrs in (
+            {},
+            cf_headers,
+            ts_headers,
+            {"X-PC-Local-Token": "wrong-token"},
+            {"X-Forwarded-For": "203.0.113.10", "X-PC-Local-Token": local_tok},
+        ):
+            code, _ = self._req("POST", "/pc/api/chat/push", {"text": "blocked"}, headers=hdrs)
+            self.assertEqual(code, 403, f"expected 403 for headers={hdrs}")
+
+        # Allowed with valid X-PC-Local-Token from localhost
+        code, res = self._req(
+            "POST",
+            "/pc/api/chat/push",
+            {"text": "Background wake message", "engine": "gemini"},
+            headers={"X-PC-Local-Token": local_tok},
+        )
+        self.assertEqual(code, 200)
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["pushed"])
+        self.assertEqual(res["message"]["role"], "assistant")
+        self.assertEqual(res["message"]["status"], "done")
+        self.assertEqual(res["message"]["text"], "Background wake message")
+        self.assertEqual(len(self.notify.calls), 1)
+
+        # Stored in chat history
+        code_list, listed = self._req("GET", "/pc/api/chat/messages", headers=ts_headers)
+        self.assertEqual(code_list, 200)
+        self.assertTrue(any(m["id"] == res["message"]["id"] for m in listed["messages"]))
 
 
 if __name__ == "__main__":

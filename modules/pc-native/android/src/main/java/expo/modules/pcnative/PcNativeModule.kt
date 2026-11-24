@@ -81,11 +81,21 @@ class PcNativeModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("PcNative")
 
+    Events("onChatPush")
+
     OnCreate {
       appContext.reactContext?.let { Notifier.ensureChannels(it) }
+      ChatForegroundState.onPush = { id, title, body ->
+        try {
+          sendEvent("onChatPush", mapOf("id" to id, "title" to title, "body" to body))
+        } catch (_: Exception) {
+        }
+      }
     }
 
     OnDestroy {
+      ChatForegroundState.visible = false
+      ChatForegroundState.onPush = null
       pendingPickPromise?.resolve(emptyList<Map<String, Any>>())
       pendingPickPromise = null
     }
@@ -169,6 +179,8 @@ class PcNativeModule : Module() {
       ctx.startActivity(i)
     }
     Function("clearChatNotifications") { Notifier.clearChatNotifications(ctx) }
+    Function("setChatVisible") { visible: Boolean -> ChatForegroundState.visible = visible }
+    Function("setChatConfig") { baseUrl: String, token: String -> Prefs.setChatConfig(ctx, baseUrl, token) }
 
     // ---- chat attachment picker (Android SAF ACTION_OPEN_DOCUMENT; zero extra permissions)
     AsyncFunction("pickAttachments") { kind: String, promise: Promise ->

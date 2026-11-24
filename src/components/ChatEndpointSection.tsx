@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Button, Card, Icon, Pill, Section } from './ui';
+import { syncNativeChatConfig } from '../lib/chatApi';
 import { getChatEndpoint, setChatEndpoint } from '../lib/chatLogic';
 import { radius, space, useTheme } from '../theme';
 
@@ -18,6 +19,7 @@ export function ChatEndpointSection() {
 
   const onSave = () => {
     const clean = setChatEndpoint({ url, token });
+    syncNativeChatConfig();
     setUrl(clean.url);
     setToken(clean.token);
     setSavedUrl(clean.url);
@@ -26,6 +28,7 @@ export function ChatEndpointSection() {
 
   const onClear = () => {
     const clean = setChatEndpoint({ url: '', token: '' });
+    syncNativeChatConfig();
     setUrl(clean.url);
     setToken(clean.token);
     setSavedUrl(clean.url);

@@ -33,6 +33,7 @@ import {
   resolveChatAttachmentSource,
   sendChatMessage,
   startNewChat,
+  syncNativeChatConfig,
   uploadChatAttachment,
 } from '../lib/chatApi';
 import {
@@ -77,7 +78,7 @@ function InlineText({
 }) {
   const t = useTheme();
   const parts = useMemo(() => text.split(/(`[^`\n]+`)/g), [text]);
-  const spacer = trailingTime ? `\u00A0\u00A0${trailingTime.replace(/ /g, '\u00A0')}` : '';
+  const spacer = trailingTime ? '\u00A0'.repeat(Math.ceil(trailingTime.length * 1.9) + 2) : '';
   return (
     <Text selectable style={[st.msgText, { color: t.text }]}>
       {parts.map((part, i) => {
@@ -364,6 +365,7 @@ export default function ChatScreen() {
   const [kbHeight, setKbHeight] = useState(0);
   const [outerHeight, setOuterHeight] = useState(0);
   const [baseHeight, setBaseHeight] = useState(0);
+  const [composerHeight, setComposerHeight] = useState(64);
   const [androidPadAnim] = useState(() => new Animated.Value(0));
 
   const [agentSettings, setAgentSettings] = useState<AgentSettings | null>(() =>
@@ -378,14 +380,34 @@ export default function ChatScreen() {
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const mountedRef = useRef(true);
   const isFocusedRef = useRef(isFocused);
+  const isForeground = isFocused && appActive;
   const messagesCountRef = useRef(messages.length);
   const nearBottomRef = useRef(true);
   const loadingOlderRef = useRef(false);
   const settleScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loadMessagesRef = useRef<(opts?: { silent?: boolean }) => Promise<void>>(async () => {});
 
   useEffect(() => {
     isFocusedRef.current = isFocused;
   }, [isFocused]);
+
+  useEffect(() => {
+    try {
+      PcNative?.setChatVisible?.(isForeground);
+    } catch {
+      // Ignore on older APKs without setChatVisible.
+    }
+  }, [isForeground]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        PcNative?.setChatVisible?.(false);
+      } catch {
+        // Ignore on older APKs without setChatVisible.
+      }
+    };
+  }, []);
 
   useEffect(() => {
     messagesCountRef.current = messages.length;
@@ -413,6 +435,7 @@ export default function ChatScreen() {
       setAppActive(active);
       if (active && isFocusedRef.current) {
         clearChatNotifs();
+        void loadMessagesRef.current({ silent: true });
       }
     });
     return () => sub.remove();
@@ -601,11 +624,36 @@ export default function ChatScreen() {
   useFocusEffect(
     useCallback(() => {
       clearChatNotifs();
+      syncNativeChatConfig();
       void loadMessages({ silent: true });
       void loadAgentSettings();
     }, [clearChatNotifs, loadMessages, loadAgentSettings]),
   );
 
+  // Immediately refresh when an incoming chat FCM arrives while the app is running.
+  useEffect(() => {
+    let sub: { remove(): void } | undefined;
+    try {
+      sub = PcNative?.addListener?.('onChatPush', () => {
+        void loadMessages({ silent: true });
+      });
+    } catch {
+      // Ignore on older APKs without onChatPush.
+    }
+    return () => {
+      try {
+        sub?.remove?.();
+      } catch {
+        // Ignore cleanup errors.
+      }
+    };
+  }, [loadMessages]);
+
+  useEffect(() => {
+    loadMessagesRef.current = loadMessages;
+  }, [loadMessages]);
+
+  // Safety-net polling ONLY while a reply is actively in flight.
   const polling = shouldPollChat(messages, running, isFocused, appActive);
 
   useEffect(() => {
@@ -721,16 +769,6 @@ export default function ChatScreen() {
       attachments: toSendAttachments.length > 0 ? toSendAttachments : undefined,
       optimistic: true,
     };
-    const optAsst: ChatMessage = {
-      id: `opt-a-${clientId}`,
-      role: 'assistant',
-      engine,
-      text: '',
-      created_at: nowSec + 0.001,
-      status: 'pending',
-      reply_to: clientId,
-      optimistic: true,
-    };
 
     setDraft('');
     setPendingAttachments([]);
@@ -739,7 +777,7 @@ export default function ChatScreen() {
     setRunning(true);
     nearBottomRef.current = true;
     setShowScrollDown(false);
-    setMessages((prev) => [...prev, optUser, optAsst]);
+    setMessages((prev) => [...prev, optUser]);
     requestAnimationFrame(() => scrollToBottomSettled(true));
 
     try {
@@ -749,14 +787,14 @@ export default function ChatScreen() {
       setRunning(res.running);
       setMessages((prev) => {
         const confirmed = [res.user_message, ...(res.assistant_message ? [res.assistant_message] : [])];
-        const withoutOpt = prev.filter((m) => m.id !== optUser.id && m.id !== optAsst.id);
+        const withoutOpt = prev.filter((m) => m.id !== optUser.id);
         const next = mergeChatMessages(withoutOpt, [...withoutOpt.filter((m) => !m.optimistic), ...confirmed]);
         persistCache(next, res.engine, hasMore);
         return next;
       });
     } catch (e) {
       if (!mountedRef.current) return;
-      setMessages((prev) => prev.filter((m) => m.id !== optUser.id && m.id !== optAsst.id));
+      setMessages((prev) => prev.filter((m) => m.id !== optUser.id));
       setDraft(trimmed);
       setPendingAttachments(toSendAttachments);
       setRunning(false);
@@ -856,6 +894,14 @@ export default function ChatScreen() {
     return `Switch model and effort: ${provider}, ${summary}`;
   }, [engine, agentSettings]);
 
+  const showTypingIndicator = running || sending;
+
+  useEffect(() => {
+    if (!showTypingIndicator || !nearBottomRef.current || loadingOlderRef.current) return;
+    const raf = requestAnimationFrame(() => scrollToBottomSettled(true));
+    return () => cancelAnimationFrame(raf);
+  }, [showTypingIndicator, scrollToBottomSettled]);
+
   const canSend = (draft.trim().length > 0 || pendingAttachments.length > 0) && !sending && uploadingCount === 0;
 
   const headerRight = (
@@ -903,7 +949,11 @@ export default function ChatScreen() {
                 onCopy={onCopy}
               />
             )}
-            contentContainerStyle={[st.listContent, messages.length === 0 && st.listContentEmpty]}
+            contentContainerStyle={[
+              st.listContent,
+              { paddingBottom: composerHeight + space(3) },
+              messages.length === 0 && st.listContentEmpty,
+            ]}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="interactive"
             onScroll={onListScroll}
@@ -926,6 +976,15 @@ export default function ChatScreen() {
                 </View>
               ) : null
             }
+            ListFooterComponent={
+              showTypingIndicator ? (
+                <View style={[st.bubbleRow, st.bubbleRowAssistant]}>
+                  <View style={[st.bubble, st.bubbleAssistant, { backgroundColor: t.card }]}>
+                    <TypingDots />
+                  </View>
+                </View>
+              ) : null
+            }
             ListEmptyComponent={
               <View style={st.emptyWrap}>
                 <View style={[st.emptyIcon, { backgroundColor: t.card }]}>
@@ -945,6 +1004,7 @@ export default function ChatScreen() {
             style={({ pressed }) => [
               st.scrollDownBtn,
               {
+                bottom: composerHeight + space(2),
                 backgroundColor: t.card,
                 borderColor: t.border,
                 opacity: pressed ? 0.8 : 1,
@@ -954,141 +1014,150 @@ export default function ChatScreen() {
             <Icon name="chevron-down" size={20} color={t.text} />
           </Pressable>
         ) : null}
-      </View>
 
-      {pendingAttachments.length > 0 || uploadingCount > 0 ? (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={st.previewStrip}
-          style={st.previewStripWrap}
-          keyboardShouldPersistTaps="handled"
+        <View
+          pointerEvents="box-none"
+          style={st.floatingBottom}
+          onLayout={(e) => {
+            const h = Math.ceil(e.nativeEvent.layout.height);
+            if (h > 0) setComposerHeight((prev) => (prev === h ? prev : h));
+          }}
         >
-          {pendingAttachments.map((att) =>
-            att.kind === 'image' ? (
-              <View key={att.id} style={st.previewImgWrap}>
-                <Image
-                  source={resolveChatAttachmentSource(att.url)}
-                  style={[st.previewImg, { backgroundColor: t.cardAlt, borderColor: t.border }]}
-                  resizeMode="cover"
-                />
-                <Pressable
-                  onPress={() => onRemoveAttachment(att.id)}
-                  accessibilityLabel={`Remove ${att.name}`}
-                  hitSlop={6}
-                  style={[st.previewRemoveBadge, { backgroundColor: t.bg, borderColor: t.border }]}
-                >
-                  <Icon name="close" size={12} color={t.text} />
-                </Pressable>
-              </View>
-            ) : (
-              <View
-                key={att.id}
-                style={[st.previewFileChip, { backgroundColor: t.card, borderColor: t.border }]}
-              >
-                <Icon name="file-document-outline" size={16} color={t.accent} />
-                <View style={st.previewFileMeta}>
-                  <Text numberOfLines={1} style={[st.previewFileName, { color: t.text }]}>
-                    {att.name}
-                  </Text>
-                  <Text style={[st.previewFileSize, { color: t.textFaint }]}>
-                    {formatAttachmentSize(att.size_bytes)}
+          {pendingAttachments.length > 0 || uploadingCount > 0 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={st.previewStrip}
+              style={st.previewStripWrap}
+              keyboardShouldPersistTaps="handled"
+            >
+              {pendingAttachments.map((att) =>
+                att.kind === 'image' ? (
+                  <View key={att.id} style={st.previewImgWrap}>
+                    <Image
+                      source={resolveChatAttachmentSource(att.url)}
+                      style={[st.previewImg, { backgroundColor: t.cardAlt, borderColor: t.border }]}
+                      resizeMode="cover"
+                    />
+                    <Pressable
+                      onPress={() => onRemoveAttachment(att.id)}
+                      accessibilityLabel={`Remove ${att.name}`}
+                      hitSlop={6}
+                      style={[st.previewRemoveBadge, { backgroundColor: t.bg, borderColor: t.border }]}
+                    >
+                      <Icon name="close" size={12} color={t.text} />
+                    </Pressable>
+                  </View>
+                ) : (
+                  <View
+                    key={att.id}
+                    style={[st.previewFileChip, { backgroundColor: t.card, borderColor: t.border }]}
+                  >
+                    <Icon name="file-document-outline" size={16} color={t.accent} />
+                    <View style={st.previewFileMeta}>
+                      <Text numberOfLines={1} style={[st.previewFileName, { color: t.text }]}>
+                        {att.name}
+                      </Text>
+                      <Text style={[st.previewFileSize, { color: t.textFaint }]}>
+                        {formatAttachmentSize(att.size_bytes)}
+                      </Text>
+                    </View>
+                    <Pressable
+                      onPress={() => onRemoveAttachment(att.id)}
+                      accessibilityLabel={`Remove ${att.name}`}
+                      hitSlop={6}
+                      style={st.previewFileClose}
+                    >
+                      <Icon name="close" size={14} color={t.textDim} />
+                    </Pressable>
+                  </View>
+                ),
+              )}
+              {uploadingCount > 0 ? (
+                <View style={[st.uploadingChip, { backgroundColor: t.card, borderColor: t.border }]}>
+                  <ActivityIndicator size="small" color={t.accent} />
+                  <Text style={[st.uploadingText, { color: t.textDim }]}>
+                    {uploadingCount > 1 ? `Uploading ${uploadingCount}…` : 'Uploading…'}
                   </Text>
                 </View>
-                <Pressable
-                  onPress={() => onRemoveAttachment(att.id)}
-                  accessibilityLabel={`Remove ${att.name}`}
-                  hitSlop={6}
-                  style={st.previewFileClose}
-                >
-                  <Icon name="close" size={14} color={t.textDim} />
-                </Pressable>
-              </View>
-            ),
-          )}
-          {uploadingCount > 0 ? (
-            <View style={[st.uploadingChip, { backgroundColor: t.card, borderColor: t.border }]}>
-              <ActivityIndicator size="small" color={t.accent} />
-              <Text style={[st.uploadingText, { color: t.textDim }]}>
-                {uploadingCount > 1 ? `Uploading ${uploadingCount}…` : 'Uploading…'}
-              </Text>
-            </View>
+              ) : null}
+            </ScrollView>
           ) : null}
-        </ScrollView>
-      ) : null}
 
-      <View
-        style={[
-          st.composerPill,
-          {
-            backgroundColor: t.card,
-            borderColor: t.border,
-          },
-        ]}
-      >
-        <Pressable
-          onPress={onOpenAttachSheet}
-          disabled={sending || pendingAttachments.length >= MAX_ATTACHMENTS}
-          accessibilityRole="button"
-          accessibilityLabel="Add photo or file"
-          android_ripple={{ color: t.ripple, foreground: true }}
-          style={({ pressed }) => [
-            st.attachBtn,
-            {
-              backgroundColor: t.cardAlt,
-              opacity:
-                sending || pendingAttachments.length >= MAX_ATTACHMENTS ? 0.4 : pressed ? 0.8 : 1,
-            },
-          ]}
-        >
-          <Icon name="plus" size={20} color={t.text} />
-        </Pressable>
-        <TextInput
-          value={draft}
-          onChangeText={setDraft}
-          placeholder={`Message ${engineLabel(engine)}`}
-          placeholderTextColor={t.textFaint}
-          multiline
-          maxLength={32000}
-          selectionColor={t.accent}
-          style={[st.input, { color: t.text }]}
-        />
-        <View style={st.composerControls}>
-          <Pressable
-            onPress={openModelPicker}
-            accessibilityRole="button"
-            accessibilityLabel={modelTriggerA11yLabel}
-            android_ripple={{ color: t.ripple, foreground: true }}
-            style={({ pressed }) => [
-              st.modelChip,
-              { backgroundColor: t.cardAlt, opacity: pressed ? 0.8 : 1 },
-            ]}
-          >
-            <Image
-              source={engine === 'claude' ? ANTHROPIC_ICON : GEMINI_ICON}
-              style={[st.modelChipIcon, { tintColor: t.accent }]}
-              resizeMode="contain"
-            />
-            <Icon name="chevron-down" size={13} color={t.textFaint} />
-          </Pressable>
-          <Pressable
-            onPress={() => void onSend()}
-            disabled={!canSend}
-            accessibilityLabel="Send message"
-            style={({ pressed }) => [
-              st.sendBtn,
+          <View
+            style={[
+              st.composerPill,
               {
-                backgroundColor: canSend ? t.accent : t.cardAlt,
-                opacity: pressed && canSend ? 0.85 : 1,
+                backgroundColor: t.card,
+                borderColor: t.border,
               },
             ]}
           >
-            {sending ? (
-              <ActivityIndicator size="small" color={t.accent} />
-            ) : (
-              <Icon name="arrow-up" size={18} color={canSend ? t.onAccent : t.textFaint} />
-            )}
-          </Pressable>
+            <Pressable
+              onPress={onOpenAttachSheet}
+              disabled={sending || pendingAttachments.length >= MAX_ATTACHMENTS}
+              accessibilityRole="button"
+              accessibilityLabel="Add photo or file"
+              android_ripple={{ color: t.ripple, foreground: true }}
+              style={({ pressed }) => [
+                st.attachBtn,
+                {
+                  backgroundColor: t.cardAlt,
+                  opacity:
+                    sending || pendingAttachments.length >= MAX_ATTACHMENTS ? 0.4 : pressed ? 0.8 : 1,
+                },
+              ]}
+            >
+              <Icon name="plus" size={20} color={t.text} />
+            </Pressable>
+            <TextInput
+              value={draft}
+              onChangeText={setDraft}
+              placeholder={`Message ${engineLabel(engine)}`}
+              placeholderTextColor={t.textFaint}
+              multiline
+              maxLength={32000}
+              selectionColor={t.accent}
+              style={[st.input, { color: t.text }]}
+            />
+            <View style={st.composerControls}>
+              <Pressable
+                onPress={openModelPicker}
+                accessibilityRole="button"
+                accessibilityLabel={modelTriggerA11yLabel}
+                android_ripple={{ color: t.ripple, foreground: true }}
+                style={({ pressed }) => [
+                  st.modelChip,
+                  { backgroundColor: t.cardAlt, opacity: pressed ? 0.8 : 1 },
+                ]}
+              >
+                <Image
+                  source={engine === 'claude' ? ANTHROPIC_ICON : GEMINI_ICON}
+                  style={[st.modelChipIcon, { tintColor: t.accent }]}
+                  resizeMode="contain"
+                />
+                <Icon name="chevron-down" size={13} color={t.textFaint} />
+              </Pressable>
+              <Pressable
+                onPress={() => void onSend()}
+                disabled={!canSend}
+                accessibilityLabel="Send message"
+                style={({ pressed }) => [
+                  st.sendBtn,
+                  {
+                    backgroundColor: canSend ? t.accent : t.cardAlt,
+                    opacity: pressed && canSend ? 0.85 : 1,
+                  },
+                ]}
+              >
+                {sending ? (
+                  <ActivityIndicator size="small" color={t.accent} />
+                ) : (
+                  <Icon name="arrow-up" size={18} color={canSend ? t.onAccent : t.textFaint} />
+                )}
+              </Pressable>
+            </View>
+          </View>
         </View>
       </View>
     </>
@@ -1227,7 +1296,7 @@ const st = StyleSheet.create({
   engineRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   engineTag: { fontSize: 11.5, fontWeight: '500' },
   inlineTimeWrap: { position: 'relative' },
-  timeSpacer: { fontSize: 10.5, lineHeight: 14, fontVariant: ['tabular-nums'], color: 'transparent' },
+  timeSpacer: { fontSize: 10.5, lineHeight: 14, color: 'rgba(0,0,0,0)' },
   timeInline: {
     position: 'absolute',
     right: 0,
@@ -1261,7 +1330,6 @@ const st = StyleSheet.create({
   scrollDownBtn: {
     position: 'absolute',
     right: screenPad,
-    bottom: space(2),
     width: 36,
     height: 36,
     borderRadius: 18,
@@ -1274,6 +1342,13 @@ const st = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 4,
     shadowOffset: { width: 0, height: 2 },
+  },
+  floatingBottom: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'transparent',
   },
   composerPill: {
     flexDirection: 'row',
@@ -1288,6 +1363,11 @@ const st = StyleSheet.create({
     paddingLeft: 6,
     paddingRight: 6,
     paddingVertical: 6,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.22,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
   },
   attachBtn: {
     width: 34,

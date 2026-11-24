@@ -1500,10 +1500,12 @@ CLAUDE_MODEL_IDS = frozenset(m["id"] for m in CLAUDE_MODELS)
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 GEMINI_MODELS = (
+    {"id": "gemini-4-carbon", "label": "Gemini 4 Carbon"},
     {"id": "gemini-4-neon", "label": "Gemini 4 Neon"},
     {"id": "gemini-4-argon", "label": "Gemini 4 Argon"},
     {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen"},
     {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
+    {"id": "gemini-pro-orchestrator", "label": "Orchestrator (Carbon)"},
     {"id": "gemini-pro-orchestrator-neon", "label": "Orchestrator (Neon)"},
     {"id": "gemini-pro-orchestrator-g1-pro", "label": "Orchestrator (Argon)"},
 )
@@ -3853,9 +3855,16 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlsplit(self.path)
         path, qs = u.path.rstrip("/"), urllib.parse.parse_qs(u.query)
         is_hook = method == "POST" and bool(re.fullmatch(r"/pc/api/hook/(radarr|sonarr|seerr)", path))
-        is_chat = (path == "/pc/api/chat" or path.startswith("/pc/api/chat/")) and ".." not in path.split("/")
-        if not self.authorized(is_hook=is_hook) and not (is_chat and chat_mod.chat_token_authorized(self.headers)):
-            return self.send_json(403, {"error": "not allowed for this tailnet identity"})
+        is_chat_push = method == "POST" and path == "/pc/api/chat/push"
+        if is_chat_push:
+            if not (ALLOW_UNAUTH_LOCAL and not self.headers.get("X-Forwarded-For") and
+                    self.client_address[0] in ("127.0.0.1", "::1") and
+                    local_token_authorized(self.headers)):
+                return self.send_json(403, {"error": "local token required"})
+        else:
+            is_chat = (path == "/pc/api/chat" or path.startswith("/pc/api/chat/")) and ".." not in path.split("/")
+            if not self.authorized(is_hook=is_hook) and not (is_chat and chat_mod.chat_token_authorized(self.headers)):
+                return self.send_json(403, {"error": "not allowed for this tailnet identity"})
         if not path.startswith("/pc"):
             return self.send_json(404, {"error": "not found"})
         path = path[3:]
@@ -4010,6 +4019,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*_chat_manager().handle_upload(b))
             if path == "/api/chat/send":
                 return self.send_json(*_chat_manager().handle_send(b))
+            if path == "/api/chat/push":
+                return self.send_json(*_chat_manager().handle_push(b))
             if path == "/api/chat/new":
                 return self.send_json(*_chat_manager().handle_new(b))
             r4 = route_round4_post(path, b)

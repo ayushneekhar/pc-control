@@ -46,6 +46,10 @@ T3_THREAD_FILE = os.environ.get(
     "PCAPI_T3_THREAD_FILE",
     os.path.join(HOME, ".local", "state", "gemini-agent", "t3-thread.json"),
 )
+LAST_CHANNEL_FILE = os.environ.get(
+    "PCAPI_LAST_CHANNEL_FILE",
+    os.path.join(HOME, ".local", "state", "gemini-agent", "last-channel.json"),
+)
 GEMINI_SETTINGS_FILE = os.environ.get(
     "GEMINI_AGENT_SETTINGS_FILE",
     os.path.join(HOME, ".config", "gemini-agent", "settings.json"),
@@ -1146,6 +1150,7 @@ class ChatManager:
         notify: Any | None = None,
         clock: Callable[[], float] | None = None,
         uploads_dir: str | None = None,
+        last_channel_file: str | None = None,
     ) -> None:
         self.store = store or ChatHistoryStore()
         self.engine_fn = engine_fn or active_engine
@@ -1154,12 +1159,41 @@ class ChatManager:
         self.notify = notify
         self.clock = clock or time.time
         self.uploads_dir = os.path.abspath(os.path.expanduser(uploads_dir or CHAT_UPLOADS_DIR))
+        self.last_channel_file = last_channel_file
         self._lock = threading.Lock()
         self._fresh_next: dict[str, bool] = {"claude": False, "gemini": False}
         self._in_flight = 0
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._worker = threading.Thread(target=self._worker_loop, name="pcapi-chat-worker", daemon=True)
         self._worker.start()
+
+    def _record_last_channel(self, ts: float) -> None:
+        path = self.last_channel_file or os.environ.get("PCAPI_LAST_CHANNEL_FILE") or LAST_CHANNEL_FILE
+        if not path:
+            return
+        try:
+            target = os.path.abspath(os.path.expanduser(path))
+            parent = os.path.dirname(target)
+            if parent:
+                os.makedirs(parent, mode=0o700, exist_ok=True)
+            tmp = f"{target}.{os.getpid()}.{threading.get_ident()}.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump({"channel": "app", "ts": float(ts)}, f, separators=(",", ":"))
+                    f.write("\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, target)
+            except Exception:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
+        except Exception:
+            # Best-effort: never break chat send.
+            pass
 
     def _current_engine(self) -> str:
         eng = self.engine_fn()
@@ -1187,7 +1221,7 @@ class ChatManager:
 
     def _execute_job(self, job: dict[str, Any]) -> None:
         engine = job["engine"]
-        asst_id = job["assistant_id"]
+        user_id = job["user_id"]
         text = job["text"]
         fresh = bool(job.get("fresh", False))
         attachments = job.get("attachments") or []
@@ -1199,24 +1233,49 @@ class ChatManager:
             else:
                 raw_reply = adapter.send(text, fresh=fresh)
             reply = str(raw_reply or "").strip() or "(no response)"
-            self.store.update(asst_id, text=reply, status="done", error=None)
+            self.store.append(
+                {
+                    "id": self._new_id(),
+                    "role": "assistant",
+                    "engine": engine,
+                    "text": reply,
+                    "created_at": float(self.clock()),
+                    "status": "done",
+                    "error": None,
+                    "reply_to": user_id,
+                }
+            )
             self._push_reply(label, reply, is_error=False)
         except Exception as exc:
             err = _clip(str(exc) or type(exc).__name__, 300)
-            self.store.update(asst_id, text="", status="error", error=err)
+            self.store.append(
+                {
+                    "id": self._new_id(),
+                    "role": "assistant",
+                    "engine": engine,
+                    "text": "",
+                    "created_at": float(self.clock()),
+                    "status": "error",
+                    "error": err,
+                    "reply_to": user_id,
+                }
+            )
             self._push_reply(f"{label} · Error", err, is_error=True)
 
-    def _push_reply(self, title: str, body: str, *, is_error: bool = False) -> None:
+    def _push_reply(self, title: str, body: str, *, is_error: bool = False) -> bool:
         if self.notify is None:
-            return
+            return False
         preview = _clip(body, 240)
         try:
             if hasattr(self.notify, "send_async"):
                 self.notify.send_async("chat", title, preview, link="pccontrol://chat")
-            elif hasattr(self.notify, "send"):
+                return True
+            if hasattr(self.notify, "send"):
                 self.notify.send("chat", title, preview, link="pccontrol://chat")
+                return True
         except Exception as exc:
             print(f"chat notify failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return False
 
     def wait_idle(self, timeout: float = 5.0) -> bool:
         """Test helper: wait until queued jobs finish."""
@@ -1403,7 +1462,6 @@ class ChatManager:
             engine = self._current_engine()
             now = float(self.clock())
             user_id = self._new_id()
-            asst_id = self._new_id()
 
             user_msg = self.store.append(
                 {
@@ -1418,18 +1476,6 @@ class ChatManager:
                     **({"attachments": resolved_atts} if resolved_atts else {}),
                 }
             )
-            asst_msg = self.store.append(
-                {
-                    "id": asst_id,
-                    "role": "assistant",
-                    "engine": engine,
-                    "text": "",
-                    "created_at": now + 0.001,
-                    "status": "pending",
-                    "error": None,
-                    "reply_to": user_id,
-                }
-            )
             fresh = self._fresh_next.get(engine, False)
             if fresh:
                 self._fresh_next[engine] = False
@@ -1438,19 +1484,58 @@ class ChatManager:
                 {
                     "engine": engine,
                     "text": text,
-                    "assistant_id": asst_id,
+                    "user_id": user_id,
                     "fresh": fresh,
                     **({"attachments": resolved_atts} if resolved_atts else {}),
                 }
             )
 
+        self._record_last_channel(now)
+
         return 202, {
             "ok": True,
             "deduped": False,
             "user_message": _public_message(user_msg),
-            "assistant_message": _public_message(asst_msg),
+            "assistant_message": None,
             "engine": engine,
             "running": True,
+        }
+
+    def handle_push(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        raw_text = body.get("text")
+        if not isinstance(raw_text, str):
+            return 400, {"error": "text must be a string"}
+        text = raw_text.strip()
+        if not text:
+            return 400, {"error": "text is required"}
+        if len(text) > MAX_TEXT_LEN:
+            return 400, {"error": f"text exceeds {MAX_TEXT_LEN} characters"}
+
+        raw_engine = body.get("engine")
+        if raw_engine is None:
+            engine = self._current_engine()
+        elif isinstance(raw_engine, str) and raw_engine.strip().lower() in VALID_ENGINES:
+            engine = raw_engine.strip().lower()
+        else:
+            return 400, {"error": "engine must be claude or gemini"}
+
+        msg = self.store.append(
+            {
+                "id": self._new_id(),
+                "role": "assistant",
+                "engine": engine,
+                "text": text,
+                "created_at": float(self.clock()),
+                "status": "done",
+                "error": None,
+            }
+        )
+        label = "Gemini" if engine == "gemini" else "Claude"
+        pushed = self._push_reply(label, text, is_error=False)
+        return 200, {
+            "ok": True,
+            "message": _public_message(msg),
+            "pushed": pushed,
         }
 
     def handle_new(self, _body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:

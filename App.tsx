@@ -1,4 +1,4 @@
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { BottomTabBarProps, createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import {
   createNavigationContainerRef,
   DarkTheme,
@@ -10,7 +10,7 @@ import {
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, AppState, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { PcNative } from './modules/pc-native';
 import { prepareCamsOnce } from './src/lib/cams/prepare';
 import { parseSharedText, SharedTarget } from './src/lib/share';
@@ -101,6 +101,8 @@ const ICONS: Record<string, [string, string]> = {
 };
 
 const TAB_LABEL: Record<string, string> = { Routes: 'Home', Chat: 'Chat', System: 'System', Root: 'Root', Settings: 'Settings' };
+/** Material 3 Navigation Bar content height (12pt top + 32pt pill + 4pt gap + 16pt label + 16pt bottom). */
+const TAB_BAR_HEIGHT = 80;
 
 export default function App() {
   const t = useTheme();
@@ -172,15 +174,110 @@ export default function App() {
   );
 }
 
+/** Material 3 compliant Bottom Navigation Bar (64×32 active pill, 24dp icons, 12sp labels, no overflowing ripple). */
+function M3TabBar({ state, descriptors, navigation, insets }: BottomTabBarProps) {
+  const t = useTheme();
+  return (
+    <View
+      style={[
+        st.tabBar,
+        {
+          backgroundColor: t.bg,
+          borderTopColor: t.border,
+          paddingBottom: 16 + insets.bottom,
+        },
+      ]}
+    >
+      {state.routes.map((route, index) => {
+        const { options } = descriptors[route.key];
+        const focused = state.index === index;
+        const label =
+          typeof options.tabBarLabel === 'string'
+            ? options.tabBarLabel
+            : (TAB_LABEL[route.name] ?? route.name);
+        const badge = options.tabBarBadge;
+        const iconPair = ICONS[route.name] ?? ['circle', 'circle-outline'];
+
+        const onPress = () => {
+          const event = navigation.emit({
+            type: 'tabPress',
+            target: route.key,
+            canPreventDefault: true,
+          });
+          if (!focused && !event.defaultPrevented) {
+            navigation.navigate(route.name, route.params);
+          }
+        };
+
+        const onLongPress = () => {
+          navigation.emit({
+            type: 'tabLongPress',
+            target: route.key,
+          });
+        };
+
+        return (
+          <Pressable
+            key={route.key}
+            onPress={onPress}
+            onLongPress={onLongPress}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: focused }}
+            accessibilityLabel={options.tabBarAccessibilityLabel ?? label}
+            style={st.tabItem}
+          >
+            {({ pressed }) => (
+              <>
+                <View style={st.tabPillWrap}>
+                  <View
+                    style={[
+                      st.tabPill,
+                      { backgroundColor: focused ? t.accentSoft : pressed ? t.ripple : 'transparent' },
+                    ]}
+                  >
+                    {focused && pressed ? (
+                      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: t.ripple }]} />
+                    ) : null}
+                    <Icon name={iconPair[focused ? 0 : 1]} size={24} color={focused ? t.accent : t.textFaint} />
+                  </View>
+                  {badge !== undefined && badge !== null && badge !== '' ? (
+                    <View style={[st.tabBadge, { backgroundColor: t.warn }]}>
+                      <Text style={[st.tabBadgeText, { color: t.bg }]} numberOfLines={1}>
+                        {typeof badge === 'number' && badge > 99 ? '99+' : String(badge)}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    st.tabLabel,
+                    {
+                      color: focused ? t.text : t.textFaint,
+                      fontWeight: focused ? '600' : '500',
+                    },
+                  ]}
+                >
+                  {label}
+                </Text>
+              </>
+            )}
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
 /** The five tabs (the root stack's first screen). */
 function Tabs() {
-  const t = useTheme();
-  const insets = useSafeAreaInsets();
   const store = useRootStore();
   const waiting = pendingList(store).filter((r) => r.status === 'pending').length;
+  const renderTabBar = useCallback((props: BottomTabBarProps) => <M3TabBar {...props} />, []);
   return (
     <Tab.Navigator
       initialRouteName={waiting ? 'Root' : 'Routes'}
+      tabBar={renderTabBar}
       screenOptions={({ route }) => ({
         headerShown: false,
         // Tabs switch instantly (v7's default is already 'none', but don't let a preset turn animation on), and a
@@ -188,21 +285,6 @@ function Tabs() {
         animation: 'none',
         freezeOnBlur: true,
         tabBarLabel: TAB_LABEL[route.name] ?? route.name,
-        tabBarActiveTintColor: t.text,
-        tabBarInactiveTintColor: t.textFaint,
-        tabBarStyle: {
-          backgroundColor: t.bg,
-          borderTopColor: t.border,
-          height: 68 + insets.bottom,
-          paddingTop: 6,
-          paddingBottom: insets.bottom,
-        },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: '500' },
-        tabBarIcon: ({ focused }) => (
-          <View style={[st.tabIcon, focused && { backgroundColor: t.accentSoft }]}>
-            <Icon name={ICONS[route.name][focused ? 0 : 1]} size={20} color={focused ? t.accent : t.textFaint} />
-          </View>
-        ),
       })}
     >
       <Tab.Screen name="Routes" component={RoutesScreen} />
@@ -211,7 +293,7 @@ function Tabs() {
       <Tab.Screen
         name="Root"
         component={RootScreen}
-        options={{ tabBarBadge: waiting || undefined, tabBarBadgeStyle: { backgroundColor: t.warn, color: t.bg, fontWeight: '600' } }}
+        options={{ tabBarBadge: waiting || undefined }}
       />
       <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
@@ -226,7 +308,7 @@ function OtaPrompt() {
   if (!updateOffered(ota)) return null;
   const busy = ota.phase === 'downloading';
   return (
-    <View style={[st.prompt, { bottom: insets.bottom + 64, backgroundColor: t.card }]}>
+    <View style={[st.prompt, { bottom: insets.bottom + TAB_BAR_HEIGHT + space(2), backgroundColor: t.card }]}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
         <Icon name="cloud-download-outline" size={20} color={t.accent} />
         <Text style={{ color: t.text, fontWeight: '600', fontSize: 15, flex: 1 }}>App update available</Text>
@@ -247,7 +329,51 @@ function OtaPrompt() {
 }
 
 const st = StyleSheet.create({
-  tabIcon: { width: 50, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  tabBar: {
+    flexDirection: 'row',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: 12,
+  },
+  tabItem: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabPillWrap: {
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabPill: {
+    width: 64,
+    height: 32,
+    borderRadius: 16,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabBadge: {
+    position: 'absolute',
+    top: -2,
+    right: 8,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabBadgeText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  tabLabel: {
+    marginTop: 4,
+    fontSize: 12,
+    lineHeight: 16,
+  },
   prompt: {
     position: 'absolute',
     left: screenPad,

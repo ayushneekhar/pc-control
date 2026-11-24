@@ -79,10 +79,14 @@ export function sendChatMessage(
   text: string,
   clientId: string,
   attachments?: ChatAttachment[],
+  replyToId?: string,
 ): Promise<ChatSendResponse> {
   const payload: Record<string, unknown> = { text, client_id: clientId };
   if (attachments && attachments.length > 0) {
     payload.attachments = attachments;
+  }
+  if (replyToId) {
+    payload.reply_to_id = replyToId;
   }
   return chatRequest<ChatSendResponse>('POST', '/pc/api/chat/send', payload);
 }

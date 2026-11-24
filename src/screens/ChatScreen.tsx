@@ -42,11 +42,13 @@ import {
   uploadChatAttachment,
 } from '../lib/chatApi';
 import {
+  buildReplyRef,
   CHAT_STATE_CACHE_KEY,
   ChatAttachment,
   ChatCacheState,
   ChatEngine,
   ChatMessage,
+  ChatReplyRef,
   computeAndroidKeyboardOffset,
   extractPreviewUrl,
   findPrecedingUserMessage,
@@ -54,6 +56,7 @@ import {
   formatChatTime,
   formatComposerChipLabel,
   formatMessagePreview,
+  getReplyRef,
   isHttpUrl,
   LinkPreview,
   makeClientId,
@@ -61,6 +64,8 @@ import {
   parseInlineTokens,
   parseMessageSegments,
   prependOlderMessages,
+  replySenderLabel,
+  resolveT3ThreadUrl,
   shouldPollChat,
   shouldShowEngineTag,
 } from '../lib/chatLogic';
@@ -96,7 +101,7 @@ function InlineText({
   const tokens = useMemo(() => parseInlineTokens(text), [text]);
   const spacer = trailingTime ? '\u00A0'.repeat(Math.ceil(trailingTime.length * 1.9) + 2) : '';
   return (
-    <Text selectable style={[st.msgText, { color: t.text }]}>
+    <Text style={[st.msgText, { color: t.text }]}>
       {tokens.map((tok, i) => {
         if (tok.kind === 'code') {
           return (
@@ -119,12 +124,13 @@ function InlineText({
           );
         }
         if (tok.kind === 'link') {
-          if (tok.external) {
+          const targetUrl = tok.external ? tok.url : resolveT3ThreadUrl(tok.url);
+          if (targetUrl) {
             return (
               <Text
                 key={i}
                 style={[st.inlineLink, { color: t.accent }]}
-                onPress={() => openExternalUrl(tok.url)}
+                onPress={() => openExternalUrl(targetUrl)}
               >
                 {tok.label}
               </Text>
@@ -395,6 +401,7 @@ type MessageBubbleProps = {
   canRetry: boolean;
   onLongPress: (msg: ChatMessage) => void;
   onRetry: (msg: ChatMessage) => void;
+  onPressReplyQuote: (replyId: string) => void;
 };
 
 const MessageBubble = React.memo(function MessageBubble({
@@ -403,6 +410,7 @@ const MessageBubble = React.memo(function MessageBubble({
   canRetry,
   onLongPress,
   onRetry,
+  onPressReplyQuote,
 }: MessageBubbleProps) {
   const t = useTheme();
   const timeStr = formatChatTime(msg.created_at);
@@ -410,6 +418,7 @@ const MessageBubble = React.memo(function MessageBubble({
     () => (msg.role !== 'system' && msg.status !== 'pending' && msg.status !== 'error' ? extractPreviewUrl(msg.text) : null),
     [msg.role, msg.status, msg.text],
   );
+  const replyRef = getReplyRef(msg);
 
   if (msg.role === 'system') {
     return (
@@ -449,6 +458,32 @@ const MessageBubble = React.memo(function MessageBubble({
             {isError ? <Icon name="alert-circle-outline" size={13} color={t.bad} /> : null}
             <Text style={[st.engineTag, { color: isError ? t.bad : t.textDim }]}>{engineLabel(msg.engine)}</Text>
           </View>
+        ) : null}
+
+        {replyRef ? (
+          <Pressable
+            onPress={() => onPressReplyQuote(replyRef.id)}
+            accessibilityRole="button"
+            accessibilityLabel={`Quoted message from ${replySenderLabel(replyRef)}`}
+            android_ripple={{ color: t.ripple, foreground: true }}
+            style={({ pressed }) => [
+              st.replyQuote,
+              {
+                backgroundColor: isUser ? t.bg : t.cardAlt,
+                borderLeftColor: t.accent,
+                opacity: pressed ? 0.8 : 1,
+              },
+            ]}
+          >
+            <Text numberOfLines={1} style={[st.replyQuoteSender, { color: t.accent }]}>
+              {replySenderLabel(replyRef)}
+            </Text>
+            {replyRef.text ? (
+              <Text numberOfLines={2} style={[st.replyQuoteText, { color: t.textDim }]}>
+                {replyRef.text}
+              </Text>
+            ) : null}
+          </Pressable>
         ) : null}
 
         {attachments.length > 0 ? <BubbleAttachments attachments={attachments} /> : null}
@@ -525,6 +560,7 @@ export default function ChatScreen() {
   const [attachSheetVisible, setAttachSheetVisible] = useState(false);
   const [actionSheetMsg, setActionSheetMsg] = useState<ChatMessage | null>(null);
   const [editingState, setEditingState] = useState<EditingMessageState | null>(null);
+  const [replyTo, setReplyTo] = useState<ChatReplyRef | null>(null);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [appActive, setAppActive] = useState(() => AppState.currentState === 'active');
@@ -988,6 +1024,8 @@ export default function ChatScreen() {
       opts?: {
         clearComposer?: boolean;
         restoreEditOnError?: EditingMessageState | null;
+        replyTo?: ChatReplyRef | null;
+        restoreReplyOnError?: ChatReplyRef | null;
       },
     ) => {
       const trimmed = text.trim();
@@ -1002,6 +1040,7 @@ export default function ChatScreen() {
         created_at: nowSec,
         status: 'done',
         client_id: clientId,
+        reply_to: opts?.replyTo ?? undefined,
         attachments: attachments.length > 0 ? attachments : undefined,
         optimistic: true,
       };
@@ -1010,6 +1049,7 @@ export default function ChatScreen() {
         setDraft('');
         setPendingAttachments([]);
         setEditingState(null);
+        setReplyTo(null);
       }
       setErr(null);
       sendingRef.current = true;
@@ -1021,7 +1061,7 @@ export default function ChatScreen() {
       requestAnimationFrame(() => scrollToBottom(true));
 
       try {
-        const res = await sendChatMessage(trimmed, clientId, attachments);
+        const res = await sendChatMessage(trimmed, clientId, attachments, opts?.replyTo?.id);
         if (!mountedRef.current) return;
         setEngine(res.engine);
         setRunning(res.running);
@@ -1041,6 +1081,9 @@ export default function ChatScreen() {
           if (opts.restoreEditOnError) {
             setEditingState(opts.restoreEditOnError);
           }
+          if (opts.restoreReplyOnError) {
+            setReplyTo(opts.restoreReplyOnError);
+          }
         }
         setRunning(false);
         setErr((e as Error).message || 'Failed to send message');
@@ -1057,17 +1100,49 @@ export default function ChatScreen() {
     void sendMessagePayload(draft, pendingAttachments, {
       clearComposer: true,
       restoreEditOnError: editingState,
+      replyTo,
+      restoreReplyOnError: replyTo,
     });
-  }, [draft, pendingAttachments, uploadingCount, editingState, sendMessagePayload]);
+  }, [draft, pendingAttachments, uploadingCount, editingState, replyTo, sendMessagePayload]);
 
   const onOpenMessageActions = useCallback((msg: ChatMessage) => {
     Keyboard.dismiss();
     setActionSheetMsg(msg);
   }, []);
 
+  const onStartReplyMessage = useCallback((msg: ChatMessage) => {
+    setActionSheetMsg(null);
+    setEditingState((prev) => {
+      if (prev) {
+        setDraft(prev.previousDraft);
+        setPendingAttachments(prev.previousAttachments);
+      }
+      return null;
+    });
+    setReplyTo(buildReplyRef(msg));
+    if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+    focusTimerRef.current = setTimeout(() => {
+      if (mountedRef.current) {
+        inputRef.current?.focus();
+      }
+    }, 80);
+  }, []);
+
+  const onCancelReply = useCallback(() => {
+    setReplyTo(null);
+  }, []);
+
+  const onPressReplyQuote = useCallback((replyId: string) => {
+    const idx = messagesRef.current.findIndex((m) => m.id === replyId);
+    if (idx >= 0) {
+      void listRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.35 });
+    }
+  }, []);
+
   const onStartEditMessage = useCallback(
     (msg: ChatMessage) => {
       setActionSheetMsg(null);
+      setReplyTo(null);
       setEditingState((prev) => ({
         messageId: msg.id,
         previewText: formatMessagePreview(msg),
@@ -1224,9 +1299,10 @@ export default function ChatScreen() {
         }
         onLongPress={onOpenMessageActions}
         onRetry={onRetryAssistantError}
+        onPressReplyQuote={onPressReplyQuote}
       />
     ),
-    [engine, onOpenMessageActions, onRetryAssistantError],
+    [engine, onOpenMessageActions, onRetryAssistantError, onPressReplyQuote],
   );
 
   const isEmpty = messages.length === 0;
@@ -1436,6 +1512,39 @@ export default function ChatScreen() {
             </ScrollView>
           ) : null}
 
+          {replyTo ? (
+            <View
+              style={[
+                st.replyBar,
+                {
+                  backgroundColor: t.card,
+                  borderColor: t.border,
+                  borderLeftColor: t.accent,
+                },
+              ]}
+            >
+              <View style={st.replyBarTextWrap}>
+                <Text numberOfLines={1} style={[st.replyBarLabel, { color: t.accent }]}>
+                  Replying to {replySenderLabel(replyTo)}
+                </Text>
+                {replyTo.text ? (
+                  <Text numberOfLines={1} style={[st.replyBarPreview, { color: t.textDim }]}>
+                    {replyTo.text}
+                  </Text>
+                ) : null}
+              </View>
+              <Pressable
+                onPress={onCancelReply}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel reply"
+                hitSlop={8}
+                style={({ pressed }) => [st.editingBarClose, pressed && { opacity: 0.7 }]}
+              >
+                <Icon name="close" size={16} color={t.textDim} />
+              </Pressable>
+            </View>
+          ) : null}
+
           {editingState ? (
             <View
               style={[
@@ -1639,6 +1748,25 @@ export default function ChatScreen() {
                 ) : null}
               </View>
 
+              <Pressable
+                onPress={() => onStartReplyMessage(actionSheetView.msg)}
+                android_ripple={{ color: t.ripple, foreground: true }}
+                style={({ pressed }) => [
+                  st.sheetRow,
+                  { backgroundColor: pressed ? t.cardAlt : 'transparent' },
+                ]}
+              >
+                <View style={[st.sheetIconWrap, { backgroundColor: t.cardAlt }]}>
+                  <Icon name="reply" size={20} color={t.accent} />
+                </View>
+                <View style={st.sheetRowText}>
+                  <Text style={[st.sheetRowTitle, { color: t.text }]}>Reply</Text>
+                  <Text style={[st.sheetRowSub, { color: t.textFaint }]}>
+                    Quote this message in your reply
+                  </Text>
+                </View>
+              </Pressable>
+
               {actionSheetView.isUserMsg ? (
                 <>
                   <Pressable
@@ -1798,6 +1926,23 @@ const st = StyleSheet.create({
   },
   engineRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   engineTag: { fontSize: 11.5, fontWeight: '500' },
+  replyQuote: {
+    borderLeftWidth: 2,
+    borderRadius: 10,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    marginBottom: 4,
+    gap: 2,
+    overflow: 'hidden',
+  },
+  replyQuoteSender: {
+    fontSize: 11.5,
+    fontWeight: '600',
+  },
+  replyQuoteText: {
+    fontSize: 12.5,
+    lineHeight: 16.5,
+  },
   inlineTimeWrap: { position: 'relative' },
   timeSpacer: { fontSize: 10.5, lineHeight: 14, color: 'rgba(0,0,0,0)' },
   timeInline: {
@@ -1916,6 +2061,32 @@ const st = StyleSheet.create({
     right: 0,
     bottom: 0,
     backgroundColor: 'transparent',
+  },
+  replyBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginHorizontal: screenPad,
+    marginTop: space(1),
+    paddingLeft: 10,
+    paddingRight: 8,
+    paddingVertical: 7,
+    borderRadius: radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderLeftWidth: 2,
+  },
+  replyBarTextWrap: {
+    flex: 1,
+    minWidth: 0,
+    gap: 1,
+  },
+  replyBarLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  replyBarPreview: {
+    fontSize: 12.5,
   },
   editingBar: {
     flexDirection: 'row',

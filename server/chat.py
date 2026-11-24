@@ -67,6 +67,8 @@ AGENT_WORKDIR = os.environ.get("PCAPI_AGENT_WORKDIR", os.path.join(HOME, "agent"
 VALID_ENGINES = ("claude", "gemini")
 MAX_TEXT_LEN = 32000
 MAX_CLIENT_ID_LEN = 128
+MAX_REPLY_SNIPPET_LEN = 240
+MAX_REPLY_PROMPT_LEN = 1200
 MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024
 MAX_ATTACHMENTS_PER_MSG = 4
 DEFAULT_LIMIT = 50
@@ -141,6 +143,65 @@ def _append_attachment_paths(text: str, paths: list[str]) -> str:
         return text
     block = "\n".join(lines)
     return f"{text}\n\n{block}" if text else block
+
+
+def _attachment_summary(attachments: Any) -> str:
+    if not isinstance(attachments, list) or not attachments:
+        return ""
+    valid = [a for a in attachments if isinstance(a, dict)]
+    if not valid:
+        return ""
+    if len(valid) == 1:
+        a = valid[0]
+        if a.get("kind") == "image":
+            return "[image]"
+        name = str(a.get("name") or "").strip()
+        return f"[file: {name}]" if name else "[file]"
+    if all(a.get("kind") == "image" for a in valid):
+        return f"[{len(valid)} images]"
+    return f"[{len(valid)} attachments]"
+
+
+def _reply_snippet(target: dict[str, Any], limit: int = MAX_REPLY_SNIPPET_LEN) -> str:
+    txt = _clip(target.get("text"), limit)
+    if txt:
+        return txt
+    if target.get("status") == "error":
+        err = _clip(target.get("error"), limit)
+        if err:
+            return err
+    return _attachment_summary(target.get("attachments"))
+
+
+def _reply_prompt_quote(target: dict[str, Any], limit: int = MAX_REPLY_PROMPT_LEN) -> str:
+    raw = str(target.get("text") or "").strip()
+    if raw:
+        return raw if len(raw) <= limit else raw[: limit - 1] + "…"
+    if target.get("status") == "error":
+        err = _clip(target.get("error"), limit)
+        if err:
+            return err
+    return _attachment_summary(target.get("attachments"))
+
+
+def _build_reply_to(target: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": str(target["id"]),
+        "role": str(target.get("role") or "user"),
+        "text": _reply_snippet(target, MAX_REPLY_SNIPPET_LEN),
+    }
+    eng = target.get("engine")
+    if isinstance(eng, str) and eng:
+        out["engine"] = eng
+    return out
+
+
+def _prepend_reply_context(target: dict[str, Any], user_text: str) -> str:
+    role = str(target.get("role") or "user").replace('"', "")
+    tid = str(target.get("id") or "").replace('"', "")
+    quoted = _reply_prompt_quote(target, MAX_REPLY_PROMPT_LEN)
+    tag = f'<reply_to role="{role}" id="{tid}">{quoted}</reply_to>'
+    return f"{tag}\n{user_text}" if user_text else tag
 
 
 def _public_message(msg: dict[str, Any]) -> dict[str, Any]:
@@ -336,6 +397,13 @@ class ChatHistoryStore:
             snap = dict(existing)
             self._append_raw_locked(snap)
             return snap
+
+    def get_by_id(self, msg_id: str) -> dict[str, Any] | None:
+        if not msg_id:
+            return None
+        with self._lock:
+            found = self._by_id.get(msg_id)
+            return dict(found) if found is not None else None
 
     def find_by_client_id(self, client_id: str) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
         if not client_id:
@@ -1445,6 +1513,13 @@ class ChatManager:
                 return 400, {"error": "invalid client_id"}
             client_id = raw_cid.strip() or None
 
+        raw_reply_id = body.get("reply_to_id")
+        reply_to_id: str | None = None
+        if raw_reply_id is not None:
+            if not isinstance(raw_reply_id, str) or len(raw_reply_id.strip()) > MAX_CLIENT_ID_LEN:
+                return 400, {"error": "invalid reply_to_id"}
+            reply_to_id = raw_reply_id.strip() or None
+
         with self._lock:
             if client_id:
                 existing = self.store.find_by_client_id(client_id)
@@ -1463,6 +1538,10 @@ class ChatManager:
             now = float(self.clock())
             user_id = self._new_id()
 
+            reply_target = self.store.get_by_id(reply_to_id) if reply_to_id else None
+            reply_to_obj = _build_reply_to(reply_target) if reply_target is not None else None
+            dispatch_text = _prepend_reply_context(reply_target, text) if reply_target is not None else text
+
             user_msg = self.store.append(
                 {
                     "id": user_id,
@@ -1474,6 +1553,7 @@ class ChatManager:
                     "error": None,
                     **({"client_id": client_id} if client_id else {}),
                     **({"attachments": resolved_atts} if resolved_atts else {}),
+                    **({"reply_to": reply_to_obj} if reply_to_obj is not None else {}),
                 }
             )
             fresh = self._fresh_next.get(engine, False)
@@ -1483,7 +1563,7 @@ class ChatManager:
             self._queue.put(
                 {
                     "engine": engine,
-                    "text": text,
+                    "text": dispatch_text,
                     "user_id": user_id,
                     "fresh": fresh,
                     **({"attachments": resolved_atts} if resolved_atts else {}),

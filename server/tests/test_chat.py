@@ -368,6 +368,99 @@ class ChatManagerTests(unittest.TestCase):
         self.assertTrue(res_ok["ok"])
         self.assertTrue(mgr_bad.wait_idle(timeout=3.0))
 
+    def test_reply_to_id_persists_snippet_and_prepends_prompt_tag(self):
+        gem = FakeAdapter(reply="Ack reply")
+        mgr = chat_mod.ChatManager(
+            store=self.store,
+            engine_fn=lambda: "gemini",
+            gemini_adapter=gem,
+            notify=self.notify,
+            last_channel_file=self.last_channel_path,
+        )
+
+        # Seed a long assistant message (>240 chars, <1200 chars) and an image-only user message.
+        long_text = "A" * 320
+        target_asst = self.store.append(
+            {
+                "id": "asst-long-1",
+                "role": "assistant",
+                "engine": "gemini",
+                "text": long_text,
+                "created_at": 100.0,
+                "status": "done",
+                "error": None,
+            }
+        )
+        img_user = self.store.append(
+            {
+                "id": "user-img-1",
+                "role": "user",
+                "engine": "gemini",
+                "text": "",
+                "created_at": 101.0,
+                "status": "done",
+                "error": None,
+                "attachments": [
+                    {
+                        "id": "0123456789abcdef",
+                        "name": "photo.png",
+                        "mime_type": "image/png",
+                        "size_bytes": 42,
+                        "kind": "image",
+                        "url": "/pc/api/chat/file/0123456789abcdef",
+                    }
+                ],
+            }
+        )
+
+        # 1. Reply to the long assistant message.
+        code, res = mgr.handle_send({"text": "Can you expand on that?", "reply_to_id": target_asst["id"]})
+        self.assertEqual(code, 202)
+        self.assertTrue(mgr.wait_idle(timeout=3.0))
+
+        u_msg = res["user_message"]
+        self.assertEqual(u_msg["text"], "Can you expand on that?")
+        self.assertIsInstance(u_msg.get("reply_to"), dict)
+        self.assertEqual(u_msg["reply_to"]["id"], "asst-long-1")
+        self.assertEqual(u_msg["reply_to"]["role"], "assistant")
+        self.assertEqual(u_msg["reply_to"]["engine"], "gemini")
+        self.assertEqual(len(u_msg["reply_to"]["text"]), 240)
+        self.assertTrue(u_msg["reply_to"]["text"].endswith("…"))
+
+        # Dispatched prompt includes full target text (up to 1200 chars) in <reply_to ...> tag.
+        dispatched_text, _ = gem.calls[-1]
+        self.assertEqual(
+            dispatched_text,
+            f'<reply_to role="assistant" id="asst-long-1">{long_text}</reply_to>\nCan you expand on that?',
+        )
+
+        # Reloading JSONL store preserves reply_to object.
+        reloaded = chat_mod.ChatHistoryStore(self.path)
+        persisted = reloaded.get_by_id(u_msg["id"])
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted["reply_to"], u_msg["reply_to"])
+
+        # 2. Reply to an image-only message falls back to [image].
+        code2, res2 = mgr.handle_send({"text": "What is in this?", "reply_to_id": img_user["id"]})
+        self.assertEqual(code2, 202)
+        self.assertTrue(mgr.wait_idle(timeout=3.0))
+        self.assertEqual(res2["user_message"]["reply_to"]["text"], "[image]")
+        self.assertEqual(
+            gem.calls[-1][0],
+            '<reply_to role="user" id="user-img-1">[image]</reply_to>\nWhat is in this?',
+        )
+
+        # 3. Unknown reply_to_id is gracefully ignored.
+        code3, res3 = mgr.handle_send({"text": "No quote", "reply_to_id": "does-not-exist"})
+        self.assertEqual(code3, 202)
+        self.assertTrue(mgr.wait_idle(timeout=3.0))
+        self.assertNotIn("reply_to", res3["user_message"])
+        self.assertEqual(gem.calls[-1][0], "No quote")
+
+        # 4. Non-string reply_to_id returns 400.
+        code4, _ = mgr.handle_send({"text": "Bad", "reply_to_id": 12345})
+        self.assertEqual(code4, 400)
+
 
 class AdapterTests(unittest.TestCase):
     def test_t3_gemini_adapter_reuses_thread_and_reads_reply(self):

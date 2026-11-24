@@ -13,6 +13,13 @@ export type ChatAttachment = {
   url: string;
 };
 
+export type ChatReplyRef = {
+  id: string;
+  role: ChatRole;
+  engine?: ChatEngine;
+  text: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: ChatRole;
@@ -22,7 +29,7 @@ export type ChatMessage = {
   status: ChatStatus;
   error?: string | null;
   client_id?: string | null;
-  reply_to?: string | null;
+  reply_to?: ChatReplyRef | string | null;
   kind?: string;
   attachments?: ChatAttachment[];
   optimistic?: boolean;
@@ -137,7 +144,7 @@ export function mergeChatMessages(current: ChatMessage[], incoming: ChatMessage[
     if (!m.optimistic) continue;
     if (seenIds.has(m.id)) continue;
     if (m.client_id && seenClientIds.has(m.client_id)) continue;
-    if (m.reply_to && seenClientIds.has(m.reply_to)) continue;
+    if (typeof m.reply_to === 'string' && seenClientIds.has(m.reply_to)) continue;
     merged.push(m);
   }
 
@@ -184,6 +191,23 @@ export type LinkPreview = {
 
 export function isHttpUrl(url: string): boolean {
   return /^https?:\/\//i.test(url);
+}
+
+/** Convert `t3-thread://v2/<envId>/<threadId>` into the T3 Code Android App Link URL. */
+export function resolveT3ThreadUrl(url: string): string | null {
+  const m = /^t3-thread:\/\/v2\/([^/]+)\/(.+)$/i.exec(url.trim());
+  if (!m) return null;
+  const decode = (s: string) => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
+  const envId = decode(m[1]).trim();
+  const threadId = decode(m[2]).trim();
+  if (!envId || !threadId) return null;
+  return `https://app.t3.codes/threads/${encodeURIComponent(envId)}/${encodeURIComponent(threadId)}`;
 }
 
 function trimBareUrl(raw: string): { url: string; trailing: string } {
@@ -347,7 +371,7 @@ function hasSendableContent(msg: ChatMessage): boolean {
 export function findPrecedingUserMessage(messages: readonly ChatMessage[], index: number): ChatMessage | null {
   if (index <= 0 || index >= messages.length) return null;
   const target = messages[index];
-  const replyTo = target?.reply_to?.trim();
+  const replyTo = typeof target?.reply_to === 'string' ? target.reply_to.trim() : '';
   if (replyTo) {
     for (let i = index - 1; i >= 0; i -= 1) {
       const m = messages[i];
@@ -364,6 +388,43 @@ export function findPrecedingUserMessage(messages: readonly ChatMessage[], index
     }
   }
   return null;
+}
+
+/** Extract the structured quoted reply object from a message (ignoring legacy string reply_to IDs on assistant messages). */
+export function getReplyRef(msg: ChatMessage): ChatReplyRef | null {
+  const r = msg.reply_to;
+  if (!r || typeof r !== 'object') return null;
+  if (typeof r.id !== 'string' || !r.id) return null;
+  return r;
+}
+
+/** Build a compact ChatReplyRef from a message for the composer bar and optimistic bubble. */
+export function buildReplyRef(msg: ChatMessage, maxLen = 240): ChatReplyRef {
+  let snippet = formatMessagePreview(msg);
+  if (!snippet) {
+    const atts = msg.attachments ?? [];
+    if (atts.length === 1) {
+      snippet = atts[0].kind === 'image' ? '[image]' : '[file]';
+    } else if (atts.length > 1) {
+      snippet = `[${atts.length} attachments]`;
+    }
+  }
+  if (snippet.length > maxLen) {
+    snippet = `${snippet.slice(0, maxLen - 1)}…`;
+  }
+  return {
+    id: msg.id,
+    role: msg.role,
+    engine: msg.engine,
+    text: snippet,
+  };
+}
+
+/** Human-readable sender label for a quoted reply bar or bubble quote block. */
+export function replySenderLabel(ref: Pick<ChatReplyRef, 'role' | 'engine'>): string {
+  if (ref.role === 'user') return 'You';
+  if (ref.role === 'system') return 'System';
+  return ref.engine === 'gemini' ? 'Gemini' : 'Claude';
 }
 
 /** Compact single-line preview of a message for the action sheet or editing bar. */

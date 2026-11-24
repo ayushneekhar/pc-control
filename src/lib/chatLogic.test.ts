@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { _setCacheBackendForTests, CacheBackend } from './cache';
 import {
+  buildReplyRef,
   ChatMessage,
   computeAndroidKeyboardOffset,
   extractPreviewUrl,
@@ -11,12 +12,15 @@ import {
   formatComposerChipLabel,
   formatMessagePreview,
   getChatEndpoint,
+  getReplyRef,
   mergeChatMessages,
   normalizeChatUrl,
   parseInlineTokens,
   parseMessageSegments,
   prependOlderMessages,
+  replySenderLabel,
   resolveChatTarget,
+  resolveT3ThreadUrl,
   setChatEndpoint,
   shortEffortLabel,
   shortModelLabel,
@@ -345,5 +349,65 @@ test('extractPreviewUrl finds first external http(s) URL and skips internal sche
     null,
   );
   assert.equal(extractPreviewUrl('Only [internal](t3-thread://v2/1234)'), null);
+  assert.equal(extractPreviewUrl('Only [T3](t3-thread://v2/env-1/thr-2)'), null);
   assert.equal(extractPreviewUrl('Plain message with no links'), null);
+});
+
+test('resolveT3ThreadUrl converts t3-thread://v2/<envId>/<threadId> to app.t3.codes App Links', () => {
+  assert.equal(
+    resolveT3ThreadUrl('t3-thread://v2/env-123/thread-456'),
+    'https://app.t3.codes/threads/env-123/thread-456',
+  );
+  // Already-encoded segments are decoded once and cleanly re-encoded (no double encoding)
+  assert.equal(
+    resolveT3ThreadUrl('t3-thread://v2/env%3A1/mcp%3A9a8fddd7-1c1a-4aab-a3ed-aed0696731e0'),
+    'https://app.t3.codes/threads/env%3A1/mcp%3A9a8fddd7-1c1a-4aab-a3ed-aed0696731e0',
+  );
+  // Non-matching or incomplete URLs return null
+  assert.equal(resolveT3ThreadUrl('t3-thread://v2/only-one-segment'), null);
+  assert.equal(resolveT3ThreadUrl('https://app.t3.codes/threads/env/thr'), null);
+  assert.equal(resolveT3ThreadUrl('pccontrol://chat'), null);
+});
+
+test('reply helpers extract structured reply_to, build snippets, and format sender labels', () => {
+  const legacyAsst: ChatMessage = {
+    id: 'a1',
+    role: 'assistant',
+    engine: 'gemini',
+    text: 'done',
+    created_at: 2,
+    status: 'done',
+    reply_to: 'u1',
+  };
+  assert.equal(getReplyRef(legacyAsst), null);
+
+  const longUser: ChatMessage = {
+    id: 'u1',
+    role: 'user',
+    engine: 'claude',
+    text: 'x'.repeat(300),
+    created_at: 1,
+    status: 'done',
+  };
+  const built = buildReplyRef(longUser);
+  assert.equal(built.id, 'u1');
+  assert.equal(built.role, 'user');
+  assert.equal(built.text.length, 240);
+  assert.ok(built.text.endsWith('…'));
+
+  const withReply: ChatMessage = {
+    id: 'u2',
+    role: 'user',
+    engine: 'gemini',
+    text: 'following up',
+    created_at: 3,
+    status: 'done',
+    reply_to: { id: 'a1', role: 'assistant', engine: 'gemini', text: 'done' },
+  };
+  assert.deepEqual(getReplyRef(withReply), { id: 'a1', role: 'assistant', engine: 'gemini', text: 'done' });
+
+  assert.equal(replySenderLabel({ role: 'user', engine: 'gemini' }), 'You');
+  assert.equal(replySenderLabel({ role: 'assistant', engine: 'gemini' }), 'Gemini');
+  assert.equal(replySenderLabel({ role: 'assistant', engine: 'claude' }), 'Claude');
+  assert.equal(replySenderLabel({ role: 'system' }), 'System');
 });

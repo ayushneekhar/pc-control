@@ -13,6 +13,7 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1176,6 +1177,226 @@ class ChatHttpAndScopeIsolationTests(unittest.TestCase):
         code_list, listed = self._req("GET", "/pc/api/chat/messages", headers=ts_headers)
         self.assertEqual(code_list, 200)
         self.assertTrue(any(m["id"] == res["message"]["id"] for m in listed["messages"]))
+
+
+class ClaudeStreamProgressTests(unittest.TestCase):
+    def test_describe_claude_tool_matches_claude_progress_hook(self):
+        cases = [
+            ("Bash", {"command": "git status"}),
+            ("Bash", {"command": "journalctl " + ("x" * 100)}),
+            ("Bash", {}),
+            ("Read", {"file_path": "/home/u/agent/NOTES.md"}),
+            ("Edit", {"file_path": "/home/u/app/ChatScreen.tsx", "new_string": "SECRET"}),
+            ("Write", {"file_path": "/tmp/out.txt", "content": "SECRET"}),
+            ("Glob", {"pattern": "**/*.ts"}),
+            ("Grep", {"pattern": "shouldShowEngineTag"}),
+            ("WebSearch", {"query": "anything"}),
+            ("WebFetch", {"url": "https://example.com"}),
+            ("Agent", {"prompt": "check"}),
+            ("TodoWrite", {"todos": []}),
+            ("mcp__playwright__browser_snapshot", {}),
+            ("CustomTool", {}),
+        ]
+        self.assertEqual(chat_mod.describe_claude_tool("Bash", {"command": "git status"}), "running `git status`")
+        self.assertEqual(chat_mod.describe_claude_tool("Read", {"file_path": "/home/u/NOTES.md"}), "reading NOTES.md")
+        self.assertNotIn("SECRET", chat_mod.describe_claude_tool("Edit", {"file_path": "/a/b.py", "new_string": "SECRET"}))
+        self.assertTrue(chat_mod.is_telegram_tool("mcp__plugin_telegram_telegram__reply"))
+        self.assertFalse(chat_mod.is_telegram_tool("Bash"))
+
+        hook_path = Path.home() / "tools" / "gemini-agent" / "claude-progress-hook"
+        if hook_path.exists():
+            import importlib.machinery
+            import importlib.util
+
+            loader = importlib.machinery.SourceFileLoader("claude_progress_hook_sync_check", str(hook_path))
+            spec = importlib.util.spec_from_loader("claude_progress_hook_sync_check", loader)
+            assert spec is not None and spec.loader is not None
+            hook_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(hook_mod)
+            for name, inp in cases:
+                self.assertEqual(
+                    chat_mod.describe_claude_tool(name, inp),
+                    hook_mod.describe_claude_tool(name, inp),
+                    f"Mismatch for {name}({inp})",
+                )
+
+    def test_claude_cli_adapter_streams_real_fixture_and_isolates_app_origin(self):
+        import io
+
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude_stream_sample.jsonl"
+        lines = fixture.read_text(encoding="utf-8").splitlines(keepends=True)
+        seen = {}
+
+        class FakePopen:
+            def __init__(self, argv, **kwargs):
+                seen["argv"] = argv
+                seen["env"] = kwargs.get("env") or {}
+                self.stdout = io.StringIO("".join(lines))
+                self.stderr = io.StringIO("")
+                self.returncode = 0
+
+            def wait(self):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = chat_mod.ClaudeCliAdapter(
+                workdir=tmp,
+                settings_file=os.path.join(tmp, "none.json"),
+                oauth_token_file=os.path.join(tmp, "missing-tok"),
+                popen_fn=FakePopen,
+            )
+            steps = []
+            reply = adapter.send("run echo", fresh=False, on_step=lambda text, kind: steps.append((kind, text)))
+            self.assertEqual(reply, "done")
+            self.assertEqual(
+                steps,
+                [
+                    ("tool", "running `echo ok`"),
+                    ("text", "Checking the notes file next."),
+                    ("tool", "reading NOTES.md"),
+                    ("text", "done"),
+                ],
+            )
+            argv = seen["argv"]
+            self.assertIn("--output-format", argv)
+            self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+            self.assertIn("--verbose", argv)
+            self.assertIn("--settings", argv)
+            settings_override = json.loads(argv[argv.index("--settings") + 1])
+            self.assertIs(settings_override["enabledPlugins"]["telegram@claude-plugins-official"], False)
+            self.assertEqual(seen["env"].get("PC_CHAT_ORIGIN"), "app")
+
+    def test_claude_cli_adapter_popen_timeout_and_is_error(self):
+        import io
+
+        class HangingPopen:
+            def __init__(self, argv, **kwargs):
+                self._killed = threading.Event()
+                self.stderr = io.StringIO("")
+                self.returncode = None
+                parent = self
+
+                class BlockingStdout:
+                    def __iter__(self):
+                        parent._killed.wait(timeout=2.0)
+                        return iter([])
+
+                    def close(self):
+                        pass
+
+                self.stdout = BlockingStdout()
+
+            def kill(self):
+                self.returncode = -9
+                self._killed.set()
+
+            def wait(self):
+                self._killed.wait(timeout=2.0)
+                return self.returncode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = chat_mod.ClaudeCliAdapter(
+                workdir=tmp,
+                settings_file=os.path.join(tmp, "none.json"),
+                oauth_token_file=os.path.join(tmp, "missing-tok"),
+                timeout=0.08,
+                popen_fn=HangingPopen,
+            )
+            with self.assertRaisesRegex(RuntimeError, "Timed out"):
+                adapter.send("slow", fresh=True)
+
+            class ErrorResultPopen:
+                def __init__(self, argv, **kwargs):
+                    self.stdout = io.StringIO(
+                        json.dumps({"type": "result", "is_error": True, "result": "quota exceeded"}) + "\n"
+                    )
+                    self.stderr = io.StringIO("")
+                    self.returncode = 0
+
+                def wait(self):
+                    return 0
+
+                def kill(self):
+                    pass
+
+            err_adapter = chat_mod.ClaudeCliAdapter(
+                workdir=tmp,
+                settings_file=os.path.join(tmp, "none.json"),
+                oauth_token_file=os.path.join(tmp, "missing-tok"),
+                popen_fn=ErrorResultPopen,
+            )
+            with self.assertRaisesRegex(RuntimeError, "quota exceeded"):
+                err_adapter.send("hi", fresh=True)
+
+    def test_chat_manager_live_progress_throttling_and_final_summary(self):
+        started_ev = threading.Event()
+        release_mid = threading.Event()
+        release_end = threading.Event()
+        now_box = [1000.0]
+
+        class StreamingFakeAdapter:
+            def send(self, text, *, fresh=False, attachments=None, on_step=None):
+                started_ev.set()
+                if on_step:
+                    # Step 1 publishes immediately
+                    on_step("running `git status`", "tool")
+                    # Steps 2 & 3 arrive immediately inside throttle window -> coalesced via trailing flush
+                    on_step("Checking notes", "text")
+                    on_step("reading NOTES.md", "tool")
+                release_mid.wait(timeout=3.0)
+                if on_step:
+                    # Trailing final reply text -> stripped from persisted final summary
+                    on_step("All done!", "text")
+                now_box[0] = 1042.0
+                release_end.wait(timeout=3.0)
+                return "All done!"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = chat_mod.ChatHistoryStore(os.path.join(tmp, "hist.jsonl"))
+            mgr = chat_mod.ChatManager(
+                store=store,
+                engine_fn=lambda: "claude",
+                claude_adapter=StreamingFakeAdapter(),
+                clock=lambda: now_box[0],
+                last_channel_file=os.path.join(tmp, "last-channel.json"),
+                progress_min_interval=0.06,
+            )
+
+            code, _ = mgr.handle_send({"text": "check repo", "client_id": "prog-1"})
+            self.assertEqual(code, 202)
+            self.assertTrue(started_ev.wait(timeout=2.0))
+
+            # Wait past throttle flush interval so steps 1..3 are visible live
+            time.sleep(0.12)
+            _, mid = mgr.handle_get_messages({})
+            self.assertTrue(mid["running"])
+            self.assertIsNotNone(mid["progress"])
+            self.assertEqual(mid["progress"]["engine"], "claude")
+            self.assertEqual(mid["progress"]["started"], 1000.0)
+            self.assertEqual(
+                [s["text"] for s in mid["progress"]["steps"]],
+                ["running `git status`", "Checking notes", "reading NOTES.md"],
+            )
+
+            release_mid.set()
+            release_end.set()
+            self.assertTrue(mgr.wait_idle(timeout=3.0))
+
+            _, done = mgr.handle_get_messages({})
+            self.assertFalse(done["running"])
+            self.assertIsNone(done["progress"])
+            asst = done["messages"][-1]
+            self.assertEqual(asst["role"], "assistant")
+            self.assertEqual(asst["text"], "All done!")
+            self.assertEqual(asst["progress"]["duration_s"], 42)
+            self.assertEqual(asst["progress"]["step_count"], 3)
+            self.assertEqual(
+                [s["text"] for s in asst["progress"]["steps"]],
+                ["running `git status`", "Checking notes", "reading NOTES.md"],
+            )
 
 
 if __name__ == "__main__":

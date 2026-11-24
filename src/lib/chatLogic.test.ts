@@ -11,12 +11,16 @@ import {
   ChatMessage,
   computeAndroidKeyboardOffset,
   computeSwipeReplyOffset,
+  currentProgressStepText,
   extractPreviewUrl,
   findPrecedingUserMessage,
   formatAttachmentSize,
   formatChatTime,
   formatComposerChipLabel,
+  formatEngineLabel,
   formatMessagePreview,
+  formatProgressDuration,
+  formatProgressSummary,
   getChatEndpoint,
   getReplyRef,
   isReplyableMessage,
@@ -294,7 +298,7 @@ test('formatChatTime formats same-day and older timestamps', () => {
   assert.equal(formatChatTime(prevDay / 1000, base), 'Nov 22, 9:30 am');
 });
 
-test('shouldShowEngineTag only shows tag on error or engine change', () => {
+test('shouldShowEngineTag and formatEngineLabel label every assistant bubble consistently', () => {
   const msgs: ChatMessage[] = [
     { id: 'u1', role: 'user', engine: 'gemini', text: 'hi', created_at: 1, status: 'done' },
     { id: 'a1', role: 'assistant', engine: 'gemini', text: 'hello', created_at: 2, status: 'done' },
@@ -302,15 +306,62 @@ test('shouldShowEngineTag only shows tag on error or engine change', () => {
     { id: 'a3', role: 'assistant', engine: 'claude', text: 'switched', created_at: 4, status: 'done' },
     { id: 'a4', role: 'assistant', engine: 'claude', text: 'still claude', created_at: 5, status: 'done' },
     { id: 'a5', role: 'assistant', engine: 'claude', text: '', error: 'boom', created_at: 6, status: 'error' },
+    { id: 's1', role: 'system', engine: 'claude', text: 'New conversation', created_at: 7, status: 'done' },
   ];
 
   assert.equal(shouldShowEngineTag(msgs, 0, 'gemini'), false); // user
-  assert.equal(shouldShowEngineTag(msgs, 1, 'gemini'), false); // matches active header engine
-  assert.equal(shouldShowEngineTag(msgs, 1, 'claude'), true); // differs from active header engine
-  assert.equal(shouldShowEngineTag(msgs, 2, 'gemini'), false); // same as previous assistant
-  assert.equal(shouldShowEngineTag(msgs, 3, 'gemini'), true); // engine changed
-  assert.equal(shouldShowEngineTag(msgs, 4, 'gemini'), false); // same as previous assistant
-  assert.equal(shouldShowEngineTag(msgs, 5, 'gemini'), true); // error always shows
+  assert.equal(shouldShowEngineTag(msgs, 1, 'gemini'), true); // gemini assistant shows label
+  assert.equal(shouldShowEngineTag(msgs, 1, 'claude'), true);
+  assert.equal(shouldShowEngineTag(msgs, 2, 'gemini'), true); // consecutive gemini still shows label
+  assert.equal(shouldShowEngineTag(msgs, 3, 'gemini'), true); // claude shows label
+  assert.equal(shouldShowEngineTag(msgs, 4, 'claude'), true); // consecutive claude shows label
+  assert.equal(shouldShowEngineTag(msgs, 5, 'gemini'), true); // error shows label
+  assert.equal(shouldShowEngineTag(msgs, 6, 'claude'), false); // system never shows label
+
+  assert.equal(formatEngineLabel('gemini'), 'Gemini');
+  assert.equal(formatEngineLabel('claude'), 'Claude');
+  assert.equal(formatEngineLabel(undefined), 'Claude');
+});
+
+test('progress helpers format current step, duration, and collapsed summary', () => {
+  assert.equal(currentProgressStepText(null), 'Thinking…');
+  assert.equal(currentProgressStepText({ started: 1, steps: [] }), 'Thinking…');
+  assert.equal(
+    currentProgressStepText({
+      started: 1,
+      steps: [
+        { t: 2, text: 'reading chat.py' },
+        { t: 3, text: 'running `git status`' },
+      ],
+    }),
+    'running `git status`',
+  );
+
+  assert.equal(formatProgressDuration(0), '1s');
+  assert.equal(formatProgressDuration(42), '42s');
+  assert.equal(formatProgressDuration(60), '1m');
+  assert.equal(formatProgressDuration(125), '2m 5s');
+
+  assert.equal(formatProgressSummary(null), null);
+  assert.equal(formatProgressSummary({ started: 1, duration_s: 5, step_count: 0, steps: [] }), null);
+  assert.equal(
+    formatProgressSummary({
+      started: 1,
+      duration_s: 42,
+      step_count: 7,
+      steps: [{ t: 2, text: 'reading chat.py' }],
+    }),
+    'Worked for 42s · 7 steps',
+  );
+  assert.equal(
+    formatProgressSummary({
+      started: 1,
+      duration_s: 3,
+      step_count: 1,
+      steps: [{ t: 2, text: 'reading chat.py' }],
+    }),
+    'Worked for 3s · 1 step',
+  );
 });
 
 test('computeAndroidKeyboardOffset subtracts tab bar and OS resize cleanly', () => {

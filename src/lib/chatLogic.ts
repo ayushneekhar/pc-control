@@ -20,6 +20,19 @@ export type ChatReplyRef = {
   text: string;
 };
 
+export type ChatProgressStep = {
+  t: number;
+  text: string;
+};
+
+export type ChatProgress = {
+  engine?: ChatEngine;
+  started: number;
+  duration_s?: number;
+  step_count?: number;
+  steps: ChatProgressStep[];
+};
+
 export type ChatMessage = {
   id: string;
   role: ChatRole;
@@ -32,6 +45,7 @@ export type ChatMessage = {
   reply_to?: ChatReplyRef | string | null;
   kind?: string;
   attachments?: ChatAttachment[];
+  progress?: ChatProgress | null;
   optimistic?: boolean;
 };
 
@@ -39,6 +53,7 @@ export type ChatMessagesResponse = {
   messages: ChatMessage[];
   engine: ChatEngine;
   running: boolean;
+  progress?: ChatProgress | null;
   has_more: boolean;
   ts: number;
 };
@@ -407,25 +422,52 @@ export function formatChatTime(epochSec: number, nowMs = Date.now()): string {
   return `${months[d.getMonth()]} ${d.getDate()}, ${h12}:${mm} ${ampm}`;
 }
 
+/** Human-readable engine label for assistant bubbles and controls. */
+export function formatEngineLabel(engine?: string | null): string {
+  return (engine || '').trim().toLowerCase() === 'gemini' ? 'Gemini' : 'Claude';
+}
+
 /**
- * Show the engine tag on an assistant bubble only when it's an error, when the engine changed
- * compared to the previous assistant message, or when the first assistant message differs from
- * the currently active header engine.
+ * Show the engine label on every assistant bubble consistently (done, pending, error, pushed, and history).
  */
 export function shouldShowEngineTag(
   messages: readonly ChatMessage[],
   index: number,
-  activeEngine: ChatEngine,
+  _activeEngine?: ChatEngine,
 ): boolean {
   const msg = messages[index];
-  if (!msg || msg.role !== 'assistant') return false;
-  if (msg.status === 'error') return true;
-  for (let i = index - 1; i >= 0; i -= 1) {
-    if (messages[i].role === 'assistant') {
-      return messages[i].engine !== msg.engine;
-    }
+  return Boolean(msg && msg.role === 'assistant');
+}
+
+export function formatProgressDuration(seconds: number): string {
+  const total = Math.max(1, Math.round(Number.isFinite(seconds) ? seconds : 0));
+  if (total < 60) return `${total}s`;
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return secs === 0 ? `${mins}m` : `${mins}m ${secs}s`;
+}
+
+export function formatProgressSummary(progress?: ChatProgress | null): string | null {
+  if (!progress || !Array.isArray(progress.steps) || progress.steps.length === 0) {
+    return null;
   }
-  return msg.engine !== activeEngine;
+  const count =
+    typeof progress.step_count === 'number' && progress.step_count > 0
+      ? progress.step_count
+      : progress.steps.length;
+  const noun = count === 1 ? 'step' : 'steps';
+  if (typeof progress.duration_s === 'number' && Number.isFinite(progress.duration_s) && progress.duration_s > 0) {
+    return `Worked for ${formatProgressDuration(progress.duration_s)} · ${count} ${noun}`;
+  }
+  return `${count} ${noun}`;
+}
+
+export function currentProgressStepText(progress?: ChatProgress | null): string {
+  if (progress && Array.isArray(progress.steps) && progress.steps.length > 0) {
+    const last = progress.steps[progress.steps.length - 1]?.text?.trim();
+    if (last) return last;
+  }
+  return 'Thinking…';
 }
 
 function hasSendableContent(msg: ChatMessage): boolean {

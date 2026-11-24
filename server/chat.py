@@ -13,6 +13,7 @@ Provides:
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import mimetypes
 import os
@@ -77,6 +78,12 @@ DEFAULT_MAX_LINES = 1000
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_KEEP_MESSAGES = 500
 DISPATCH_TIMEOUT = 900.0
+PROGRESS_MIN_INTERVAL = 0.5
+MAX_PROGRESS_STEPS = 40
+CLAUDE_APP_SETTINGS_OVERRIDE = json.dumps(
+    {"enabledPlugins": {"telegram@claude-plugins-official": False}},
+    separators=(",", ":"),
+)
 
 _T3_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted", "rolled_back"}
 _ATT_ID_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -1094,6 +1101,135 @@ class T3GeminiAdapter:
         return reply or "(no response)"
 
 
+# ---------------------------------------------------------------- Claude CLI progress helpers
+
+
+def _truncate_inline(text: str, max_len: int = 60) -> str:
+    collapsed = " ".join((text or "").split())
+    if len(collapsed) <= max_len:
+        return collapsed
+    return collapsed[: max_len - 1].rstrip() + "…"
+
+
+def _short_name(path_str: str, max_len: int = 60) -> str:
+    s = " ".join((path_str or "").split()).rstrip("/")
+    if not s:
+        return ""
+    base = os.path.basename(s) or s
+    return _truncate_inline(base, max_len)
+
+
+def _first_str(params: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for k in keys:
+        v = params.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def describe_claude_tool(
+    tool_name: str,
+    tool_input: dict[str, Any] | None = None,
+    max_len: int = 60,
+) -> str:
+    """Safely summarize a Claude Code tool call (kept in sync with claude-progress-hook)."""
+    name = (tool_name or "").strip()
+    p = tool_input if isinstance(tool_input, dict) else {}
+
+    if name in ("Bash", "run_command"):
+        cmd = _first_str(p, ("command", "CommandLine", "cmd"))
+        return f"running `{_truncate_inline(cmd, max_len)}`" if cmd else "running command"
+
+    if name in ("Read", "view_file", "read_file"):
+        path = _first_str(p, ("file_path", "path", "AbsolutePath", "Path"))
+        return f"reading {_short_name(path, max_len)}" if path else "reading file"
+
+    if name in ("Edit", "MultiEdit", "NotebookEdit", "replace_file_content", "edit_file"):
+        path = _first_str(p, ("file_path", "notebook_path", "path", "TargetFile", "Path"))
+        return f"editing {_short_name(path, max_len)}" if path else "editing file"
+
+    if name in ("Write", "write_to_file", "write_file"):
+        path = _first_str(p, ("file_path", "path", "TargetFile", "Path"))
+        return f"writing {_short_name(path, max_len)}" if path else "writing file"
+
+    if name in ("Glob", "find_by_name"):
+        pat = _first_str(p, ("pattern", "Pattern", "path"))
+        return f"finding `{_truncate_inline(pat, max_len)}`" if pat else "finding files"
+
+    if name in ("Grep", "grep_search"):
+        pat = _first_str(p, ("pattern", "Query", "query"))
+        return f"searching `{_truncate_inline(pat, max_len)}`" if pat else "searching files"
+
+    if name in ("WebSearch", "search_web"):
+        return "web search"
+
+    if name in ("WebFetch", "read_url_content"):
+        return "fetching web page"
+
+    if name in ("Agent", "Task"):
+        return "running subagent"
+
+    if name in ("TodoWrite", "TaskCreate", "TaskUpdate"):
+        return "updating tasks"
+
+    if name.startswith("mcp__"):
+        parts = [part for part in name.split("__") if part]
+        short = parts[-1] if len(parts) >= 2 else name
+        return f"calling {_truncate_inline(short, max_len)}"
+
+    return _truncate_inline(name, max_len) if name else "running tool"
+
+
+def is_telegram_tool(tool_name: str) -> bool:
+    """Return True for Telegram reply/edit/react/channel tools that must not appear as steps."""
+    return "telegram" in (tool_name or "").lower()
+
+
+def parse_claude_stream_line(raw_line: str) -> tuple[list[tuple[str, str]], dict[str, Any] | None]:
+    """Parse one stdout line from `claude -p --output-format stream-json --verbose`.
+
+    Returns (steps, result_event) where each step is (kind, text) with kind in ('tool', 'text').
+    Also accepts legacy single-line `--output-format json` result objects.
+    """
+    line = (raw_line or "").strip()
+    if not line:
+        return [], None
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return [], None
+    if not isinstance(ev, dict):
+        return [], None
+
+    ev_type = ev.get("type")
+    if ev_type == "result" or (ev_type is None and ("result" in ev or "is_error" in ev)):
+        return [], {
+            "is_error": bool(ev.get("is_error")),
+            "result": ev.get("result"),
+        }
+
+    steps: list[tuple[str, str]] = []
+    if ev_type == "assistant":
+        msg = ev.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "tool_use":
+                    tname = str(block.get("name") or "")
+                    if is_telegram_tool(tname):
+                        continue
+                    tinput = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    steps.append(("tool", describe_claude_tool(tname, tinput)))
+                elif btype == "text":
+                    txt = _truncate_inline(str(block.get("text") or ""), 80)
+                    if txt:
+                        steps.append(("text", txt))
+    return steps, None
+
+
 # ---------------------------------------------------------------- Claude CLI adapter
 
 
@@ -1109,17 +1245,20 @@ class ClaudeCliAdapter:
         oauth_token_file: str = CLAUDE_OAUTH_TOKEN_FILE,
         timeout: float = DISPATCH_TIMEOUT,
         run_fn: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        popen_fn: Callable[..., Any] | None = None,
     ) -> None:
         self.claude_bin = claude_bin
         self.workdir = workdir
         self.settings_file = settings_file
         self.oauth_token_file = oauth_token_file
         self.timeout = float(timeout)
-        self.run_fn = run_fn or subprocess.run
+        self.run_fn = run_fn
+        self.popen_fn = popen_fn or subprocess.Popen
 
     def _build_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env["PATH"] = f"{HOME}/.local/bin:{HOME}/.bun/bin:{HOME}/remote-pc/bin:{env.get('PATH', '')}"
+        env["PC_CHAT_ORIGIN"] = "app"
         try:
             tok = Path(self.oauth_token_file).read_text(encoding="utf-8").strip()
             if tok:
@@ -1134,8 +1273,11 @@ class ClaudeCliAdapter:
             "-p",
             text,
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
             "--dangerously-skip-permissions",
+            "--settings",
+            CLAUDE_APP_SETTINGS_OVERRIDE,
         ]
         try:
             cfg = json.loads(Path(self.settings_file).read_text(encoding="utf-8"))
@@ -1152,12 +1294,40 @@ class ClaudeCliAdapter:
             argv.append("--continue")
         return argv
 
+    def _finalize_stream_output(
+        self,
+        *,
+        returncode: int,
+        stderr: str,
+        raw_lines: list[str],
+        result_ev: dict[str, Any] | None,
+    ) -> str:
+        if returncode != 0:
+            err_src = stderr.strip()
+            if not err_src and result_ev and isinstance(result_ev.get("result"), str):
+                err_src = result_ev["result"].strip()
+            if not err_src:
+                err_src = "\n".join(raw_lines).strip()
+            err = err_src or f"exit {returncode}"
+            raise RuntimeError(_clip(f"Claude failed: {err}", 300))
+
+        if result_ev is not None:
+            if result_ev.get("is_error"):
+                raise RuntimeError(_clip(result_ev.get("result") or "Claude returned an error", 300))
+            val = result_ev.get("result")
+            if isinstance(val, str):
+                return val.strip() or "(no response)"
+
+        raw = "\n".join(raw_lines).strip()
+        return raw or "(no response)"
+
     def send(
         self,
         text: str,
         *,
         fresh: bool = False,
         attachments: list[dict[str, Any]] | None = None,
+        on_step: Callable[[str, str], None] | None = None,
     ) -> str:
         paths = [
             str(a["path"])
@@ -1167,39 +1337,116 @@ class ClaudeCliAdapter:
         prompt = _append_attachment_paths(text, paths)
         argv = self._build_argv(prompt, fresh=fresh)
         cwd = self.workdir if os.path.isdir(self.workdir) else HOME
+        env = self._build_env()
+
+        if self.run_fn is not None:
+            try:
+                res = self.run_fn(
+                    argv,
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                )
+            except FileNotFoundError:
+                raise RuntimeError("claude CLI not found on PATH") from None
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("Timed out waiting for Claude reply") from None
+
+            raw_lines = (res.stdout or "").splitlines()
+            result_ev: dict[str, Any] | None = None
+            for line in raw_lines:
+                steps, ev = parse_claude_stream_line(line)
+                if on_step is not None:
+                    for kind, step_text in steps:
+                        on_step(step_text, kind)
+                if ev is not None:
+                    result_ev = ev
+            return self._finalize_stream_output(
+                returncode=res.returncode,
+                stderr=res.stderr or "",
+                raw_lines=raw_lines,
+                result_ev=result_ev,
+            )
+
         try:
-            res = self.run_fn(
+            proc = self.popen_fn(
                 argv,
                 cwd=cwd,
-                env=self._build_env(),
+                env=env,
                 stdin=subprocess.DEVNULL,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.timeout,
+                bufsize=1,
             )
         except FileNotFoundError:
             raise RuntimeError("claude CLI not found on PATH") from None
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("Timed out waiting for Claude reply") from None
 
-        if res.returncode != 0:
-            err = (res.stderr or res.stdout or f"exit {res.returncode}").strip()
-            raise RuntimeError(_clip(f"Claude failed: {err}", 300))
+        timed_out = threading.Event()
 
-        raw = (res.stdout or "").strip()
-        if not raw:
-            return "(no response)"
+        def _on_timeout() -> None:
+            timed_out.set()
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+        timer = threading.Timer(self.timeout, _on_timeout)
+        timer.daemon = True
+        timer.start()
+
+        stderr_chunks: list[str] = []
+
+        def _drain_stderr() -> None:
+            try:
+                if proc.stderr is not None:
+                    stderr_chunks.append(proc.stderr.read())
+            except Exception:
+                pass
+
+        stderr_thread = threading.Thread(target=_drain_stderr, name="claude-stderr-drain", daemon=True)
+        stderr_thread.start()
+
+        raw_lines: list[str] = []
+        result_ev = None
         try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                if parsed.get("is_error"):
-                    raise RuntimeError(_clip(parsed.get("result") or "Claude returned an error", 300))
-                val = parsed.get("result")
-                if isinstance(val, str):
-                    return val.strip() or "(no response)"
-        except ValueError:
-            pass
-        return raw
+            if proc.stdout is not None:
+                for raw_line in proc.stdout:
+                    line = raw_line.rstrip("\r\n")
+                    if line:
+                        raw_lines.append(line)
+                    steps, ev = parse_claude_stream_line(line)
+                    if on_step is not None:
+                        for kind, step_text in steps:
+                            try:
+                                on_step(step_text, kind)
+                            except Exception:
+                                pass
+                    if ev is not None:
+                        result_ev = ev
+            proc.wait()
+        finally:
+            timer.cancel()
+            stderr_thread.join(timeout=2.0)
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+
+        if timed_out.is_set():
+            raise RuntimeError("Timed out waiting for Claude reply")
+
+        return self._finalize_stream_output(
+            returncode=proc.returncode if proc.returncode is not None else 1,
+            stderr="".join(stderr_chunks),
+            raw_lines=raw_lines,
+            result_ev=result_ev,
+        )
 
 
 # ---------------------------------------------------------------- ChatManager
@@ -1219,6 +1466,7 @@ class ChatManager:
         clock: Callable[[], float] | None = None,
         uploads_dir: str | None = None,
         last_channel_file: str | None = None,
+        progress_min_interval: float = PROGRESS_MIN_INTERVAL,
     ) -> None:
         self.store = store or ChatHistoryStore()
         self.engine_fn = engine_fn or active_engine
@@ -1228,9 +1476,11 @@ class ChatManager:
         self.clock = clock or time.time
         self.uploads_dir = os.path.abspath(os.path.expanduser(uploads_dir or CHAT_UPLOADS_DIR))
         self.last_channel_file = last_channel_file
+        self.progress_min_interval = max(0.0, float(progress_min_interval))
         self._lock = threading.Lock()
         self._fresh_next: dict[str, bool] = {"claude": False, "gemini": False}
         self._in_flight = 0
+        self._active_progress: dict[str, Any] | None = None
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._worker = threading.Thread(target=self._worker_loop, name="pcapi-chat-worker", daemon=True)
         self._worker.start()
@@ -1287,6 +1537,28 @@ class ChatManager:
                     self._in_flight = max(0, self._in_flight - 1)
                 self._queue.task_done()
 
+    @staticmethod
+    def _adapter_accepts_on_step(adapter: Any) -> bool:
+        try:
+            sig = inspect.signature(adapter.send)
+        except (TypeError, ValueError):
+            return False
+        for param in sig.parameters.values():
+            if param.kind == inspect.Parameter.VAR_KEYWORD or param.name == "on_step":
+                return True
+        return False
+
+    def _snapshot_active_progress(self) -> dict[str, Any] | None:
+        with self._lock:
+            p = self._active_progress
+            if p is None:
+                return None
+            return {
+                "engine": p["engine"],
+                "started": p["started"],
+                "steps": [dict(s) for s in p["steps"]],
+            }
+
     def _execute_job(self, job: dict[str, Any]) -> None:
         engine = job["engine"]
         user_id = job["user_id"]
@@ -1295,40 +1567,134 @@ class ChatManager:
         attachments = job.get("attachments") or []
         adapter = self.gemini_adapter if engine == "gemini" else self.claude_adapter
         label = "Gemini" if engine == "gemini" else "Claude"
+
+        started_ts = float(self.clock())
+        raw_steps: list[dict[str, Any]] = []
+        progress_lock = threading.Lock()
+        last_publish = 0.0
+        flush_timer: list[threading.Timer | None] = [None]
+        job_finished = threading.Event()
+
+        def _publish_progress() -> None:
+            if job_finished.is_set():
+                return
+            with progress_lock:
+                snap_steps = [{"t": s["t"], "text": s["text"]} for s in raw_steps[-MAX_PROGRESS_STEPS:]]
+            with self._lock:
+                if not job_finished.is_set():
+                    self._active_progress = {
+                        "engine": engine,
+                        "started": started_ts,
+                        "steps": snap_steps,
+                    }
+
+        def on_step(step_text: str, kind: str = "tool") -> None:
+            nonlocal last_publish
+            cleaned = _truncate_inline(step_text, 80)
+            if not cleaned:
+                return
+            now_mono = time.monotonic()
+            should_publish = False
+            delay_s = 0.0
+            with progress_lock:
+                if raw_steps and raw_steps[-1]["text"] == cleaned:
+                    return
+                raw_steps.append({"t": float(self.clock()), "text": cleaned, "kind": kind})
+                elapsed = now_mono - last_publish
+                if last_publish <= 0.0 or elapsed >= self.progress_min_interval:
+                    last_publish = now_mono
+                    should_publish = True
+                    if flush_timer[0] is not None:
+                        flush_timer[0].cancel()
+                        flush_timer[0] = None
+                elif flush_timer[0] is None:
+                    delay_s = max(0.01, self.progress_min_interval - elapsed)
+
+                    def _deferred_flush() -> None:
+                        nonlocal last_publish
+                        with progress_lock:
+                            flush_timer[0] = None
+                            last_publish = time.monotonic()
+                        _publish_progress()
+
+                    t = threading.Timer(delay_s, _deferred_flush)
+                    t.daemon = True
+                    flush_timer[0] = t
+                    t.start()
+            if should_publish:
+                _publish_progress()
+
+        with self._lock:
+            self._active_progress = {
+                "engine": engine,
+                "started": started_ts,
+                "steps": [],
+            }
+
+        def _build_final_progress() -> dict[str, Any] | None:
+            with progress_lock:
+                steps_copy = list(raw_steps)
+            # Drop trailing assistant text steps emitted after the last tool_use (the final reply itself).
+            while steps_copy and steps_copy[-1].get("kind") == "text":
+                steps_copy.pop()
+            if not steps_copy:
+                return None
+            duration_s = max(1, int(round(max(0.0, float(self.clock()) - started_ts))))
+            return {
+                "started": started_ts,
+                "duration_s": duration_s,
+                "step_count": len(steps_copy),
+                "steps": [{"t": s["t"], "text": s["text"]} for s in steps_copy[-MAX_PROGRESS_STEPS:]],
+            }
+
         try:
+            send_kwargs: dict[str, Any] = {"fresh": fresh}
             if attachments:
-                raw_reply = adapter.send(text, fresh=fresh, attachments=attachments)
-            else:
-                raw_reply = adapter.send(text, fresh=fresh)
+                send_kwargs["attachments"] = attachments
+            if self._adapter_accepts_on_step(adapter):
+                send_kwargs["on_step"] = on_step
+            raw_reply = adapter.send(text, **send_kwargs)
             reply = str(raw_reply or "").strip() or "(no response)"
-            self.store.append(
-                {
-                    "id": self._new_id(),
-                    "role": "assistant",
-                    "engine": engine,
-                    "text": reply,
-                    "created_at": float(self.clock()),
-                    "status": "done",
-                    "error": None,
-                    "reply_to": user_id,
-                }
-            )
+            final_progress = _build_final_progress()
+            msg_rec: dict[str, Any] = {
+                "id": self._new_id(),
+                "role": "assistant",
+                "engine": engine,
+                "text": reply,
+                "created_at": float(self.clock()),
+                "status": "done",
+                "error": None,
+                "reply_to": user_id,
+            }
+            if final_progress is not None:
+                msg_rec["progress"] = final_progress
+            self.store.append(msg_rec)
             self._push_reply(label, reply, is_error=False)
         except Exception as exc:
             err = _clip(str(exc) or type(exc).__name__, 300)
-            self.store.append(
-                {
-                    "id": self._new_id(),
-                    "role": "assistant",
-                    "engine": engine,
-                    "text": "",
-                    "created_at": float(self.clock()),
-                    "status": "error",
-                    "error": err,
-                    "reply_to": user_id,
-                }
-            )
+            final_progress = _build_final_progress()
+            msg_rec = {
+                "id": self._new_id(),
+                "role": "assistant",
+                "engine": engine,
+                "text": "",
+                "created_at": float(self.clock()),
+                "status": "error",
+                "error": err,
+                "reply_to": user_id,
+            }
+            if final_progress is not None:
+                msg_rec["progress"] = final_progress
+            self.store.append(msg_rec)
             self._push_reply(f"{label} · Error", err, is_error=True)
+        finally:
+            job_finished.set()
+            with progress_lock:
+                if flush_timer[0] is not None:
+                    flush_timer[0].cancel()
+                    flush_timer[0] = None
+            with self._lock:
+                self._active_progress = None
 
     def _push_reply(self, title: str, body: str, *, is_error: bool = False) -> bool:
         if self.notify is None:
@@ -1447,6 +1813,7 @@ class ChatManager:
             "messages": [_public_message(m) for m in messages],
             "engine": self._current_engine(),
             "running": self.is_running(),
+            "progress": self._snapshot_active_progress(),
             "has_more": has_more,
             "ts": int(self.clock()),
         }

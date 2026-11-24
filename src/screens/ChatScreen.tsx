@@ -8,6 +8,7 @@ import {
   Animated,
   AppState,
   Clipboard,
+  Easing,
   findNodeHandle,
   Image,
   Keyboard,
@@ -62,15 +63,20 @@ import {
   ChatCacheState,
   ChatEngine,
   ChatMessage,
+  ChatProgress,
+  ChatProgressStep,
   ChatReplyRef,
   computeAndroidKeyboardOffset,
   computeSwipeReplyOffset,
+  currentProgressStepText,
   extractPreviewUrl,
   findPrecedingUserMessage,
   formatAttachmentSize,
   formatChatTime,
   formatComposerChipLabel,
+  formatEngineLabel,
   formatMessagePreview,
+  formatProgressSummary,
   getReplyRef,
   isHttpUrl,
   isReplyableMessage,
@@ -95,13 +101,13 @@ const ANTHROPIC_ICON = require('../../assets/brand-anthropic.png');
 const GEMINI_ICON = require('../../assets/brand-gemini.png');
 const CACHE_AGENT_SETTINGS = 'agent:settings';
 const CACHE_AGENT_STATE = 'agent:state';
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 1000;
 const KEYBOARD_BREATHING_ROOM = 12;
 const MAX_ATTACHMENTS = 4;
 const COPY_TOAST_DURATION_MS = 1500;
 
-function engineLabel(engine: ChatEngine): string {
-  return engine === 'gemini' ? 'Gemini' : 'Claude';
+function engineLabel(engine?: ChatEngine | string | null): string {
+  return formatEngineLabel(engine);
 }
 
 function openExternalUrl(url: string): void {
@@ -633,50 +639,183 @@ function ChatSkeleton() {
   );
 }
 
-function TypingDots() {
+const SHIMMER_OUTER_W = 68;
+const SHIMMER_INNER_W = 34;
+
+function ShimmerText({ text }: { text: string }) {
   const t = useTheme();
-  const [dots] = useState(() => [new Animated.Value(0), new Animated.Value(0), new Animated.Value(0)]);
+  const [width, setWidth] = useState(180);
+  const [phase] = useState(() => new Animated.Value(0));
 
   useEffect(() => {
-    const loops: Animated.CompositeAnimation[] = [];
-    const timers = dots.map((dot, idx) =>
-      setTimeout(() => {
-        const loop = Animated.loop(
-          Animated.sequence([
-            Animated.timing(dot, { toValue: 1, duration: 360, useNativeDriver: true }),
-            Animated.timing(dot, { toValue: 0, duration: 360, useNativeDriver: true }),
-            Animated.delay(260),
-          ]),
-        );
-        loops.push(loop);
-        loop.start();
-      }, idx * 160),
+    phase.setValue(0);
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(phase, {
+          toValue: 1,
+          duration: 1400,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.delay(260),
+      ]),
     );
+    loop.start();
     return () => {
-      timers.forEach((id) => clearTimeout(id));
-      loops.forEach((loop) => loop.stop());
+      loop.stop();
     };
-  }, [dots]);
+  }, [phase]);
+
+  const span = Math.max(width, 64);
+  const outerStart = -SHIMMER_OUTER_W;
+  const outerEnd = span + 12;
+  const innerOffset = (SHIMMER_OUTER_W - SHIMMER_INNER_W) / 2;
+  const innerStart = outerStart + innerOffset;
+  const innerEnd = outerEnd + innerOffset;
+
+  const outerX = useMemo(
+    () => phase.interpolate({ inputRange: [0, 1], outputRange: [outerStart, outerEnd] }),
+    [phase, outerStart, outerEnd],
+  );
+  const outerCounterX = useMemo(
+    () => phase.interpolate({ inputRange: [0, 1], outputRange: [-outerStart, -outerEnd] }),
+    [phase, outerStart, outerEnd],
+  );
+  const innerX = useMemo(
+    () => phase.interpolate({ inputRange: [0, 1], outputRange: [innerStart, innerEnd] }),
+    [phase, innerStart, innerEnd],
+  );
+  const innerCounterX = useMemo(
+    () => phase.interpolate({ inputRange: [0, 1], outputRange: [-innerStart, -innerEnd] }),
+    [phase, innerStart, innerEnd],
+  );
+
+  const onTextLayout = useCallback((e: LayoutChangeEvent) => {
+    const measured = Math.ceil(e.nativeEvent.layout.width);
+    if (measured > 0) {
+      setWidth((prev) => (Math.abs(prev - measured) > 1 ? measured : prev));
+    }
+  }, []);
 
   return (
-    <View style={st.typingRow} accessible accessibilityLabel="Assistant is typing">
-      {dots.map((dot, idx) => (
-        <Animated.View
-          key={idx}
-          style={[
-            st.typingDot,
-            {
-              backgroundColor: t.accent,
-              opacity: dot.interpolate({ inputRange: [0, 1], outputRange: [0.28, 0.9] }),
-              transform: [
-                {
-                  translateY: dot.interpolate({ inputRange: [0, 1], outputRange: [0, -2.5] }),
-                },
-              ],
-            },
-          ]}
-        />
+    <View style={st.shimmerWrap} onLayout={onTextLayout}>
+      <Text numberOfLines={1} style={[st.shimmerText, { color: t.textDim }]}>
+        {text}
+      </Text>
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          st.shimmerBand,
+          { width: SHIMMER_OUTER_W, transform: [{ translateX: outerX }] },
+        ]}
+      >
+        <Animated.View style={{ width: span, transform: [{ translateX: outerCounterX }] }}>
+          <Text
+            numberOfLines={1}
+            accessibilityElementsHidden
+            importantForAccessibility="no"
+            style={[st.shimmerText, { color: t.text, opacity: 0.45 }]}
+          >
+            {text}
+          </Text>
+        </Animated.View>
+      </Animated.View>
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          st.shimmerBand,
+          { width: SHIMMER_INNER_W, transform: [{ translateX: innerX }] },
+        ]}
+      >
+        <Animated.View style={{ width: span, transform: [{ translateX: innerCounterX }] }}>
+          <Text
+            numberOfLines={1}
+            accessibilityElementsHidden
+            importantForAccessibility="no"
+            style={[st.shimmerText, { color: t.text }]}
+          >
+            {text}
+          </Text>
+        </Animated.View>
+      </Animated.View>
+    </View>
+  );
+}
+
+function ProgressStepList({ steps }: { steps: ChatProgressStep[] }) {
+  const t = useTheme();
+  if (steps.length === 0) return null;
+  return (
+    <View style={[st.progressList, { borderLeftColor: t.border }]}>
+      {steps.map((step, idx) => (
+        <View key={`${step.t}-${idx}`} style={st.progressStepRow}>
+          <View style={[st.progressStepDot, { backgroundColor: t.textFaint }]} />
+          <Text style={[st.progressStepText, { color: t.textDim }]}>{step.text}</Text>
+        </View>
       ))}
+    </View>
+  );
+}
+
+function ThinkingProgressContent({ progress }: { progress?: ChatProgress | null }) {
+  const t = useTheme();
+  const [expanded, setExpanded] = useState(false);
+  const steps = progress?.steps ?? [];
+  const hasSteps = steps.length > 0;
+  const currentStep = currentProgressStepText(progress);
+
+  if (!hasSteps) {
+    return (
+      <View style={st.thinkingRow} accessible accessibilityLabel={currentStep}>
+        <ShimmerText text={currentStep} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={st.thinkingWrap}>
+      <Pressable
+        onPress={() => setExpanded((v) => !v)}
+        accessibilityRole="button"
+        accessibilityLabel={`${currentStep}. ${expanded ? 'Hide' : 'Show'} ${steps.length} steps`}
+        style={({ pressed }) => [st.thinkingRow, pressed && { opacity: 0.78 }]}
+      >
+        <View style={st.thinkingTextFlex}>
+          <ShimmerText text={currentStep} />
+        </View>
+        <Icon
+          name={expanded ? 'chevron-up' : 'chevron-down'}
+          size={15}
+          color={t.textFaint}
+        />
+      </Pressable>
+      {expanded ? <ProgressStepList steps={steps} /> : null}
+    </View>
+  );
+}
+
+function CompletedProgressBlock({ progress }: { progress: ChatProgress }) {
+  const t = useTheme();
+  const [expanded, setExpanded] = useState(false);
+  const summary = formatProgressSummary(progress);
+  if (!summary) return null;
+
+  return (
+    <View style={st.completedProgressWrap}>
+      <Pressable
+        onPress={() => setExpanded((v) => !v)}
+        accessibilityRole="button"
+        accessibilityLabel={`${summary}. ${expanded ? 'Hide' : 'Show'} steps`}
+        style={({ pressed }) => [st.completedProgressRow, pressed && { opacity: 0.75 }]}
+      >
+        <Text style={[st.completedProgressText, { color: t.textDim }]}>{summary}</Text>
+        <Icon
+          name={expanded ? 'chevron-down' : 'chevron-right'}
+          size={14}
+          color={t.textFaint}
+        />
+      </Pressable>
+      {expanded ? <ProgressStepList steps={progress.steps} /> : null}
     </View>
   );
 }
@@ -968,8 +1107,10 @@ const MessageBubble = React.memo(function MessageBubble({
           />
         ) : null}
 
+        {!isPending && !isUser && msg.progress ? <CompletedProgressBlock progress={msg.progress} /> : null}
+
         {isPending ? (
-          <TypingDots />
+          <ThinkingProgressContent progress={msg.progress} />
         ) : isError ? (
           <>
             <Text selectable style={[st.errorText, { color: t.bad }]}>
@@ -1037,6 +1178,7 @@ export default function ChatScreen() {
   const [engine, setEngine] = useState<ChatEngine>(() => cached?.engine ?? 'claude');
   const [hasMore, setHasMore] = useState<boolean>(() => cached?.has_more ?? false);
   const [running, setRunning] = useState(false);
+  const [activeProgress, setActiveProgress] = useState<ChatProgress | null>(null);
   const [loadingInitial, setLoadingInitial] = useState(() => !cached);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [sending, setSending] = useState(false);
@@ -1260,6 +1402,7 @@ export default function ChatScreen() {
         if (!mountedRef.current) return;
         setEngine(res.engine);
         setRunning(res.running);
+        setActiveProgress(res.running ? (res.progress ?? null) : null);
         setHasMore(res.has_more);
         setMessages((prev) => {
           const next = mergeChatMessages(prev, res.messages);
@@ -1642,6 +1785,7 @@ export default function ChatScreen() {
       sendingRef.current = true;
       setSending(true);
       setRunning(true);
+      setActiveProgress({ engine, started: nowSec, steps: [] });
       nearBottomRef.current = true;
       setShowScrollDown(false);
       setMessages((prev) => [...prev, optUser]);
@@ -1673,6 +1817,7 @@ export default function ChatScreen() {
           }
         }
         setRunning(false);
+        setActiveProgress(null);
         setErr((e as Error).message || 'Failed to send message');
       } finally {
         sendingRef.current = false;
@@ -1894,7 +2039,8 @@ export default function ChatScreen() {
     return `Switch model and effort: ${provider}, ${summary}`;
   }, [engine, agentSettings]);
 
-  const showTypingIndicator = running || sending;
+  const hasPendingMsg = useMemo(() => messages.some((m) => m.status === 'pending'), [messages]);
+  const showTypingIndicator = (running || sending) && !hasPendingMsg;
   const canSend = (draft.trim().length > 0 || pendingAttachments.length > 0) && !sending && uploadingCount === 0;
 
   const keyExtractor = useCallback((item: ChatMessage) => item.id, []);
@@ -1952,11 +2098,16 @@ export default function ChatScreen() {
       showTypingIndicator ? (
         <View style={[st.bubbleRow, st.bubbleRowAssistant, st.typingFooter]}>
           <View style={[st.bubble, st.bubbleAssistant, { backgroundColor: t.card }]}>
-            <TypingDots />
+            <View style={st.engineRow}>
+              <Text style={[st.engineTag, { color: t.textDim }]}>
+                {engineLabel(activeProgress?.engine ?? engine)}
+              </Text>
+            </View>
+            <ThinkingProgressContent progress={activeProgress} />
           </View>
         </View>
       ) : null,
-    [showTypingIndicator, t.card],
+    [showTypingIndicator, activeProgress, engine, t.card, t.textDim],
   );
 
   const listEmpty = useMemo(
@@ -2779,8 +2930,77 @@ const st = StyleSheet.create({
     fontSize: 12.5,
     fontWeight: '500',
   },
-  typingRow: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 5, paddingHorizontal: 2 },
-  typingDot: { width: 7, height: 7, borderRadius: 3.5 },
+  shimmerWrap: {
+    position: 'relative',
+    overflow: 'hidden',
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
+  },
+  shimmerBand: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    overflow: 'hidden',
+  },
+  shimmerText: {
+    fontSize: 13.5,
+    lineHeight: 19,
+    fontWeight: '400',
+  },
+  thinkingWrap: {
+    gap: 6,
+  },
+  thinkingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 2,
+  },
+  thinkingTextFlex: {
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  completedProgressWrap: {
+    marginBottom: 4,
+    gap: 5,
+  },
+  completedProgressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 3,
+    paddingVertical: 1,
+  },
+  completedProgressText: {
+    fontSize: 12.5,
+    fontWeight: '500',
+    fontVariant: ['tabular-nums'],
+  },
+  progressList: {
+    borderLeftWidth: 1.5,
+    paddingLeft: 9,
+    marginLeft: 2,
+    gap: 4,
+    paddingVertical: 2,
+  },
+  progressStepRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+  },
+  progressStepDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    marginTop: 6.5,
+    flexShrink: 0,
+  },
+  progressStepText: {
+    flex: 1,
+    fontSize: 12.5,
+    lineHeight: 17,
+  },
   typingFooter: { paddingTop: space(2.5) },
   errorText: { fontSize: 14, lineHeight: 20 },
   errorFooter: {

@@ -1641,6 +1641,106 @@ class AgentUsageAndSettingsHttpTests(unittest.TestCase):
         self.assertTrue(bg_started.wait(timeout=2.0))
         unblock.set()
 
+    def test_claude_signed_in_resilience_and_429_preserves_unexpired_usage(self):
+        # 1. _normalize_usage_report honors explicit signed_in and falls back to email/creds on transient error
+        creds_path = os.path.join(self.dir, "claude-creds.json")
+        with open(creds_path, "w") as f:
+            json.dump({"claudeAiOauth": {"accessToken": "tok-abc"}}, f)
+        missing_cfg = os.path.join(self.dir, "no-claude.json")
+        missing_creds = os.path.join(self.dir, "no-creds.json")
+
+        # Omitted signed_in + error, but creds exist -> signed_in=True
+        accs, _ = pcapi._normalize_usage_report(
+            {"claude": {"error": "Anthropic HTTP 429: rate_limit_error"}},
+            claude_config_path=missing_cfg,
+            claude_creds_path=creds_path,
+        )
+        self.assertTrue(accs[0]["signed_in"])
+
+        # Omitted signed_in + error, email exists (even without creds) -> signed_in=True
+        accs_email, _ = pcapi._normalize_usage_report(
+            {"claude": {"error": "Anthropic HTTP 429: rate_limit_error"}},
+            claude_config_path=self.claude_cfg,
+            claude_creds_path=missing_creds,
+        )
+        self.assertTrue(accs_email[0]["signed_in"])
+        self.assertEqual(accs_email[0]["email"], "claude@example.com")
+
+        # Omitted signed_in + error, neither email nor creds -> signed_in=False
+        accs_none, _ = pcapi._normalize_usage_report(
+            {"claude": {"error": "Anthropic HTTP 401"}},
+            claude_config_path=missing_cfg,
+            claude_creds_path=missing_creds,
+        )
+        self.assertFalse(accs_none[0]["signed_in"])
+
+        # Explicit signed_in=False (e.g. revoked) is honored even when email/creds exist
+        accs_revoked, _ = pcapi._normalize_usage_report(
+            {"claude": {"signed_in": False, "error": "invalid_grant"}},
+            claude_config_path=self.claude_cfg,
+            claude_creds_path=creds_path,
+        )
+        self.assertFalse(accs_revoked[0]["signed_in"])
+
+        # 2. AgentUsageManager preserves unexpired Claude windows on 429 with null windows
+        self.usage_report["claude"] = {
+            "account": "claude@example.com",
+            "signed_in": True,
+            "five_hour": {"remaining_pct": 82.0, "used_pct": 18.0, "resets_at": "2099-01-01T05:00:00Z"},
+            "weekly": {"remaining_pct": 71.0, "used_pct": 29.0, "resets_at": "2099-01-07T00:00:00Z"},
+        }
+        code, r1 = self.call("GET", "/pc/api/agent/usage?refresh=1")
+        self.assertEqual(code, 200)
+        c1 = next(a for a in r1["accounts"] if a["id"] == "claude")
+        self.assertTrue(c1["signed_in"])
+        self.assertEqual(c1["five_hour"]["remaining_pct"], 82.0)
+
+        # Now ai-usage returns a 429 error with five_hour=None, weekly=None
+        self.usage_report["claude"] = {
+            "signed_in": True,
+            "rate_limited": True,
+            "retry_after_s": 3600,
+            "status": "Rate limited (retry in 1h)",
+            "error": "Anthropic HTTP 429 (retry in 1h)",
+            "five_hour": None,
+            "weekly": None,
+        }
+        code, r2 = self.call("GET", "/pc/api/agent/usage?refresh=1")
+        self.assertEqual(code, 200)
+        c2 = next(a for a in r2["accounts"] if a["id"] == "claude")
+        self.assertTrue(c2["signed_in"])
+        self.assertTrue(c2["stale"])
+        self.assertTrue(c2["rate_limited"])
+        self.assertEqual(c2["status"], "Rate limited (retry in 1h)")
+        self.assertIsNone(c2["error"])
+        self.assertEqual(c2["five_hour"]["remaining_pct"], 82.0)
+        self.assertEqual(c2["weekly"]["remaining_pct"], 71.0)
+
+        # 3. If previous windows are expired, don't revive them; keep signed_in=True & clean error/status
+        self.usage_report["claude"] = {
+            "account": "claude@example.com",
+            "signed_in": True,
+            "five_hour": {"remaining_pct": 10.0, "used_pct": 90.0, "resets_at": "2020-01-01T00:00:00Z"},
+            "weekly": {"remaining_pct": 20.0, "used_pct": 80.0, "resets_at": "2020-01-02T00:00:00Z"},
+        }
+        self.assertEqual(self.call("GET", "/pc/api/agent/usage?refresh=1")[0], 200)
+        self.usage_report["claude"] = {
+            "signed_in": True,
+            "rate_limited": True,
+            "status": "Rate limited (retry in 1h)",
+            "error": "Anthropic HTTP 429 (retry in 1h)",
+            "five_hour": None,
+            "weekly": None,
+        }
+        code, r3 = self.call("GET", "/pc/api/agent/usage?refresh=1")
+        self.assertEqual(code, 200)
+        c3 = next(a for a in r3["accounts"] if a["id"] == "claude")
+        self.assertTrue(c3["signed_in"])
+        self.assertIsNone(c3["five_hour"])
+        self.assertIsNone(c3["weekly"])
+        self.assertEqual(c3["status"], "Rate limited (retry in 1h)")
+        self.assertEqual(c3["error"], "Anthropic HTTP 429 (retry in 1h)")
+
     def test_settings_get_update_validation_and_fresh_flag(self):
         # Populate cached emails first
         self.assertEqual(self.call("GET", "/pc/api/agent/usage")[0], 200)

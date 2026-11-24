@@ -1488,6 +1488,9 @@ T3_PROVIDERS_DIR = os.environ.get(
     "PCAPI_T3_PROVIDERS_DIR", os.path.join(HOME, ".t3", "userdata", "providers", "antigravity")
 )
 CLAUDE_CONFIG_FILE = os.environ.get("PCAPI_CLAUDE_CONFIG", os.path.join(HOME, ".claude.json"))
+CLAUDE_CREDS_FILE = os.environ.get(
+    "PCAPI_CLAUDE_CREDS", os.path.join(HOME, ".claude", ".credentials.json")
+)
 AGENT_USAGE_CACHE_FILE = os.environ.get(
     "PCAPI_AGENT_USAGE_CACHE", os.path.join(HOME, ".cache", "pc-api", "agent-usage.json")
 )
@@ -1545,6 +1548,57 @@ def _read_claude_email(claude_config_path=None):
     oa = raw.get("oauthAccount") if isinstance(raw, dict) else None
     email = oa.get("emailAddress") if isinstance(oa, dict) else None
     return email.strip() if isinstance(email, str) and email.strip() else None
+
+
+def _claude_has_credentials(claude_creds_path=None):
+    p = claude_creds_path if claude_creds_path is not None else CLAUDE_CREDS_FILE
+    raw = _read_json_file(os.path.expanduser(p))
+    oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
+    if not isinstance(oauth, dict):
+        return False
+    return bool(
+        str(oauth.get("accessToken") or "").strip()
+        or str(oauth.get("refreshToken") or "").strip()
+    )
+
+
+def _parse_iso_utc(ts):
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        iso = ts.strip()
+        if iso.endswith("Z"):
+            iso = iso[:-1] + "+00:00"
+        dt = datetime.datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc)
+    except ValueError:
+        return None
+
+
+def _window_is_unexpired(win, now_dt=None):
+    if not isinstance(win, dict):
+        return False
+    if win.get("remaining_pct") is None and win.get("used_pct") is None:
+        return False
+    resets_at = win.get("resets_at")
+    if isinstance(resets_at, str) and resets_at.strip():
+        reset_dt = _parse_iso_utc(resets_at)
+        if reset_dt is not None:
+            ref = now_dt or datetime.datetime.now(datetime.timezone.utc)
+            if reset_dt <= ref:
+                return False
+    return True
+
+
+def _is_rate_limit_error(acc):
+    if not isinstance(acc, dict):
+        return False
+    if acc.get("rate_limited"):
+        return True
+    text = f"{acc.get('error') or ''} {acc.get('status') or ''}".lower()
+    return "429" in text or "rate limit" in text or "rate_limit" in text
 
 
 def _list_t3_antigravity_instances(t3_settings_path=None, t3_providers_dir=None, email_map=None):
@@ -1619,7 +1673,7 @@ def _normalize_usage_window(win):
     }
 
 
-def _normalize_usage_report(raw, claude_config_path=None):
+def _normalize_usage_report(raw, claude_config_path=None, claude_creds_path=None):
     accounts = []
     emails = {}
     agy_accounts = raw.get("antigravity_accounts")
@@ -1665,12 +1719,13 @@ def _normalize_usage_report(raw, claude_config_path=None):
     claude = raw.get("claude")
     if isinstance(claude, dict):
         c_email = claude.get("account") or _read_claude_email(claude_config_path)
-        c_signed_in = (
-            bool(claude["signed_in"])
-            if "signed_in" in claude
-            else not bool(claude.get("error"))
-        )
-        accounts.append({
+        if "signed_in" in claude:
+            c_signed_in = bool(claude["signed_in"])
+        elif not claude.get("error"):
+            c_signed_in = True
+        else:
+            c_signed_in = bool(c_email) or _claude_has_credentials(claude_creds_path)
+        c_acc = {
             "id": "claude",
             "harness": "claude",
             "label": "Claude",
@@ -1680,7 +1735,14 @@ def _normalize_usage_report(raw, claude_config_path=None):
             "error": claude.get("error"),
             "five_hour": _normalize_usage_window(claude.get("five_hour")),
             "weekly": _normalize_usage_window(claude.get("weekly")),
-        })
+        }
+        if claude.get("stale"):
+            c_acc["stale"] = True
+        if claude.get("rate_limited"):
+            c_acc["rate_limited"] = True
+        if claude.get("retry_after_s") is not None:
+            c_acc["retry_after_s"] = claude.get("retry_after_s")
+        accounts.append(c_acc)
 
     oc = raw.get("opencode")
     if isinstance(oc, dict):
@@ -1754,12 +1816,13 @@ class AgentUsageManager:
     """Query ~/remote-pc/bin/ai-usage --json with disk persistence and stale-while-revalidate."""
 
     def __init__(self, script=None, run_fn=None, clock=time.monotonic, ttl=AGENT_USAGE_CACHE_TTL,
-                 claude_config_path=None, cache_path=None, on_update=None):
+                 claude_config_path=None, claude_creds_path=None, cache_path=None, on_update=None):
         self.script = script
         self.run_fn = run_fn
         self.clock = clock
         self.ttl = ttl
         self.claude_config_path = claude_config_path
+        self.claude_creds_path = claude_creds_path
         self.cache_path = cache_path
         self.on_update = on_update
         self.lock = threading.Lock()
@@ -1852,7 +1915,42 @@ class AgentUsageManager:
             if not isinstance(raw, dict):
                 return 502, {"error": "ai-usage JSON must be an object"}
 
-            accounts, emails = _normalize_usage_report(raw, self.claude_config_path)
+            accounts, emails = _normalize_usage_report(raw, self.claude_config_path, self.claude_creds_path)
+            with self.lock:
+                prev_cached = self._cached
+            prev_claude = None
+            if isinstance(prev_cached, dict) and isinstance(prev_cached.get("accounts"), list):
+                prev_claude = next(
+                    (a for a in prev_cached["accounts"]
+                     if isinstance(a, dict) and (a.get("id") == "claude" or a.get("harness") == "claude")),
+                    None,
+                )
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+            for acc in accounts:
+                if not isinstance(acc, dict) or (acc.get("id") != "claude" and acc.get("harness") != "claude"):
+                    continue
+                if acc.get("five_hour") is None and acc.get("weekly") is None and _is_rate_limit_error(acc):
+                    if prev_claude is not None and prev_claude.get("signed_in"):
+                        acc["signed_in"] = True
+                    if prev_claude is not None:
+                        prev_fh = (
+                            prev_claude.get("five_hour")
+                            if _window_is_unexpired(prev_claude.get("five_hour"), now_dt)
+                            else None
+                        )
+                        prev_wk = (
+                            prev_claude.get("weekly")
+                            if _window_is_unexpired(prev_claude.get("weekly"), now_dt)
+                            else None
+                        )
+                        if prev_fh is not None or prev_wk is not None:
+                            acc["five_hour"] = prev_fh
+                            acc["weekly"] = prev_wk
+                            acc["stale"] = True
+                            acc["rate_limited"] = True
+                            if not acc.get("status"):
+                                acc["status"] = acc.get("error") or "Rate limited"
+                            acc["error"] = None
             payload = {
                 "ts": int(time.time()),
                 "cached": False,

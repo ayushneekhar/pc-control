@@ -30,7 +30,7 @@ const NATIVE: Record<string, string> = { '/cams/': 'Cams', '/agentview': 'AgentV
 
 /** Phone-side names for routes that open a native screen. */
 const TILE: Record<string, Partial<Pick<Route, 'name' | 'icon'>>> = {
-  '/agentview': { name: 'Agent view', icon: 'robot-outline' },
+  '/agentview': { name: 'Agent view', icon: 'robot' },
 };
 
 type DetState = {
@@ -112,7 +112,7 @@ function CameraTile({
         <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" fadeDuration={0} />
       ) : failed ? (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-          <Icon name="video-off-outline" size={20} color={t.onMediaDim} />
+          <Icon name="video-off" size={20} color={t.onMediaDim} />
         </View>
       ) : (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
@@ -379,7 +379,7 @@ export default function RoutesScreen() {
       ) : null}
 
       {keyring.status?.locked ? (
-        <Banner tone="warn" icon="lock-outline" title="Keyring locked: RDP unavailable">
+        <Banner tone="warn" icon="lock" title="Keyring locked: RDP unavailable">
           <Text style={{ color: t.textDim, fontSize: 13.5, lineHeight: 19 }}>
             Unlock the laptop’s login keyring to restart remote desktop ({keyring.status.rdp}).
           </Text>
@@ -388,7 +388,7 @@ export default function RoutesScreen() {
           ) : null}
           <Button
             label={keyring.hasSaved ? 'Unlock (fingerprint)' : 'Unlock'}
-            icon={keyring.hasSaved ? 'fingerprint' : 'lock-open-outline'}
+            icon={keyring.hasSaved ? 'fingerprint' : 'lock-open'}
             compact
             busy={keyring.busy}
             style={{ alignSelf: 'flex-start', marginTop: 8 }}
@@ -396,7 +396,7 @@ export default function RoutesScreen() {
           />
         </Banner>
       ) : keyring.notice ? (
-        <Banner tone="ok" icon="lock-open-outline" title={keyring.notice}>
+        <Banner tone="ok" icon="lock-open" title={keyring.notice}>
           <Button label="Dismiss" compact kind="subtle" style={{ alignSelf: 'flex-start', marginTop: 4 }} onPress={clearKeyringFeedback} />
         </Banner>
       ) : null}
@@ -472,13 +472,13 @@ export default function RoutesScreen() {
             );
           })}
           <ListRow
-            icon="movie-search-outline"
+            icon="movie-search"
             title="Seerr"
             chevron
             onPress={() => nav.navigate('Seerr')}
           />
           <ListRow
-            icon="download-outline"
+            icon="download"
             title="Downloads"
             subtitle={hasDownloads ? `${active.length} active · ${rate(total?.speed ?? 0)}` : undefined}
             trailing={

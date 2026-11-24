@@ -22,13 +22,13 @@ Radius: 16 for cards/lists, 12 small, 999 pills. Spacing 4-pt grid; screen side 
 
 ## Components (src/components/ui.tsx)
 - Card: surface fill, NO border, radius 16.
-- List / ListRow (new): rows inside one surface card separated by hairlines; row = 20px outline icon (textDim) · title 15/500 · subtitle 12.5 textFaint · trailing value or chevron "›" textFaint. Min height 56. Ripple subtle.
+- List / ListRow (new): rows inside one surface card separated by hairlines; row = 20px filled icon (textDim) · title 15/500 · subtitle 12.5 textFaint · trailing value or chevron "›" textFaint. Min height 56. Ripple subtle.
 - Stat strip (new): 3 equal columns in one card, divided by hairlines: label 11.5 textFaint, value 20/500 tabular.
 - Pill: small, soft background, no dot unless it's a status.
 - Button: primary = accent bg + black text; subtle = surfaceRaised + text; danger = badSoft + bad text. Height 44, radius 12.
 - Segmented control (new): surface track, raised selected segment.
 - Status dot: 7px circle (ok/warn/bad/faint).
-- Icons: MaterialCommunityIcons OUTLINE variants only, monochrome (textDim; text when active). No coloured icon squares.
+- Icons: MaterialCommunityIcons FILLED variants (except unchecked checkboxes), monochrome (textDim; text when active). No coloured icon squares.
 
 ## Navigation
 Bottom tabs: Home, Vitals, Services, Root, Settings. Bar bg = bg, hairline top border, height ~68. Active tab: icon in accentSoft pill (64x30), icon colour accent, label text colour; inactive: textFaint. Labels 11 / 500.

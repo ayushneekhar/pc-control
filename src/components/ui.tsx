@@ -17,11 +17,16 @@ import { radius, screenPad, space, Theme, useTheme } from '../theme';
 
 export type IconName = React.ComponentProps<typeof MaterialCommunityIcons>['name'];
 
-/** Monochrome outline glyphs only; a filled name falls back to its -outline sibling when there is one. */
+const KEEP_OUTLINE = new Set(['checkbox-blank-outline']);
+
+/** Monochrome filled glyphs; strips -outline when a filled sibling exists (except empty checkboxes). */
 export function Icon({ name, size = 20, color }: { name: string; size?: number; color?: string }) {
   const t = useTheme();
-  const outline = `${name}-outline`;
-  const usable = outline in MaterialCommunityIcons.glyphMap ? outline : name;
+  let usable = name;
+  if (name.endsWith('-outline') && !KEEP_OUTLINE.has(name)) {
+    const filled = name.slice(0, -'-outline'.length);
+    if (filled in MaterialCommunityIcons.glyphMap) usable = filled;
+  }
   const n = (usable in MaterialCommunityIcons.glyphMap ? usable : 'web') as IconName;
   return <MaterialCommunityIcons name={n} size={size} color={color ?? t.textDim} />;
 }
@@ -321,7 +326,7 @@ export function StatusRing({ tone = 'ok', icon }: { tone?: Tone; icon?: string }
   const [fg] = toneColors(t, tone);
   return (
     <View style={[styles.ring, { borderColor: fg }]}>
-      <Icon name={icon ?? (tone === 'bad' ? 'alert-outline' : tone === 'warn' ? 'alert-outline' : 'check')} size={18} color={fg} />
+      <Icon name={icon ?? (tone === 'bad' ? 'alert' : tone === 'warn' ? 'alert' : 'check')} size={18} color={fg} />
     </View>
   );
 }

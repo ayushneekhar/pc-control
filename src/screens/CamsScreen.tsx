@@ -613,7 +613,7 @@ function CamCard({
       {showMsg && !compact ? (
         <View style={st.msg} pointerEvents="none">
           {state.phase === "error" ? (
-            <Icon name="video-off-outline" size={28} color={t.onMediaDim} />
+            <Icon name="video-off" size={28} color={t.onMediaDim} />
           ) : (
             <ActivityIndicator color={t.onMediaDim} />
           )}
@@ -1021,7 +1021,7 @@ export default function CamsScreen() {
     <>
       <View style={st.tr}>
         <IconBtn
-          icon="camera-outline"
+          icon="camera"
           label="Save snapshot"
           busy={snapBusy === id}
           onPress={() => snapshot(id)}
@@ -1392,7 +1392,7 @@ export default function CamsScreen() {
                 run: () => openWeb(tab === "live" ? "" : "#" + tab),
               },
               {
-                icon: "shield-check-outline",
+                icon: "shield-check",
                 label: safeMode
                   ? "Leave safe mode"
                   : "Safe mode (WebRTC defaults)",
@@ -1461,7 +1461,7 @@ function Toast({
       style={[st.toast, { bottom, opacity: toast.op, backgroundColor: t.card }]}
       pointerEvents="box-none"
     >
-      <Icon name="information-outline" size={18} color={t.accent} />
+      <Icon name="information" size={18} color={t.accent} />
       <Text style={{ color: t.text, fontSize: 13.5, flexShrink: 1 }}>
         {toast.msg.text}
       </Text>

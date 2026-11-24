@@ -100,7 +100,7 @@ function AgentRow() {
   return (
     <List>
       <ListRow
-        icon="robot-outline"
+        icon="robot"
         title="Agent"
         subtitle={
           status ? (
@@ -234,7 +234,7 @@ function TorrentVpn() {
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <Icon name="shield-lock-outline" size={22} color={down || noPort ? t.warn : enabled ? t.accent : t.textDim} />
+        <Icon name="shield-lock" size={22} color={down || noPort ? t.warn : enabled ? t.accent : t.textDim} />
         <View style={{ flex: 1 }}>
           <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Torrent VPN</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -434,7 +434,7 @@ function Enrollment() {
         ) : (
           <Button label="Cancel" kind="subtle" style={{ flex: 1 }} onPress={() => setPhase({ kind: 'idle' })} />
         )}
-        {key ? <Button label="Remove" kind="danger" icon="delete-outline" onPress={remove} /> : null}
+        {key ? <Button label="Remove" kind="danger" icon="delete" onPress={remove} /> : null}
       </View>
     </Card>
   );
@@ -508,7 +508,7 @@ function KeyringCard() {
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <Icon name={locked ? 'lock-outline' : 'key-outline'} size={22} color={locked ? t.warn : keyring.hasSaved ? t.ok : t.textDim} />
+        <Icon name={locked ? 'lock' : 'key'} size={22} color={locked ? t.warn : keyring.hasSaved ? t.ok : t.textDim} />
         <View style={{ flex: 1 }}>
           <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Keyring</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -516,7 +516,7 @@ function KeyringCard() {
             <Text style={{ color: t.textDim, fontSize: 13 }}>{subtitle}</Text>
           </View>
         </View>
-        {locked ? <Pill tone="warn" icon="lock-outline" label="Locked" /> : keyring.hasSaved ? <Pill tone="ok" icon="fingerprint" label="Saved" /> : null}
+        {locked ? <Pill tone="warn" icon="lock" label="Locked" /> : keyring.hasSaved ? <Pill tone="ok" icon="fingerprint" label="Saved" /> : null}
       </View>
 
       <View>
@@ -569,7 +569,7 @@ function KeyringCard() {
           {locked ? (
             <Button
               label={keyring.hasSaved ? 'Unlock (fingerprint)' : 'Unlock'}
-              icon={keyring.hasSaved ? 'fingerprint' : 'lock-open-outline'}
+              icon={keyring.hasSaved ? 'fingerprint' : 'lock-open'}
               busy={keyring.busy}
               onPress={() => void onUnlock()}
             />
@@ -588,7 +588,7 @@ function KeyringCard() {
                 }}
               />
               {keyring.hasSaved ? (
-                <Button label="Forget" kind="danger" icon="delete-outline" disabled={keyring.busy} onPress={onForget} />
+                <Button label="Forget" kind="danger" icon="delete" disabled={keyring.busy} onPress={onForget} />
               ) : null}
             </View>
           ) : (
@@ -774,7 +774,7 @@ function NotificationPrefs() {
           pressed && { opacity: 0.8 },
         ]}
       >
-        <Icon name="bell-cog-outline" size={22} color={t.accent} />
+        <Icon name="bell-cog" size={22} color={t.accent} />
         <View style={{ flex: 1 }}>
           <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Where notifications go</Text>
         </View>
@@ -793,7 +793,7 @@ function NotificationPrefs() {
       <View style={[st.masters, { backgroundColor: t.cardAlt }]}>
         {(['telegram', 'app'] as Channel[]).map((ch) => (
           <View key={ch} style={st.master}>
-            <Icon name={ch === 'telegram' ? 'send-outline' : 'cellphone'} size={18} color={s.masters[ch] ? t.accent : t.textFaint} />
+            <Icon name={ch === 'telegram' ? 'send' : 'cellphone'} size={18} color={s.masters[ch] ? t.accent : t.textFaint} />
             <View style={{ flex: 1 }}>
               <Text style={{ color: t.text, fontWeight: '600', fontSize: 14 }}>{ch === 'telegram' ? 'Telegram' : 'App'}</Text>
               <Text style={{ color: t.textFaint, fontSize: 11.5 }}>
@@ -871,7 +871,7 @@ function Updates() {
       </View>
 
       {otaReady ? (
-        <Banner tone="accent" icon="cloud-download-outline" title={`JS update ${ota.check?.remoteVersion} available`}>
+        <Banner tone="accent" icon="cloud-download" title={`JS update ${ota.check?.remoteVersion} available`}>
           {ota.phase === 'ready' ? 'Downloaded. It applies the next time the app starts.' : ota.check?.metadata?.releaseNotes ?? ''}
         </Banner>
       ) : null}
@@ -1033,7 +1033,7 @@ function KeyboardLockCard() {
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <Icon name={enabled ? 'keyboard-off-outline' : 'keyboard-outline'} size={22} color={enabled ? t.accent : t.textDim} />
+        <Icon name={enabled ? 'keyboard-off' : 'keyboard'} size={22} color={enabled ? t.accent : t.textDim} />
         <View style={{ flex: 1 }}>
           <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Keyboard lock</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>

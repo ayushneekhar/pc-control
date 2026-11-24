@@ -83,7 +83,7 @@ function Unavailable({ label, error }: { label: string; error?: string }) {
   const t = useTheme();
   return (
     <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-      <Icon name="cloud-off-outline" size={20} color={t.textFaint} />
+      <Icon name="cloud-off" size={20} color={t.textFaint} />
       <View style={{ flex: 1 }}>
         <Text style={{ color: t.text, fontWeight: '500', fontSize: 14 }}>{label} unavailable</Text>
         <Text style={{ color: t.textFaint, fontSize: 12.5 }}>{error || 'No answer from the laptop'}</Text>
@@ -168,7 +168,7 @@ function ArrRow({ label, q, last }: { label: string; q: ArrQueue; last?: boolean
         <View style={{ gap: 3, paddingBottom: space(1) }}>
           {(q.items ?? []).slice(0, 3).map((x, i) => (
             <View key={`${x.title}-${i}`} style={{ flexDirection: 'row', gap: space(2) }}>
-              <Icon name="alert-outline" size={14} color={t.bad} />
+              <Icon name="alert" size={14} color={t.bad} />
               <View style={{ flex: 1 }}>
                 <Text style={{ color: t.text, fontSize: 12.5 }} numberOfLines={1}>
                   {x.title}
@@ -262,7 +262,7 @@ export default function HealthScreen({
       {h ? (
         <Card style={{ gap: space(3) }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3.5) }}>
-            <StatusRing tone={summaryTone} icon={problems.length ? 'alert-outline' : 'check'} />
+            <StatusRing tone={summaryTone} icon={problems.length ? 'alert' : 'check'} />
             <Text style={{ color: t.text, fontSize: 16, fontWeight: '600', flex: 1 }}>
               {problems.length
                 ? `${problems.length} problem${problems.length === 1 ? '' : 's'}`
@@ -357,7 +357,7 @@ export default function HealthScreen({
                 style={[st.stream, i > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.border }]}
               >
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2), flexWrap: 'wrap' }}>
-                  <Icon name="account-outline" size={16} color={t.textDim} />
+                  <Icon name="account" size={16} color={t.textDim} />
                   <Text style={{ color: t.text, fontSize: 13.5, fontWeight: '500' }}>{s.user}</Text>
                   <Pill
                     tone={s.method === 'transcode' ? 'warn' : 'ok'}

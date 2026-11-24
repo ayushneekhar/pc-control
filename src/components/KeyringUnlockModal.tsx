@@ -65,7 +65,7 @@ function KeyringUnlockModalBody({ onClose }: { onClose: () => void }) {
         <Pressable style={StyleSheet.absoluteFill} onPress={close} />
         <View style={[st.sheet, { backgroundColor: t.card }]}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2.5) }}>
-            <Icon name="lock-open-outline" size={22} color={t.accent} />
+            <Icon name="lock-open" size={22} color={t.accent} />
             <Text style={{ color: t.text, fontSize: 17, fontWeight: '600', flex: 1 }}>Unlock keyring</Text>
           </View>
           <Text style={{ color: t.textDim, fontSize: 13.5, lineHeight: 19 }}>
@@ -110,7 +110,7 @@ function KeyringUnlockModalBody({ onClose }: { onClose: () => void }) {
 
           <View style={{ flexDirection: 'row', gap: space(2), marginTop: space(1) }}>
             <Button label="Cancel" kind="subtle" style={{ flex: 1 }} disabled={busy} onPress={close} />
-            <Button label="Unlock" icon="lock-open-outline" style={{ flex: 1 }} busy={busy} onPress={submit} />
+            <Button label="Unlock" icon="lock-open" style={{ flex: 1 }} busy={busy} onPress={submit} />
           </View>
         </View>
       </KeyboardAvoidingView>

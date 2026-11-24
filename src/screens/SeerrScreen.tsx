@@ -82,7 +82,7 @@ function Poster({
   const t = useTheme();
   const dim = size === 'md' ? st.posterMd : st.poster;
   if (!uri) {
-    const iconName = kind === 'collection' ? 'layers-outline' : kind === 'tv' ? 'television' : 'movie-outline';
+    const iconName = kind === 'collection' ? 'layers' : kind === 'tv' ? 'television' : 'movie';
     return (
       <View style={[dim, { backgroundColor: t.cardAlt, alignItems: 'center', justifyContent: 'center' }]}>
         <Icon name={iconName} size={size === 'md' ? 24 : 20} color={t.textFaint} />
@@ -914,7 +914,7 @@ export default function SeerrScreen() {
             </View>
           ) : (
             <Card>
-              <Empty icon="movie-search-outline" title="No requests yet" />
+              <Empty icon="movie-search" title="No requests yet" />
             </Card>
           )}
         </Section>

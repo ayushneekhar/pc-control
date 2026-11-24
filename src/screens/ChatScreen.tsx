@@ -577,7 +577,7 @@ function BubbleAttachments({ attachments }: { attachments: ChatAttachment[] }) {
           key={file.id}
           style={[st.bubbleFileChip, { backgroundColor: t.bg, borderColor: t.border }]}
         >
-          <Icon name="file-document-outline" size={16} color={t.accent} />
+          <Icon name="file-document" size={16} color={t.accent} />
           <View style={st.bubbleFileMeta}>
             <Text numberOfLines={1} style={[st.bubbleFileName, { color: t.text }]}>
               {file.name}
@@ -656,7 +656,7 @@ const MessageBubble = React.memo(function MessageBubble({
       >
         {showEngine ? (
           <View style={st.engineRow}>
-            {isError ? <Icon name="alert-circle-outline" size={13} color={t.bad} /> : null}
+            {isError ? <Icon name="alert-circle" size={13} color={t.bad} /> : null}
             <Text style={[st.engineTag, { color: isError ? t.bad : t.textDim }]}>{engineLabel(msg.engine)}</Text>
           </View>
         ) : null}
@@ -1546,7 +1546,7 @@ export default function ChatScreen() {
     () => (
       <View style={st.emptyWrap}>
         <View style={[st.emptyIcon, { backgroundColor: t.card }]}>
-          <Icon name="message-text-outline" size={22} color={t.textFaint} />
+          <Icon name="message-text" size={22} color={t.textFaint} />
         </View>
         <Text style={[st.emptyLabel, { color: t.textFaint }]}>Start a conversation</Text>
       </View>
@@ -1586,7 +1586,7 @@ export default function ChatScreen() {
         {resetting ? (
           <ActivityIndicator size={13} color={t.text} />
         ) : (
-          <Icon name="square-edit-outline" size={15} color={t.text} />
+          <Icon name="pencil-box" size={15} color={t.text} />
         )}
         <Text style={[st.newBtnText, { color: t.text }]}>New</Text>
       </Pressable>
@@ -1684,7 +1684,7 @@ export default function ChatScreen() {
                     key={att.id}
                     style={[st.previewFileChip, { backgroundColor: t.card, borderColor: t.border }]}
                   >
-                    <Icon name="file-document-outline" size={16} color={t.accent} />
+                    <Icon name="file-document" size={16} color={t.accent} />
                     <View style={st.previewFileMeta}>
                       <Text numberOfLines={1} style={[st.previewFileName, { color: t.text }]}>
                         {att.name}
@@ -1756,7 +1756,7 @@ export default function ChatScreen() {
               ]}
             >
               <View style={st.editingBarLeft}>
-                <Icon name="pencil-outline" size={14} color={t.accent} />
+                <Icon name="pencil" size={14} color={t.accent} />
                 <Text style={[st.editingBarLabel, { color: t.accent }]}>Editing message</Text>
                 {editingState.previewText ? (
                   <Text numberOfLines={1} style={[st.editingBarPreview, { color: t.textFaint }]}>
@@ -1901,7 +1901,7 @@ export default function ChatScreen() {
               ]}
             >
               <View style={[st.sheetIconWrap, { backgroundColor: t.cardAlt }]}>
-                <Icon name="image-outline" size={20} color={t.accent} />
+                <Icon name="image" size={20} color={t.accent} />
               </View>
               <View style={st.sheetRowText}>
                 <Text style={[st.sheetRowTitle, { color: t.text }]}>Photo</Text>
@@ -1917,7 +1917,7 @@ export default function ChatScreen() {
               ]}
             >
               <View style={[st.sheetIconWrap, { backgroundColor: t.cardAlt }]}>
-                <Icon name="file-document-outline" size={20} color={t.accent} />
+                <Icon name="file-document" size={20} color={t.accent} />
               </View>
               <View style={st.sheetRowText}>
                 <Text style={[st.sheetRowTitle, { color: t.text }]}>File</Text>
@@ -1981,7 +1981,7 @@ export default function ChatScreen() {
                     ]}
                   >
                     <View style={[st.sheetIconWrap, { backgroundColor: t.cardAlt }]}>
-                      <Icon name="pencil-outline" size={20} color={t.accent} />
+                      <Icon name="pencil" size={20} color={t.accent} />
                     </View>
                     <View style={st.sheetRowText}>
                       <Text style={[st.sheetRowTitle, { color: t.text }]}>Edit & resend</Text>

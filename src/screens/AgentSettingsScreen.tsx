@@ -1039,7 +1039,7 @@ export default function AgentSettingsScreen() {
       <Section label="Usage alerts">
         <List>
           <ListRow
-            icon="bell-alert-outline"
+            icon="bell-alert"
             title="Usage alerts"
             chevron={false}
             trailing={

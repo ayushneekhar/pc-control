@@ -92,12 +92,12 @@ const linking: LinkingOptions<any> = {
   },
 };
 
-const ICONS: Record<string, [string, string]> = {
-  Routes: ['home-variant', 'home-variant-outline'],
-  Chat: ['message-text', 'message-text-outline'],
-  System: ['monitor-dashboard', 'monitor-dashboard'],
-  Root: ['shield-key', 'shield-key-outline'],
-  Settings: ['cog', 'cog-outline'],
+const ICONS: Record<string, string> = {
+  Routes: 'home-variant',
+  Chat: 'message-text',
+  System: 'monitor-dashboard',
+  Root: 'shield-key',
+  Settings: 'cog',
 };
 
 const TAB_LABEL: Record<string, string> = { Routes: 'Home', Chat: 'Chat', System: 'System', Root: 'Root', Settings: 'Settings' };
@@ -196,7 +196,7 @@ function M3TabBar({ state, descriptors, navigation, insets }: BottomTabBarProps)
             ? options.tabBarLabel
             : (TAB_LABEL[route.name] ?? route.name);
         const badge = options.tabBarBadge;
-        const iconPair = ICONS[route.name] ?? ['circle', 'circle-outline'];
+        const iconName = ICONS[route.name] ?? 'circle';
 
         const onPress = () => {
           const event = navigation.emit({
@@ -238,7 +238,7 @@ function M3TabBar({ state, descriptors, navigation, insets }: BottomTabBarProps)
                     {focused && pressed ? (
                       <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: t.ripple }]} />
                     ) : null}
-                    <Icon name={iconPair[focused ? 0 : 1]} size={24} color={focused ? t.accent : t.textFaint} />
+                    <Icon name={iconName} size={24} color={focused ? t.accent : t.textFaint} />
                   </View>
                   {badge !== undefined && badge !== null && badge !== '' ? (
                     <View style={[st.tabBadge, { backgroundColor: t.warn }]}>
@@ -310,7 +310,7 @@ function OtaPrompt() {
   return (
     <View style={[st.prompt, { bottom: insets.bottom + TAB_BAR_HEIGHT + space(2), backgroundColor: t.card }]}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
-        <Icon name="cloud-download-outline" size={20} color={t.accent} />
+        <Icon name="cloud-download" size={20} color={t.accent} />
         <Text style={{ color: t.text, fontWeight: '600', fontSize: 15, flex: 1 }}>App update available</Text>
       </View>
       <Text style={{ color: t.textDim, fontSize: 13 }}>

@@ -13,13 +13,13 @@ import { useNow } from '../lib/useNow';
 import { radius, screenPad, space, useTheme } from '../theme';
 
 const STATUS: Record<RootRequest['status'], { label: string; tone: 'ok' | 'warn' | 'bad' | 'accent' | 'dim'; icon: string }> = {
-  pending: { label: 'Waiting', tone: 'warn', icon: 'clock-outline' },
+  pending: { label: 'Waiting', tone: 'warn', icon: 'clock' },
   running: { label: 'Running', tone: 'accent', icon: 'progress-clock' },
   done: { label: 'Done', tone: 'ok', icon: 'check' },
   denied: { label: 'Denied', tone: 'bad', icon: 'close' },
-  expired: { label: 'Expired', tone: 'dim', icon: 'timer-off-outline' },
+  expired: { label: 'Expired', tone: 'dim', icon: 'timer-off' },
   cancelled: { label: 'Cancelled', tone: 'dim', icon: 'cancel' },
-  lost: { label: 'Lost', tone: 'bad', icon: 'help-circle-outline' },
+  lost: { label: 'Lost', tone: 'bad', icon: 'help-circle' },
 };
 
 function statusPill(r: RootRequest) {
@@ -84,7 +84,7 @@ function PendingCard({ req, onOpen, decision }: { req: RootRequest; onOpen: () =
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
-        <Icon name="shield-key-outline" size={20} color={pending ? t.warn : t.accent} />
+        <Icon name="shield-key" size={20} color={pending ? t.warn : t.accent} />
         <Text style={{ color: t.text, fontWeight: '600', fontSize: 16, flex: 1 }} numberOfLines={2}>
           {req.reason || 'Root command'}
         </Text>
@@ -92,12 +92,12 @@ function PendingCard({ req, onOpen, decision }: { req: RootRequest; onOpen: () =
       </View>
       {userPath || req.snap_sha256 ? (
         <View style={{ flexDirection: 'row', gap: space(2), flexWrap: 'wrap' }}>
-          {userPath ? <Pill tone="warn" icon="folder-alert-outline" label="Path under /home or /tmp" /> : null}
-          {req.snap_sha256 ? <Pill tone="accent" icon="file-lock-outline" label={`Snapshotted · ${req.snap_sha256.slice(0, 12)}…`} /> : null}
+          {userPath ? <Pill tone="warn" icon="folder-alert" label="Path under /home or /tmp" /> : null}
+          {req.snap_sha256 ? <Pill tone="accent" icon="file-lock" label={`Snapshotted · ${req.snap_sha256.slice(0, 12)}…`} /> : null}
         </View>
       ) : null}
       {longCmd ? (
-        <Banner tone="warn" icon="alert-outline" title={`Long command (${cmd.length} chars)`}>
+        <Banner tone="warn" icon="alert" title={`Long command (${cmd.length} chars)`}>
           Review every argument below before approving.
         </Banner>
       ) : null}
@@ -202,12 +202,12 @@ function Detail({ id, onClose, decision }: { id: string | null; onClose: () => v
                 </View>
                 {userPath || r.snap_sha256 ? (
                   <View style={{ flexDirection: 'row', gap: space(2), flexWrap: 'wrap' }}>
-                    {userPath ? <Pill tone="warn" icon="folder-alert-outline" label="Path under /home or /tmp" /> : null}
-                    {r.snap_sha256 ? <Pill tone="accent" icon="file-lock-outline" label={`Snapshotted · ${r.snap_sha256.slice(0, 12)}…`} /> : null}
+                    {userPath ? <Pill tone="warn" icon="folder-alert" label="Path under /home or /tmp" /> : null}
+                    {r.snap_sha256 ? <Pill tone="accent" icon="file-lock" label={`Snapshotted · ${r.snap_sha256.slice(0, 12)}…`} /> : null}
                   </View>
                 ) : null}
                 {longCmd ? (
-                  <Banner tone="warn" icon="alert-outline" title={`Long command (${cmdLen} chars)`}>
+                  <Banner tone="warn" icon="alert" title={`Long command (${cmdLen} chars)`}>
                     Review every argument below before approving.
                   </Banner>
                 ) : null}
@@ -331,7 +331,7 @@ export default function RootScreen() {
             <Text style={{ color: t.textDim, fontSize: 12.5 }}>{status.label}</Text>
           </View>
         }
-        right={waiting ? <Pill tone="warn" icon="bell-ring-outline" label={`${waiting} waiting`} /> : undefined}
+        right={waiting ? <Pill tone="warn" icon="bell-ring" label={`${waiting} waiting`} /> : undefined}
         refreshing={refreshing}
         onRefresh={async () => {
           setRefreshing(true);
@@ -341,7 +341,7 @@ export default function RootScreen() {
         }}
       >
         {store.rootd === 'not_installed' ? (
-          <Banner tone="accent" icon="shield-lock-outline" title="rootd isn't installed yet">
+          <Banner tone="accent" icon="shield-lock" title="rootd isn't installed yet">
             <Text style={{ color: t.textDim, fontSize: 13.5, lineHeight: 19 }}>
               Root approvals need the root daemon on the laptop. Run this once in a terminal on the laptop:
             </Text>
@@ -364,7 +364,7 @@ export default function RootScreen() {
         <Section label="Waiting for you">
           {pending.length === 0 ? (
             <Card>
-              <Empty icon="shield-check-outline" title="Nothing waiting" />
+              <Empty icon="shield-check" title="Nothing waiting" />
             </Card>
           ) : (
             pending.map((r) => <PendingCard key={r.id} req={r} decision={decision} onOpen={() => setOpen(r.id)} />)

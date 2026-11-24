@@ -125,7 +125,7 @@ function TorrentCard({
             { backgroundColor: t.badSoft, opacity: busy ? 0.5 : pressed ? 0.8 : 1 },
           ]}
         >
-          <Icon name="delete-outline" size={17} color={t.bad} />
+          <Icon name="delete" size={17} color={t.bad} />
         </Pressable>
       </View>
     </Card>
@@ -155,7 +155,7 @@ function StuckArrCard({
   return (
     <Card style={{ gap: space(3) }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
-        <Icon name="alert-outline" size={18} color={t.bad} />
+        <Icon name="alert" size={18} color={t.bad} />
         <Text style={{ color: t.text, fontSize: 15, fontWeight: '600', flex: 1 }}>{label}</Text>
         <Pill tone="bad" label={`${queue.needs_action ?? items.length} stuck`} />
       </View>
@@ -418,7 +418,7 @@ export default function DownloadsScreen() {
           </View>
         ) : (
           <Card>
-            <Empty icon="download-outline" title="No torrents" />
+            <Empty icon="download" title="No torrents" />
           </Card>
         )}
       </Section>

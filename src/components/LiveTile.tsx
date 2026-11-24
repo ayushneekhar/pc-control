@@ -36,7 +36,7 @@ export function LiveTile({
       ) : (
         <View style={st.center}>
           {posterFailed ? (
-            <Icon name="video-off-outline" size={20} color={t.onMediaDim} />
+            <Icon name="video-off" size={20} color={t.onMediaDim} />
           ) : (
             <ActivityIndicator size="small" color={t.onMediaDim} />
           )}

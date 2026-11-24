@@ -76,7 +76,7 @@ export function ChatEndpointSection() {
               accessibilityLabel={showToken ? 'Hide token' : 'Show token'}
               style={[st.eyeBtn, { backgroundColor: t.cardAlt, borderColor: t.border }]}
             >
-              <Icon name={showToken ? 'eye-off-outline' : 'eye-outline'} size={18} color={t.textDim} />
+              <Icon name={showToken ? 'eye-off' : 'eye'} size={18} color={t.textDim} />
             </Pressable>
           </View>
         </View>

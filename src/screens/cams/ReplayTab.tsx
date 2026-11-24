@@ -186,7 +186,7 @@ export function ReplayTab({
                   ) : null}
                   {isBig ? (
                     <Pressable onPress={snapshot} accessibilityLabel="Save this frame" hitSlop={4} style={s.snapBtn}>
-                      {snapBusy ? <ActivityIndicator size="small" color={t.onMedia} /> : <Icon name="camera-outline" size={22} color={t.onMedia} />}
+                      {snapBusy ? <ActivityIndicator size="small" color={t.onMedia} /> : <Icon name="camera" size={22} color={t.onMedia} />}
                     </Pressable>
                   ) : null}
                 </Pressable>

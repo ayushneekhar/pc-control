@@ -40,9 +40,9 @@ type Draft = {
 };
 
 const ACTIONS: { id: AgentAction; icon: string; title: string }[] = [
-  { id: 'replace_page', icon: 'file-document-edit-outline', title: 'Show my page' },
+  { id: 'replace_page', icon: 'file-document-edit', title: 'Show my page' },
   { id: 'replace_text', icon: 'find-replace', title: 'Replace text' },
-  { id: 'hide', icon: 'eye-off-outline', title: 'Hide elements' },
+  { id: 'hide', icon: 'eye-off', title: 'Hide elements' },
   { id: 'block', icon: 'cancel', title: 'Block' },
 ];
 
@@ -429,7 +429,7 @@ export default function AgentRuleScreen() {
                 <View style={{ flexDirection: 'row', gap: space(2) }}>
                   <Button
                     label="Preview"
-                    icon="eye-outline"
+                    icon="eye"
                     kind="subtle"
                     disabled={!draft.html.trim()}
                     style={{ flex: 1 }}
@@ -439,7 +439,7 @@ export default function AgentRuleScreen() {
                 <View style={{ flexDirection: 'row', gap: space(2) }}>
                   <Button
                     label="Preview original"
-                    icon="eye-outline"
+                    icon="eye"
                     kind="subtle"
                     busy={busy === 'original-preview'}
                     style={{ flex: 1 }}
@@ -513,7 +513,7 @@ export default function AgentRuleScreen() {
                           hitSlop={8}
                           accessibilityLabel="Remove pair"
                         >
-                          <Icon name="trash-can-outline" size={20} color={t.bad} />
+                          <Icon name="trash-can" size={20} color={t.bad} />
                         </Pressable>
                       </View>
                     </View>
@@ -555,7 +555,7 @@ export default function AgentRuleScreen() {
                         hitSlop={8}
                         accessibilityLabel="Remove selector"
                       >
-                        <Icon name="trash-can-outline" size={20} color={t.bad} />
+                        <Icon name="trash-can" size={20} color={t.bad} />
                       </Pressable>
                     </View>
                   ))}
@@ -591,7 +591,7 @@ export default function AgentRuleScreen() {
           ) : null}
 
           <View style={{ flexDirection: 'row', gap: space(2), marginTop: space(2) }}>
-            <Button label="Delete" icon="trash-can-outline" kind="danger" style={{ flex: 1 }} onPress={remove} />
+            <Button label="Delete" icon="trash-can" kind="danger" style={{ flex: 1 }} onPress={remove} />
             <Button label="Save" icon="check" style={{ flex: 2 }} busy={busy === 'save'} onPress={save} />
           </View>
         </>

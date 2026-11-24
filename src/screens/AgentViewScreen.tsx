@@ -22,9 +22,9 @@ import { radius, space, useTheme } from '../theme';
 type Tab = 'urls' | 'rules';
 
 const ACTION_ICONS: Record<AgentRule['action'], string> = {
-  replace_page: 'file-document-edit-outline',
+  replace_page: 'file-document-edit',
   replace_text: 'find-replace',
-  hide: 'eye-off-outline',
+  hide: 'eye-off',
   block: 'cancel',
 };
 
@@ -252,7 +252,7 @@ export default function AgentViewScreen() {
       ) : (
         <>
           {state && state.rules.length === 0 ? (
-            <Empty icon="filter-off-outline" title="No rules yet" />
+            <Empty icon="filter-off" title="No rules yet" />
           ) : null}
 
           {state && state.rules.length ? (
@@ -304,7 +304,7 @@ export default function AgentViewScreen() {
                     </Pressable>
                     <View style={{ flex: 1 }} />
                     <Pressable onPress={() => removeRule(rule)} hitSlop={8} accessibilityLabel="Delete rule" style={st.iconBtn}>
-                      <Icon name="trash-can-outline" size={20} color={t.bad} />
+                      <Icon name="trash-can" size={20} color={t.bad} />
                     </Pressable>
                   </View>
                 </View>

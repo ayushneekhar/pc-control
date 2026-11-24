@@ -182,7 +182,7 @@ function CandidateRow({
           ) : null}
           {item.warn_unwatched && item.unwatched_users.length > 0 ? (
             <View style={[st.warnChip, { backgroundColor: t.warnSoft }]}>
-              <Icon name="alert-outline" size={12} color={t.warn} />
+              <Icon name="alert" size={12} color={t.warn} />
               <Text style={[st.warnChipText, { color: t.warn }]} numberOfLines={1}>
                 {item.unwatched_users.join(', ')}
               </Text>
@@ -342,7 +342,7 @@ export default function SpaceScreen() {
                 <View key={r.id} style={{ gap: 2 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                     <Icon
-                      name={r.ok ? 'check' : 'close-circle-outline'}
+                      name={r.ok ? 'check' : 'close-circle'}
                       size={14}
                       color={r.ok ? t.ok : t.bad}
                     />
@@ -436,7 +436,7 @@ export default function SpaceScreen() {
           </List>
         ) : (
           <Empty
-            icon="check-circle-outline"
+            icon="check-circle"
             title={
               filter === 'movie'
                 ? 'No watched movies'
@@ -493,7 +493,7 @@ export default function SpaceScreen() {
             {selection.unwatched.length > 0 ? (
               <View style={[st.unwatchedBox, { backgroundColor: t.warnSoft }]}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <Icon name="alert-outline" size={16} color={t.warn} />
+                  <Icon name="alert" size={16} color={t.warn} />
                   <Text style={{ color: t.warn, fontSize: 13, fontWeight: '600' }}>
                     Not watched by others
                   </Text>
@@ -534,7 +534,7 @@ export default function SpaceScreen() {
               />
               <Button
                 label="Delete"
-                icon="delete-outline"
+                icon="delete"
                 kind="danger"
                 style={{ flex: 1 }}
                 busy={freeing}

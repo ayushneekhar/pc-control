@@ -17,7 +17,7 @@ import {
   unlockKeyringWithSaved,
   useKeyring,
 } from '../lib/keyring';
-import { ApkRelease, APK_URLS, binaryTarget, clearOtaRecovery, latestApk, otaRecovery, otaSnapshot } from '../lib/ota';
+import { apkDownloadUrl, ApkRelease, binaryTarget, clearOtaRecovery, latestApk, otaRecovery, otaSnapshot } from '../lib/ota';
 import { applyOta, checkOta, useOta } from '../lib/otaStore';
 import { liveStatus } from '../lib/live';
 import { askNotificationPermission, registerPush } from '../lib/push';
@@ -848,10 +848,14 @@ function Updates() {
   const snap = otaSnapshot();
   const myCode = Number(Constants.expoConfig?.android?.versionCode ?? 0);
 
-  useEffect(() => {
+  const refreshApk = useCallback(() => {
     latestApk().then(setApk, (e) => setApk({ error: (e as Error).message }));
+  }, []);
+
+  useEffect(() => {
+    refreshApk();
     checkOta();
-  }, [tick]);
+  }, [tick, refreshApk]);
 
   const newer = apk && 'versionCode' in apk && apk.versionCode > myCode ? apk : null;
   const apkError = apk && 'error' in apk ? apk.error : null;
@@ -878,7 +882,17 @@ function Updates() {
       {ota.error ? <Text style={{ color: t.textDim, fontSize: 13 }}>{ota.error}</Text> : null}
       {apkError && apkError !== ota.error ? <Text style={{ color: t.textDim, fontSize: 13 }}>{apkError}</Text> : null}
       <View style={{ flexDirection: 'row', gap: space(2) }}>
-        <Button label="Check" icon="refresh" kind="subtle" style={{ flex: 1 }} busy={ota.checking} onPress={() => checkOta(true)} />
+        <Button
+          label="Check"
+          icon="refresh"
+          kind="subtle"
+          style={{ flex: 1 }}
+          busy={ota.checking}
+          onPress={() => {
+            checkOta(true);
+            refreshApk();
+          }}
+        />
         {otaReady && ota.phase !== 'ready' ? (
           <Button label={ota.phase === 'downloading' ? `${Math.round(ota.progress * 100)}%` : 'Update now'} icon="restart" style={{ flex: 1 }} busy={ota.phase === 'downloading'} onPress={() => applyOta(true)} />
         ) : null}
@@ -886,7 +900,7 @@ function Updates() {
 
       {newer ? (
         <Banner tone="accent" icon="download" title={`New app version: ${newer.versionName} (${newer.versionCode})`}>
-          <Button label="Download APK" compact kind="primary" icon="download" style={{ alignSelf: 'flex-start', marginTop: 4 }} onPress={() => Linking.openURL(APK_URLS.apkUrl)} />
+          <Button label="Download APK" compact kind="primary" icon="download" style={{ alignSelf: 'flex-start', marginTop: 4 }} onPress={() => Linking.openURL(apkDownloadUrl())} />
         </Banner>
       ) : null}
     </Card>

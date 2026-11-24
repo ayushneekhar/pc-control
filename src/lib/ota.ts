@@ -50,6 +50,14 @@ export function mirrorOtaUrls() {
   };
 }
 
+export function mirrorApkUrls() {
+  const base = serverUrl();
+  return {
+    versionUrl: `${base}/pc/api/ota/apk/version.json`,
+    apkUrl: `${base}/pc/api/ota/apk/pc-control.apk`,
+  };
+}
+
 let cached: { mod: NitroOtaModule; manager: Manager } | null | undefined;
 
 function ota() {
@@ -384,10 +392,44 @@ export function clearOtaRecovery() {
   } catch {}
 }
 
-/** Newest APK on GitHub Releases. Throws one clean message (offline, HTTP 404 while the repo is private, …). */
+let lastApkFromMirror = false;
+
+/** APK download URL using the transport that last succeeded (laptop tailnet mirror first when reachable, else GitHub). */
+export function apkDownloadUrl(): string {
+  const base = serverUrl();
+  return lastApkFromMirror && base ? mirrorApkUrls().apkUrl : APK_URLS.apkUrl;
+}
+
+/** Newest APK release. Tries the laptop mirror over Tailscale first (fast when Tailscale is on),
+ *  then falls back to GitHub Releases. Throws one clean message on failure. */
 export async function latestApk(): Promise<ApkRelease> {
-  const [status, body] = await getText(APK_URLS.versionUrl, 'app releases');
-  const r = parseApkVersion(status, body);
-  if (!r.ok) throw new Error(r.error);
-  return r.release;
+  const base = serverUrl();
+  let mirrorErr: string | null = null;
+  if (base) {
+    const mirror = mirrorApkUrls();
+    try {
+      const r = await fetchTextOnce(mirror.versionUrl, 5000);
+      const parsed = parseApkVersion(r.status, r.body);
+      if (parsed.ok) {
+        lastApkFromMirror = true;
+        return parsed.release;
+      }
+      mirrorErr = parsed.error;
+      console.warn(`[ota] laptop mirror APK version unusable (${parsed.error}); falling back to GitHub`);
+    } catch (e) {
+      mirrorErr = (e as Error).message;
+      console.warn(`[ota] laptop mirror APK check failed (${mirrorErr}); falling back to GitHub`);
+    }
+  }
+
+  try {
+    const [status, body] = await getText(APK_URLS.versionUrl, 'app releases');
+    const r = parseApkVersion(status, body);
+    if (!r.ok) throw new Error(r.error);
+    lastApkFromMirror = false;
+    return r.release;
+  } catch (e) {
+    const ghErr = (e as Error).message;
+    throw new Error(mirrorErr ? `${ghErr} (laptop mirror: ${mirrorErr})` : ghErr);
+  }
 }

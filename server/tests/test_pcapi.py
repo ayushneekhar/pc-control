@@ -1,5 +1,5 @@
 """pc-api route classification (API-only routes hidden server-side, overridable via routes.json)."""
-import atexit, json, os, shutil, struct, sys, tempfile, threading, time, unittest, urllib.error, urllib.parse, urllib.request
+import atexit, io, json, os, shutil, struct, sys, tempfile, threading, time, unittest, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
@@ -1853,16 +1853,39 @@ class AgentUsageAndSettingsHttpTests(unittest.TestCase):
         self.assertIn("error", r2)
 
 
+class _FakeUpstreamResponse:
+    def __init__(self, body, headers=None):
+        self._buf = io.BytesIO(body)
+        self.headers = headers if headers is not None else {"Content-Length": str(len(body))}
+
+    def read(self, n=-1):
+        return self._buf.read(n)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
 class OtaMirrorTests(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp()
-        self.ota_dir = os.path.join(self.dir, "ota")
-        self.art_dir = os.path.join(self.dir, "artifacts")
-        os.makedirs(self.ota_dir)
-        os.makedirs(self.art_dir)
-        self.orig = (pcapi.OTA_DIR, pcapi.OTA_ARTIFACTS_DIR)
-        pcapi.OTA_DIR = self.ota_dir
-        pcapi.OTA_ARTIFACTS_DIR = self.art_dir
+        self.calls = []
+        self.routes = {}
+        self.orig_proxy = pcapi.OTA_PROXY
+
+        def fake_open(url, timeout):
+            self.calls.append((url, timeout))
+            val = self.routes.get(url)
+            if val is None:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"not found"))
+            if isinstance(val, Exception):
+                raise val
+            if callable(val):
+                val = val()
+            return _FakeUpstreamResponse(val)
+
+        pcapi.OTA_PROXY = pcapi.OtaProxy(opener=fake_open, ttl=15.0)
         self.srv = pcapi.Server(("127.0.0.1", 0), pcapi.H)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
@@ -1870,55 +1893,100 @@ class OtaMirrorTests(unittest.TestCase):
     def tearDown(self):
         self.srv.shutdown()
         self.srv.server_close()
-        pcapi.OTA_DIR, pcapi.OTA_ARTIFACTS_DIR = self.orig
-        shutil.rmtree(self.dir)
+        pcapi.OTA_PROXY = self.orig_proxy
 
     def fetch(self, path):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", headers=_with_local_auth(path=path))
         try:
             with urllib.request.urlopen(req) as r:
-                return r.status, r.headers.get("Content-Type", ""), r.read()
+                return r.status, dict(r.headers.items()), r.read()
         except urllib.error.HTTPError as e:
-            return e.code, e.headers.get("Content-Type", ""), e.read()
+            return e.code, dict(e.headers.items()), e.read()
 
-    def test_404_when_missing_and_fallback_to_artifacts_then_override(self):
+    def test_live_github_proxy_ota_and_apk_with_cache_and_streaming(self):
+        repo = pcapi.OTA_GITHUB_REPO
+        tag = pcapi.OTA_GITHUB_TAG
+        ota_base = f"https://github.com/{repo}/releases/download/{tag}"
+        apk_base = f"https://github.com/{repo}/releases/latest/download"
+
+        # 404 when upstream returns 404
         code, _, _ = self.fetch("/pc/api/ota/ota.version.json")
         self.assertEqual(code, 404)
         code, _, _ = self.fetch("/pc/api/ota/bundle.zip")
         self.assertEqual(code, 404)
 
-        # Fallback to artifacts dir when ota_dir is empty
-        with open(os.path.join(self.art_dir, "ota.version.json"), "w") as f:
-            json.dump({"version": "27"}, f)
-        with open(os.path.join(self.art_dir, "bundle.zip"), "wb") as f:
-            f.write(b"PK-art")
+        # Serve ota.version.json with short TTL cache + ?refresh=1 bypass
+        ver = {"v": 58}
+        self.routes[f"{ota_base}/ota.version.json"] = lambda: json.dumps(
+            {"version": str(ver["v"]), "targetVersions": {"android": ["1.6.7+23"]}}
+        ).encode()
 
-        code, ctype, body = self.fetch("/pc/api/ota/ota.version.json")
+        code, hdrs, body = self.fetch("/pc/api/ota/ota.version.json")
         self.assertEqual(code, 200)
-        self.assertIn("application/json", ctype)
-        self.assertEqual(json.loads(body)["version"], "27")
+        self.assertIn("application/json", hdrs.get("Content-Type", ""))
+        self.assertEqual(json.loads(body)["version"], "58")
+        calls_after_first = len(self.calls)
 
-        code, ctype, body = self.fetch("/pc/api/ota/bundle.zip")
-        self.assertEqual(code, 200)
-        self.assertEqual(ctype, "application/zip")
-        self.assertEqual(body, b"PK-art")
-
-        # ota_dir takes precedence over artifacts dir
-        with open(os.path.join(self.ota_dir, "ota.version.json"), "w") as f:
-            json.dump({"version": "28"}, f)
+        # Cached within TTL
+        ver["v"] = 59
         code, _, body = self.fetch("/pc/api/ota/ota.version.json")
         self.assertEqual(code, 200)
-        self.assertEqual(json.loads(body)["version"], "28")
+        self.assertEqual(json.loads(body)["version"], "58")
+        self.assertEqual(len(self.calls), calls_after_first)
 
-        # bsdiff patch-*.zip files are served safely; invalid names are rejected
-        with open(os.path.join(self.ota_dir, "patch-27-to-28.zip"), "wb") as f:
-            f.write(b"PK-patch")
-        code, ctype, body = self.fetch("/pc/api/ota/patch-27-to-28.zip")
+        # ?refresh=1 bypasses cache
+        code, _, body = self.fetch("/pc/api/ota/ota.version.json?refresh=1")
         self.assertEqual(code, 200)
-        self.assertEqual(ctype, "application/zip")
+        self.assertEqual(json.loads(body)["version"], "59")
+        self.assertEqual(len(self.calls), calls_after_first + 1)
+
+        # Stream bundle.zip and patch-*.zip with Content-Length
+        self.routes[f"{ota_base}/bundle.zip"] = b"PK-live-bundle" * 100
+        code, hdrs, body = self.fetch("/pc/api/ota/bundle.zip")
+        self.assertEqual(code, 200)
+        self.assertEqual(hdrs.get("Content-Type"), "application/zip")
+        self.assertEqual(hdrs.get("Content-Length"), str(len(b"PK-live-bundle" * 100)))
+        self.assertEqual(body, b"PK-live-bundle" * 100)
+
+        self.routes[f"{ota_base}/patch-58-to-59.zip"] = b"PK-patch"
+        code, hdrs, body = self.fetch("/pc/api/ota/patch-58-to-59.zip")
+        self.assertEqual(code, 200)
+        self.assertEqual(hdrs.get("Content-Type"), "application/zip")
         self.assertEqual(body, b"PK-patch")
 
-        for bad in ("patch-foo.zip", "patch-1-to-2.zip.bak", "../secret.zip", "other.zip"):
+        # Proxy APK version.json and pc-control.apk
+        self.routes[f"{apk_base}/version.json"] = json.dumps(
+            {"versionName": "1.6.7", "versionCode": 23, "sha256": "abc", "size": 1234}
+        ).encode()
+        code, hdrs, body = self.fetch("/pc/api/ota/apk/version.json")
+        self.assertEqual(code, 200)
+        self.assertIn("application/json", hdrs.get("Content-Type", ""))
+        self.assertEqual(json.loads(body)["versionCode"], 23)
+
+        apk_bytes = b"PK-apk-payload" * 50
+        self.routes[f"{apk_base}/pc-control.apk"] = apk_bytes
+        code, hdrs, body = self.fetch("/pc/api/ota/apk/pc-control.apk")
+        self.assertEqual(code, 200)
+        self.assertEqual(hdrs.get("Content-Type"), "application/vnd.android.package-archive")
+        self.assertEqual(hdrs.get("Content-Length"), str(len(apk_bytes)))
+        self.assertIn("pc-control.apk", hdrs.get("Content-Disposition", ""))
+        self.assertEqual(body, apk_bytes)
+
+        # Upstream network errors return 502
+        self.routes[f"{ota_base}/bundle.zip"] = OSError("network down")
+        code, _, body = self.fetch("/pc/api/ota/bundle.zip")
+        self.assertEqual(code, 502)
+        self.assertIn("error", json.loads(body))
+
+        # Strict allowlist / path traversal rejection
+        for bad in (
+            "patch-foo.zip",
+            "patch-1-to-2.zip.bak",
+            "../secret.zip",
+            "other.zip",
+            "apk/other.apk",
+            "apk/../bundle.zip",
+        ):
             code, _, _ = self.fetch(f"/pc/api/ota/{bad}")
             self.assertEqual(code, 404, bad)
 

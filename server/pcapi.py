@@ -2681,14 +2681,33 @@ class KeyringManager:
 KEYRING = KeyringManager()
 
 
-# ---------------------------------------------------------------- local OTA mirror (/pc/api/ota/*)
+# ---------------------------------------------------------------- GitHub Releases OTA/APK proxy (/pc/api/ota/*)
 
-OTA_DIR = os.environ.get("PCAPI_OTA_DIR", os.path.join(DATA_DIR, "ota"))
-OTA_ARTIFACTS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".artifacts", "nitro-ota", "android"
-)
-OTA_ALLOWED_FILES = {"ota.version.json": "application/json; charset=utf-8", "bundle.zip": "application/zip"}
+
+def _load_app_github_config():
+    app_json = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.json")
+    cfg = load_json(app_json, {})
+    gh = (cfg.get("expo") or {}).get("extra", {}).get("github") or {}
+    return (
+        gh.get("repo") or "ayushneekhar/pc-control",
+        gh.get("otaTag") or "ota-android",
+    )
+
+
+_APP_GH_REPO, _APP_OTA_TAG = _load_app_github_config()
+OTA_GITHUB_REPO = os.environ.get("PCAPI_GITHUB_REPO") or _APP_GH_REPO
+OTA_GITHUB_TAG = os.environ.get("PCAPI_OTA_TAG") or _APP_OTA_TAG
+OTA_RELEASES_BASE = os.environ.get("PCAPI_OTA_RELEASES_BASE") or ""
+OTA_MANIFEST_TTL = float(os.environ.get("PCAPI_OTA_MANIFEST_TTL", "15"))
+
+OTA_ALLOWED_FILES = {
+    "ota.version.json": "application/json; charset=utf-8",
+    "bundle.zip": "application/zip",
+    "apk/version.json": "application/json; charset=utf-8",
+    "apk/pc-control.apk": "application/vnd.android.package-archive",
+}
 OTA_PATCH_RE = re.compile(r"^patch-\d+-to-\d+\.zip$")
+OTA_MANIFEST_FILES = frozenset({"ota.version.json", "apk/version.json"})
 
 
 def ota_content_type(filename):
@@ -2699,17 +2718,86 @@ def ota_content_type(filename):
     return None
 
 
-def ota_file_path(filename, ota_dir=None, artifacts_dir=None):
+def ota_upstream_url(filename, repo=None, ota_tag=None, releases_base=None):
     if not ota_content_type(filename):
         return None
-    for base in (ota_dir if ota_dir is not None else OTA_DIR,
-                 artifacts_dir if artifacts_dir is not None else OTA_ARTIFACTS_DIR):
-        if not base:
-            continue
-        p = os.path.join(os.path.expanduser(base), filename)
-        if os.path.isfile(p):
-            return p
-    return None
+    base = (releases_base if releases_base is not None else OTA_RELEASES_BASE).rstrip("/")
+    if not base:
+        r = repo or OTA_GITHUB_REPO
+        base = f"https://github.com/{r}/releases"
+    if filename == "apk/version.json":
+        return f"{base}/latest/download/version.json"
+    if filename == "apk/pc-control.apk":
+        return f"{base}/latest/download/pc-control.apk"
+    tag = ota_tag or OTA_GITHUB_TAG
+    return f"{base}/download/{tag}/{filename}"
+
+
+def _ota_default_open(url, timeout):
+    req = urllib.request.Request(url, headers={"User-Agent": "pc-api/1", "Accept": "*/*"})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+class OtaProxy:
+    """Live GitHub Releases proxy for /pc/api/ota/* with short-TTL in-memory caching for small JSON manifests
+    and chunked streaming (zero RAM buffering) for binary assets (bundle.zip, patch-*.zip, apk/pc-control.apk)."""
+
+    def __init__(self, opener=None, ttl=None):
+        self._opener = opener
+        self._ttl = ttl
+        self._lock = threading.Lock()
+        self._manifest_cache = {}  # filename -> (monotonic_ts, bytes)
+
+    def _open(self, url, timeout):
+        fn = self._opener or _ota_default_open
+        return fn(url, timeout)
+
+    def _get_ttl(self):
+        return OTA_MANIFEST_TTL if self._ttl is None else self._ttl
+
+    def clear_cache(self):
+        with self._lock:
+            self._manifest_cache.clear()
+
+    def fetch_manifest(self, filename, refresh=False):
+        url = ota_upstream_url(filename)
+        if not url:
+            return 404, {"error": f"no OTA resource {filename}"}
+        ttl = self._get_ttl()
+        now = time.monotonic()
+        if not refresh and ttl > 0:
+            with self._lock:
+                entry = self._manifest_cache.get(filename)
+                if entry and (now - entry[0]) < ttl:
+                    return 200, entry[1]
+        try:
+            with self._open(url, 15) as r:
+                data = r.read(1024 * 1024)
+        except urllib.error.HTTPError as e:
+            code = 404 if e.code == 404 else 502
+            return code, {"error": f"upstream GitHub returned HTTP {e.code} for {filename}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": clip(f"upstream GitHub fetch failed for {filename}: {type(e).__name__}: {e}", 240)}
+        if ttl > 0:
+            with self._lock:
+                self._manifest_cache[filename] = (time.monotonic(), data)
+        return 200, data
+
+    def open_stream(self, filename):
+        url = ota_upstream_url(filename)
+        if not url:
+            return 404, {"error": f"no OTA resource {filename}"}
+        try:
+            resp = self._open(url, 30)
+            return 200, resp
+        except urllib.error.HTTPError as e:
+            code = 404 if e.code == 404 else 502
+            return code, {"error": f"upstream GitHub returned HTTP {e.code} for {filename}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": clip(f"upstream GitHub fetch failed for {filename}: {type(e).__name__}: {e}", 240)}
+
+
+OTA_PROXY = OtaProxy()
 
 
 # ---------------------------------------------------------------- health overview (/pc/api/health)
@@ -4147,7 +4235,8 @@ class H(BaseHTTPRequestHandler):
             if path.startswith("/api/ota/"):
                 ota_name = path[len("/api/ota/"):]
                 if ota_content_type(ota_name):
-                    return self.send_ota_file(ota_name)
+                    refresh = qs.get("refresh", [""])[0] in ("1", "true", "yes")
+                    return self.send_ota_file(ota_name, refresh=refresh)
             if path == "/api/chat/messages":
                 return self.send_json(*_chat_manager().handle_get_messages(qs))
             if path == "/api/chat/agent":
@@ -4287,23 +4376,36 @@ class H(BaseHTTPRequestHandler):
         img = NOTIFY.fetch_poster(n["image_url"]) if n.get("image_url") else None
         return self.send_json(*NOTIFY.send(n["category"], n["title"], n["body"], None, img, n.get("link")))
 
-    def send_ota_file(self, filename):
-        p = ota_file_path(filename)
+    def send_ota_file(self, filename, refresh=False):
         ctype = ota_content_type(filename)
-        if not p or not ctype:
-            return self.send_json(404, {"error": f"no local OTA {filename}"})
+        if not ctype:
+            return self.send_json(404, {"error": f"no OTA resource {filename}"})
+        if filename in OTA_MANIFEST_FILES:
+            code, payload = OTA_PROXY.fetch_manifest(filename, refresh=refresh)
+            if code != 200:
+                return self.send_json(code, payload)
+            return self.send_bytes(payload, ctype)
+        code, resp_or_err = OTA_PROXY.open_stream(filename)
+        if code != 200:
+            return self.send_json(code, resp_or_err)
         try:
-            size = os.path.getsize(p)
-            with open(p, "rb") as f:
+            with resp_or_err as resp:
+                clen = resp.headers.get("Content-Length") if hasattr(resp, "headers") and resp.headers else None
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(size))
+                if clen and str(clen).isdigit():
+                    self.send_header("Content-Length", str(clen))
+                if filename == "apk/pc-control.apk":
+                    self.send_header("Content-Disposition", 'attachment; filename="pc-control.apk"')
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                while chunk := f.read(256 * 1024):
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
                     self.wfile.write(chunk)
-        except FileNotFoundError:
-            return self.send_json(404, {"error": f"no local OTA {filename}"})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def send_apk(self):
         p = os.path.join(DATA_DIR, "app.apk")

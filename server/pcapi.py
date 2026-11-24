@@ -2023,7 +2023,8 @@ class AgentSettingsManager:
 
     def __init__(self, claude_path=None, gemini_path=None, gemini_fresh_flag=None,
                  t3_settings_path=None, t3_providers_dir=None, claude_config_path=None,
-                 usage_mgr=None, usage_alerts_path=None):
+                 usage_mgr=None, usage_alerts_path=None,
+                 claude_thread_file=None, gemini_thread_file=None, t3_client=None):
         self.claude_path = claude_path
         self.gemini_path = gemini_path
         self.gemini_fresh_flag = gemini_fresh_flag
@@ -2032,7 +2033,48 @@ class AgentSettingsManager:
         self.claude_config_path = claude_config_path
         self.usage_mgr = usage_mgr
         self.usage_alerts_path = usage_alerts_path
+        self.claude_thread_file = claude_thread_file
+        self.gemini_thread_file = gemini_thread_file
+        self.t3_client = t3_client
         self.lock = threading.Lock()
+
+    def _claude_thread_file(self):
+        if self.claude_thread_file is not None:
+            return os.path.expanduser(self.claude_thread_file)
+        if self.claude_path is not None:
+            return None
+        return os.path.expanduser(chat_mod.CLAUDE_T3_THREAD_FILE)
+
+    def _gemini_thread_file(self):
+        if self.gemini_thread_file is not None:
+            return os.path.expanduser(self.gemini_thread_file)
+        if self.gemini_path is not None:
+            return None
+        return os.path.expanduser(chat_mod.T3_THREAD_FILE)
+
+    def _configure_t3_thread(self, engine):
+        """Best-effort: apply updated model/effort settings to an active T3 Code thread."""
+        tf = self._claude_thread_file() if engine == "claude" else self._gemini_thread_file()
+        if not tf:
+            return False
+        state = _read_json_file(tf)
+        thread_id = state.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            return False
+        model_sel = (
+            chat_mod.build_claude_model_selection(self._claude_file())
+            if engine == "claude"
+            else chat_mod.build_gemini_model_selection(self._gemini_file())
+        )
+        try:
+            client = self.t3_client or chat_mod.T3Client(timeout=5.0)
+            client.call_tool(
+                "t3_thread_configure",
+                {"threadId": thread_id.strip(), "modelSelection": model_sel},
+            )
+            return True
+        except Exception:
+            return False
 
     def _claude_file(self):
         return os.path.expanduser(self.claude_path if self.claude_path is not None else CLAUDE_AGENT_SETTINGS)
@@ -2184,6 +2226,11 @@ class AgentSettingsManager:
                 if "weekly_pct" in u_upd:
                     cur["weekly_pct"] = int(u_upd["weekly_pct"])
                 _write_json_atomic(u_path, cur)
+
+        if c_upd is not None and ("model" in c_upd or "effort" in c_upd):
+            self._configure_t3_thread("claude")
+        if g_upd is not None and ("model" in g_upd or "thought_level" in g_upd or "instance_id" in g_upd):
+            self._configure_t3_thread("gemini")
 
         return 200, self.get()
 

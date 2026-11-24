@@ -5,8 +5,8 @@ Provides:
   with bounded compaction/rotation and crash-safe startup recovery.
 - Optional chat-only bearer token auth (~/.config/pc-control/chat-token) strictly scoped to
   /pc/api/chat/* routes (for Cloudflare Tunnel + Access without exposing any other endpoint).
-- Asynchronous background dispatch to the active engine (Gemini via persistent T3 Code thread,
-  Claude via headless `claude -p` in ~/agent without touching live services).
+- Asynchronous background dispatch to the active engine (Gemini and Claude via persistent
+  T3 Code threads, streaming live T3 activity progress into the chat shimmer bubble).
 - FCM push notification hook on completed assistant replies with pccontrol://chat deep link.
 """
 
@@ -47,6 +47,10 @@ T3_THREAD_FILE = os.environ.get(
     "PCAPI_T3_THREAD_FILE",
     os.path.join(HOME, ".local", "state", "gemini-agent", "t3-thread.json"),
 )
+CLAUDE_T3_THREAD_FILE = os.environ.get(
+    "PCAPI_CLAUDE_T3_THREAD_FILE",
+    os.path.join(HOME, ".local", "state", "pc-control", "claude-t3-thread.json"),
+)
 LAST_CHANNEL_FILE = os.environ.get(
     "PCAPI_LAST_CHANNEL_FILE",
     os.path.join(HOME, ".local", "state", "gemini-agent", "last-channel.json"),
@@ -78,14 +82,24 @@ DEFAULT_MAX_LINES = 1000
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_KEEP_MESSAGES = 500
 DISPATCH_TIMEOUT = 900.0
+DEFAULT_T3_POLL_WAIT_MS = 2000
 PROGRESS_MIN_INTERVAL = 0.5
 MAX_PROGRESS_STEPS = 40
+MAX_PROGRESS_STEP_LEN = 110
+DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
+VALID_CLAUDE_EFFORTS = frozenset(("low", "medium", "high", "xhigh", "max", "ultrathink"))
+CLAUDE_T3_BOOTSTRAP = (
+    "[System context: You are Ayush's PC Agent in PC Control Chat (workspace ~/agent). "
+    "Read ~/agent/CLAUDE.md and ~/agent/NOTES.md for your rules and notes. "
+    "Keep replies concise and plain-text. Never send replies to Telegram for PC Control app turns.]"
+)
 CLAUDE_APP_SETTINGS_OVERRIDE = json.dumps(
     {"enabledPlugins": {"telegram@claude-plugins-official": False}},
     separators=(",", ":"),
 )
 
 _T3_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted", "rolled_back"}
+_T3_IN_PROGRESS_STATUSES = {"in_progress", "running", "pending", "queued", "starting"}
 _ATT_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 _MIME_RE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+_-]*$", re.IGNORECASE)
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -695,11 +709,196 @@ class T3Client:
         }
 
 
-class T3GeminiAdapter:
-    """Dispatches chat turns to the active persistent Gemini T3 Code thread (shared with Telegram)."""
+def build_gemini_model_selection(settings_file: str = GEMINI_SETTINGS_FILE) -> dict[str, Any]:
+    """Build T3 modelSelection dict for Gemini from ~/.config/gemini-agent/settings.json."""
+    instance_id = "antigravity"
+    model = "gemini-4-neon"
+    thought_level = "medium"
+    try:
+        cfg = json.loads(Path(settings_file).read_text(encoding="utf-8"))
+        if isinstance(cfg, dict):
+            if isinstance(cfg.get("instance_id"), str) and cfg["instance_id"].strip():
+                instance_id = cfg["instance_id"].strip()
+            if isinstance(cfg.get("model"), str) and cfg["model"].strip():
+                model = cfg["model"].strip()
+            if isinstance(cfg.get("thought_level"), str) and cfg["thought_level"].strip():
+                thought_level = cfg["thought_level"].strip()
+    except Exception:
+        pass
+    return {
+        "instanceId": instance_id,
+        "model": model,
+        "options": [{"id": "thought_level", "value": thought_level}],
+    }
+
+
+def build_claude_model_selection(settings_file: str = CLAUDE_SETTINGS_FILE) -> dict[str, Any]:
+    """Build T3 modelSelection dict for Claude (claudeAgent) from ~/.config/claude-agent/settings.json."""
+    model = DEFAULT_CLAUDE_MODEL
+    effort: str | None = None
+    try:
+        cfg = json.loads(Path(settings_file).read_text(encoding="utf-8"))
+        if isinstance(cfg, dict):
+            raw_model = cfg.get("model")
+            if isinstance(raw_model, str) and raw_model.strip():
+                model = raw_model.strip()
+            raw_effort = cfg.get("effort")
+            if isinstance(raw_effort, str) and raw_effort.strip().lower() in VALID_CLAUDE_EFFORTS:
+                effort = raw_effort.strip().lower()
+    except Exception:
+        pass
+    sel: dict[str, Any] = {
+        "instanceId": "claudeAgent",
+        "model": model,
+    }
+    if effort:
+        sel["options"] = [{"id": "effort", "value": effort}]
+    return sel
+
+
+_MD_PREFIX_RE = re.compile(r"^\s*(?:#{1,6}\s+|>\s+|[-*+]\s+|\d+[.)]\s+)+")
+_MD_INLINE_RE = re.compile(r"(\*\*|__|~~|`)")
+_TITLE_FILE_OP_RE = re.compile(r"^(Read|View|Edit|Write)\s+(.+)$", re.IGNORECASE)
+
+
+def _format_t3_reasoning(text: str, max_len: int = MAX_PROGRESS_STEP_LEN) -> str:
+    """Extract a clean single-line first sentence/line from a T3 reasoning item."""
+    for raw_line in (text or "").splitlines():
+        line = _MD_PREFIX_RE.sub("", raw_line).strip()
+        if not line:
+            continue
+        cleaned = _MD_INLINE_RE.sub("", line)
+        cleaned = " ".join(cleaned.split())
+        if not cleaned:
+            continue
+        # Prefer first complete sentence when it fits comfortably.
+        m = re.search(r"[.!?](?:\s|$)", cleaned)
+        if m and 20 <= m.end() <= max_len:
+            return cleaned[: m.end()].strip()
+        return _truncate_inline(cleaned, max_len)
+    return ""
+
+
+def format_t3_activity_item(
+    item: dict[str, Any],
+    max_len: int = MAX_PROGRESS_STEP_LEN,
+) -> tuple[str, str] | None:
+    """Convert one T3 `view='activity'` item into `(kind, step_text)` or None to skip."""
+    if not isinstance(item, dict):
+        return None
+    item_type = str(item.get("type") or "").strip().lower()
+    if item_type in ("user_message", "checkpoint", "assistant_message", ""):
+        return None
+
+    title = str(item.get("title") or "").strip()
+    text = str(item.get("text") or "").strip()
+
+    if item_type == "reasoning":
+        summary = _format_t3_reasoning(text, max_len=max_len)
+        return ("reasoning", summary) if summary else None
+
+    if item_type == "command_execution":
+        first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        if title.lower() == "workspace ready" and first_line.lower().startswith("$ preparing workspace"):
+            return None
+        if first_line.startswith("$ "):
+            cmd = first_line[2:].strip()
+            if cmd:
+                return ("tool", describe_claude_tool("Bash", {"command": cmd}, max_len=max(20, max_len - 12)))
+        if title:
+            return ("tool", _truncate_inline(title, max_len))
+        return ("tool", "running command")
+
+    if item_type == "file_change":
+        paths: list[str] = []
+        for raw_ln in text.splitlines():
+            ln = raw_ln.strip()
+            if not ln or ln.startswith(("@@", "+++", "---", "+", "-", "{", "[")):
+                continue
+            paths.append(ln)
+        if paths:
+            base = _short_name(paths[0], max(20, max_len - 18))
+            if base:
+                suffix = f" (+{len(paths) - 1})" if len(paths) > 1 else ""
+                return ("tool", _truncate_inline(f"editing {base}{suffix}", max_len))
+        if title:
+            return ("tool", _truncate_inline(title, max_len))
+        return ("tool", "editing files")
+
+    # Tool calls (`dynamic_tool`, `mcp_tool_call`, `tool_call`, `web_search`, `subagent`, etc.)
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            tname = str(parsed.get("toolName") or parsed.get("name") or "").strip()
+            if tname:
+                if is_telegram_tool(tname):
+                    return None
+                tinput = parsed.get("input")
+                if not isinstance(tinput, dict):
+                    tinput = parsed.get("arguments") if isinstance(parsed.get("arguments"), dict) else {}
+                return (
+                    "tool",
+                    _truncate_inline(describe_claude_tool(tname, tinput, max_len=max(20, max_len - 14)), max_len),
+                )
+
+    if title:
+        if is_telegram_tool(title):
+            return None
+        op_match = _TITLE_FILE_OP_RE.match(title)
+        if op_match:
+            verb = op_match.group(1).lower()
+            target = op_match.group(2).strip()
+            if "/" in target or "\\" in target:
+                short = _short_name(target, max(20, max_len - 12))
+                if short:
+                    verb_map = {"read": "reading", "view": "reading", "edit": "editing", "write": "writing"}
+                    return ("tool", _truncate_inline(f"{verb_map[verb]} {short}", max_len))
+        return ("tool", _truncate_inline(title, max_len))
+
+    if item_type == "web_search":
+        return ("tool", "web search")
+    if item_type == "subagent":
+        return ("tool", "running subagent")
+    return None
+
+
+def _is_thread_missing_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "not found" in msg
+        or "does not exist" in msg
+        or "unknown thread" in msg
+        or "http 404" in msg
+    )
+
+
+def _callback_accepts_step_id(cb: Callable[..., None] | None) -> tuple[bool, bool]:
+    """Return (accepts_step_id_kwarg, accepts_3rd_positional)."""
+    if cb is None:
+        return False, False
+    try:
+        params = list(inspect.signature(cb).parameters.values())
+    except (TypeError, ValueError):
+        return False, False
+    has_kw = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD or p.name == "step_id"
+        for p in params
+    )
+    has_pos3 = len(params) >= 3 or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+    return has_kw, has_pos3
+
+
+class T3ThreadAdapter:
+    """Shared persistent T3 Code thread adapter with incremental `view='activity'` progress polling."""
 
     _WAIT_RETRY_DELAY = 0.4
     _EMPTY_REPLY_RETRIES = 3
+    engine_label: str = "Agent"
+    thread_title: str = "PC Agent (App)"
+    bootstrap_prompt: str = ""
 
     def __init__(
         self,
@@ -709,16 +908,25 @@ class T3GeminiAdapter:
         settings_file: str = GEMINI_SETTINGS_FILE,
         workdir: str = AGENT_WORKDIR,
         timeout: float = DISPATCH_TIMEOUT,
-        poll_wait_ms: int = 30000,
+        poll_wait_ms: int = DEFAULT_T3_POLL_WAIT_MS,
         retry_delay: float | None = None,
+        thread_title: str | None = None,
+        engine_label: str | None = None,
+        bootstrap_prompt: str | None = None,
     ) -> None:
         self.client = client or T3Client()
         self.thread_file = thread_file
         self.settings_file = settings_file
         self.workdir = workdir
         self.timeout = float(timeout)
-        self.poll_wait_ms = int(poll_wait_ms)
+        self.poll_wait_ms = max(50, int(poll_wait_ms))
         self.retry_delay = self._WAIT_RETRY_DELAY if retry_delay is None else float(retry_delay)
+        if thread_title is not None:
+            self.thread_title = thread_title
+        if engine_label is not None:
+            self.engine_label = engine_label
+        if bootstrap_prompt is not None:
+            self.bootstrap_prompt = bootstrap_prompt
 
     def _read_thread_state(self) -> dict[str, Any]:
         try:
@@ -735,25 +943,27 @@ class T3GeminiAdapter:
         os.replace(tmp, p)
 
     def _model_selection(self) -> dict[str, Any]:
-        instance_id = "antigravity"
-        model = "gemini-4-neon"
-        thought_level = "medium"
+        raise NotImplementedError
+
+    def _apply_bootstrap(self, text: str) -> str:
+        if not self.bootstrap_prompt:
+            return text
+        return f"{self.bootstrap_prompt}\n\n{text}" if text else self.bootstrap_prompt
+
+    def configure_active_thread(self) -> bool:
+        """Best-effort: apply current modelSelection to the active thread if one exists."""
+        state = self._read_thread_state()
+        thread_id = state.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            return False
         try:
-            cfg = json.loads(Path(self.settings_file).read_text(encoding="utf-8"))
-            if isinstance(cfg, dict):
-                if isinstance(cfg.get("instance_id"), str) and cfg["instance_id"].strip():
-                    instance_id = cfg["instance_id"].strip()
-                if isinstance(cfg.get("model"), str) and cfg["model"].strip():
-                    model = cfg["model"].strip()
-                if isinstance(cfg.get("thought_level"), str) and cfg["thought_level"].strip():
-                    thought_level = cfg["thought_level"].strip()
+            self.client.call_tool(
+                "t3_thread_configure",
+                {"threadId": thread_id.strip(), "modelSelection": self._model_selection()},
+            )
+            return True
         except Exception:
-            pass
-        return {
-            "instanceId": instance_id,
-            "model": model,
-            "options": [{"id": "thought_level", "value": thought_level}],
-        }
+            return False
 
     def _find_or_create_project(self) -> str:
         target_real = os.path.realpath(os.path.expanduser(self.workdir))
@@ -850,6 +1060,97 @@ class T3GeminiAdapter:
                 time.sleep(self.retry_delay)
             reply = self._fetch_reply(thread_id, run_id, after_pos)
         return reply
+
+    def _poll_activity(
+        self,
+        thread_id: str,
+        *,
+        after_pos: int,
+        run_id: str | None,
+        prev_latest_run_id: str | None,
+        seen_items: dict[str, str],
+        on_step: Callable[..., None],
+        accepts_kw: bool,
+        accepts_pos3: bool,
+    ) -> int:
+        """Fetch incremental T3 activity items and forward new/updated steps to `on_step`.
+
+        Returns the updated `after_pos` cursor (advancing only past completed items so
+        `in_progress` items are re-checked on the next poll and updated in place).
+        """
+        cur_after = after_pos
+        for _ in range(5):
+            try:
+                res = self.client.call_tool(
+                    "t3_thread_read",
+                    {
+                        "threadId": thread_id,
+                        "view": "activity",
+                        "afterPosition": cur_after,
+                        "limit": 50,
+                        "maxCharsPerItem": 2000,
+                    },
+                )
+            except Exception:
+                return cur_after
+
+            items = res.get("items") if isinstance(res.get("items"), list) else []
+            if not items:
+                break
+
+            hit_in_progress = False
+            page_max_pos = cur_after
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                pos = item.get("position")
+                status = str(item.get("status") or "").strip().lower()
+                is_in_progress = status in _T3_IN_PROGRESS_STATUSES
+                if is_in_progress:
+                    hit_in_progress = True
+                elif not hit_in_progress and isinstance(pos, int) and pos > cur_after:
+                    cur_after = pos
+                if isinstance(pos, int) and pos > page_max_pos:
+                    page_max_pos = pos
+
+                item_run_id = item.get("runId")
+                if run_id:
+                    if isinstance(item_run_id, str) and item_run_id and item_run_id != run_id:
+                        continue
+                elif prev_latest_run_id and item_run_id == prev_latest_run_id:
+                    continue
+
+                formatted = format_t3_activity_item(item)
+                if formatted is None:
+                    continue
+                kind, step_text = formatted
+                raw_id = item.get("itemId")
+                item_id = str(raw_id) if isinstance(raw_id, str) and raw_id else (
+                    f"pos:{pos}" if isinstance(pos, int) else None
+                )
+                if item_id is not None:
+                    if seen_items.get(item_id) == step_text:
+                        continue
+                    seen_items[item_id] = step_text
+
+                try:
+                    if accepts_kw:
+                        on_step(step_text, kind, step_id=item_id)
+                    elif accepts_pos3:
+                        on_step(step_text, kind, item_id)
+                    else:
+                        on_step(step_text, kind)
+                except Exception:
+                    pass
+
+            if hit_in_progress:
+                break
+            has_more = bool(res.get("hasMore"))
+            next_pos = res.get("nextPosition")
+            if not has_more or not isinstance(next_pos, int) or next_pos <= cur_after:
+                break
+            cur_after = max(cur_after, page_max_pos)
+        return cur_after
 
     @staticmethod
     def _extract_wait_state(
@@ -955,6 +1256,7 @@ class T3GeminiAdapter:
         *,
         fresh: bool = False,
         attachments: list[dict[str, Any]] | None = None,
+        on_step: Callable[..., None] | None = None,
     ) -> str:
         state = self._read_thread_state()
         thread_id = state.get("thread_id") if isinstance(state.get("thread_id"), str) else None
@@ -974,7 +1276,7 @@ class T3GeminiAdapter:
             try:
                 head = self.client.call_tool(
                     "t3_thread_read",
-                    {"threadId": thread_id, "view": "messages", "limit": 1},
+                    {"threadId": thread_id, "view": "activity", "limit": 1},
                 )
                 head_thread = head.get("thread") if isinstance(head.get("thread"), dict) else {}
                 prev_rid = head_thread.get("latestRunId")
@@ -983,7 +1285,7 @@ class T3GeminiAdapter:
                 if items and isinstance(items[0], dict) and isinstance(items[0].get("position"), int):
                     start_pos = int(items[0]["position"])
                 elif isinstance(head.get("nextPosition"), int):
-                    start_pos = max(-1, int(head["nextPosition"]) - 1)
+                    start_pos = max(-1, int(head["nextPosition"]))
                 elif isinstance(head_thread.get("itemCount"), int):
                     start_pos = int(head_thread["itemCount"]) - 1
 
@@ -997,8 +1299,7 @@ class T3GeminiAdapter:
                     try:
                         sent = self.client.call_tool("t3_thread_send_attachments", att_args)
                     except RuntimeError as att_exc:
-                        msg_lower = str(att_exc).lower()
-                        if "not found" in msg_lower or "does not exist" in msg_lower or "unknown thread" in msg_lower:
+                        if _is_thread_missing_error(att_exc):
                             raise
                         # Fall back cleanly to plain message with [attachment: /abs/path].
                         fallback_msg = _append_attachment_paths(text, all_paths)
@@ -1008,6 +1309,8 @@ class T3GeminiAdapter:
                         )
                 else:
                     msg_text = _append_attachment_paths(text, all_paths) if (t3_attachments and fresh) else effective_text
+                    if fresh:
+                        msg_text = self._apply_bootstrap(msg_text)
                     send_args: dict[str, Any] = {
                         "threadId": thread_id,
                         "message": msg_text,
@@ -1021,8 +1324,7 @@ class T3GeminiAdapter:
                 rid = sent.get("runId") or sent.get("queuedRunId") or run_obj.get("runId")
                 run_id = str(rid) if rid else None
             except RuntimeError as exc:
-                msg = str(exc).lower()
-                if "not found" in msg or "does not exist" in msg or "unknown thread" in msg:
+                if _is_thread_missing_error(exc):
                     thread_id = None
                     start_pos = None
                     prev_latest_run_id = None
@@ -1037,10 +1339,11 @@ class T3GeminiAdapter:
                 else self._find_or_create_project()
             )
             model_sel = self._model_selection()
+            launch_msg = self._apply_bootstrap(effective_text or "See attached file(s).")
             launch_args: dict[str, Any] = {
                 "projectId": project_id,
-                "title": "PC Agent (App)",
-                "message": effective_text or "See attached file(s).",
+                "title": self.thread_title,
+                "message": launch_msg,
                 "modelSelection": model_sel,
                 "runtimeMode": "full-access",
                 "interactionMode": "default",
@@ -1054,7 +1357,12 @@ class T3GeminiAdapter:
                 raise RuntimeError("t3_thread_launch returned no threadId")
             thread_id = str(tid)
             run_obj = launched.get("run") if isinstance(launched.get("run"), dict) else {}
-            rid = launched.get("runId") or launched.get("queuedRunId") or run_obj.get("runId") or thread_obj.get("latestRunId")
+            rid = (
+                launched.get("runId")
+                or launched.get("queuedRunId")
+                or run_obj.get("runId")
+                or thread_obj.get("latestRunId")
+            )
             run_id = str(rid) if rid else None
             start_pos = -1
             prev_latest_run_id = None
@@ -1062,7 +1370,7 @@ class T3GeminiAdapter:
                 {
                     "thread_id": thread_id,
                     "project_id": project_id,
-                    "title": "PC Agent (App)",
+                    "title": self.thread_title,
                     "instance_id": model_sel.get("instanceId"),
                 }
             )
@@ -1071,11 +1379,15 @@ class T3GeminiAdapter:
             except OSError:
                 pass
 
+        accepts_kw, accepts_pos3 = _callback_accepts_step_id(on_step)
+        activity_pos = start_pos if start_pos is not None else -1
+        seen_activity_items: dict[str, str] = {}
+
         deadline = time.monotonic() + self.timeout
         while True:
             remaining_ms = int((deadline - time.monotonic()) * 1000)
             if remaining_ms <= 0:
-                raise RuntimeError("Timed out waiting for Gemini reply")
+                raise RuntimeError(f"Timed out waiting for {self.engine_label} reply")
             wait_args: dict[str, Any] = {
                 "threadId": thread_id,
                 "timeoutMs": min(self.poll_wait_ms, remaining_ms),
@@ -1086,6 +1398,17 @@ class T3GeminiAdapter:
             run_id, status, timed_out, err_detail, is_stale = self._extract_wait_state(
                 waited, run_id, prev_latest_run_id
             )
+            if on_step is not None and not is_stale:
+                activity_pos = self._poll_activity(
+                    thread_id,
+                    after_pos=activity_pos,
+                    run_id=run_id,
+                    prev_latest_run_id=prev_latest_run_id,
+                    seen_items=seen_activity_items,
+                    on_step=on_step,
+                    accepts_kw=accepts_kw,
+                    accepts_pos3=accepts_pos3,
+                )
             if timed_out:
                 continue
             if is_stale:
@@ -1093,12 +1416,76 @@ class T3GeminiAdapter:
                     time.sleep(min(self.retry_delay, max(0.0, deadline - time.monotonic())))
                 continue
             if status in ("failed", "cancelled", "interrupted", "rolled_back"):
-                raise RuntimeError(f"Gemini run {status}: {err_detail or status}")
+                raise RuntimeError(f"{self.engine_label} run {status}: {err_detail or status}")
             if not status or status in _T3_TERMINAL_STATUSES or status == "idle":
                 break
 
         reply = self._fetch_reply_with_retries(thread_id, run_id, start_pos)
         return reply or "(no response)"
+
+
+class T3GeminiAdapter(T3ThreadAdapter):
+    """Dispatches chat turns to the active persistent Gemini T3 Code thread (shared with Telegram)."""
+
+    engine_label = "Gemini"
+    thread_title = "PC Agent (App)"
+    bootstrap_prompt = ""
+
+    def __init__(
+        self,
+        *,
+        client: T3Client | None = None,
+        thread_file: str = T3_THREAD_FILE,
+        settings_file: str = GEMINI_SETTINGS_FILE,
+        workdir: str = AGENT_WORKDIR,
+        timeout: float = DISPATCH_TIMEOUT,
+        poll_wait_ms: int = DEFAULT_T3_POLL_WAIT_MS,
+        retry_delay: float | None = None,
+    ) -> None:
+        super().__init__(
+            client=client,
+            thread_file=thread_file,
+            settings_file=settings_file,
+            workdir=workdir,
+            timeout=timeout,
+            poll_wait_ms=poll_wait_ms,
+            retry_delay=retry_delay,
+        )
+
+    def _model_selection(self) -> dict[str, Any]:
+        return build_gemini_model_selection(self.settings_file)
+
+
+class T3ClaudeAdapter(T3ThreadAdapter):
+    """Dispatches chat turns to a persistent Claude T3 Code thread (claudeAgent)."""
+
+    engine_label = "Claude"
+    thread_title = "PC Agent (Claude Chat)"
+    bootstrap_prompt = CLAUDE_T3_BOOTSTRAP
+
+    def __init__(
+        self,
+        *,
+        client: T3Client | None = None,
+        thread_file: str = CLAUDE_T3_THREAD_FILE,
+        settings_file: str = CLAUDE_SETTINGS_FILE,
+        workdir: str = AGENT_WORKDIR,
+        timeout: float = DISPATCH_TIMEOUT,
+        poll_wait_ms: int = DEFAULT_T3_POLL_WAIT_MS,
+        retry_delay: float | None = None,
+    ) -> None:
+        super().__init__(
+            client=client,
+            thread_file=thread_file,
+            settings_file=settings_file,
+            workdir=workdir,
+            timeout=timeout,
+            poll_wait_ms=poll_wait_ms,
+            retry_delay=retry_delay,
+        )
+
+    def _model_selection(self) -> dict[str, Any]:
+        return build_claude_model_selection(self.settings_file)
 
 
 # ---------------------------------------------------------------- Claude CLI progress helpers
@@ -1471,7 +1858,7 @@ class ChatManager:
         self.store = store or ChatHistoryStore()
         self.engine_fn = engine_fn or active_engine
         self.gemini_adapter = gemini_adapter or T3GeminiAdapter()
-        self.claude_adapter = claude_adapter or ClaudeCliAdapter()
+        self.claude_adapter = claude_adapter or T3ClaudeAdapter()
         self.notify = notify
         self.clock = clock or time.time
         self.uploads_dir = os.path.abspath(os.path.expanduser(uploads_dir or CHAT_UPLOADS_DIR))
@@ -1570,6 +1957,7 @@ class ChatManager:
 
         started_ts = float(self.clock())
         raw_steps: list[dict[str, Any]] = []
+        step_index_by_id: dict[str, int] = {}
         progress_lock = threading.Lock()
         last_publish = 0.0
         flush_timer: list[threading.Timer | None] = [None]
@@ -1588,18 +1976,27 @@ class ChatManager:
                         "steps": snap_steps,
                     }
 
-        def on_step(step_text: str, kind: str = "tool") -> None:
+        def on_step(step_text: str, kind: str = "tool", step_id: str | None = None) -> None:
             nonlocal last_publish
-            cleaned = _truncate_inline(step_text, 80)
+            cleaned = _truncate_inline(step_text, MAX_PROGRESS_STEP_LEN)
             if not cleaned:
                 return
             now_mono = time.monotonic()
             should_publish = False
             delay_s = 0.0
             with progress_lock:
-                if raw_steps and raw_steps[-1]["text"] == cleaned:
-                    return
-                raw_steps.append({"t": float(self.clock()), "text": cleaned, "kind": kind})
+                if step_id and step_id in step_index_by_id:
+                    idx = step_index_by_id[step_id]
+                    if raw_steps[idx]["text"] == cleaned:
+                        return
+                    raw_steps[idx]["text"] = cleaned
+                    raw_steps[idx]["kind"] = kind
+                else:
+                    if not step_id and raw_steps and raw_steps[-1]["text"] == cleaned:
+                        return
+                    raw_steps.append({"t": float(self.clock()), "text": cleaned, "kind": kind})
+                    if step_id:
+                        step_index_by_id[step_id] = len(raw_steps) - 1
                 elapsed = now_mono - last_publish
                 if last_publish <= 0.0 or elapsed >= self.progress_min_interval:
                     last_publish = now_mono

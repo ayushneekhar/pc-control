@@ -1791,6 +1791,56 @@ class AgentUsageAndSettingsHttpTests(unittest.TestCase):
                 "auto_rotate": True,
             })
 
+    def test_settings_update_configures_active_claude_t3_thread(self):
+        claude_tf = os.path.join(self.dir, "claude-t3-thread.json")
+        with open(claude_tf, "w", encoding="utf-8") as f:
+            json.dump({"thread_id": "thr-claude-live"}, f)
+
+        calls = []
+
+        class FakeT3Cfg:
+            def call_tool(self, name, args=None):
+                calls.append((name, args or {}))
+                return {"ok": True}
+
+        mgr = pcapi.AgentSettingsManager(
+            claude_path=self.claude_agent_cfg,
+            gemini_path=self.gemini_agent_cfg,
+            gemini_fresh_flag=self.fresh_flag,
+            t3_settings_path=self.t3_settings,
+            t3_providers_dir=self.t3_providers,
+            claude_config_path=self.claude_cfg,
+            usage_mgr=pcapi.AGENT_USAGE,
+            claude_thread_file=claude_tf,
+            t3_client=FakeT3Cfg(),
+        )
+        code, res = mgr.update({"claude": {"model": "claude-sonnet-5-5", "effort": "max"}})
+        self.assertEqual(code, 200)
+        self.assertEqual(res["claude"]["model"], "claude-sonnet-5-5")
+        self.assertEqual(calls, [
+            (
+                "t3_thread_configure",
+                {
+                    "threadId": "thr-claude-live",
+                    "modelSelection": {
+                        "instanceId": "claudeAgent",
+                        "model": "claude-sonnet-5-5",
+                        "options": [{"id": "effort", "value": "max"}],
+                    },
+                },
+            )
+        ])
+
+        # Best-effort: T3 error must not fail settings update.
+        class FailingT3Cfg:
+            def call_tool(self, name, args=None):
+                raise RuntimeError("T3 unreachable")
+
+        mgr.t3_client = FailingT3Cfg()
+        code2, res2 = mgr.update({"claude": {"model": "claude-opus-5-5", "effort": "medium"}})
+        self.assertEqual(code2, 200)
+        self.assertEqual(res2["claude"]["model"], "claude-opus-5-5")
+
     def test_reset_endpoint(self):
         code, r = self.call("POST", "/pc/api/agent/reset", {})
         self.assertEqual(code, 200)

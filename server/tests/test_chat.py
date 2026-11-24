@@ -1399,5 +1399,423 @@ class ClaudeStreamProgressTests(unittest.TestCase):
             )
 
 
+class T3ClaudeAndActivityProgressTests(unittest.TestCase):
+    def test_build_claude_model_selection_defaults_and_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "missing.json")
+            self.assertEqual(
+                chat_mod.build_claude_model_selection(missing),
+                {"instanceId": "claudeAgent", "model": "claude-opus-5-5"},
+            )
+
+            cfg = os.path.join(tmp, "settings.json")
+            with open(cfg, "w", encoding="utf-8") as f:
+                json.dump({"model": "claude-sonnet-5-5", "effort": "ultrathink"}, f)
+            self.assertEqual(
+                chat_mod.build_claude_model_selection(cfg),
+                {
+                    "instanceId": "claudeAgent",
+                    "model": "claude-sonnet-5-5",
+                    "options": [{"id": "effort", "value": "ultrathink"}],
+                },
+            )
+
+            with open(cfg, "w", encoding="utf-8") as f:
+                json.dump({"model": "claude-haiku-5-5", "effort": "bogus"}, f)
+            self.assertEqual(
+                chat_mod.build_claude_model_selection(cfg),
+                {"instanceId": "claudeAgent", "model": "claude-haiku-5-5"},
+            )
+
+    def test_t3_claude_adapter_creates_reuses_recovers_on_404_and_sends_attachments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tf = os.path.join(tmp, "claude-t3-thread.json")
+            cfg = os.path.join(tmp, "claude-settings.json")
+            with open(cfg, "w", encoding="utf-8") as f:
+                json.dump({"model": "claude-sonnet-5-5", "effort": "xhigh"}, f)
+            img = os.path.join(tmp, "screen.png")
+            with open(img, "wb") as f:
+                f.write(b"\x89PNG\r\n\x1a\nfake")
+
+            calls = []
+            launch_count = 0
+            fail_next_read = [False]
+
+            class FakeT3Claude:
+                def upload_attachment(self, file_path, **kw):
+                    return {
+                        "type": "image",
+                        "id": "att-c-1",
+                        "name": "screen.png",
+                        "mimeType": "image/png",
+                        "sizeBytes": 12,
+                    }
+
+                def call_tool(self, name, args=None):
+                    nonlocal launch_count
+                    args = args or {}
+                    calls.append((name, args))
+                    if name == "t3_project_list":
+                        return {"projects": [{"id": "proj-agent", "workspaceRoot": tmp}]}
+                    if name == "t3_thread_launch":
+                        launch_count += 1
+                        return {
+                            "threadId": f"thr-claude-{launch_count}",
+                            "runId": f"run-launch-{launch_count}",
+                        }
+                    if name == "t3_thread_read" and args.get("limit") == 1:
+                        if fail_next_read[0]:
+                            fail_next_read[0] = False
+                            raise RuntimeError("T3 HTTP 404 on t3_thread_read: thread not found")
+                        return {"thread": {"latestRunId": "run-prev"}, "items": [{"position": 4}]}
+                    if name == "t3_thread_send":
+                        return {"runId": "run-send"}
+                    if name == "t3_thread_send_attachments":
+                        return {"runId": "run-att"}
+                    if name == "t3_thread_wait":
+                        return {"status": "completed", "runId": args.get("runId")}
+                    if name == "t3_thread_read" and args.get("view") == "messages":
+                        return {
+                            "items": [
+                                {
+                                    "itemId": "it-c",
+                                    "type": "assistant_message",
+                                    "runId": "run-att" if any(n == "t3_thread_send_attachments" for n, _ in calls[-4:]) else None,
+                                    "text": f"reply #{launch_count}",
+                                    "textTruncated": False,
+                                }
+                            ]
+                        }
+                    return {}
+
+            adapter = chat_mod.T3ClaudeAdapter(
+                client=FakeT3Claude(),
+                thread_file=tf,
+                settings_file=cfg,
+                workdir=tmp,
+                poll_wait_ms=50,
+                retry_delay=0.0,
+            )
+
+            # 1. Fresh launch creates thread with claudeAgent modelSelection + bootstrap + state file.
+            r1 = adapter.send("hello claude")
+            self.assertEqual(r1, "reply #1")
+            launch_call = next(a for n, a in calls if n == "t3_thread_launch")
+            self.assertEqual(launch_call["title"], "PC Agent (Claude Chat)")
+            self.assertEqual(
+                launch_call["modelSelection"],
+                {
+                    "instanceId": "claudeAgent",
+                    "model": "claude-sonnet-5-5",
+                    "options": [{"id": "effort", "value": "xhigh"}],
+                },
+            )
+            self.assertIn("PC Control Chat", launch_call["message"])
+            self.assertIn("hello claude", launch_call["message"])
+            saved = json.loads(Path(tf).read_text(encoding="utf-8"))
+            self.assertEqual(saved["thread_id"], "thr-claude-1")
+            self.assertEqual(saved["instance_id"], "claudeAgent")
+
+            # 2. Follow-up reuses saved thread without bootstrap.
+            calls.clear()
+            r2 = adapter.send("follow up")
+            self.assertEqual(r2, "reply #1")
+            send_call = next(a for n, a in calls if n == "t3_thread_send")
+            self.assertEqual(send_call["threadId"], "thr-claude-1")
+            self.assertEqual(send_call["message"], "follow up")
+            self.assertNotIn("freshContext", send_call)
+
+            # 3. Attachment upload dispatches via t3_thread_send_attachments.
+            calls.clear()
+            r3 = adapter.send(
+                "describe this",
+                attachments=[{"path": img, "name": "screen.png", "mime_type": "image/png", "kind": "image"}],
+            )
+            self.assertEqual(r3, "reply #1")
+            att_call = next(a for n, a in calls if n == "t3_thread_send_attachments")
+            self.assertEqual(att_call["threadId"], "thr-claude-1")
+            self.assertEqual(att_call["attachments"][0]["id"], "att-c-1")
+
+            # 4. 404 on existing thread auto-recreates thread and updates state file.
+            calls.clear()
+            fail_next_read[0] = True
+            r4 = adapter.send("after 404")
+            self.assertEqual(r4, "reply #2")
+            saved2 = json.loads(Path(tf).read_text(encoding="utf-8"))
+            self.assertEqual(saved2["thread_id"], "thr-claude-2")
+
+            # 5. fresh=True passes freshContext=True and includes bootstrap again.
+            calls.clear()
+            adapter.send("new topic", fresh=True)
+            fresh_call = next(a for n, a in calls if n == "t3_thread_send")
+            self.assertTrue(fresh_call.get("freshContext"))
+            self.assertIn("PC Control Chat", fresh_call["message"])
+            self.assertIn("new topic", fresh_call["message"])
+
+    def test_format_t3_activity_item_all_types(self):
+        # Ignored types
+        self.assertIsNone(chat_mod.format_t3_activity_item({"type": "user_message", "text": "hi"}))
+        self.assertIsNone(chat_mod.format_t3_activity_item({"type": "checkpoint", "text": "[{\"path\":\"a\"}]"}))
+        self.assertIsNone(chat_mod.format_t3_activity_item({"type": "assistant_message", "text": "final"}))
+
+        # Reasoning: strips markdown, takes first sentence, single line
+        self.assertEqual(
+            chat_mod.format_t3_activity_item(
+                {
+                    "type": "reasoning",
+                    "text": "## **Checking** `server/chat.py` for adapter logic. Then we will write tests.\nMore lines.",
+                }
+            ),
+            ("reasoning", "Checking server/chat.py for adapter logic."),
+        )
+
+        # Command execution: extracts $ cmd and skips workspace boilerplate
+        self.assertIsNone(
+            chat_mod.format_t3_activity_item(
+                {
+                    "type": "command_execution",
+                    "title": "Workspace ready",
+                    "text": "$ Preparing workspace\nWorkspace preparation completed.",
+                }
+            )
+        )
+        self.assertEqual(
+            chat_mod.format_t3_activity_item(
+                {
+                    "type": "command_execution",
+                    "title": "Ran command",
+                    "text": "$ git status -sb\n## main",
+                }
+            ),
+            ("tool", "running `git status -sb`"),
+        )
+
+        # File change: basename + count, never diffs
+        self.assertEqual(
+            chat_mod.format_t3_activity_item(
+                {
+                    "type": "file_change",
+                    "title": "Changed files",
+                    "text": "/home/ayushlive/code/pc-control/server/chat.py\n/home/ayushlive/code/pc-control/server/pcapi.py",
+                }
+            ),
+            ("tool", "editing chat.py (+1)"),
+        )
+
+        # Dynamic tool: JSON toolName + input
+        self.assertEqual(
+            chat_mod.format_t3_activity_item(
+                {
+                    "type": "dynamic_tool",
+                    "title": "Read /home/ayushlive/agent/NOTES.md",
+                    "text": json.dumps({"toolName": "Read", "input": {"Path": "/home/ayushlive/agent/NOTES.md"}}),
+                }
+            ),
+            ("tool", "reading NOTES.md"),
+        )
+
+        # Dynamic tool with truncated JSON falls back cleanly to title (never raw JSON)
+        self.assertEqual(
+            chat_mod.format_t3_activity_item(
+                {
+                    "type": "dynamic_tool",
+                    "title": "Read /home/ayushlive/agent/CLAUDE.md",
+                    "text": '{"toolName": "Read", "input": {"Path": "/home/ayushlive/agent/CLAUDE.md"...',
+                }
+            ),
+            ("tool", "reading CLAUDE.md"),
+        )
+
+        # Telegram tools skipped
+        self.assertIsNone(
+            chat_mod.format_t3_activity_item(
+                {
+                    "type": "dynamic_tool",
+                    "title": "telegram reply",
+                    "text": json.dumps({"toolName": "mcp__telegram__reply", "input": {}}),
+                }
+            )
+        )
+
+    def test_t3_activity_progress_live_and_persisted_for_gemini_and_claude(self):
+        for engine, adapter_cls in (("gemini", chat_mod.T3GeminiAdapter), ("claude", chat_mod.T3ClaudeAdapter)):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as tmp:
+                tf = os.path.join(tmp, f"{engine}-thread.json")
+                with open(tf, "w", encoding="utf-8") as f:
+                    json.dump({"thread_id": f"thr-{engine}", "project_id": "proj-1"}, f)
+
+                wait_step = [0]
+                gate = threading.Event()
+                mid_seen = threading.Event()
+                now_box = [2000.0]
+                activity_after_positions = []
+
+                class FakeStreamingT3:
+                    def call_tool(self, name, args=None):
+                        args = args or {}
+                        if name == "t3_thread_read" and args.get("limit") == 1:
+                            return {"thread": {"latestRunId": "run-old"}, "items": [{"position": 10}]}
+                        if name == "t3_thread_send":
+                            return {"runId": "run-cur"}
+                        if name == "t3_thread_wait":
+                            wait_step[0] += 1
+                            if wait_step[0] == 1:
+                                return {"timedOut": True, "runId": "run-cur"}
+                            mid_seen.set()
+                            gate.wait(timeout=3.0)
+                            now_box[0] = 2018.0
+                            return {"status": "completed", "runId": "run-cur"}
+                        if name == "t3_thread_read" and args.get("view") == "activity":
+                            activity_after_positions.append(args.get("afterPosition"))
+                            if wait_step[0] == 1:
+                                return {
+                                    "items": [
+                                        # Stale run item must be filtered out
+                                        {
+                                            "position": 10,
+                                            "itemId": "old-1",
+                                            "runId": "run-old",
+                                            "type": "reasoning",
+                                            "status": "completed",
+                                            "text": "Old run thought",
+                                        },
+                                        {
+                                            "position": 11,
+                                            "itemId": "u-1",
+                                            "runId": "run-cur",
+                                            "type": "user_message",
+                                            "status": "completed",
+                                            "text": "check status",
+                                        },
+                                        {
+                                            "position": 12,
+                                            "itemId": "r-1",
+                                            "runId": "run-cur",
+                                            "type": "reasoning",
+                                            "status": "in_progress",
+                                            "text": "Checking service",
+                                        },
+                                    ],
+                                    "hasMore": False,
+                                    "nextPosition": 12,
+                                }
+                            # Second poll: r-1 completed with updated text + command_execution + tool + assistant + checkpoint
+                            return {
+                                "items": [
+                                    {
+                                        "position": 12,
+                                        "itemId": "r-1",
+                                        "runId": "run-cur",
+                                        "type": "reasoning",
+                                        "status": "completed",
+                                        "text": "Checking service status and recent logs.",
+                                    },
+                                    {
+                                        "position": 13,
+                                        "itemId": "c-1",
+                                        "runId": "run-cur",
+                                        "type": "command_execution",
+                                        "status": "completed",
+                                        "title": "Ran command",
+                                        "text": "$ systemctl --user is-active pc-api.service\nactive",
+                                    },
+                                    {
+                                        "position": 14,
+                                        "itemId": "t-1",
+                                        "runId": "run-cur",
+                                        "type": "dynamic_tool",
+                                        "status": "completed",
+                                        "title": "Read /home/ayushlive/agent/NOTES.md",
+                                        "text": json.dumps(
+                                            {"toolName": "Read", "input": {"Path": "/home/ayushlive/agent/NOTES.md"}}
+                                        ),
+                                    },
+                                    {
+                                        "position": 15,
+                                        "itemId": "a-1",
+                                        "runId": "run-cur",
+                                        "type": "assistant_message",
+                                        "status": "completed",
+                                        "text": f"{engine} all good!",
+                                    },
+                                    {
+                                        "position": 16,
+                                        "itemId": "cp-1",
+                                        "runId": "run-cur",
+                                        "type": "checkpoint",
+                                        "status": "completed",
+                                        "text": "[]",
+                                    },
+                                ],
+                                "hasMore": False,
+                                "nextPosition": 16,
+                            }
+                        if name == "t3_thread_read" and args.get("view") == "messages":
+                            return {
+                                "items": [
+                                    {
+                                        "itemId": "a-1",
+                                        "type": "assistant_message",
+                                        "runId": "run-cur",
+                                        "text": f"{engine} all good!",
+                                        "textTruncated": False,
+                                    }
+                                ]
+                            }
+                        return {}
+
+                adapter = adapter_cls(
+                    client=FakeStreamingT3(),
+                    thread_file=tf,
+                    settings_file=os.path.join(tmp, "none.json"),
+                    poll_wait_ms=50,
+                    retry_delay=0.0,
+                )
+                store = chat_mod.ChatHistoryStore(os.path.join(tmp, "hist.jsonl"))
+                mgr = chat_mod.ChatManager(
+                    store=store,
+                    engine_fn=lambda e=engine: e,
+                    gemini_adapter=adapter if engine == "gemini" else None,
+                    claude_adapter=adapter if engine == "claude" else None,
+                    clock=lambda: now_box[0],
+                    last_channel_file=os.path.join(tmp, "last-channel.json"),
+                    progress_min_interval=0.01,
+                )
+
+                code, _ = mgr.handle_send({"text": "check status", "client_id": f"cid-{engine}"})
+                self.assertEqual(code, 202)
+                self.assertTrue(mid_seen.wait(timeout=3.0))
+
+                # Live progress shows the in_progress reasoning step before completion.
+                _, mid = mgr.handle_get_messages({})
+                self.assertTrue(mid["running"])
+                self.assertIsNotNone(mid["progress"])
+                self.assertEqual(mid["progress"]["engine"], engine)
+                self.assertEqual([s["text"] for s in mid["progress"]["steps"]], ["Checking service"])
+
+                gate.set()
+                self.assertTrue(mgr.wait_idle(timeout=3.0))
+
+                _, done = mgr.handle_get_messages({})
+                self.assertFalse(done["running"])
+                self.assertIsNone(done["progress"])
+                asst = done["messages"][-1]
+                self.assertEqual(asst["role"], "assistant")
+                self.assertEqual(asst["engine"], engine)
+                self.assertEqual(asst["text"], f"{engine} all good!")
+                # r-1 was updated in place (3 steps total, not 4!), old run & user/checkpoint/assistant excluded
+                self.assertEqual(activity_after_positions, [10, 11])
+                self.assertEqual(asst["progress"]["duration_s"], 18)
+                self.assertEqual(asst["progress"]["step_count"], 3)
+                self.assertEqual(
+                    [s["text"] for s in asst["progress"]["steps"]],
+                    [
+                        "Checking service status and recent logs.",
+                        "running `systemctl --user is-active pc-api.service`",
+                        "reading NOTES.md",
+                    ],
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

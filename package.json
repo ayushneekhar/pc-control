@@ -12,6 +12,11 @@
     "test": "python3 -I -m unittest discover -s server/tests -v",
     "test:js": "node scripts/test-js.mjs"
   },
+  "enriched-markdown": {
+    "enableCodeHighlight": false,
+    "enableMath": false,
+    "enableVideo": false
+  },
   "dependencies": {
     "@expo/vector-icons": "^15.1.1",
     "@legendapp/list": "^3.9.0",
@@ -26,6 +31,7 @@
     "expo-system-ui": "~57.0.4",
     "react": "19.2.3",
     "react-native": "0.86.3",
+    "react-native-enriched-markdown": "1.2.0",
     "react-native-mmkv": "^4.3.2",
     "react-native-nitro-modules": "0.35.1",
     "react-native-nitro-ota": "0.14.0",

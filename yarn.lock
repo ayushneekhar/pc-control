@@ -4695,6 +4695,11 @@ react-is@^19.1.0:
   resolved "https://registry.yarnpkg.com/react-is/-/react-is-19.3.1.tgz#81f7f7e431fc9b5bd9781b0a9f19997f08dee51b"
   integrity sha512-RRieF6IyxQBkcK6pP8xOHprLTPW6QjRkbGdImtqNme+/hYVwCZkLQLdlZGOhUqXwkS9IEynaGvPJtv6XB/cz0Q==
 
+react-native-enriched-markdown@1.2.0:
+  version "1.2.0"
+  resolved "https://registry.yarnpkg.com/react-native-enriched-markdown/-/react-native-enriched-markdown-1.2.0.tgz#9d03925f781ce737767d2fb816fb7788191db6eb"
+  integrity sha512-zu2+Slk7tkEu+9qiGoK644cWWV+dVgkFAUwQtjopyGmPFHr00iA9/drrZuEo93TCoXsWILK1AK/H60QNG8XtQQ==
+
 react-native-mmkv@^4.3.2:
   version "4.3.2"
   resolved "https://registry.yarnpkg.com/react-native-mmkv/-/react-native-mmkv-4.3.2.tgz#522978d2330932c538cce36093040826870ccb49"

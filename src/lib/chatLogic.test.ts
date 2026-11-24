@@ -26,10 +26,12 @@ import {
   isReplyableMessage,
   mergeChatMessages,
   normalizeChatUrl,
+  normalizeMarkdownForDisplay,
   parseInlineTokens,
   parseMessageSegments,
   prependOlderMessages,
   replySenderLabel,
+  resolveChatLinkUrl,
   resolveChatTarget,
   resolveT3ThreadUrl,
   setChatEndpoint,
@@ -892,4 +894,19 @@ test('applyChatListAutoFormat ignores multi-line paste, deletions, and plain tex
   const typing = applyChatListAutoFormat('1. a', '1. ab', { start: 4, end: 4 });
   assert.equal(typing.changed, false);
   assert.equal(typing.text, '1. ab');
+});
+
+test('normalizeMarkdownForDisplay converts leading unicode bullets to CommonMark dashes', () => {
+  assert.equal(normalizeMarkdownForDisplay('• first\n• second'), '- first\n- second');
+  assert.equal(normalizeMarkdownForDisplay('  • nested\n\t• deeper'), '  - nested\n\t- deeper');
+  assert.equal(normalizeMarkdownForDisplay('foo • bar'), 'foo • bar');
+  assert.equal(normalizeMarkdownForDisplay('- already dash\n1. numbered'), '- already dash\n1. numbered');
+  assert.equal(normalizeMarkdownForDisplay(''), '');
+});
+
+test('resolveChatLinkUrl resolves http(s) and t3-thread URLs and rejects others', () => {
+  assert.equal(resolveChatLinkUrl('https://app.t3.codes/threads/e1/t1'), 'https://app.t3.codes/threads/e1/t1');
+  assert.equal(resolveChatLinkUrl('t3-thread://v2/env-1/thr-2'), 'https://app.t3.codes/threads/env-1/thr-2');
+  assert.equal(resolveChatLinkUrl('javascript:alert(1)'), null);
+  assert.equal(resolveChatLinkUrl(''), null);
 });

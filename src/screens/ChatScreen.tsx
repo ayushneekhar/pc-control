@@ -26,12 +26,21 @@ import {
   StyleProp,
   StyleSheet,
   Text,
-  TextInput,
-  TextInputSelectionChangeEventData,
   Vibration,
   View,
   ViewStyle,
 } from 'react-native';
+import {
+  EnrichedMarkdownText,
+  EnrichedMarkdownTextInput,
+  EnrichedMarkdownTextInputInstance,
+  LinkPressEvent,
+  LinkRecognition,
+  MarkdownShortcutsConfig,
+  MarkdownStyle,
+  MarkdownTextInputStyle,
+  Md4cFlags,
+} from 'react-native-enriched-markdown';
 import { PcNative, PickedAttachment } from '../../modules/pc-native';
 import { AgentModelPickerModal, AgentSelectionResult } from '../components/AgentModelPickerModal';
 import { Banner, Button, Icon, Screen } from '../components/ui';
@@ -54,7 +63,6 @@ import {
   uploadChatAttachment,
 } from '../lib/chatApi';
 import {
-  applyChatListAutoFormat,
   attachmentImageCacheKey,
   buildReplyRef,
   CHAT_STATE_CACHE_KEY,
@@ -83,19 +91,18 @@ import {
   LinkPreview,
   makeClientId,
   mergeChatMessages,
-  parseInlineTokens,
+  normalizeMarkdownForDisplay,
   parseMessageSegments,
   prependOlderMessages,
   replySenderLabel,
-  resolveT3ThreadUrl,
+  resolveChatLinkUrl,
   shouldCaptureSwipeReply,
   shouldPollChat,
   shouldShowEngineTag,
   SWIPE_REPLY_RESET_THRESHOLD,
   SWIPE_REPLY_THRESHOLD,
-  TextSelection,
 } from '../lib/chatLogic';
-import { radius, screenPad, space, useTheme } from '../theme';
+import { radius, screenPad, space, Theme, useTheme } from '../theme';
 
 const ANTHROPIC_ICON = require('../../assets/brand-anthropic.png');
 const GEMINI_ICON = require('../../assets/brand-gemini.png');
@@ -309,77 +316,160 @@ function SwipeableMessageRow({
   );
 }
 
-function InlineText({
+const BUBBLE_MD4C_FLAGS: Md4cFlags = {
+  hardSoftBreaks: true,
+  strikethrough: true,
+  latexMath: false,
+  admonitions: false,
+};
+
+const BUBBLE_LINK_RECOGNITION: LinkRecognition = {
+  text: /t3-thread:\/\/v2\/[^\s<>)\]]+/,
+};
+
+const COMPOSER_MARKDOWN_SHORTCUTS: MarkdownShortcutsConfig = {
+  unorderedList: true,
+  orderedList: true,
+  heading: false,
+};
+
+function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
+  const codeBg = isUser ? t.bg : t.cardAlt;
+  return {
+    paragraph: {
+      fontSize: 15,
+      lineHeight: 21,
+      color: t.text,
+      marginTop: 0,
+      marginBottom: 6,
+    },
+    list: {
+      fontSize: 15,
+      lineHeight: 21,
+      color: t.text,
+      bulletColor: t.accent,
+      bulletSize: 5,
+      markerColor: t.accent,
+      markerFontWeight: '500',
+      markerMinWidth: 16,
+      gapWidth: 8,
+      marginLeft: 18,
+      itemSpacing: 4,
+      marginTop: 4,
+      marginBottom: 6,
+    },
+    strong: {
+      fontWeight: 'bold',
+      color: t.text,
+    },
+    em: {
+      fontStyle: 'italic',
+      color: t.text,
+    },
+    link: {
+      color: t.accent,
+      underline: true,
+    },
+    code: {
+      fontFamily: t.mono,
+      fontSize: 13,
+      color: t.text,
+      backgroundColor: codeBg,
+      borderColor: t.border,
+    },
+    codeBlock: {
+      fontFamily: t.mono,
+      fontSize: 12.5,
+      lineHeight: 18,
+      color: t.text,
+      backgroundColor: codeBg,
+      borderColor: t.border,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderRadius: radius.sm,
+      padding: 10,
+      marginTop: 4,
+      marginBottom: 6,
+    },
+    blockquote: {
+      fontSize: 14.5,
+      lineHeight: 20,
+      color: t.textDim,
+      borderColor: t.accent,
+      borderWidth: 2,
+      gapWidth: 10,
+      backgroundColor: codeBg,
+      borderRadius: 8,
+      padding: 8,
+      marginTop: 4,
+      marginBottom: 6,
+    },
+    h1: { fontSize: 18, lineHeight: 24, fontWeight: '600', color: t.text, marginTop: 6, marginBottom: 4 },
+    h2: { fontSize: 17, lineHeight: 23, fontWeight: '600', color: t.text, marginTop: 6, marginBottom: 4 },
+    h3: { fontSize: 16, lineHeight: 22, fontWeight: '600', color: t.text, marginTop: 6, marginBottom: 4 },
+    h4: { fontSize: 15, lineHeight: 21, fontWeight: '600', color: t.text, marginTop: 4, marginBottom: 3 },
+    h5: { fontSize: 15, lineHeight: 21, fontWeight: '500', color: t.text, marginTop: 4, marginBottom: 3 },
+    h6: { fontSize: 14, lineHeight: 20, fontWeight: '500', color: t.textDim, marginTop: 4, marginBottom: 3 },
+    thematicBreak: {
+      color: t.border,
+      height: StyleSheet.hairlineWidth,
+      marginTop: 8,
+      marginBottom: 8,
+    },
+  };
+}
+
+function buildComposerMarkdownStyle(t: Theme): MarkdownTextInputStyle {
+  return {
+    strong: { color: t.text },
+    em: { color: t.text },
+    link: { color: t.accent, underline: true },
+    list: { itemSpacing: 3 },
+  };
+}
+
+function MarkdownSegment({
   text,
   isUser,
-  trailingTime,
   onCopyCode,
   onLongPress,
 }: {
   text: string;
   isUser: boolean;
-  trailingTime?: string;
   onCopyCode: (code: string) => void;
   onLongPress?: () => void;
 }) {
   const t = useTheme();
-  const tokens = useMemo(() => parseInlineTokens(text), [text]);
-  const spacer = trailingTime ? '\u00A0'.repeat(Math.ceil(trailingTime.length * 1.9) + 2) : '';
+  const normalized = useMemo(() => normalizeMarkdownForDisplay(text), [text]);
+  const markdownStyle = useMemo(() => buildBubbleMarkdownStyle(t, isUser), [t, isUser]);
+
+  const handleLinkPress = useCallback((event: LinkPressEvent) => {
+    const targetUrl = resolveChatLinkUrl(event.url);
+    if (targetUrl) openExternalUrl(targetUrl);
+  }, []);
+
+  const handleLinkLongPress = useCallback(() => {
+    onLongPress?.();
+  }, [onLongPress]);
+
+  const handleCodeBlockPress = useCallback(
+    (event: { code: string }) => {
+      onCopyCode(event.code);
+    },
+    [onCopyCode],
+  );
+
   return (
-    <Text style={[st.msgText, { color: t.text }]}>
-      {tokens.map((tok, i) => {
-        if (tok.kind === 'code') {
-          return (
-            <Text
-              key={i}
-              onPress={() => onCopyCode(tok.code)}
-              onLongPress={onLongPress}
-              accessibilityRole="button"
-              accessibilityLabel={`Copy ${tok.code}`}
-              style={[
-                st.inlineCode,
-                { fontFamily: t.mono, backgroundColor: isUser ? t.bg : t.cardAlt, color: t.text },
-              ]}
-            >
-              {`\u00A0${tok.code}\u00A0`}
-            </Text>
-          );
-        }
-        if (tok.kind === 'bold') {
-          return (
-            <Text key={i} style={st.inlineBold}>
-              {tok.text}
-            </Text>
-          );
-        }
-        if (tok.kind === 'link') {
-          const targetUrl = tok.external ? tok.url : resolveT3ThreadUrl(tok.url);
-          if (targetUrl) {
-            return (
-              <Text
-                key={i}
-                style={[st.inlineLink, { color: t.accent }]}
-                onPress={() => openExternalUrl(targetUrl)}
-                onLongPress={onLongPress}
-              >
-                {tok.label}
-              </Text>
-            );
-          }
-          return (
-            <Text key={i} style={[st.inlineInternalRef, { color: t.accent }]}>
-              {tok.label}
-            </Text>
-          );
-        }
-        return <React.Fragment key={i}>{tok.text}</React.Fragment>;
-      })}
-      {spacer ? (
-        <Text style={st.timeSpacer} accessibilityElementsHidden importantForAccessibility="no">
-          {spacer}
-        </Text>
-      ) : null}
-    </Text>
+    <EnrichedMarkdownText
+      markdown={normalized}
+      markdownStyle={markdownStyle}
+      md4cFlags={BUBBLE_MD4C_FLAGS}
+      linkRecognition={BUBBLE_LINK_RECOGNITION}
+      selectable={false}
+      allowTrailingMargin={false}
+      onLinkPress={handleLinkPress}
+      onLinkLongPress={onLongPress ? handleLinkLongPress : undefined}
+      onCodeBlockPress={handleCodeBlockPress}
+    />
   );
 }
 
@@ -572,24 +662,9 @@ function MessageBody({
 
   if (segments.length === 0) return null;
 
-  if (segments.length === 1 && segments[0].kind === 'text') {
-    return (
-      <View style={st.inlineTimeWrap}>
-        <InlineText
-          text={segments[0].text}
-          isUser={isUser}
-          trailingTime={timeStr || undefined}
-          onCopyCode={onCopyCode}
-          onLongPress={onLongPress}
-        />
-        {timeStr ? <Text style={[st.timeInline, { color: t.textFaint }]}>{timeStr}</Text> : null}
-      </View>
-    );
-  }
-
   return (
     <>
-      <View style={{ gap: space(2) }}>
+      <View style={segments.length > 1 ? st.messageBodyStack : undefined}>
         {segments.map((seg, idx) => {
           if (seg.kind === 'codeblock') {
             return (
@@ -604,7 +679,7 @@ function MessageBody({
             );
           }
           return (
-            <InlineText
+            <MarkdownSegment
               key={idx}
               text={seg.text}
               isUser={isUser}
@@ -1216,7 +1291,6 @@ export default function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [draft, setDraft] = useState('');
-  const [forcedSelection, setForcedSelection] = useState<TextSelection | undefined>(undefined);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
   const [uploadingCount, setUploadingCount] = useState(0);
   const [attachSheetVisible, setAttachSheetVisible] = useState(false);
@@ -1245,9 +1319,10 @@ export default function ChatScreen() {
   const [applyModelErr, setApplyModelErr] = useState<string | null>(null);
 
   const listRef = useRef<LegendListRef>(null);
-  const inputRef = useRef<TextInput>(null);
+  const inputRef = useRef<EnrichedMarkdownTextInputInstance | null>(null);
+  const inputWrapRef = useRef<View>(null);
+  const composerFocusedRef = useRef(false);
   const draftRef = useRef(draft);
-  const selectionRef = useRef<TextSelection>({ start: 0, end: 0 });
   const pasteViewTagRef = useRef<number | null>(null);
   const pendingCountRef = useRef(0);
   const uploadingCountRef = useRef(0);
@@ -1655,7 +1730,7 @@ export default function ChatScreen() {
 
   const ensureImagePasteAttached = useCallback(() => {
     if (Platform.OS !== 'android' || !PcNative?.attachImagePaste) return;
-    const tag = findNodeHandle(inputRef.current);
+    const tag = findNodeHandle(inputWrapRef.current);
     if (typeof tag !== 'number' || tag <= 0) return;
     if (pasteViewTagRef.current === tag) return;
     pasteViewTagRef.current = tag;
@@ -1740,44 +1815,27 @@ export default function ChatScreen() {
     [uploadPickedItems],
   );
 
-  useEffect(() => {
-    if (!forcedSelection) return;
-    const raf = requestAnimationFrame(() => {
-      setForcedSelection(undefined);
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [forcedSelection]);
+  const composerMarkdownStyle = useMemo(() => buildComposerMarkdownStyle(t), [t]);
 
   const setDraftValue = useCallback((next: string) => {
     draftRef.current = next;
-    selectionRef.current = { start: next.length, end: next.length };
-    setForcedSelection(undefined);
     setDraft(next);
+    inputRef.current?.setValue(next);
   }, []);
 
-  const onChangeDraft = useCallback((nextText: string) => {
-    const formatted = applyChatListAutoFormat(draftRef.current, nextText, selectionRef.current);
-    draftRef.current = formatted.text;
-    if (formatted.changed) {
-      selectionRef.current = formatted.selection;
-      const isAtEnd =
-        formatted.selection.start === formatted.text.length &&
-        formatted.selection.end === formatted.text.length;
-      // Avoid controlled selection flicker on Android when appending/disengaging at the end of text;
-      // only force selection when inserting or disengaging mid-text.
-      setForcedSelection(isAtEnd ? undefined : formatted.selection);
-    } else {
-      setForcedSelection((prev) => (prev ? undefined : prev));
-    }
-    setDraft(formatted.text);
+  const onChangeDraftMarkdown = useCallback((markdown: string) => {
+    draftRef.current = markdown;
+    setDraft(markdown);
   }, []);
 
-  const onDraftSelectionChange = useCallback(
-    (e: NativeSyntheticEvent<TextInputSelectionChangeEventData>) => {
-      selectionRef.current = e.nativeEvent.selection;
-    },
-    [],
-  );
+  const onComposerFocus = useCallback(() => {
+    composerFocusedRef.current = true;
+    ensureImagePasteAttached();
+  }, [ensureImagePasteAttached]);
+
+  const onComposerBlur = useCallback(() => {
+    composerFocusedRef.current = false;
+  }, []);
 
   const sendMessagePayload = useCallback(
     async (
@@ -1883,9 +1941,9 @@ export default function ChatScreen() {
       if (!mountedRef.current) return;
       const input = inputRef.current;
       if (!input) return;
-      // On Android, hardware-back dismissal can leave TextInput focused while the
+      // On Android, hardware-back dismissal can leave the input focused while the
       // IME is hidden; blur + next-frame focus forces showSoftInput reliably.
-      if (Platform.OS === 'android' && kbHeightRef.current === 0 && input.isFocused()) {
+      if (Platform.OS === 'android' && kbHeightRef.current === 0 && composerFocusedRef.current) {
         input.blur();
         requestAnimationFrame(() => {
           if (mountedRef.current) {
@@ -2438,20 +2496,24 @@ export default function ChatScreen() {
             >
               <Icon name="plus" size={20} color={t.text} />
             </Pressable>
-            <TextInput
-              ref={inputRef}
-              onLayout={ensureImagePasteAttached}
-              value={draft}
-              onChangeText={onChangeDraft}
-              onSelectionChange={onDraftSelectionChange}
-              selection={forcedSelection}
-              placeholder={`Message ${engineLabel(engine)}`}
-              placeholderTextColor={t.textFaint}
-              multiline
-              maxLength={32000}
-              selectionColor={t.accent}
-              style={[st.input, { color: t.text }]}
-            />
+            <View ref={inputWrapRef} style={st.inputWrap} onLayout={ensureImagePasteAttached}>
+              <EnrichedMarkdownTextInput
+                ref={inputRef}
+                onLayout={ensureImagePasteAttached}
+                onChangeMarkdown={onChangeDraftMarkdown}
+                onFocus={onComposerFocus}
+                onBlur={onComposerBlur}
+                markdownShortcuts={COMPOSER_MARKDOWN_SHORTCUTS}
+                markdownStyle={composerMarkdownStyle}
+                placeholder={`Message ${engineLabel(engine)}`}
+                placeholderTextColor={t.textFaint}
+                multiline
+                scrollEnabled
+                cursorColor={t.accent}
+                selectionColor={t.accentSoft}
+                style={[st.input, { color: t.text }]}
+              />
+            </View>
             <View style={st.composerControls}>
               <Pressable
                 onPress={openModelPicker}
@@ -2854,27 +2916,14 @@ const st = StyleSheet.create({
     fontSize: 12.5,
     lineHeight: 16.5,
   },
-  inlineTimeWrap: { position: 'relative' },
-  timeSpacer: { fontSize: 10.5, lineHeight: 14, color: 'rgba(0,0,0,0)' },
-  timeInline: {
-    position: 'absolute',
-    right: 0,
-    bottom: 0,
-    fontSize: 10.5,
-    lineHeight: 14,
-    fontVariant: ['tabular-nums'],
-  },
+  messageBodyStack: { gap: space(2) },
   timeBlock: {
     fontSize: 10.5,
     lineHeight: 14,
     fontVariant: ['tabular-nums'],
     alignSelf: 'flex-end',
+    marginTop: 2,
   },
-  msgText: { fontSize: 15, lineHeight: 20 },
-  inlineCode: { fontSize: 13, paddingHorizontal: 4, borderRadius: 4 },
-  inlineBold: { fontWeight: '600' },
-  inlineLink: { textDecorationLine: 'underline' },
-  inlineInternalRef: { fontWeight: '500' },
   linkCard: {
     flexDirection: 'row',
     borderWidth: 1,
@@ -3418,8 +3467,13 @@ const st = StyleSheet.create({
   sheetRowSub: {
     fontSize: 12,
   },
-  input: {
+  inputWrap: {
     flex: 1,
+    minWidth: 0,
+    justifyContent: 'center',
+  },
+  input: {
+    width: '100%',
     minHeight: 36,
     maxHeight: 120,
     paddingTop: 7,
@@ -3427,8 +3481,6 @@ const st = StyleSheet.create({
     paddingRight: 4,
     fontSize: 15,
     lineHeight: 20,
-    textAlignVertical: 'center',
-    includeFontPadding: false,
   },
   composerControls: {
     flexDirection: 'row',

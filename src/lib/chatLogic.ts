@@ -294,6 +294,24 @@ export function resolveT3ThreadUrl(url: string): string | null {
   return `https://app.t3.codes/threads/${encodeURIComponent(envId)}/${encodeURIComponent(threadId)}`;
 }
 
+/** Resolve a tapped Markdown/chat link URL (http(s) or `t3-thread://v2/...`) into an openable http(s) URL. */
+export function resolveChatLinkUrl(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  if (isHttpUrl(trimmed)) return trimmed;
+  return resolveT3ThreadUrl(trimmed);
+}
+
+/**
+ * Normalize a non-code Markdown text segment before handing it to EnrichedMarkdownText:
+ * converts leading Unicode bullet markers (`• item`) into CommonMark `- item` so they get
+ * proper native hanging indentation, while leaving mid-line bullets and all other syntax intact.
+ */
+export function normalizeMarkdownForDisplay(text: string): string {
+  if (!text || !text.includes('•')) return text;
+  return text.replace(/^([ \t]*)•[ \t]+/gm, '$1- ');
+}
+
 function trimBareUrl(raw: string): { url: string; trailing: string } {
   let end = raw.length;
   while (end > 0) {

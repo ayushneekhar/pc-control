@@ -98,7 +98,6 @@ import {
   resolveChatLinkUrl,
   shouldCaptureSwipeReply,
   shouldPollChat,
-  shouldShowEngineTag,
   SWIPE_REPLY_RESET_THRESHOLD,
   SWIPE_REPLY_THRESHOLD,
 } from '../lib/chatLogic';
@@ -1076,12 +1075,62 @@ function BubbleAttachments({
   );
 }
 
+const FOOTER_ICON_HIT_SLOP = { top: 10, bottom: 10, left: 6, right: 6 };
+
+function CopyIconButton({
+  msgId,
+  text,
+  onCopy,
+}: {
+  msgId: string;
+  text: string;
+  onCopy: (text: string) => void;
+}) {
+  const t = useTheme();
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const justCopied = copiedMsgId === msgId;
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const handlePress = useCallback(() => {
+    onCopy(text);
+    setCopiedMsgId(msgId);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      setCopiedMsgId((prev) => (prev === msgId ? null : prev));
+    }, COPY_TOAST_DURATION_MS);
+  }, [msgId, onCopy, text]);
+
+  return (
+    <Pressable
+      onPress={handlePress}
+      hitSlop={FOOTER_ICON_HIT_SLOP}
+      accessibilityRole="button"
+      accessibilityLabel={justCopied ? 'Copied message' : 'Copy message'}
+      style={({ pressed }) => [st.footerIconBtn, pressed && { opacity: 0.65 }]}
+    >
+      <Icon
+        name={justCopied ? 'check' : 'content-copy'}
+        size={15}
+        color={justCopied ? t.accent : t.textFaint}
+      />
+    </Pressable>
+  );
+}
+
 type MessageBubbleProps = {
   msg: ChatMessage;
-  showEngine: boolean;
   canRetry: boolean;
   onLongPress: (msg: ChatMessage) => void;
   onReply: (msg: ChatMessage) => void;
+  onEdit: (msg: ChatMessage) => void;
+  onCopy: (text: string) => void;
   onRetry: (msg: ChatMessage) => void;
   onPressReplyQuote: (replyId: string) => void;
   onCopyCode: (code: string) => void;
@@ -1090,10 +1139,11 @@ type MessageBubbleProps = {
 
 const MessageBubble = React.memo(function MessageBubble({
   msg,
-  showEngine,
   canRetry,
   onLongPress,
   onReply,
+  onEdit,
+  onCopy,
   onRetry,
   onPressReplyQuote,
   onCopyCode,
@@ -1123,21 +1173,19 @@ const MessageBubble = React.memo(function MessageBubble({
   const isUser = msg.role === 'user';
   const isPending = msg.status === 'pending';
   const isError = msg.status === 'error';
+  const isSettled = !isPending && !msg.optimistic;
   const attachments = msg.attachments ?? [];
   const hasText = msg.text.trim().length > 0;
   const canOpenActions = !isPending && (isUser || isError || hasText || attachments.length > 0);
   const canSwipeReply = isReplyableMessage(msg);
+  const canShowCopy = isSettled && !isError && hasText;
+  const canShowEdit = isUser && isSettled && (hasText || attachments.length > 0);
   const handleLongPress = canOpenActions ? () => onLongPress(msg) : undefined;
 
   if (!isUser && isPending) {
     return (
       <View style={st.assistantGroup}>
         <View style={st.assistantMeta}>
-          {showEngine ? (
-            <View style={st.engineRow}>
-              <Text style={[st.engineTag, { color: t.textDim }]}>{engineLabel(msg.engine)}</Text>
-            </View>
-          ) : null}
           <ThinkingProgressContent progress={msg.progress} />
         </View>
       </View>
@@ -1145,146 +1193,193 @@ const MessageBubble = React.memo(function MessageBubble({
   }
 
   const hasCompletedProgress = !isUser && formatProgressSummary(msg.progress) !== null;
-  const showAssistantMeta = !isUser && (showEngine || hasCompletedProgress);
 
-  const bubbleRow = (
-    <SwipeableMessageRow msg={msg} enabled={canSwipeReply} onSwipeReply={onReply}>
-      <View style={[st.bubbleRow, isUser ? st.bubbleRowUser : st.bubbleRowAssistant]}>
+  const messageContent = (
+    <>
+      {replyRef ? (
         <Pressable
-          onLongPress={handleLongPress}
-          delayLongPress={260}
+          onPress={() => onPressReplyQuote(replyRef.id)}
+          accessibilityRole="button"
+          accessibilityLabel={`Quoted message from ${replySenderLabel(replyRef)}`}
+          android_ripple={{ color: t.ripple, foreground: true }}
           style={({ pressed }) => [
-            isUser
-              ? [st.bubble, st.bubbleUser, { backgroundColor: t.cardAlt }]
-              : isError
-                ? [
-                    st.assistantErrorCard,
-                    {
-                      backgroundColor: t.badSoft,
-                      borderColor: t.border,
-                      borderLeftColor: t.bad,
-                    },
-                  ]
-                : st.assistantPlain,
-            pressed && canOpenActions && { opacity: 0.84 },
+            st.replyQuote,
+            !isUser && [st.replyQuoteAssistant, { borderColor: t.border }],
+            {
+              backgroundColor: isUser ? t.bg : t.card,
+              borderLeftColor: t.accent,
+              opacity: pressed ? 0.8 : 1,
+            },
           ]}
         >
-          {replyRef ? (
-            <Pressable
-              onPress={() => onPressReplyQuote(replyRef.id)}
-              accessibilityRole="button"
-              accessibilityLabel={`Quoted message from ${replySenderLabel(replyRef)}`}
-              android_ripple={{ color: t.ripple, foreground: true }}
-              style={({ pressed }) => [
-                st.replyQuote,
-                !isUser && [st.replyQuoteAssistant, { borderColor: t.border }],
-                {
-                  backgroundColor: isUser ? t.bg : t.card,
-                  borderLeftColor: t.accent,
-                  opacity: pressed ? 0.8 : 1,
-                },
-              ]}
-            >
-              <Text numberOfLines={1} style={[st.replyQuoteSender, { color: t.accent }]}>
-                {replySenderLabel(replyRef)}
-              </Text>
-              {replyRef.text ? (
-                <Text numberOfLines={2} style={[st.replyQuoteText, { color: t.textDim }]}>
-                  {replyRef.text}
-                </Text>
-              ) : null}
-            </Pressable>
+          <Text numberOfLines={1} style={[st.replyQuoteSender, { color: t.accent }]}>
+            {replySenderLabel(replyRef)}
+          </Text>
+          {replyRef.text ? (
+            <Text numberOfLines={2} style={[st.replyQuoteText, { color: t.textDim }]}>
+              {replyRef.text}
+            </Text>
           ) : null}
-
-          {attachments.length > 0 ? (
-            <BubbleAttachments
-              attachments={attachments}
-              isUser={isUser}
-              onPressImage={onPressImage}
-              onLongPress={handleLongPress}
-            />
-          ) : null}
-
-          {isError ? (
-            <>
-              <Text selectable style={[st.errorText, { color: t.bad }]}>
-                {msg.error || 'Request failed'}
-              </Text>
-              <View style={st.errorFooter}>
-                {canRetry ? (
-                  <Pressable
-                    onPress={() => onRetry(msg)}
-                    accessibilityRole="button"
-                    accessibilityLabel="Retry message"
-                    android_ripple={{ color: t.ripple, foreground: true }}
-                    style={({ pressed }) => [
-                      st.retryBtn,
-                      {
-                        backgroundColor: t.card,
-                        borderColor: t.border,
-                        opacity: pressed ? 0.8 : 1,
-                      },
-                    ]}
-                  >
-                    <Icon name="refresh" size={13} color={t.bad} />
-                    <Text style={[st.retryBtnText, { color: t.bad }]}>Retry</Text>
-                  </Pressable>
-                ) : (
-                  <View />
-                )}
-                {timeStr ? <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text> : null}
-              </View>
-            </>
-          ) : (
-            <>
-              {hasText ? (
-                <>
-                  <MessageBody
-                    text={msg.text}
-                    isUser={isUser}
-                    onCopyCode={onCopyCode}
-                    onLongPress={handleLongPress}
-                  />
-                  {previewUrl ? <LinkPreviewCard url={previewUrl} isUser={isUser} /> : null}
-                </>
-              ) : null}
-              {timeStr ? (
-                <Text
-                  style={[
-                    isUser ? st.timeBlock : st.timeBlockAssistant,
-                    { color: t.textFaint },
-                  ]}
-                >
-                  {timeStr}
-                </Text>
-              ) : null}
-            </>
-          )}
         </Pressable>
-      </View>
-    </SwipeableMessageRow>
+      ) : null}
+
+      {attachments.length > 0 ? (
+        <BubbleAttachments
+          attachments={attachments}
+          isUser={isUser}
+          onPressImage={onPressImage}
+          onLongPress={handleLongPress}
+        />
+      ) : null}
+
+      {isError ? (
+        <>
+          <Text selectable style={[st.errorText, { color: t.bad }]}>
+            {msg.error || 'Request failed'}
+          </Text>
+          <View style={st.errorFooter}>
+            {canRetry ? (
+              <Pressable
+                onPress={() => onRetry(msg)}
+                accessibilityRole="button"
+                accessibilityLabel="Retry message"
+                android_ripple={{ color: t.ripple, foreground: true }}
+                style={({ pressed }) => [
+                  st.retryBtn,
+                  {
+                    backgroundColor: t.card,
+                    borderColor: t.border,
+                    opacity: pressed ? 0.8 : 1,
+                  },
+                ]}
+              >
+                <Icon name="refresh" size={13} color={t.bad} />
+                <Text style={[st.retryBtnText, { color: t.bad }]}>Retry</Text>
+              </Pressable>
+            ) : (
+              <View />
+            )}
+            {timeStr ? <Text style={[st.footerTime, { color: t.textFaint }]}>{timeStr}</Text> : null}
+          </View>
+        </>
+      ) : hasText ? (
+        <>
+          <MessageBody
+            text={msg.text}
+            isUser={isUser}
+            onCopyCode={onCopyCode}
+            onLongPress={handleLongPress}
+          />
+          {previewUrl ? <LinkPreviewCard url={previewUrl} isUser={isUser} /> : null}
+        </>
+      ) : null}
+    </>
   );
 
   if (isUser) {
-    return bubbleRow;
+    const showUserFooter = canShowEdit || canShowCopy || Boolean(timeStr);
+    return (
+      <SwipeableMessageRow msg={msg} enabled={canSwipeReply} onSwipeReply={onReply}>
+        <View style={[st.bubbleRow, st.bubbleRowUser]}>
+          <View style={st.userBubbleColumn}>
+            <Pressable
+              onLongPress={handleLongPress}
+              delayLongPress={260}
+              style={({ pressed }) => [
+                st.bubble,
+                st.bubbleUser,
+                { backgroundColor: t.cardAlt },
+                pressed && canOpenActions && { opacity: 0.84 },
+              ]}
+            >
+              {messageContent}
+            </Pressable>
+            {showUserFooter ? (
+              <View style={st.userFooterRow}>
+                {canShowEdit || canShowCopy ? (
+                  <View style={st.footerActions}>
+                    {canShowEdit ? (
+                      <Pressable
+                        onPress={() => onEdit(msg)}
+                        hitSlop={FOOTER_ICON_HIT_SLOP}
+                        accessibilityRole="button"
+                        accessibilityLabel="Edit and resend message"
+                        style={({ pressed }) => [st.footerIconBtn, pressed && { opacity: 0.65 }]}
+                      >
+                        <Icon name="pencil" size={15} color={t.textFaint} />
+                      </Pressable>
+                    ) : null}
+                    {canShowCopy ? (
+                      <CopyIconButton msgId={msg.id} text={msg.text} onCopy={onCopy} />
+                    ) : null}
+                  </View>
+                ) : null}
+                {timeStr ? (
+                  <Text style={[st.footerTime, { color: t.textFaint }]}>{timeStr}</Text>
+                ) : null}
+              </View>
+            ) : null}
+          </View>
+        </View>
+      </SwipeableMessageRow>
+    );
   }
+
+  const showAssistantFooter = !isError && (canShowCopy || Boolean(timeStr));
 
   return (
     <View style={st.assistantGroup}>
-      {showAssistantMeta ? (
+      {hasCompletedProgress && msg.progress ? (
         <View style={st.assistantMeta}>
-          {showEngine ? (
-            <View style={st.engineRow}>
-              {isError ? <Icon name="alert-circle" size={13} color={t.bad} /> : null}
-              <Text style={[st.engineTag, { color: isError ? t.bad : t.textDim }]}>
-                {engineLabel(msg.engine)}
-              </Text>
-            </View>
-          ) : null}
-          {hasCompletedProgress && msg.progress ? <CompletedProgressBlock progress={msg.progress} /> : null}
+          <CompletedProgressBlock progress={msg.progress} />
         </View>
       ) : null}
-      {bubbleRow}
+      <SwipeableMessageRow msg={msg} enabled={canSwipeReply} onSwipeReply={onReply}>
+        <View style={[st.bubbleRow, st.bubbleRowAssistant]}>
+          {isError ? (
+            <Pressable
+              onLongPress={handleLongPress}
+              delayLongPress={260}
+              style={({ pressed }) => [
+                st.assistantErrorCard,
+                {
+                  backgroundColor: t.badSoft,
+                  borderColor: t.border,
+                  borderLeftColor: t.bad,
+                },
+                pressed && canOpenActions && { opacity: 0.84 },
+              ]}
+            >
+              {messageContent}
+            </Pressable>
+          ) : (
+            <View style={st.assistantPlain}>
+              <Pressable
+                onLongPress={handleLongPress}
+                delayLongPress={260}
+                style={({ pressed }) => [
+                  st.assistantBodyPress,
+                  pressed && canOpenActions && { opacity: 0.84 },
+                ]}
+              >
+                {messageContent}
+              </Pressable>
+              {showAssistantFooter ? (
+                <View style={st.assistantFooterRow}>
+                  <View style={st.footerActions}>
+                    {canShowCopy ? (
+                      <CopyIconButton msgId={msg.id} text={msg.text} onCopy={onCopy} />
+                    ) : null}
+                  </View>
+                  {timeStr ? (
+                    <Text style={[st.footerTime, { color: t.textFaint }]}>{timeStr}</Text>
+                  ) : null}
+                </View>
+              ) : null}
+            </View>
+          )}
+        </View>
+      </SwipeableMessageRow>
     </View>
   );
 });
@@ -1345,6 +1440,7 @@ export default function ChatScreen() {
   const composerFocusedRef = useRef(false);
   const draftRef = useRef(draft);
   const pasteViewTagRef = useRef<number | null>(null);
+  const pendingAttachmentsRef = useRef<ChatAttachment[]>(pendingAttachments);
   const pendingCountRef = useRef(0);
   const uploadingCountRef = useRef(0);
   const mountedRef = useRef(true);
@@ -1391,8 +1487,9 @@ export default function ChatScreen() {
   }, [sending]);
 
   useEffect(() => {
+    pendingAttachmentsRef.current = pendingAttachments;
     pendingCountRef.current = pendingAttachments.length;
-  }, [pendingAttachments.length]);
+  }, [pendingAttachments]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -2013,20 +2110,20 @@ export default function ChatScreen() {
   }, []);
 
   const onStartEditMessage = useCallback(
-    (msg: ChatMessage) => {
+    (msg: ChatMessage, opts?: { fromSheet?: boolean }) => {
       setActionSheetMsg(null);
       setReplyTo(null);
       setEditingState((prev) => ({
         messageId: msg.id,
         previewText: formatMessagePreview(msg),
-        previousDraft: prev ? prev.previousDraft : draft,
-        previousAttachments: prev ? prev.previousAttachments : pendingAttachments,
+        previousDraft: prev ? prev.previousDraft : draftRef.current,
+        previousAttachments: prev ? prev.previousAttachments : pendingAttachmentsRef.current,
       }));
       setDraftValue(msg.text);
       setPendingAttachments(msg.attachments ? [...msg.attachments] : []);
-      focusComposer(220);
+      focusComposer(opts?.fromSheet ? 220 : 60);
     },
-    [draft, focusComposer, pendingAttachments, setDraftValue],
+    [focusComposer, setDraftValue],
   );
 
   const onCancelEdit = useCallback(() => {
@@ -2165,7 +2262,6 @@ export default function ChatScreen() {
     ({ item, index, data }: LegendListRenderItemProps<ChatMessage>) => (
       <MessageBubble
         msg={item}
-        showEngine={shouldShowEngineTag(data, index, engine)}
         canRetry={
           item.role === 'assistant' &&
           item.status === 'error' &&
@@ -2173,13 +2269,24 @@ export default function ChatScreen() {
         }
         onLongPress={onOpenMessageActions}
         onReply={onStartReplyMessage}
+        onEdit={onStartEditMessage}
+        onCopy={onCopy}
         onRetry={onRetryAssistantError}
         onPressReplyQuote={onPressReplyQuote}
         onCopyCode={onCopyCode}
         onPressImage={onPressImage}
       />
     ),
-    [engine, onOpenMessageActions, onStartReplyMessage, onRetryAssistantError, onPressReplyQuote, onCopyCode, onPressImage],
+    [
+      onOpenMessageActions,
+      onStartReplyMessage,
+      onStartEditMessage,
+      onCopy,
+      onRetryAssistantError,
+      onPressReplyQuote,
+      onCopyCode,
+      onPressImage,
+    ],
   );
 
   const isEmpty = messages.length === 0;
@@ -2209,16 +2316,11 @@ export default function ChatScreen() {
       showTypingIndicator ? (
         <View style={[st.assistantGroup, st.typingFooter]}>
           <View style={st.assistantMeta}>
-            <View style={st.engineRow}>
-              <Text style={[st.engineTag, { color: t.textDim }]}>
-                {engineLabel(activeProgress?.engine ?? engine)}
-              </Text>
-            </View>
             <ThinkingProgressContent progress={activeProgress} />
           </View>
         </View>
       ) : null,
-    [showTypingIndicator, activeProgress, engine, t.textDim],
+    [showTypingIndicator, activeProgress],
   );
 
   const listEmpty = useMemo(
@@ -2694,7 +2796,7 @@ export default function ChatScreen() {
               {actionSheetView.isUserMsg ? (
                 <>
                   <Pressable
-                    onPress={() => onStartEditMessage(actionSheetView.msg)}
+                    onPress={() => onStartEditMessage(actionSheetView.msg, { fromSheet: true })}
                     android_ripple={{ color: t.ripple, foreground: true }}
                     style={({ pressed }) => [
                       st.sheetRow,
@@ -2902,18 +3004,26 @@ const st = StyleSheet.create({
   bubbleRow: { flexDirection: 'row', width: '100%' },
   bubbleRowUser: { justifyContent: 'flex-end' },
   bubbleRowAssistant: { justifyContent: 'flex-start' },
+  userBubbleColumn: {
+    maxWidth: '82%',
+    alignItems: 'flex-end',
+  },
   bubble: {
     borderRadius: 18,
     paddingHorizontal: 13,
     paddingTop: 8,
-    paddingBottom: 7,
+    paddingBottom: 8,
     gap: 3,
   },
   bubbleUser: {
-    maxWidth: '82%',
+    maxWidth: '100%',
     borderBottomRightRadius: 5,
   },
   assistantPlain: {
+    width: '100%',
+    gap: 4,
+  },
+  assistantBodyPress: {
     width: '100%',
     gap: 6,
   },
@@ -2927,8 +3037,36 @@ const st = StyleSheet.create({
     gap: 6,
     overflow: 'hidden',
   },
-  engineRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  engineTag: { fontSize: 11.5, fontWeight: '500' },
+  assistantFooterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginTop: 2,
+  },
+  userFooterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 12,
+    marginTop: 4,
+    paddingRight: 2,
+  },
+  footerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  footerIconBtn: {
+    padding: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  footerTime: {
+    fontSize: 11,
+    lineHeight: 15,
+    fontVariant: ['tabular-nums'],
+  },
   replyQuote: {
     borderLeftWidth: 2,
     borderRadius: 10,
@@ -2951,20 +3089,6 @@ const st = StyleSheet.create({
     lineHeight: 16.5,
   },
   messageBodyStack: { gap: space(2.5) },
-  timeBlock: {
-    fontSize: 10.5,
-    lineHeight: 14,
-    fontVariant: ['tabular-nums'],
-    alignSelf: 'flex-end',
-    marginTop: 2,
-  },
-  timeBlockAssistant: {
-    fontSize: 11,
-    lineHeight: 14,
-    fontVariant: ['tabular-nums'],
-    alignSelf: 'flex-start',
-    marginTop: 4,
-  },
   linkCard: {
     flexDirection: 'row',
     borderWidth: 1,

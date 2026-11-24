@@ -102,6 +102,7 @@ import {
   SWIPE_REPLY_THRESHOLD,
 } from '../lib/chatLogic';
 import { radius, screenPad, space, Theme, useTheme } from '../theme';
+import { setHasActiveDraft } from '../lib/otaTriggerLogic';
 
 const ANTHROPIC_ICON = require('../../assets/brand-anthropic.png');
 const GEMINI_ICON = require('../../assets/brand-gemini.png');
@@ -1625,11 +1626,19 @@ export default function ChatScreen() {
     }, [clearChatNotifs, loadMessages, loadAgentSettings]),
   );
 
+  // Track whether the composer currently holds an unsent draft/attachment so auto-apply OTA never wipes it.
+  useEffect(() => {
+    setHasActiveDraft(draft.trim().length > 0 || pendingAttachments.length > 0 || uploadingCount > 0);
+  }, [draft, pendingAttachments.length, uploadingCount]);
+
+  useEffect(() => () => setHasActiveDraft(false), []);
+
   // Immediately refresh when an incoming chat FCM arrives while the app is running.
   useEffect(() => {
     let sub: { remove(): void } | undefined;
     try {
-      sub = PcNative?.addListener?.('onChatPush', () => {
+      sub = PcNative?.addListener?.('onChatPush', (ev) => {
+        if (typeof ev?.id === 'string' && ev.id.startsWith('ota-trigger-')) return;
         void loadMessages({ silent: true });
       });
     } catch {

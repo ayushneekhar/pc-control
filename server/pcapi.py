@@ -2799,6 +2799,109 @@ class OtaProxy:
 
 OTA_PROXY = OtaProxy()
 
+OTA_VERSION_RE = re.compile(r"^\d{1,9}$")
+OTA_TRIGGER_FILE = os.environ.get(
+    "PCAPI_OTA_TRIGGER_FILE",
+    os.path.join(HOME, ".local", "state", "pc-control", "ota-trigger.json"),
+)
+
+
+class OtaTriggerStore:
+    """Persists the latest agent-triggered OTA version and broadcasts live wakeups over SSE (/pc/api/events).
+
+    We deliberately do NOT send a cat=chat FCM push for OTA triggers because PushService.kt only suppresses
+    Android notifications when ChatScreen is in the foreground; SSE (/pc/api/events) wakes foreground JS
+    immediately on every tab with zero notification tray noise, and GET /pc/api/ota/trigger + SSE hello
+    catch up as soon as a backgrounded app returns to the foreground."""
+
+    def __init__(self, path=None):
+        self._path = path or OTA_TRIGGER_FILE
+        self._lock = threading.Lock()
+        self._state = self._load()
+
+    def _load(self):
+        d = load_json(self._path, None)
+        if not isinstance(d, dict):
+            return None
+        v = str(d.get("version") or "").strip()
+        if not OTA_VERSION_RE.fullmatch(v):
+            return None
+        return {
+            "version": v,
+            "notes": clip(d.get("notes") or "", 300),
+            "triggered_at": int(d.get("triggered_at") or 0),
+        }
+
+    def get(self):
+        with self._lock:
+            return dict(self._state) if self._state else {"version": None}
+
+    def record(self, version, notes=""):
+        state = {
+            "version": str(version).strip(),
+            "notes": clip(notes or "", 300),
+            "triggered_at": int(time.time()),
+        }
+        with self._lock:
+            self._state = state
+            parent = os.path.dirname(self._path)
+            if parent:
+                os.makedirs(parent, mode=0o700, exist_ok=True)
+            tmp = self._path + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(state, f, indent=1)
+                os.replace(tmp, self._path)
+            except Exception:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
+            return dict(state)
+
+    def trigger(self, body=None, ota_proxy=None, hub=None):
+        b = body if isinstance(body, dict) else {}
+        proxy = ota_proxy if ota_proxy is not None else OTA_PROXY
+        raw_ver = b.get("version")
+        raw_notes = b.get("notes")
+
+        if raw_ver is not None and str(raw_ver).strip() != "":
+            ver = str(raw_ver).strip()
+            if not OTA_VERSION_RE.fullmatch(ver):
+                return 400, {"error": "version must be a numeric OTA version"}
+            notes = clip(raw_notes or "", 300)
+            proxy.clear_cache()
+        else:
+            code, payload = proxy.fetch_manifest("ota.version.json", refresh=True)
+            if code != 200:
+                return code, payload
+            try:
+                manifest = json.loads(payload)
+            except (ValueError, TypeError):
+                return 502, {"error": "upstream ota.version.json is not valid JSON"}
+            if not isinstance(manifest, dict):
+                return 502, {"error": "upstream ota.version.json is not a JSON object"}
+            mver = manifest.get("version")
+            ver = str(mver).strip() if isinstance(mver, (int, str)) and not isinstance(mver, bool) else ""
+            if not OTA_VERSION_RE.fullmatch(ver):
+                return 502, {"error": "upstream ota.version.json has no valid version"}
+            notes_src = raw_notes if raw_notes is not None and str(raw_notes).strip() else manifest.get("releaseNotes")
+            notes = clip(notes_src or "", 300)
+
+        state = self.record(ver, notes)
+        target_hub = hub if hub is not None else HUB
+        sse_clients = 0
+        if target_hub is not None:
+            with target_hub.lock:
+                sse_clients = len(target_hub.clients)
+            target_hub.publish("ota_trigger", state)
+        return 200, {"ok": True, **state, "sse_clients": sse_clients}
+
+
+OTA_TRIGGER = OtaTriggerStore()
+
 
 # ---------------------------------------------------------------- health overview (/pc/api/health)
 
@@ -4161,7 +4264,8 @@ class H(BaseHTTPRequestHandler):
         path, qs = u.path.rstrip("/"), urllib.parse.parse_qs(u.query)
         is_hook = method == "POST" and bool(re.fullmatch(r"/pc/api/hook/(radarr|sonarr|seerr)", path))
         is_chat_push = method == "POST" and path == "/pc/api/chat/push"
-        if is_chat_push:
+        is_ota_trigger = method == "POST" and path == "/pc/api/ota/trigger"
+        if is_chat_push or is_ota_trigger:
             if not (ALLOW_UNAUTH_LOCAL and not self.headers.get("X-Forwarded-For") and
                     self.client_address[0] in ("127.0.0.1", "::1") and
                     local_token_authorized(self.headers)):
@@ -4232,6 +4336,8 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json(200, KEYRING.status())
                 except Exception as e:
                     return self.send_json(502, {"error": f"keyring status failed: {type(e).__name__}"})
+            if path == "/api/ota/trigger":
+                return self.send_json(200, OTA_TRIGGER.get())
             if path.startswith("/api/ota/"):
                 ota_name = path[len("/api/ota/"):]
                 if ota_content_type(ota_name):
@@ -4328,6 +4434,8 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/enroll":
                 return self.send_json(*rootd_or_503({"op": "enroll_request", "name": str(b.get("name", "phone")),
                                                      "pubkey": str(b.get("pubkey", ""))}))
+            if path == "/api/ota/trigger":
+                return self.send_json(*OTA_TRIGGER.trigger(b))
             if path == "/api/chat/upload":
                 return self.send_json(*_chat_manager().handle_upload(b))
             if path == "/api/chat/send":
@@ -4438,7 +4546,7 @@ class H(BaseHTTPRequestHandler):
                 try: pending = [r for r in rootd_call({"op": "list"}, 5).get("requests", [])
                                 if r["status"] in ("pending", "running")]
                 except OSError: st = "down"
-            self.write_event("hello", {"rootd": st, "pending": pending, "ts": int(time.time())})
+            self.write_event("hello", {"rootd": st, "pending": pending, "ota_trigger": OTA_TRIGGER.get(), "ts": int(time.time())})
             self.wfile.write(b"retry: 3000\n\n"); self.wfile.flush()
             while True:
                 msg = q.get()

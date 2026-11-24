@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { AppState } from 'react-native';
 import { get, RootdState, RootRequest } from './api';
 import { EventStream, ServerEvent } from './events';
+import { handleOtaTrigger } from './otaStore';
 
 type State = {
   rootd: RootdState;
@@ -33,8 +34,12 @@ function onEvent({ event, data }: ServerEvent) {
       const reqs: Record<string, RootRequest> = {};
       for (const r of (data.pending || []) as RootRequest[]) reqs[r.id] = r;
       set((s) => ({ rootd: data.rootd, requests: reqs, historyVersion: s.historyVersion + 1 }));
+      if (data.ota_trigger) void handleOtaTrigger(data.ota_trigger);
       break;
     }
+    case 'ota_trigger':
+      void handleOtaTrigger(data);
+      break;
     case 'rootd':
       if (data.pending) {
         const reqs: Record<string, RootRequest> = {};

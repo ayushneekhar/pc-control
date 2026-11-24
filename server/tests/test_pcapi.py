@@ -1991,6 +1991,142 @@ class OtaMirrorTests(unittest.TestCase):
             self.assertEqual(code, 404, bad)
 
 
+class OtaTriggerTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.trigger_file = os.path.join(self.dir, "ota-trigger.json")
+        self.orig_proxy = pcapi.OTA_PROXY
+        self.orig_trigger = pcapi.OTA_TRIGGER
+        self.orig_hub = pcapi.HUB
+        self.orig_push = pcapi.PUSH
+        self.routes = {}
+        self.calls = []
+
+        def fake_open(url, timeout):
+            self.calls.append(url)
+            val = self.routes.get(url)
+            if val is None:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"not found"))
+            if isinstance(val, Exception):
+                raise val
+            if callable(val):
+                val = val()
+            return _FakeUpstreamResponse(val)
+
+        class FakeHub:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.clients = {object()}
+                self.published = []
+
+            def publish(self, event, data):
+                self.published.append((event, data))
+
+        class FakePush:
+            def __init__(self):
+                self.sent = []
+
+            def send_all(self, *args, **kwargs):
+                self.sent.append((args, kwargs))
+                return []
+
+        self.fake_hub = FakeHub()
+        self.fake_push = FakePush()
+        pcapi.OTA_PROXY = pcapi.OtaProxy(opener=fake_open, ttl=60.0)
+        pcapi.OTA_TRIGGER = pcapi.OtaTriggerStore(path=self.trigger_file)
+        pcapi.HUB = self.fake_hub
+        pcapi.PUSH = self.fake_push
+        self.srv = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        pcapi.OTA_PROXY = self.orig_proxy
+        pcapi.OTA_TRIGGER = self.orig_trigger
+        pcapi.HUB = self.orig_hub
+        pcapi.PUSH = self.orig_push
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def req(self, method, path, body=None, headers=None, use_local_token=True):
+        hdrs = dict(headers or {})
+        if use_local_token:
+            hdrs = _with_local_auth(hdrs, path=path)
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            hdrs["Content-Type"] = "application/json"
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=data, method=method, headers=hdrs)
+        try:
+            with urllib.request.urlopen(r) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def test_ota_trigger_auth_payload_manifest_fallback_and_sse_broadcast(self):
+        repo = pcapi.OTA_GITHUB_REPO
+        tag = pcapi.OTA_GITHUB_TAG
+        manifest_url = f"https://github.com/{repo}/releases/download/{tag}/ota.version.json"
+
+        # Initial GET returns {"version": None}
+        code, body = self.req("GET", "/pc/api/ota/trigger")
+        self.assertEqual(code, 200)
+        self.assertEqual(body, {"version": None})
+
+        # POST requires local token (403 without token, 403 with X-Forwarded-For even with token)
+        code, _ = self.req("POST", "/pc/api/ota/trigger", {"version": "62"}, use_local_token=False)
+        self.assertEqual(code, 403)
+        code, _ = self.req("POST", "/pc/api/ota/trigger", {"version": "62"}, headers={"X-Forwarded-For": "100.64.0.2"})
+        self.assertEqual(code, 403)
+
+        # Invalid version returns 400
+        code, _ = self.req("POST", "/pc/api/ota/trigger", {"version": "not-a-number"})
+        self.assertEqual(code, 400)
+
+        # Explicit version persists to disk, broadcasts SSE ota_trigger, and does NOT emit noisy FCM notifications
+        code, body = self.req("POST", "/pc/api/ota/trigger", {"version": "62", "notes": "Agent shipped fix"})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["version"], "62")
+        self.assertEqual(body["notes"], "Agent shipped fix")
+        self.assertEqual(body["sse_clients"], 1)
+        self.assertGreater(body["triggered_at"], 0)
+        self.assertEqual(len(self.fake_hub.published), 1)
+        self.assertEqual(self.fake_hub.published[0][0], "ota_trigger")
+        self.assertEqual(self.fake_hub.published[0][1]["version"], "62")
+        self.assertEqual(self.fake_push.sent, [])
+
+        # Persisted state is returned by GET and survives reload
+        code, got = self.req("GET", "/pc/api/ota/trigger")
+        self.assertEqual(code, 200)
+        self.assertEqual(got["version"], "62")
+        reloaded = pcapi.OtaTriggerStore(path=self.trigger_file)
+        self.assertEqual(reloaded.get()["version"], "62")
+
+        # Omitted version fetches live ota.version.json with refresh=True (bypassing cached manifest)
+        ver = {"v": 62, "notes": "old"}
+        self.routes[manifest_url] = lambda: json.dumps(
+            {"version": str(ver["v"]), "releaseNotes": ver["notes"], "targetVersions": {"android": ["1.6.7+23"]}}
+        ).encode()
+        # Prime cache with v62
+        pcapi.OTA_PROXY.fetch_manifest("ota.version.json", refresh=False)
+        # Update upstream to v63 and trigger with empty body -> must bypass cache and pick v63 + notes
+        ver["v"] = 63
+        ver["notes"] = "Live manifest notes"
+        code, body = self.req("POST", "/pc/api/ota/trigger", {})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["version"], "63")
+        self.assertEqual(body["notes"], "Live manifest notes")
+        self.assertEqual(self.fake_hub.published[-1][1]["version"], "63")
+
+        # Upstream error when version omitted returns 502
+        self.routes[manifest_url] = OSError("github unreachable")
+        code, body = self.req("POST", "/pc/api/ota/trigger", {})
+        self.assertEqual(code, 502)
+        self.assertIn("error", body)
+
+
 class CatCamTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

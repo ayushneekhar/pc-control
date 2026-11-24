@@ -18,7 +18,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-cont
 import { ShareSheet } from './src/components/ShareSheet';
 import { SystemInsetsProvider } from './src/components/SystemInsets';
 import { Button, Icon } from './src/components/ui';
-import { applyOta, dismissOta, startOta, updateOffered, useOta } from './src/lib/otaStore';
+import { applyOta, dismissOta, reloadAutoOtaNow, startOta, updateOffered, useOta } from './src/lib/otaStore';
 import { normalizeDeepLinkPath } from './src/lib/linking';
 import { startLiveIfDownloading } from './src/lib/live';
 import { uploadCrashes } from './src/lib/crash';
@@ -166,6 +166,7 @@ export default function App() {
               }}
             />
           </Stack.Navigator>
+          <OtaAutoBanner />
           <OtaPrompt />
           <ShareSheet target={shareTarget} onClose={() => setShareTarget(null)} />
         </NavigationContainer>
@@ -300,6 +301,51 @@ function Tabs() {
   );
 }
 
+/** Restrained dark/mint top pill for agent-triggered auto-apply OTA: brief countdown toast or 1-tap draft-held reload. */
+function OtaAutoBanner() {
+  const t = useTheme();
+  const ota = useOta();
+  const insets = useSafeAreaInsets();
+  const auto = ota.autoApply;
+  if (auto.status !== 'reloading' && auto.status !== 'held_for_draft') return null;
+
+  const isHeld = auto.status === 'held_for_draft';
+  return (
+    <View pointerEvents="box-none" style={[st.autoWrap, { top: insets.top + space(2) }]}>
+      {isHeld ? (
+        <Pressable
+          onPress={reloadAutoOtaNow}
+          accessibilityRole="button"
+          accessibilityLabel={`OTA ${auto.version} ready, tap to reload`}
+          style={({ pressed }) => [
+            st.autoPill,
+            {
+              backgroundColor: pressed ? t.cardAlt : t.card,
+              borderColor: t.border,
+            },
+          ]}
+        >
+          <View style={[st.autoDot, { backgroundColor: t.accent }]} />
+          <Text style={[st.autoText, { color: t.text }]} numberOfLines={1}>
+            OTA {auto.version} ready
+          </Text>
+          <Text style={[st.autoSep, { color: t.textFaint }]}>·</Text>
+          <Text style={[st.autoAction, { color: t.accent }]} numberOfLines={1}>
+            Reload
+          </Text>
+        </Pressable>
+      ) : (
+        <View style={[st.autoPill, { backgroundColor: t.card, borderColor: t.border }]}>
+          <View style={[st.autoDot, { backgroundColor: t.accent }]} />
+          <Text style={[st.autoText, { color: t.text }]} numberOfLines={1}>
+            Applying update (OTA {auto.version})…
+          </Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
 /** Apex-style "update available" card above the tab bar: Later, or Update (download, verify, restart). */
 function OtaPrompt() {
   const t = useTheme();
@@ -382,5 +428,40 @@ const st = StyleSheet.create({
     gap: space(3),
     borderRadius: radius.md,
     elevation: 8,
+  },
+  autoWrap: {
+    position: 'absolute',
+    left: screenPad,
+    right: screenPad,
+    alignItems: 'center',
+    zIndex: 40,
+  },
+  autoPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space(2),
+    paddingHorizontal: space(4),
+    paddingVertical: space(2),
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    elevation: 6,
+  },
+  autoDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 999,
+  },
+  autoText: {
+    fontSize: 13,
+    fontWeight: '500',
+    fontVariant: ['tabular-nums'],
+  },
+  autoSep: {
+    fontSize: 13,
+    fontWeight: '400',
+  },
+  autoAction: {
+    fontSize: 13,
+    fontWeight: '600',
   },
 });

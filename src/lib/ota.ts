@@ -16,6 +16,7 @@ import { Platform } from 'react-native';
 import { PcNative } from '../../modules/pc-native';
 import { serverUrl } from './api';
 import { ApkRelease, parseApkVersion, parseOtaManifest } from './otaManifest';
+import { OtaTrigger, parseOtaTrigger } from './otaTriggerLogic';
 
 export type { ApkRelease } from './otaManifest';
 
@@ -47,6 +48,7 @@ export function mirrorOtaUrls() {
   return {
     versionUrl: `${base}/pc/api/ota/ota.version.json`,
     downloadUrl: `${base}/pc/api/ota/bundle.zip`,
+    triggerUrl: `${base}/pc/api/ota/trigger`,
   };
 }
 
@@ -230,7 +232,7 @@ let lastCheckedPatches: Record<string, string> | null = null;
 
 /** Fetches and validates the OTA manifest. Tries the laptop mirror over Tailscale first (fast when Tailscale is on),
  *  then falls back to GitHub Releases. Every step has a hard timeout so it can never hang. */
-export async function checkForOta(): Promise<OtaCheck | null> {
+export async function checkForOta(forceRefresh = false): Promise<OtaCheck | null> {
   const o = ota();
   if (!o) return null;
   const blacklist = await o.mod.getBlacklistedVersions().catch(() => [] as string[]);
@@ -239,9 +241,10 @@ export async function checkForOta(): Promise<OtaCheck | null> {
 
   // 1. Try laptop mirror first (over tailnet).
   const mirror = mirrorOtaUrls();
+  const mirrorVersionUrl = forceRefresh ? `${mirror.versionUrl}?refresh=1` : mirror.versionUrl;
   let mirrorErr: string | null = null;
   try {
-    const r = await fetchTextOnce(mirror.versionUrl, 5000);
+    const r = await fetchTextOnce(mirrorVersionUrl, 5000);
     const parsed = parseOtaManifest(r.status, r.body, target, current, blacklist);
     if (parsed.ok) {
       lastCheckedPatches = parsed.patches ?? null;
@@ -355,6 +358,18 @@ export async function downloadOta(onProgress?: (received: number, total: number)
   if (problem) {
     await o.manager.rollback().catch(() => false);
     throw new Error(`Update refused: ${problem}`);
+  }
+}
+
+export async function fetchOtaTrigger(): Promise<OtaTrigger | null> {
+  const base = serverUrl();
+  if (!base) return null;
+  try {
+    const r = await fetchTextOnce(mirrorOtaUrls().triggerUrl, 5000);
+    if (r.status < 200 || r.status >= 300) return null;
+    return parseOtaTrigger(JSON.parse(r.body));
+  } catch {
+    return null;
   }
 }
 

@@ -2811,7 +2811,9 @@ const st = StyleSheet.create({
     gap: 5,
   },
   assistantMeta: {
+    width: '100%',
     maxWidth: '88%',
+    alignSelf: 'flex-start',
     paddingLeft: 2,
     gap: 3,
   },
@@ -2991,12 +2993,14 @@ const st = StyleSheet.create({
     fontWeight: '400',
   },
   thinkingWrap: {
+    width: '100%',
     gap: 6,
   },
   thinkingRow: {
     flexDirection: 'row',
     alignItems: 'center',
     alignSelf: 'flex-start',
+    maxWidth: '100%',
     gap: 6,
     paddingVertical: 2,
   },
@@ -3005,12 +3009,14 @@ const st = StyleSheet.create({
     minWidth: 0,
   },
   completedProgressWrap: {
+    width: '100%',
     gap: 5,
   },
   completedProgressRow: {
     flexDirection: 'row',
     alignItems: 'center',
     alignSelf: 'flex-start',
+    maxWidth: '100%',
     gap: 3,
     paddingVertical: 2,
   },
@@ -3020,6 +3026,7 @@ const st = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
   progressList: {
+    width: '100%',
     borderLeftWidth: 1.5,
     paddingLeft: 10,
     marginLeft: 3,
@@ -3027,6 +3034,7 @@ const st = StyleSheet.create({
     paddingVertical: 2,
   },
   progressStepRow: {
+    width: '100%',
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 6,
@@ -3040,6 +3048,8 @@ const st = StyleSheet.create({
   },
   progressStepText: {
     flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
     fontSize: 12.5,
     lineHeight: 17,
   },

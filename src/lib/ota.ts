@@ -24,7 +24,10 @@ type Manager = InstanceType<NitroOtaModule['OTAUpdateManager']>;
 /** A validated manifest (src/lib/otaManifest.ts). Failures are thrown as one short message instead. */
 export type OtaCheck = { hasUpdate: boolean; isCompatible: boolean; remoteVersion: string; metadata?: { releaseNotes?: string } };
 
-const extra = (Constants.expoConfig?.extra ?? {}) as { github?: { repo?: string; otaTag?: string } };
+const extra = (Constants.expoConfig?.extra ?? {}) as {
+  github?: { repo?: string; otaTag?: string };
+  bundledOtaVersion?: string | number;
+};
 export const GITHUB_REPO = extra.github?.repo ?? 'ayushneekhar/pc-control';
 const OTA_TAG = extra.github?.otaTag ?? 'ota-android';
 const RELEASES = `https://github.com/${GITHUB_REPO}/releases`;
@@ -76,8 +79,10 @@ export function binaryTarget(): string {
   return code ? `${binaryVersion()}+${code}` : binaryVersion();
 }
 
-/** OTA version the running JS was built as (inlined at bundle time; also set for the APK's embedded JS). */
+/** OTA version the running JS was built as (baked into app.config by withBuildOptimizations, or inlined at bundle time). */
 function bundledOtaVersion(): string | null {
+  const fromExtra = extra.bundledOtaVersion;
+  if (fromExtra != null && String(fromExtra).trim()) return String(fromExtra).trim();
   return process.env.EXPO_PUBLIC_BUNDLED_OTA_VERSION?.trim() || null;
 }
 
@@ -213,6 +218,8 @@ async function getText(url: string, what: string, timeoutMs = 8000, xhrTimeoutMs
   );
 }
 
+let lastCheckedPatches: Record<string, string> | null = null;
+
 /** Fetches and validates the OTA manifest. Tries the laptop mirror over Tailscale first (fast when Tailscale is on),
  *  then falls back to GitHub Releases. Every step has a hard timeout so it can never hang. */
 export async function checkForOta(): Promise<OtaCheck | null> {
@@ -229,6 +236,7 @@ export async function checkForOta(): Promise<OtaCheck | null> {
     const r = await fetchTextOnce(mirror.versionUrl, 5000);
     const parsed = parseOtaManifest(r.status, r.body, target, current, blacklist);
     if (parsed.ok) {
+      lastCheckedPatches = parsed.patches ?? null;
       return {
         hasUpdate: parsed.hasUpdate,
         isCompatible: parsed.isCompatible,
@@ -248,6 +256,7 @@ export async function checkForOta(): Promise<OtaCheck | null> {
     const [status, body] = await getText(OTA_URLS.versionUrl, 'updates');
     const r = parseOtaManifest(status, body, target, current, blacklist);
     if (!r.ok) throw new Error(r.error);
+    lastCheckedPatches = r.patches ?? null;
     return {
       hasUpdate: r.hasUpdate,
       isCompatible: r.isCompatible,
@@ -261,15 +270,63 @@ export async function checkForOta(): Promise<OtaCheck | null> {
 }
 
 const DOWNLOAD_TIMEOUT_MS = 45_000;
+const PATCH_FILENAME_RE = /^patch-\d+-to-\d+\.zip$/;
 
-/** Download + unzip (mirror first, then GitHub fallback), then verify the laptop's ECDSA-P256 signature
- *  before anything uses it. Throws (and drops it) if refused or timed out. */
+function resolvePatchUrls(patchRef: string): { mirrorUrl: string | null; githubUrl: string } {
+  if (/^https:\/\//.test(patchRef)) {
+    const baseName = patchRef.split('/').pop() ?? '';
+    return {
+      mirrorUrl: PATCH_FILENAME_RE.test(baseName) ? `${serverUrl()}/pc/api/ota/${baseName}` : null,
+      githubUrl: patchRef,
+    };
+  }
+  return {
+    mirrorUrl: PATCH_FILENAME_RE.test(patchRef) ? `${serverUrl()}/pc/api/ota/${patchRef}` : null,
+    githubUrl: `${RELEASES}/download/${OTA_TAG}/${patchRef}`,
+  };
+}
+
+/** Download + unzip (patch first when an installed OTA bundle matches the manifest's patches map,
+ *  mirror-first with GitHub fallback, seamlessly falling back to full bundle.zip on any patch error),
+ *  then verify the laptop's ECDSA-P256 signature before anything uses it. */
 export async function downloadOta(onProgress?: (received: number, total: number) => void): Promise<void> {
   const o = ota();
   if (!o) throw new Error('OTA is unavailable in this build');
 
-  // Bypass OTAUpdateManager.downloadUpdate() because it calls findPatchUrl() -> raw fetch() with no timeout.
-  // Call downloadZipFromUrl() directly with mirror-first + GitHub fallback, each under a hard timeout.
+  // 1. Differential bsdiff patch path: only when a previous OTA bundle is already installed on disk
+  //    (never on the first OTA after a fresh APK) and the manifest advertises a patch for it.
+  const installedVersion = o.manager.getVersion();
+  const installedPath = o.manager.getUnzippedPath();
+  const patchRef = installedVersion && installedPath && o.mod.isPatchSupported() ? lastCheckedPatches?.[installedVersion] : undefined;
+  if (patchRef) {
+    const { mirrorUrl, githubUrl } = resolvePatchUrls(patchRef);
+    let patched = false;
+    if (mirrorUrl) {
+      try {
+        await withTimeout(o.mod.downloadZipFromUrl(mirrorUrl, onProgress), DOWNLOAD_TIMEOUT_MS, 'Laptop OTA patch download');
+        patched = true;
+      } catch (e) {
+        console.warn(`[ota] laptop mirror patch failed (${(e as Error).message}); trying GitHub patch`);
+      }
+    }
+    if (!patched) {
+      try {
+        await withTimeout(o.mod.downloadZipFromUrl(githubUrl, onProgress), DOWNLOAD_TIMEOUT_MS, 'GitHub OTA patch download');
+        patched = true;
+      } catch (e) {
+        console.warn(`[ota] GitHub patch failed (${(e as Error).message}); falling back to full bundle`);
+      }
+    }
+    if (patched) {
+      const patchedPath = o.manager.getUnzippedPath();
+      const problem = patchedPath && PcNative ? PcNative.otaCheck(patchedPath) : 'no bundle path';
+      if (!problem) return;
+      console.warn(`[ota] patched bundle refused (${problem}); falling back to full bundle`);
+    }
+  }
+
+  // 2. Full bundle download: mirror-first + GitHub fallback, each under a hard timeout.
+  //    Bypass OTAUpdateManager.downloadUpdate() because its internal findPatchUrl() has no timeout.
   const mirror = mirrorOtaUrls();
   let mirrorErr: string | null = null;
   try {

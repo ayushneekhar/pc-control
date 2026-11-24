@@ -4,7 +4,7 @@
 // "504 Gateway Time-out" HTML page, as the version string, so we don't use it for checking.)
 
 export type OtaManifestResult =
-  | { ok: true; remoteVersion: string; isCompatible: boolean; hasUpdate: boolean; releaseNotes?: string }
+  | { ok: true; remoteVersion: string; isCompatible: boolean; hasUpdate: boolean; releaseNotes?: string; patches?: Record<string, string> }
   | { ok: false; error: string };
 
 export type ApkRelease = { versionName: string; versionCode: number; sha256: string; size: number; otaVersion?: number };
@@ -23,6 +23,21 @@ function parseJson(text: string): unknown {
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+const PATCH_FILE_RE = /^patch-\d+-to-\d+\.zip$/;
+
+function parsePatches(raw: unknown): Record<string, string> | undefined {
+  if (!isObj(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(raw)) {
+    if (!/^\d{1,9}$/.test(k)) continue;
+    const ref = typeof val === 'string' ? val.trim() : isObj(val) && typeof val.url === 'string' ? val.url.trim() : '';
+    if (PATCH_FILE_RE.test(ref) || /^https:\/\/\S+$/.test(ref)) {
+      out[k] = ref;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 /**
  * @param status   HTTP status of the manifest fetch
@@ -44,7 +59,15 @@ export function parseOtaManifest(status: number, text: string, target: string, c
   const cur = current && /^\d+$/.test(current.trim()) ? Number(current.trim()) : null;
   const hasUpdate = isCompatible && !blacklist.includes(v) && (cur === null || Number(v) > cur);
   const notes = typeof j.releaseNotes === 'string' && j.releaseNotes.trim() ? j.releaseNotes.trim().slice(0, 300) : undefined;
-  return { ok: true, remoteVersion: v, isCompatible, hasUpdate, ...(notes ? { releaseNotes: notes } : {}) };
+  const patches = parsePatches(j.patches);
+  return {
+    ok: true,
+    remoteVersion: v,
+    isCompatible,
+    hasUpdate,
+    ...(notes ? { releaseNotes: notes } : {}),
+    ...(patches ? { patches } : {}),
+  };
 }
 
 export function parseApkVersion(status: number, text: string): ApkResult {

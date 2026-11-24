@@ -42,6 +42,11 @@ const other = ota(200, good('9', ['1.2.0+5']), T, '1');             // built for
 assert.equal(other.isCompatible, false);
 assert.equal(other.hasUpdate, false);
 assert.equal(ota(200, good('9'), T, '1', ['9']).hasUpdate, false);  // rolled back before
+// differential patches (string filename or { url } object; invalid entries ignored)
+assert.deepEqual(
+  ota(200, good('42', [T], { patches: { '41': 'patch-41-to-42.zip', '40': { url: 'https://example.com/patch-40-to-42.zip', size: 1234 }, bad: '../x.zip', '39': 'http://insecure.zip' } }), T, '41'),
+  { ok: true, remoteVersion: '42', isCompatible: true, hasUpdate: true, patches: { '41': 'patch-41-to-42.zip', '40': 'https://example.com/patch-40-to-42.zip' } },
+);
 
 // APK version.json
 assert.deepEqual(apk(404, 'Not Found'), { ok: false, error: "Couldn't check for app releases (HTTP 404)" });

@@ -2541,10 +2541,19 @@ OTA_ARTIFACTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".artifacts", "nitro-ota", "android"
 )
 OTA_ALLOWED_FILES = {"ota.version.json": "application/json; charset=utf-8", "bundle.zip": "application/zip"}
+OTA_PATCH_RE = re.compile(r"^patch-\d+-to-\d+\.zip$")
+
+
+def ota_content_type(filename):
+    if filename in OTA_ALLOWED_FILES:
+        return OTA_ALLOWED_FILES[filename]
+    if OTA_PATCH_RE.fullmatch(filename):
+        return "application/zip"
+    return None
 
 
 def ota_file_path(filename, ota_dir=None, artifacts_dir=None):
-    if filename not in OTA_ALLOWED_FILES:
+    if not ota_content_type(filename):
         return None
     for base in (ota_dir if ota_dir is not None else OTA_DIR,
                  artifacts_dir if artifacts_dir is not None else OTA_ARTIFACTS_DIR):
@@ -4074,8 +4083,10 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json(200, KEYRING.status())
                 except Exception as e:
                     return self.send_json(502, {"error": f"keyring status failed: {type(e).__name__}"})
-            if path in ("/api/ota/ota.version.json", "/api/ota/bundle.zip"):
-                return self.send_ota_file(path.rsplit("/", 1)[1])
+            if path.startswith("/api/ota/"):
+                ota_name = path[len("/api/ota/"):]
+                if ota_content_type(ota_name):
+                    return self.send_ota_file(ota_name)
             if path == "/api/chat/messages":
                 return self.send_json(*_chat_manager().handle_get_messages(qs))
             if path == "/api/chat/link-preview":
@@ -4207,9 +4218,9 @@ class H(BaseHTTPRequestHandler):
 
     def send_ota_file(self, filename):
         p = ota_file_path(filename)
-        if not p:
+        ctype = ota_content_type(filename)
+        if not p or not ctype:
             return self.send_json(404, {"error": f"no local OTA {filename}"})
-        ctype = OTA_ALLOWED_FILES[filename]
         try:
             size = os.path.getsize(p)
             with open(p, "rb") as f:

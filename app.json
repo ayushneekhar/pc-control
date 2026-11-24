@@ -2,7 +2,7 @@
   "expo": {
     "name": "PC Control",
     "slug": "pc-control",
-    "version": "1.6.4",
+    "version": "1.6.5",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "pccontrol",
@@ -10,7 +10,7 @@
     "backgroundColor": "#0B0D12",
     "android": {
       "package": "com.neekhar.pccontrol",
-      "versionCode": 20,
+      "versionCode": 21,
       "allowBackup": false,
       "predictiveBackGestureEnabled": false,
       "adaptiveIcon": {
@@ -53,7 +53,8 @@
         }
       ],
       "./plugins/withReleaseSigning",
-      "./plugins/withNitroOta"
+      "./plugins/withNitroOta",
+      "./plugins/withBuildOptimizations"
     ],
     "extra": {
       "github": {

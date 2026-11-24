@@ -1760,6 +1760,18 @@ class OtaMirrorTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)["version"], "28")
 
+        # bsdiff patch-*.zip files are served safely; invalid names are rejected
+        with open(os.path.join(self.ota_dir, "patch-27-to-28.zip"), "wb") as f:
+            f.write(b"PK-patch")
+        code, ctype, body = self.fetch("/pc/api/ota/patch-27-to-28.zip")
+        self.assertEqual(code, 200)
+        self.assertEqual(ctype, "application/zip")
+        self.assertEqual(body, b"PK-patch")
+
+        for bad in ("patch-foo.zip", "patch-1-to-2.zip.bak", "../secret.zip", "other.zip"):
+            code, _, _ = self.fetch(f"/pc/api/ota/{bad}")
+            self.assertEqual(code, 404, bad)
+
 
 class CatCamTests(unittest.TestCase):
     def setUp(self):

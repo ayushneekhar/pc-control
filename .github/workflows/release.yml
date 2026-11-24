@@ -43,7 +43,7 @@ jobs:
       CCACHE_SLOPPINESS: "time_macros,include_file_mtime,include_file_ctime"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
@@ -64,13 +64,13 @@ jobs:
           [ "$missing" -eq 0 ] || exit 1
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
       - name: Set up JDK 21
         if: inputs.mode == 'apk'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -84,34 +84,62 @@ jobs:
             echo "::warning::JDK 17 not found; Gradle may try to provision a Java 17 toolchain."
           fi
 
-      - name: Set up Android SDK
-        if: inputs.mode == 'apk'
-        uses: android-actions/setup-android@v3
-        with:
-          packages: "platform-tools"
-
-      - name: Install Android SDK packages
+      - name: Ensure Android SDK packages
         if: inputs.mode == 'apk'
         run: |
-          sdkmanager --install \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "ndk;27.1.12297006" \
-            "cmake;3.22.1" >/dev/null
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then
+            echo "::error::Preinstalled Android SDK not found in ANDROID_HOME/ANDROID_SDK_ROOT"
+            exit 1
+          fi
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found at $SDKMANAGER"
+            exit 1
+          fi
+          MISSING=()
+          [ -d "$SDK/platform-tools" ] || MISSING+=("platform-tools")
+          [ -d "$SDK/platforms/android-35" ] || MISSING+=("platforms;android-35")
+          [ -d "$SDK/build-tools/35.0.0" ] || MISSING+=("build-tools;35.0.0")
+          [ -d "$SDK/ndk/27.1.12297006" ] || MISSING+=("ndk;27.1.12297006")
+          [ -d "$SDK/cmake/3.22.1" ] || MISSING+=("cmake;3.22.1")
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "Installing missing Android SDK packages: ${MISSING[*]}"
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+            "$SDKMANAGER" --install "${MISSING[@]}" >/dev/null
+          else
+            echo "All required Android SDK/NDK packages already preinstalled."
+          fi
 
       - name: Install ccache
         if: inputs.mode == 'apk'
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: release-apk-${{ runner.os }}-${{ hashFiles('yarn.lock', 'package.json') }}
+          key: release-apk-${{ runner.os }}
           max-size: 2G
 
       - name: Cache Gradle
         if: inputs.mode == 'apk'
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Cache node_modules
+        id: node-modules-cache
+        uses: actions/cache@v6
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
 
       - name: Install dependencies
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
         run: yarn install --frozen-lockfile --network-timeout 600000
+
+      - name: Cache Metro
+        uses: actions/cache@v6
+        with:
+          path: /tmp/metro-cache
+          key: metro-cache-${{ runner.os }}-${{ hashFiles('yarn.lock', 'babel.config.js') }}
+          restore-keys: |
+            metro-cache-${{ runner.os }}-
 
       - name: Restore the OTA signing key
         run: |

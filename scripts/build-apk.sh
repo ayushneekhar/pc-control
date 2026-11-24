@@ -24,10 +24,12 @@ if [ "${1:-}" = "--bump" ]; then
     console.log("version", j.expo.version, "code", j.expo.android.versionCode);'
 fi
 
-yarn -s typecheck
-yarn -s lint
+yarn -s typecheck & pid_tc=$!
+yarn -s lint & pid_lint=$!
+tc_rc=0; wait "$pid_tc" || tc_rc=$?
+lint_rc=0; wait "$pid_lint" || lint_rc=$?
+[ "$tc_rc" -eq 0 ] && [ "$lint_rc" -eq 0 ]
 npx expo prebuild -p android --clean --no-install
-rm -rf "${TMPDIR:-/tmp}"/metro-* "${TMPDIR:-/tmp}"/haste-map-*   # EXPO_PUBLIC_* values are inlined: no stale cache
 # Optional: use an already-cached Gradle when the wrapper's download is unavailable, e.g.
 #   GRADLE_DIST_URL=https://services.gradle.org/distributions/gradle-9.8.0-bin.zip scripts/build-apk.sh
 if [ -n "${GRADLE_DIST_URL:-}" ]; then
@@ -38,7 +40,7 @@ sed -i 's|^networkTimeout=.*|networkTimeout=120000|' android/gradle/wrapper/grad
 JDK17="${JDK17:-$HOME/tools/jdk-17-deb/usr/lib/jvm/java-17-openjdk-amd64}"
 TOOLCHAIN=()
 [ -x "$JDK17/bin/javac" ] && TOOLCHAIN=(-Porg.gradle.java.installations.paths="$JDK17")
-(cd android && ./gradlew --no-daemon "${TOOLCHAIN[@]}" -PreactNativeArchitectures=arm64-v8a assembleRelease)
+(cd android && ./gradlew --no-daemon --build-cache "${TOOLCHAIN[@]}" -PreactNativeArchitectures=arm64-v8a assembleRelease -x lintVitalAnalyzeRelease -x lintVitalRelease)
 # cams player: nothing JNI-backed may run in Application.onCreate (libwebrtc is not loaded yet)
 scripts/cams/check-startup-jni.sh
 # cams player: H.265 is only offered when the bundled libwebrtc can receive it

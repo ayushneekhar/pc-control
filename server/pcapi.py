@@ -3220,8 +3220,6 @@ def apk_info():
 QBT_ADD_CATEGORY = "qwen"
 SEERR_URL = os.environ.get("PCAPI_SEERR_URL", CONFIG.get("seerr_url_local") or "http://127.0.0.1:5055").rstrip("/")
 SEERR_SETTINGS = os.environ.get("PCAPI_SEERR_SETTINGS", os.path.join(HOME, ".config", "seerr", "settings.json"))
-T3_MCP_URL = os.environ.get("PCAPI_T3_MCP_URL", "http://127.0.0.1:3773/mcp")
-T3_CREDS_FILE = os.environ.get("PCAPI_T3_CREDS", os.path.join(HOME, ".claude", ".credentials.json"))
 KBD_LOCK_UNIT = "kbd-lock.service"
 
 ALL_TORRENT_STATE = {
@@ -3897,109 +3895,6 @@ class SeerrClient:
 SEERR = SeerrClient()
 
 
-class T3ThreadsClient:
-    """Read-only + interrupt client for the local T3 Code MCP server (127.0.0.1:3773/mcp).
-    Never reads or returns thread message contents — only thread metadata (title, model, status, age)."""
-
-    def __init__(self, url=T3_MCP_URL, creds_file=T3_CREDS_FILE):
-        self.url = url
-        self.creds_file = creds_file
-        self._lock = threading.Lock()
-        self._sid = None
-
-    def _token(self):
-        with open(self.creds_file) as f:
-            d = json.load(f)
-        oauth = d.get("mcpOAuth") or {}
-        for k, v in oauth.items():
-            if k.startswith("t3|") and isinstance(v, dict) and v.get("accessToken"):
-                return v["accessToken"]
-        raise ValueError("T3 OAuth token not found")
-
-    def _post(self, tok, body, sid=None, timeout=15):
-        h = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "Authorization": "Bearer " + tok,
-        }
-        if sid:
-            h["mcp-session-id"] = sid
-        req = urllib.request.Request(self.url, json.dumps(body).encode(), h)
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            txt = r.read().decode("utf-8", "replace")
-            sid2 = r.headers.get("mcp-session-id")
-        for line in txt.splitlines():
-            if line.startswith("data: "):
-                txt = line[6:]
-        return (json.loads(txt) if txt.strip() else None), sid2
-
-    def _init_session(self, tok):
-        _, sid = self._post(tok, {
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "pc-api", "version": "1"}},
-        })
-        self._post(tok, {"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
-        return sid
-
-    def _call_tool(self, name, arguments):
-        tok = self._token()
-        with self._lock:
-            sid = self._sid
-            if not sid:
-                sid = self._init_session(tok)
-                self._sid = sid
-        try:
-            res, _ = self._post(tok, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                                      "params": {"name": name, "arguments": arguments}}, sid)
-        except urllib.error.HTTPError:
-            with self._lock:
-                sid = self._init_session(tok)
-                self._sid = sid
-            res, _ = self._post(tok, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                                      "params": {"name": name, "arguments": arguments}}, sid)
-        if not isinstance(res, dict):
-            raise ValueError("empty T3 response")
-        if "error" in res:
-            raise ValueError(str(res["error"]))
-        content = (res.get("result") or {}).get("content") or []
-        text = content[0].get("text", "") if content and isinstance(content[0], dict) else ""
-        return json.loads(text) if text.strip() else {}
-
-    def list_threads(self, limit=20):
-        try:
-            data = self._call_tool("t3_thread_list", {"allProjects": True, "limit": limit})
-        except (OSError, ValueError) as e:
-            return 502, {"error": clip(f"T3 threads unavailable: {e}", 240)}
-        out = []
-        for th in data.get("threads") or []:
-            if not isinstance(th, dict):
-                continue
-            out.append({
-                "id": str(th.get("threadId") or ""),
-                "title": clip(th.get("title") or "Untitled", 160),
-                "model": clip(th.get("model") or "", 80),
-                "instance": clip(th.get("providerInstanceId") or "", 60),
-                "status": str(th.get("status") or "unknown"),
-                "settled": bool(th.get("settled")),
-                "created_at": th.get("createdAt") or "",
-                "updated_at": th.get("updatedAt") or "",
-            })
-        return 200, {"threads": out, "ts": int(time.time())}
-
-    def interrupt_thread(self, body):
-        tid = str(body.get("threadId") or "").strip()
-        if not tid or len(tid) > 120:
-            return 400, {"error": "threadId required"}
-        try:
-            self._call_tool("t3_thread_interrupt", {"threadId": tid})
-        except (OSError, ValueError) as e:
-            return 502, {"error": clip(f"Interrupt failed: {e}", 240)}
-        return 200, {"ok": True, "threadId": tid}
-
-
-T3_THREADS = T3ThreadsClient()
-
-
 def _space_module():
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
@@ -4036,8 +3931,6 @@ def route_round4_get(path, qs):
         return SEERR.collection(qs.get("id", [""])[0])
     if path == "/api/seerr/requests":
         return SEERR.requests()
-    if path == "/api/agent/threads":
-        return T3_THREADS.list_threads()
     return None
 
 
@@ -4073,8 +3966,6 @@ def route_round4_post(path, b):
         return SEERR.create_request(b)
     if path == "/api/seerr/resolve":
         return SEERR.resolve_url(b)
-    if path == "/api/agent/threads/interrupt":
-        return T3_THREADS.interrupt_thread(b)
     return None
 
 

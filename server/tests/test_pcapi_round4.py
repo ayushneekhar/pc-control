@@ -286,30 +286,10 @@ class FakeSeerrAndT3Handler(BaseHTTPRequestHandler):
             return self.reply(204, {})
         if self.path == "/api/v3/command":
             return self.reply(201, {"id": 77})
-        if self.path == "/mcp":
-            method = body.get("method")
-            if method == "initialize":
-                return self.reply(200, {"jsonrpc": "2.0", "id": 1, "result": {}}, headers=[("mcp-session-id", "sid-1")])
-            if method == "notifications/initialized":
-                return self.reply(200, {})
-            if method == "tools/call":
-                tname = body["params"]["name"]
-                if tname == "t3_thread_list":
-                    payload = {"threads": [{
-                        "threadId": "mcp:t1", "title": "Feature work", "model": "gemini-4-neon",
-                        "providerInstanceId": "antigravity-2", "status": "running", "settled": False,
-                        "createdAt": "2026-11-23T16:00:00.000Z", "updatedAt": "2026-11-23T16:30:00.000Z",
-                        "messages": [{"text": "SECRET PROMPT SHOULD NEVER LEAK"}],
-                    }]}
-                    return self.reply(200, {"jsonrpc": "2.0", "id": 2,
-                                            "result": {"content": [{"type": "text", "text": json.dumps(payload)}]}})
-                if tname == "t3_thread_interrupt":
-                    return self.reply(200, {"jsonrpc": "2.0", "id": 2,
-                                            "result": {"content": [{"type": "text", "text": json.dumps({"ok": True})}]}})
         self.reply(404, {"error": "not found"})
 
 
-class SeerrArrJellyfinT3Tests(unittest.TestCase):
+class SeerrArrJellyfinTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeSeerrAndT3Handler)
@@ -319,9 +299,6 @@ class SeerrArrJellyfinT3Tests(unittest.TestCase):
         cls.seerr_conf = os.path.join(cls.dir, "seerr.json")
         with open(cls.seerr_conf, "w") as f:
             json.dump({"main": {"apiKey": "seerr-key-1"}}, f)
-        cls.creds_file = os.path.join(cls.dir, "creds.json")
-        with open(cls.creds_file, "w") as f:
-            json.dump({"mcpOAuth": {"t3|local": {"accessToken": "tok-123"}}}, f)
         cls.jf_key = os.path.join(cls.dir, "jf.key")
         with open(cls.jf_key, "w") as f:
             f.write("jf-secret")
@@ -437,19 +414,6 @@ class SeerrArrJellyfinT3Tests(unittest.TestCase):
         with mock.patch.object(pcapi, "JELLYFIN_URL", self.base), \
                 mock.patch.object(pcapi, "JELLYFIN_KEY_FILE", self.jf_key):
             self.assertEqual(pcapi.jellyfin_refresh_library(), (200, {"ok": True}))
-
-    def test_t3_threads_never_expose_messages_and_interrupt(self):
-        t3 = pcapi.T3ThreadsClient(url=self.base + "/mcp", creds_file=self.creds_file)
-        code, body = t3.list_threads()
-        self.assertEqual(code, 200)
-        self.assertEqual(len(body["threads"]), 1)
-        th = body["threads"][0]
-        self.assertEqual(set(th.keys()), {"id", "title", "model", "instance", "status", "settled", "created_at", "updated_at"})
-        self.assertNotIn("SECRET", json.dumps(body))
-
-        code, res = t3.interrupt_thread({"threadId": "mcp:t1"})
-        self.assertEqual((code, res["ok"]), (200, True))
-        self.assertEqual(t3.interrupt_thread({"threadId": ""})[0], 400)
 
 
 if __name__ == "__main__":

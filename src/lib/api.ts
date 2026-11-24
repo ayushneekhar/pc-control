@@ -521,21 +521,6 @@ export const createSeerrRequest = (mediaType: 'movie' | 'tv', mediaId: number, s
   );
 export const resolveMediaUrl = (url: string) => post<SeerrItem>('/pc/api/seerr/resolve', { url }, 15000);
 
-export type CodingThread = {
-  id: string;
-  title: string;
-  model: string;
-  instance: string;
-  status: string;
-  settled: boolean;
-  created_at: string;
-  updated_at: string;
-};
-
-export const getCodingThreads = () => get<{ threads: CodingThread[]; ts: number }>('/pc/api/agent/threads', 15000);
-export const interruptCodingThread = (threadId: string) =>
-  post<{ ok: boolean; threadId: string }>('/pc/api/agent/threads/interrupt', { threadId }, 15000);
-
 // ---------------------------------------------------------------- space manager
 
 export type SpaceHdd = {

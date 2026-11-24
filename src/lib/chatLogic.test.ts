@@ -5,6 +5,7 @@ import {
   buildReplyRef,
   ChatMessage,
   computeAndroidKeyboardOffset,
+  computeSwipeReplyOffset,
   extractPreviewUrl,
   findPrecedingUserMessage,
   formatAttachmentSize,
@@ -13,6 +14,7 @@ import {
   formatMessagePreview,
   getChatEndpoint,
   getReplyRef,
+  isReplyableMessage,
   mergeChatMessages,
   normalizeChatUrl,
   parseInlineTokens,
@@ -24,8 +26,11 @@ import {
   setChatEndpoint,
   shortEffortLabel,
   shortModelLabel,
+  shouldCaptureSwipeReply,
   shouldPollChat,
   shouldShowEngineTag,
+  SWIPE_REPLY_MAX_DRAG,
+  SWIPE_REPLY_THRESHOLD,
 } from './chatLogic';
 
 function memBackend(): CacheBackend {
@@ -410,4 +415,64 @@ test('reply helpers extract structured reply_to, build snippets, and format send
   assert.equal(replySenderLabel({ role: 'assistant', engine: 'gemini' }), 'Gemini');
   assert.equal(replySenderLabel({ role: 'assistant', engine: 'claude' }), 'Claude');
   assert.equal(replySenderLabel({ role: 'system' }), 'System');
+});
+
+test('shouldCaptureSwipeReply captures only deliberate rightward horizontal drags', () => {
+  assert.equal(shouldCaptureSwipeReply(0, 0), false);
+  assert.equal(shouldCaptureSwipeReply(10, 0), false);
+  assert.equal(shouldCaptureSwipeReply(11, 0), true);
+  assert.equal(shouldCaptureSwipeReply(-30, 0), false);
+  assert.equal(shouldCaptureSwipeReply(20, 15), false); // dy too large (20 <= 22.5)
+  assert.equal(shouldCaptureSwipeReply(20, -15), false);
+  assert.equal(shouldCaptureSwipeReply(25, 15), true); // 25 > 22.5
+  assert.equal(shouldCaptureSwipeReply(Number.NaN, 0), false);
+});
+
+test('computeSwipeReplyOffset tracks 1:1 up to threshold and rubber-bands cleanly below max', () => {
+  assert.equal(computeSwipeReplyOffset(-25), 0);
+  assert.equal(computeSwipeReplyOffset(0), 0);
+  assert.equal(computeSwipeReplyOffset(32), 32);
+  assert.equal(computeSwipeReplyOffset(SWIPE_REPLY_THRESHOLD), SWIPE_REPLY_THRESHOLD);
+
+  const past = computeSwipeReplyOffset(SWIPE_REPLY_THRESHOLD + 40);
+  assert.ok(past > SWIPE_REPLY_THRESHOLD && past < SWIPE_REPLY_MAX_DRAG);
+
+  const huge = computeSwipeReplyOffset(2000);
+  assert.ok(huge <= SWIPE_REPLY_MAX_DRAG);
+  assert.ok(huge > SWIPE_REPLY_MAX_DRAG - 0.1);
+});
+
+test('isReplyableMessage excludes system, pending, and optimistic messages', () => {
+  assert.equal(
+    isReplyableMessage({ id: 'u1', role: 'user', engine: 'claude', text: 'hi', created_at: 1, status: 'done' }),
+    true,
+  );
+  assert.equal(
+    isReplyableMessage({ id: 'a1', role: 'assistant', engine: 'gemini', text: 'hey', created_at: 2, status: 'done' }),
+    true,
+  );
+  assert.equal(
+    isReplyableMessage({ id: 'a2', role: 'assistant', engine: 'gemini', text: '', error: 'err', created_at: 3, status: 'error' }),
+    true,
+  );
+  assert.equal(
+    isReplyableMessage({ id: 's1', role: 'system', engine: 'claude', text: 'New chat', created_at: 4, status: 'done' }),
+    false,
+  );
+  assert.equal(
+    isReplyableMessage({ id: 'p1', role: 'assistant', engine: 'claude', text: '', created_at: 5, status: 'pending' }),
+    false,
+  );
+  assert.equal(
+    isReplyableMessage({
+      id: 'opt-1',
+      role: 'user',
+      engine: 'claude',
+      text: 'sending',
+      created_at: 6,
+      status: 'done',
+      optimistic: true,
+    }),
+    false,
+  );
 });

@@ -125,6 +125,8 @@ export type PcNativeModule = {
   setChatVisible?(visible: boolean): void;
   /** Persist optional custom chat endpoint URL + bearer token for inline notification replies. */
   setChatConfig?(baseUrl: string, token: string): void;
+  /** Crisp native haptic tick via Android VibrationEffect.createPredefined (defaults to EFFECT_CLICK). */
+  haptic?(kind?: 'click' | 'heavy' | 'tick'): boolean;
   /** Subscribe to native module events (e.g. 'onChatPush', 'onImagePaste'). */
   addListener?: {
     (

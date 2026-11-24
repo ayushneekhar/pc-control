@@ -525,3 +525,41 @@ export function formatAttachmentSize(bytes: number): string {
   const mb = kb / 1024;
   return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
 }
+
+export const SWIPE_REPLY_ACTIVATION_DX = 10;
+export const SWIPE_REPLY_DIRECTION_RATIO = 1.5;
+export const SWIPE_REPLY_THRESHOLD = 60;
+export const SWIPE_REPLY_RESET_THRESHOLD = 48;
+export const SWIPE_REPLY_MAX_DRAG = 84;
+
+/** Capture only deliberate horizontal rightward drags so vertical scroll, leftward drags, and taps stay untouched. */
+export function shouldCaptureSwipeReply(dx: number, dy: number): boolean {
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return false;
+  return dx > SWIPE_REPLY_ACTIVATION_DX && dx > Math.abs(dy) * SWIPE_REPLY_DIRECTION_RATIO;
+}
+
+/**
+ * Maps raw horizontal rightward drag distance (dx) to damped visual bubble offset:
+ * - 0 for leftward/zero drags
+ * - 1:1 tracking up to SWIPE_REPLY_THRESHOLD
+ * - Smooth exponential rubber-band resistance asymptotically approaching SWIPE_REPLY_MAX_DRAG
+ */
+export function computeSwipeReplyOffset(dx: number): number {
+  if (!Number.isFinite(dx) || dx <= 0) return 0;
+  if (dx <= SWIPE_REPLY_THRESHOLD) return dx;
+  const excess = dx - SWIPE_REPLY_THRESHOLD;
+  const headroom = SWIPE_REPLY_MAX_DRAG - SWIPE_REPLY_THRESHOLD;
+  return SWIPE_REPLY_THRESHOLD + headroom * (1 - Math.exp(-excess / 48));
+}
+
+/** Returns true only for replyable user/assistant messages (excludes system banners, pending, and optimistic placeholders). */
+export function isReplyableMessage(msg: ChatMessage): boolean {
+  if (msg.role === 'system') return false;
+  if (msg.status === 'pending' || msg.optimistic) return false;
+  return (
+    msg.role === 'user' ||
+    msg.status === 'error' ||
+    msg.text.trim().length > 0 ||
+    (msg.attachments?.length ?? 0) > 0
+  );
+}

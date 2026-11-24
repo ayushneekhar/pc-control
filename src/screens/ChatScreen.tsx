@@ -17,6 +17,7 @@ import {
   Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -24,6 +25,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  Vibration,
   View,
 } from 'react-native';
 import { PcNative, PickedAttachment } from '../../modules/pc-native';
@@ -50,6 +52,7 @@ import {
   ChatMessage,
   ChatReplyRef,
   computeAndroidKeyboardOffset,
+  computeSwipeReplyOffset,
   extractPreviewUrl,
   findPrecedingUserMessage,
   formatAttachmentSize,
@@ -58,6 +61,7 @@ import {
   formatMessagePreview,
   getReplyRef,
   isHttpUrl,
+  isReplyableMessage,
   LinkPreview,
   makeClientId,
   mergeChatMessages,
@@ -66,8 +70,11 @@ import {
   prependOlderMessages,
   replySenderLabel,
   resolveT3ThreadUrl,
+  shouldCaptureSwipeReply,
   shouldPollChat,
   shouldShowEngineTag,
+  SWIPE_REPLY_RESET_THRESHOLD,
+  SWIPE_REPLY_THRESHOLD,
 } from '../lib/chatLogic';
 import { radius, screenPad, space, useTheme } from '../theme';
 
@@ -86,6 +93,196 @@ function engineLabel(engine: ChatEngine): string {
 function openExternalUrl(url: string): void {
   if (!isHttpUrl(url)) return;
   Linking.openURL(url).catch(() => {});
+}
+
+function triggerReplyHaptic(): void {
+  try {
+    if (typeof PcNative?.haptic === 'function') {
+      PcNative.haptic('click');
+      return;
+    }
+  } catch {
+    // Fall through to legacy Vibration on older APKs without PcNative.haptic.
+  }
+  try {
+    Vibration.vibrate(10);
+  } catch {
+    // Ignore if vibration is unavailable.
+  }
+}
+
+function createSwipeReplyResponder({
+  enabled,
+  msg,
+  dragX,
+  iconPulse,
+  onThresholdChange,
+  onSpringBack,
+  onSwipeReply,
+}: {
+  enabled: boolean;
+  msg: ChatMessage;
+  dragX: Animated.Value;
+  iconPulse: Animated.Value;
+  onThresholdChange: (msgId: string | null) => void;
+  onSpringBack: () => void;
+  onSwipeReply: (msg: ChatMessage) => void;
+}) {
+  let thresholdCrossed = false;
+  return PanResponder.create({
+    onStartShouldSetPanResponder: () => false,
+    onStartShouldSetPanResponderCapture: () => false,
+    onMoveShouldSetPanResponder: (_, gs) => enabled && shouldCaptureSwipeReply(gs.dx, gs.dy),
+    onMoveShouldSetPanResponderCapture: (_, gs) => enabled && shouldCaptureSwipeReply(gs.dx, gs.dy),
+    onPanResponderTerminationRequest: () => false,
+    onShouldBlockNativeResponder: () => true,
+    onPanResponderGrant: () => {
+      dragX.stopAnimation();
+      thresholdCrossed = false;
+      onThresholdChange(null);
+    },
+    onPanResponderMove: (_, gs) => {
+      const offset = computeSwipeReplyOffset(gs.dx);
+      dragX.setValue(offset);
+      if (!thresholdCrossed && offset >= SWIPE_REPLY_THRESHOLD) {
+        thresholdCrossed = true;
+        onThresholdChange(msg.id);
+        triggerReplyHaptic();
+        iconPulse.stopAnimation();
+        iconPulse.setValue(1);
+        Animated.sequence([
+          Animated.timing(iconPulse, { toValue: 1.22, duration: 85, useNativeDriver: true }),
+          Animated.spring(iconPulse, { toValue: 1, friction: 6, tension: 220, useNativeDriver: true }),
+        ]).start();
+      } else if (thresholdCrossed && offset < SWIPE_REPLY_RESET_THRESHOLD) {
+        thresholdCrossed = false;
+        onThresholdChange(null);
+      }
+    },
+    onPanResponderRelease: () => {
+      const triggered = thresholdCrossed;
+      thresholdCrossed = false;
+      onSpringBack();
+      if (triggered) {
+        onSwipeReply(msg);
+      }
+    },
+    onPanResponderTerminate: () => {
+      thresholdCrossed = false;
+      onSpringBack();
+    },
+  });
+}
+
+function SwipeableMessageRow({
+  msg,
+  enabled,
+  onSwipeReply,
+  children,
+}: {
+  msg: ChatMessage;
+  enabled: boolean;
+  onSwipeReply: (msg: ChatMessage) => void;
+  children: React.ReactNode;
+}) {
+  const t = useTheme();
+  const [dragX] = useState(() => new Animated.Value(0));
+  const [iconPulse] = useState(() => new Animated.Value(1));
+  const [thresholdMsgId, setThresholdMsgId] = useState<string | null>(null);
+  const thresholdReached = thresholdMsgId === msg.id;
+
+  useEffect(() => {
+    dragX.stopAnimation();
+    dragX.setValue(0);
+    iconPulse.stopAnimation();
+    iconPulse.setValue(1);
+  }, [msg.id, dragX, iconPulse]);
+
+  const springBack = useCallback(() => {
+    setThresholdMsgId(null);
+    iconPulse.stopAnimation();
+    iconPulse.setValue(1);
+    Animated.spring(dragX, {
+      toValue: 0,
+      useNativeDriver: true,
+      tension: 180,
+      friction: 18,
+    }).start();
+  }, [dragX, iconPulse]);
+
+  const panResponder = useMemo(
+    () =>
+      createSwipeReplyResponder({
+        enabled,
+        msg,
+        dragX,
+        iconPulse,
+        onThresholdChange: setThresholdMsgId,
+        onSpringBack: springBack,
+        onSwipeReply,
+      }),
+    [dragX, enabled, iconPulse, msg, onSwipeReply, springBack],
+  );
+
+  const iconOpacity = useMemo(
+    () =>
+      dragX.interpolate({
+        inputRange: [0, 12, SWIPE_REPLY_THRESHOLD],
+        outputRange: [0, 0, 1],
+        extrapolate: 'clamp',
+      }),
+    [dragX],
+  );
+  const iconTranslateX = useMemo(
+    () =>
+      dragX.interpolate({
+        inputRange: [0, SWIPE_REPLY_THRESHOLD],
+        outputRange: [-18, 6],
+        extrapolate: 'clamp',
+      }),
+    [dragX],
+  );
+  const iconScale = useMemo(
+    () =>
+      dragX.interpolate({
+        inputRange: [0, 12, SWIPE_REPLY_THRESHOLD],
+        outputRange: [0.55, 0.55, 1],
+        extrapolate: 'clamp',
+      }),
+    [dragX],
+  );
+
+  return (
+    <View style={st.swipeRowWrap} {...(enabled ? panResponder.panHandlers : undefined)}>
+      {enabled ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            st.swipeReplyIndicatorWrap,
+            {
+              opacity: iconOpacity,
+              transform: [{ translateX: iconTranslateX }, { scale: iconScale }],
+            },
+          ]}
+        >
+          <Animated.View
+            style={[
+              st.swipeReplyIconCircle,
+              {
+                backgroundColor: thresholdReached ? t.accentSoft : t.cardAlt,
+                transform: [{ scale: iconPulse }],
+              },
+            ]}
+          >
+            <Icon name="reply" size={17} color={thresholdReached ? t.accent : t.textDim} />
+          </Animated.View>
+        </Animated.View>
+      ) : null}
+      <Animated.View style={[st.swipeBubbleTrack, { transform: [{ translateX: dragX }] }]}>
+        {children}
+      </Animated.View>
+    </View>
+  );
 }
 
 function InlineText({
@@ -400,6 +597,7 @@ type MessageBubbleProps = {
   showEngine: boolean;
   canRetry: boolean;
   onLongPress: (msg: ChatMessage) => void;
+  onReply: (msg: ChatMessage) => void;
   onRetry: (msg: ChatMessage) => void;
   onPressReplyQuote: (replyId: string) => void;
 };
@@ -409,6 +607,7 @@ const MessageBubble = React.memo(function MessageBubble({
   showEngine,
   canRetry,
   onLongPress,
+  onReply,
   onRetry,
   onPressReplyQuote,
 }: MessageBubbleProps) {
@@ -439,9 +638,11 @@ const MessageBubble = React.memo(function MessageBubble({
   const attachments = msg.attachments ?? [];
   const hasText = msg.text.trim().length > 0;
   const canOpenActions = !isPending && (isUser || isError || hasText || attachments.length > 0);
+  const canSwipeReply = isReplyableMessage(msg);
 
   return (
-    <View style={[st.bubbleRow, isUser ? st.bubbleRowUser : st.bubbleRowAssistant]}>
+    <SwipeableMessageRow msg={msg} enabled={canSwipeReply} onSwipeReply={onReply}>
+      <View style={[st.bubbleRow, isUser ? st.bubbleRowUser : st.bubbleRowAssistant]}>
       <Pressable
         onLongPress={canOpenActions ? () => onLongPress(msg) : undefined}
         delayLongPress={260}
@@ -529,7 +730,8 @@ const MessageBubble = React.memo(function MessageBubble({
           <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text>
         ) : null}
       </Pressable>
-    </View>
+      </View>
+    </SwipeableMessageRow>
   );
 });
 
@@ -1298,11 +1500,12 @@ export default function ChatScreen() {
           findPrecedingUserMessage(data, index) !== null
         }
         onLongPress={onOpenMessageActions}
+        onReply={onStartReplyMessage}
         onRetry={onRetryAssistantError}
         onPressReplyQuote={onPressReplyQuote}
       />
     ),
-    [engine, onOpenMessageActions, onRetryAssistantError, onPressReplyQuote],
+    [engine, onOpenMessageActions, onStartReplyMessage, onRetryAssistantError, onPressReplyQuote],
   );
 
   const isEmpty = messages.length === 0;
@@ -1906,6 +2109,29 @@ const st = StyleSheet.create({
     justifyContent: 'center',
   },
   emptyLabel: { fontSize: 14, fontWeight: '400' },
+  swipeRowWrap: {
+    position: 'relative',
+    width: '100%',
+    justifyContent: 'center',
+  },
+  swipeReplyIndicatorWrap: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  swipeReplyIconCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  swipeBubbleTrack: {
+    width: '100%',
+  },
   bubbleRow: { flexDirection: 'row', width: '100%' },
   bubbleRowUser: { justifyContent: 'flex-end' },
   bubbleRowAssistant: { justifyContent: 'flex-start' },

@@ -8,6 +8,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Base64
@@ -235,6 +238,34 @@ class PcNativeModule : Module() {
     Function("clearChatNotifications") { Notifier.clearChatNotifications(ctx) }
     Function("setChatVisible") { visible: Boolean -> ChatForegroundState.visible = visible }
     Function("setChatConfig") { baseUrl: String, token: String -> Prefs.setChatConfig(ctx, baseUrl, token) }
+
+    // ---- crisp native haptics (predefined VibrationEffect on API 29+, avoids soft/buzzy legacy vibrate)
+    Function("haptic") { kind: String? ->
+      try {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+          val mgr = ctx.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+          mgr?.defaultVibrator
+        } else {
+          @Suppress("DEPRECATION")
+          ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+        if (vibrator == null || !vibrator.hasVibrator()) return@Function false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+          val effectId = when (kind) {
+            "heavy" -> VibrationEffect.EFFECT_HEAVY_CLICK
+            "tick" -> VibrationEffect.EFFECT_TICK
+            else -> VibrationEffect.EFFECT_CLICK
+          }
+          vibrator.vibrate(VibrationEffect.createPredefined(effectId))
+        } else {
+          @Suppress("DEPRECATION")
+          vibrator.vibrate(VibrationEffect.createOneShot(10L, VibrationEffect.DEFAULT_AMPLITUDE))
+        }
+        true
+      } catch (_: Exception) {
+        false
+      }
+    }
 
     // ---- chat attachment picker (Android SAF ACTION_OPEN_DOCUMENT; zero extra permissions)
     AsyncFunction("pickAttachments") { kind: String, promise: Promise ->

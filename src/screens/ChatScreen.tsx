@@ -334,18 +334,21 @@ const COMPOSER_MARKDOWN_SHORTCUTS: MarkdownShortcutsConfig = {
 };
 
 function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
-  const codeBg = isUser ? t.bg : t.cardAlt;
+  const inlineCodeBg = isUser ? t.bg : t.cardAlt;
+  const blockSurfaceBg = isUser ? t.bg : t.card;
+  const lineHeight = isUser ? 21 : 22;
+  const blockMarginBottom = isUser ? 6 : 8;
   return {
     paragraph: {
       fontSize: 15,
-      lineHeight: 21,
+      lineHeight,
       color: t.text,
       marginTop: 0,
-      marginBottom: 6,
+      marginBottom: blockMarginBottom,
     },
     list: {
       fontSize: 15,
-      lineHeight: 21,
+      lineHeight,
       color: t.text,
       bulletColor: t.accent,
       bulletSize: 5,
@@ -356,7 +359,7 @@ function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
       marginLeft: 18,
       itemSpacing: 4,
       marginTop: 4,
-      marginBottom: 6,
+      marginBottom: blockMarginBottom,
     },
     strong: {
       fontWeight: 'bold',
@@ -374,7 +377,7 @@ function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
       fontFamily: t.mono,
       fontSize: 13,
       color: t.text,
-      backgroundColor: codeBg,
+      backgroundColor: inlineCodeBg,
       borderColor: t.border,
     },
     codeBlock: {
@@ -382,13 +385,13 @@ function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
       fontSize: 12.5,
       lineHeight: 18,
       color: t.text,
-      backgroundColor: codeBg,
+      backgroundColor: blockSurfaceBg,
       borderColor: t.border,
       borderWidth: StyleSheet.hairlineWidth,
       borderRadius: radius.sm,
       padding: 10,
       marginTop: 4,
-      marginBottom: 6,
+      marginBottom: blockMarginBottom,
     },
     blockquote: {
       fontSize: 14.5,
@@ -397,16 +400,16 @@ function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
       borderColor: t.accent,
       borderWidth: 2,
       gapWidth: 10,
-      backgroundColor: codeBg,
+      backgroundColor: blockSurfaceBg,
       borderRadius: 8,
       padding: 8,
       marginTop: 4,
-      marginBottom: 6,
+      marginBottom: blockMarginBottom,
     },
-    h1: { fontSize: 18, lineHeight: 24, fontWeight: '600', color: t.text, marginTop: 6, marginBottom: 4 },
-    h2: { fontSize: 17, lineHeight: 23, fontWeight: '600', color: t.text, marginTop: 6, marginBottom: 4 },
-    h3: { fontSize: 16, lineHeight: 22, fontWeight: '600', color: t.text, marginTop: 6, marginBottom: 4 },
-    h4: { fontSize: 15, lineHeight: 21, fontWeight: '600', color: t.text, marginTop: 4, marginBottom: 3 },
+    h1: { fontSize: 18, lineHeight: 24, fontWeight: '600', color: t.text, marginTop: isUser ? 6 : 10, marginBottom: 4 },
+    h2: { fontSize: 17, lineHeight: 23, fontWeight: '600', color: t.text, marginTop: isUser ? 6 : 10, marginBottom: 4 },
+    h3: { fontSize: 16, lineHeight: 22, fontWeight: '600', color: t.text, marginTop: isUser ? 6 : 8, marginBottom: 4 },
+    h4: { fontSize: 15, lineHeight: 21, fontWeight: '600', color: t.text, marginTop: 6, marginBottom: 3 },
     h5: { fontSize: 15, lineHeight: 21, fontWeight: '500', color: t.text, marginTop: 4, marginBottom: 3 },
     h6: { fontSize: 14, lineHeight: 20, fontWeight: '500', color: t.textDim, marginTop: 4, marginBottom: 3 },
     thematicBreak: {
@@ -515,7 +518,7 @@ const LinkPreviewCard = React.memo(function LinkPreviewCard({
       style={({ pressed }) => [
         st.linkCard,
         {
-          backgroundColor: isUser ? t.bg : t.cardAlt,
+          backgroundColor: isUser ? t.bg : t.card,
           borderColor: t.border,
           opacity: pressed ? 0.86 : 1,
         },
@@ -543,7 +546,7 @@ const LinkPreviewCard = React.memo(function LinkPreviewCard({
         {showImage && imgUrl ? (
           <Image
             source={{ uri: imgUrl }}
-            style={[st.linkCardThumb, { backgroundColor: t.card, borderColor: t.border }]}
+            style={[st.linkCardThumb, { backgroundColor: t.cardAlt, borderColor: t.border }]}
             resizeMode="cover"
             onError={() => setFailedImg(imgUrl)}
           />
@@ -591,7 +594,7 @@ function CodeBlockCard({
       style={[
         st.codeBlock,
         {
-          backgroundColor: isUser ? t.bg : t.cardAlt,
+          backgroundColor: isUser ? t.bg : t.card,
           borderColor: t.border,
         },
       ]}
@@ -610,7 +613,7 @@ function CodeBlockCard({
           style={({ pressed }) => [
             st.codeCopyChip,
             {
-              backgroundColor: isUser ? t.cardAlt : t.card,
+              backgroundColor: t.cardAlt,
               opacity: pressed ? 0.75 : 1,
             },
           ]}
@@ -647,50 +650,44 @@ function CodeBlockCard({
 function MessageBody({
   text,
   isUser,
-  timeStr,
   onCopyCode,
   onLongPress,
 }: {
   text: string;
   isUser: boolean;
-  timeStr: string;
   onCopyCode: (code: string) => void;
   onLongPress?: () => void;
 }) {
-  const t = useTheme();
   const segments = useMemo(() => parseMessageSegments(text), [text]);
 
   if (segments.length === 0) return null;
 
   return (
-    <>
-      <View style={segments.length > 1 ? st.messageBodyStack : undefined}>
-        {segments.map((seg, idx) => {
-          if (seg.kind === 'codeblock') {
-            return (
-              <CodeBlockCard
-                key={idx}
-                lang={seg.lang}
-                code={seg.code}
-                isUser={isUser}
-                onCopyCode={onCopyCode}
-                onLongPress={onLongPress}
-              />
-            );
-          }
+    <View style={segments.length > 1 ? st.messageBodyStack : undefined}>
+      {segments.map((seg, idx) => {
+        if (seg.kind === 'codeblock') {
           return (
-            <MarkdownSegment
+            <CodeBlockCard
               key={idx}
-              text={seg.text}
+              lang={seg.lang}
+              code={seg.code}
               isUser={isUser}
               onCopyCode={onCopyCode}
               onLongPress={onLongPress}
             />
           );
-        })}
-      </View>
-      {timeStr ? <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text> : null}
-    </>
+        }
+        return (
+          <MarkdownSegment
+            key={idx}
+            text={seg.text}
+            isUser={isUser}
+            onCopyCode={onCopyCode}
+            onLongPress={onLongPress}
+          />
+        );
+      })}
+    </View>
   );
 }
 
@@ -702,10 +699,10 @@ function ChatSkeleton() {
         <View style={[st.skelLine, { width: '75%', backgroundColor: t.border }]} />
         <View style={[st.skelLine, { width: '45%', backgroundColor: t.border }]} />
       </View>
-      <View style={[st.skelBubbleLeft, { backgroundColor: t.card }]}>
-        <View style={[st.skelLine, { width: '88%', backgroundColor: t.cardAlt }]} />
-        <View style={[st.skelLine, { width: '70%', backgroundColor: t.cardAlt }]} />
-        <View style={[st.skelLine, { width: '52%', backgroundColor: t.cardAlt }]} />
+      <View style={st.skelAssistantPlain}>
+        <View style={[st.skelLine, { width: '92%', backgroundColor: t.cardAlt }]} />
+        <View style={[st.skelLine, { width: '78%', backgroundColor: t.cardAlt }]} />
+        <View style={[st.skelLine, { width: '58%', backgroundColor: t.cardAlt }]} />
       </View>
       <View style={[st.skelBubbleRight, { backgroundColor: t.cardAlt }]}>
         <View style={[st.skelLine, { width: '60%', backgroundColor: t.border }]} />
@@ -1023,10 +1020,12 @@ function ChatAttachmentImage({
 
 function BubbleAttachments({
   attachments,
+  isUser,
   onPressImage,
   onLongPress,
 }: {
   attachments: ChatAttachment[];
+  isUser: boolean;
   onPressImage?: (att: ChatAttachment) => void;
   onLongPress?: () => void;
 }) {
@@ -1034,6 +1033,7 @@ function BubbleAttachments({
   if (attachments.length === 0) return null;
   const images = attachments.filter((a) => a.kind === 'image');
   const files = attachments.filter((a) => a.kind !== 'image');
+  const surfaceBg = isUser ? t.bg : t.card;
 
   return (
     <View style={st.bubbleAttWrap}>
@@ -1047,7 +1047,7 @@ function BubbleAttachments({
               name={img.name}
               style={[
                 images.length === 1 ? st.bubbleImgSingle : st.bubbleImgMulti,
-                { backgroundColor: t.bg, borderColor: t.border },
+                { backgroundColor: surfaceBg, borderColor: t.border },
               ]}
               resizeMode="cover"
               onPress={onPressImage ? () => onPressImage(img) : undefined}
@@ -1059,7 +1059,7 @@ function BubbleAttachments({
       {files.map((file) => (
         <View
           key={file.id}
-          style={[st.bubbleFileChip, { backgroundColor: t.bg, borderColor: t.border }]}
+          style={[st.bubbleFileChip, { backgroundColor: surfaceBg, borderColor: t.border }]}
         >
           <Icon name="file-document" size={16} color={t.accent} />
           <View style={st.bubbleFileMeta}>
@@ -1154,11 +1154,19 @@ const MessageBubble = React.memo(function MessageBubble({
           onLongPress={handleLongPress}
           delayLongPress={260}
           style={({ pressed }) => [
-            st.bubble,
             isUser
-              ? [st.bubbleUser, { backgroundColor: t.cardAlt }]
-              : [st.bubbleAssistant, { backgroundColor: isError ? t.badSoft : t.card }],
-            pressed && canOpenActions && { opacity: 0.85 },
+              ? [st.bubble, st.bubbleUser, { backgroundColor: t.cardAlt }]
+              : isError
+                ? [
+                    st.assistantErrorCard,
+                    {
+                      backgroundColor: t.badSoft,
+                      borderColor: t.border,
+                      borderLeftColor: t.bad,
+                    },
+                  ]
+                : st.assistantPlain,
+            pressed && canOpenActions && { opacity: 0.84 },
           ]}
         >
           {replyRef ? (
@@ -1169,8 +1177,9 @@ const MessageBubble = React.memo(function MessageBubble({
               android_ripple={{ color: t.ripple, foreground: true }}
               style={({ pressed }) => [
                 st.replyQuote,
+                !isUser && [st.replyQuoteAssistant, { borderColor: t.border }],
                 {
-                  backgroundColor: isUser ? t.bg : t.cardAlt,
+                  backgroundColor: isUser ? t.bg : t.card,
                   borderLeftColor: t.accent,
                   opacity: pressed ? 0.8 : 1,
                 },
@@ -1190,6 +1199,7 @@ const MessageBubble = React.memo(function MessageBubble({
           {attachments.length > 0 ? (
             <BubbleAttachments
               attachments={attachments}
+              isUser={isUser}
               onPressImage={onPressImage}
               onLongPress={handleLongPress}
             />
@@ -1225,20 +1235,31 @@ const MessageBubble = React.memo(function MessageBubble({
                 {timeStr ? <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text> : null}
               </View>
             </>
-          ) : hasText ? (
+          ) : (
             <>
-              <MessageBody
-                text={msg.text}
-                isUser={isUser}
-                timeStr={timeStr}
-                onCopyCode={onCopyCode}
-                onLongPress={handleLongPress}
-              />
-              {previewUrl ? <LinkPreviewCard url={previewUrl} isUser={isUser} /> : null}
+              {hasText ? (
+                <>
+                  <MessageBody
+                    text={msg.text}
+                    isUser={isUser}
+                    onCopyCode={onCopyCode}
+                    onLongPress={handleLongPress}
+                  />
+                  {previewUrl ? <LinkPreviewCard url={previewUrl} isUser={isUser} /> : null}
+                </>
+              ) : null}
+              {timeStr ? (
+                <Text
+                  style={[
+                    isUser ? st.timeBlock : st.timeBlockAssistant,
+                    { color: t.textFaint },
+                  ]}
+                >
+                  {timeStr}
+                </Text>
+              ) : null}
             </>
-          ) : timeStr ? (
-            <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text>
-          ) : null}
+          )}
         </Pressable>
       </View>
     </SwipeableMessageRow>
@@ -2823,7 +2844,7 @@ const st = StyleSheet.create({
     paddingHorizontal: screenPad,
     paddingTop: space(1),
     paddingBottom: space(4),
-    gap: space(2.5),
+    gap: space(3.5),
     flexGrow: 1,
   },
   listContentEmpty: {
@@ -2870,14 +2891,13 @@ const st = StyleSheet.create({
   assistantGroup: {
     width: '100%',
     alignItems: 'flex-start',
-    gap: 5,
+    gap: 6,
+    paddingVertical: 2,
   },
   assistantMeta: {
     width: '100%',
-    maxWidth: '88%',
     alignSelf: 'flex-start',
-    paddingLeft: 2,
-    gap: 3,
+    gap: 4,
   },
   bubbleRow: { flexDirection: 'row', width: '100%' },
   bubbleRowUser: { justifyContent: 'flex-end' },
@@ -2893,9 +2913,19 @@ const st = StyleSheet.create({
     maxWidth: '82%',
     borderBottomRightRadius: 5,
   },
-  bubbleAssistant: {
-    maxWidth: '88%',
-    borderBottomLeftRadius: 5,
+  assistantPlain: {
+    width: '100%',
+    gap: 6,
+  },
+  assistantErrorCard: {
+    width: '100%',
+    borderRadius: radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderLeftWidth: 3,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 6,
+    overflow: 'hidden',
   },
   engineRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   engineTag: { fontSize: 11.5, fontWeight: '500' },
@@ -2908,6 +2938,10 @@ const st = StyleSheet.create({
     gap: 2,
     overflow: 'hidden',
   },
+  replyQuoteAssistant: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderLeftWidth: 2,
+  },
   replyQuoteSender: {
     fontSize: 11.5,
     fontWeight: '600',
@@ -2916,13 +2950,20 @@ const st = StyleSheet.create({
     fontSize: 12.5,
     lineHeight: 16.5,
   },
-  messageBodyStack: { gap: space(2) },
+  messageBodyStack: { gap: space(2.5) },
   timeBlock: {
     fontSize: 10.5,
     lineHeight: 14,
     fontVariant: ['tabular-nums'],
     alignSelf: 'flex-end',
     marginTop: 2,
+  },
+  timeBlockAssistant: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontVariant: ['tabular-nums'],
+    alignSelf: 'flex-start',
+    marginTop: 4,
   },
   linkCard: {
     flexDirection: 'row',
@@ -3102,7 +3143,7 @@ const st = StyleSheet.create({
     fontSize: 12.5,
     lineHeight: 17,
   },
-  typingFooter: { paddingTop: space(2.5) },
+  typingFooter: { paddingTop: space(3) },
   errorText: { fontSize: 14, lineHeight: 20 },
   errorFooter: {
     flexDirection: 'row',
@@ -3519,12 +3560,9 @@ const st = StyleSheet.create({
     padding: space(3.5),
     gap: space(2),
   },
-  skelBubbleLeft: {
-    alignSelf: 'flex-start',
-    width: '80%',
-    borderRadius: 18,
-    borderBottomLeftRadius: 5,
-    padding: space(3.5),
+  skelAssistantPlain: {
+    alignSelf: 'stretch',
+    paddingVertical: space(1),
     gap: space(2),
   },
   skelLine: { height: 12, borderRadius: 4 },

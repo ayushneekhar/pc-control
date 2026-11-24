@@ -88,6 +88,7 @@ const CACHE_AGENT_STATE = 'agent:state';
 const POLL_INTERVAL_MS = 2000;
 const KEYBOARD_BREATHING_ROOM = 12;
 const MAX_ATTACHMENTS = 4;
+const COPY_TOAST_DURATION_MS = 1500;
 
 function engineLabel(engine: ChatEngine): string {
   return engine === 'gemini' ? 'Gemini' : 'Claude';
@@ -98,20 +99,24 @@ function openExternalUrl(url: string): void {
   Linking.openURL(url).catch(() => {});
 }
 
-function triggerReplyHaptic(): void {
+function triggerHaptic(kind: 'click' | 'heavy' | 'tick' = 'click'): void {
   try {
     if (typeof PcNative?.haptic === 'function') {
-      PcNative.haptic('click');
+      PcNative.haptic(kind);
       return;
     }
   } catch {
     // Fall through to legacy Vibration on older APKs without PcNative.haptic.
   }
   try {
-    Vibration.vibrate(10);
+    Vibration.vibrate(kind === 'tick' ? 8 : 10);
   } catch {
     // Ignore if vibration is unavailable.
   }
+}
+
+function triggerReplyHaptic(): void {
+  triggerHaptic('click');
 }
 
 function createSwipeReplyResponder({
@@ -292,10 +297,14 @@ function InlineText({
   text,
   isUser,
   trailingTime,
+  onCopyCode,
+  onLongPress,
 }: {
   text: string;
   isUser: boolean;
   trailingTime?: string;
+  onCopyCode: (code: string) => void;
+  onLongPress?: () => void;
 }) {
   const t = useTheme();
   const tokens = useMemo(() => parseInlineTokens(text), [text]);
@@ -307,12 +316,16 @@ function InlineText({
           return (
             <Text
               key={i}
+              onPress={() => onCopyCode(tok.code)}
+              onLongPress={onLongPress}
+              accessibilityRole="button"
+              accessibilityLabel={`Copy ${tok.code}`}
               style={[
                 st.inlineCode,
                 { fontFamily: t.mono, backgroundColor: isUser ? t.bg : t.cardAlt, color: t.text },
               ]}
             >
-              {tok.code}
+              {`\u00A0${tok.code}\u00A0`}
             </Text>
           );
         }
@@ -331,6 +344,7 @@ function InlineText({
                 key={i}
                 style={[st.inlineLink, { color: t.accent }]}
                 onPress={() => openExternalUrl(targetUrl)}
+                onLongPress={onLongPress}
               >
                 {tok.label}
               </Text>
@@ -433,7 +447,110 @@ const LinkPreviewCard = React.memo(function LinkPreviewCard({
   );
 });
 
-function MessageBody({ text, isUser, timeStr }: { text: string; isUser: boolean; timeStr: string }) {
+function CodeBlockCard({
+  lang,
+  code,
+  isUser,
+  onCopyCode,
+  onLongPress,
+}: {
+  lang: string;
+  code: string;
+  isUser: boolean;
+  onCopyCode: (code: string) => void;
+  onLongPress?: () => void;
+}) {
+  const t = useTheme();
+  const [justCopied, setJustCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const handleCopy = useCallback(() => {
+    onCopyCode(code);
+    setJustCopied(true);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      setJustCopied(false);
+    }, COPY_TOAST_DURATION_MS);
+  }, [code, onCopyCode]);
+
+  return (
+    <View
+      style={[
+        st.codeBlock,
+        {
+          backgroundColor: isUser ? t.bg : t.cardAlt,
+          borderColor: t.border,
+        },
+      ]}
+    >
+      <View style={[st.codeHeader, { borderBottomColor: t.border }]}>
+        <Text numberOfLines={1} style={[st.codeLang, { color: t.textFaint, fontFamily: t.mono }]}>
+          {lang || 'code'}
+        </Text>
+        <Pressable
+          onPress={handleCopy}
+          onLongPress={onLongPress}
+          hitSlop={6}
+          accessibilityRole="button"
+          accessibilityLabel={justCopied ? 'Copied code block' : 'Copy code block'}
+          android_ripple={{ color: t.ripple, foreground: true }}
+          style={({ pressed }) => [
+            st.codeCopyChip,
+            {
+              backgroundColor: isUser ? t.cardAlt : t.card,
+              opacity: pressed ? 0.75 : 1,
+            },
+          ]}
+        >
+          <Icon
+            name={justCopied ? 'check' : 'content-copy'}
+            size={12}
+            color={justCopied ? t.accent : t.textDim}
+          />
+          <Text style={[st.codeCopyChipText, { color: justCopied ? t.accent : t.textDim }]}>
+            {justCopied ? 'Copied' : 'Copy'}
+          </Text>
+        </Pressable>
+      </View>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={st.codeBodyScroll}
+      >
+        <Pressable
+          onPress={handleCopy}
+          onLongPress={onLongPress}
+          accessibilityRole="button"
+          accessibilityLabel="Copy code block"
+          style={({ pressed }) => [st.codeBodyPress, pressed && { opacity: 0.78 }]}
+        >
+          <Text style={[st.codeText, { color: t.text, fontFamily: t.mono }]}>{code}</Text>
+        </Pressable>
+      </ScrollView>
+    </View>
+  );
+}
+
+function MessageBody({
+  text,
+  isUser,
+  timeStr,
+  onCopyCode,
+  onLongPress,
+}: {
+  text: string;
+  isUser: boolean;
+  timeStr: string;
+  onCopyCode: (code: string) => void;
+  onLongPress?: () => void;
+}) {
   const t = useTheme();
   const segments = useMemo(() => parseMessageSegments(text), [text]);
 
@@ -442,7 +559,13 @@ function MessageBody({ text, isUser, timeStr }: { text: string; isUser: boolean;
   if (segments.length === 1 && segments[0].kind === 'text') {
     return (
       <View style={st.inlineTimeWrap}>
-        <InlineText text={segments[0].text} isUser={isUser} trailingTime={timeStr || undefined} />
+        <InlineText
+          text={segments[0].text}
+          isUser={isUser}
+          trailingTime={timeStr || undefined}
+          onCopyCode={onCopyCode}
+          onLongPress={onLongPress}
+        />
         {timeStr ? <Text style={[st.timeInline, { color: t.textFaint }]}>{timeStr}</Text> : null}
       </View>
     );
@@ -454,28 +577,25 @@ function MessageBody({ text, isUser, timeStr }: { text: string; isUser: boolean;
         {segments.map((seg, idx) => {
           if (seg.kind === 'codeblock') {
             return (
-              <View
+              <CodeBlockCard
                 key={idx}
-                style={[
-                  st.codeBlock,
-                  {
-                    backgroundColor: t.bg,
-                    borderColor: t.border,
-                  },
-                ]}
-              >
-                {seg.lang ? (
-                  <Text style={[st.codeLang, { color: t.textFaint, fontFamily: t.mono }]}>{seg.lang}</Text>
-                ) : null}
-                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                  <Text selectable style={[st.codeText, { color: t.text, fontFamily: t.mono }]}>
-                    {seg.code}
-                  </Text>
-                </ScrollView>
-              </View>
+                lang={seg.lang}
+                code={seg.code}
+                isUser={isUser}
+                onCopyCode={onCopyCode}
+                onLongPress={onLongPress}
+              />
             );
           }
-          return <InlineText key={idx} text={seg.text} isUser={isUser} />;
+          return (
+            <InlineText
+              key={idx}
+              text={seg.text}
+              isUser={isUser}
+              onCopyCode={onCopyCode}
+              onLongPress={onLongPress}
+            />
+          );
         })}
       </View>
       {timeStr ? <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text> : null}
@@ -603,6 +723,7 @@ type MessageBubbleProps = {
   onReply: (msg: ChatMessage) => void;
   onRetry: (msg: ChatMessage) => void;
   onPressReplyQuote: (replyId: string) => void;
+  onCopyCode: (code: string) => void;
 };
 
 const MessageBubble = React.memo(function MessageBubble({
@@ -613,6 +734,7 @@ const MessageBubble = React.memo(function MessageBubble({
   onReply,
   onRetry,
   onPressReplyQuote,
+  onCopyCode,
 }: MessageBubbleProps) {
   const t = useTheme();
   const timeStr = formatChatTime(msg.created_at);
@@ -642,12 +764,13 @@ const MessageBubble = React.memo(function MessageBubble({
   const hasText = msg.text.trim().length > 0;
   const canOpenActions = !isPending && (isUser || isError || hasText || attachments.length > 0);
   const canSwipeReply = isReplyableMessage(msg);
+  const handleLongPress = canOpenActions ? () => onLongPress(msg) : undefined;
 
   return (
     <SwipeableMessageRow msg={msg} enabled={canSwipeReply} onSwipeReply={onReply}>
       <View style={[st.bubbleRow, isUser ? st.bubbleRowUser : st.bubbleRowAssistant]}>
       <Pressable
-        onLongPress={canOpenActions ? () => onLongPress(msg) : undefined}
+        onLongPress={handleLongPress}
         delayLongPress={260}
         style={({ pressed }) => [
           st.bubble,
@@ -726,7 +849,13 @@ const MessageBubble = React.memo(function MessageBubble({
           </>
         ) : hasText ? (
           <>
-            <MessageBody text={msg.text} isUser={isUser} timeStr={timeStr} />
+            <MessageBody
+              text={msg.text}
+              isUser={isUser}
+              timeStr={timeStr}
+              onCopyCode={onCopyCode}
+              onLongPress={handleLongPress}
+            />
             {previewUrl ? <LinkPreviewCard url={previewUrl} isUser={isUser} /> : null}
           </>
         ) : timeStr ? (
@@ -775,6 +904,8 @@ export default function ChatScreen() {
   const [baseHeight, setBaseHeight] = useState(0);
   const [composerHeight, setComposerHeight] = useState(64);
   const [androidPadAnim] = useState(() => new Animated.Value(0));
+  const [copyToastVisible, setCopyToastVisible] = useState(false);
+  const [copyToastAnim] = useState(() => new Animated.Value(0));
 
   const [agentSettings, setAgentSettings] = useState<AgentSettings | null>(() =>
     cacheGet<AgentSettings>(CACHE_AGENT_SETTINGS),
@@ -800,6 +931,7 @@ export default function ChatScreen() {
   const sendingRef = useRef(sending);
   const nearBottomRef = useRef(true);
   const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadMessagesRef = useRef<(opts?: { silent?: boolean }) => Promise<void>>(async () => {});
 
   useEffect(() => {
@@ -842,6 +974,7 @@ export default function ChatScreen() {
     return () => {
       mountedRef.current = false;
       if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+      if (copyToastTimerRef.current) clearTimeout(copyToastTimerRef.current);
     };
   }, []);
 
@@ -1066,15 +1199,61 @@ export default function ChatScreen() {
     }
   }, [loadingOlder, hasMore]);
 
-  const onCopy = useCallback((text: string) => {
-    const clean = text.trim();
-    if (!clean) return;
-    try {
-      Clipboard.setString(clean);
-    } catch {
-      void Share.share({ message: clean }).catch(() => {});
+  const showCopyToast = useCallback(() => {
+    if (copyToastTimerRef.current) {
+      clearTimeout(copyToastTimerRef.current);
     }
-  }, []);
+    setCopyToastVisible(true);
+    copyToastAnim.stopAnimation();
+    Animated.timing(copyToastAnim, {
+      toValue: 1,
+      duration: 120,
+      useNativeDriver: true,
+    }).start();
+    copyToastTimerRef.current = setTimeout(() => {
+      copyToastTimerRef.current = null;
+      Animated.timing(copyToastAnim, {
+        toValue: 0,
+        duration: 180,
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (finished && mountedRef.current) {
+          setCopyToastVisible(false);
+        }
+      });
+    }, COPY_TOAST_DURATION_MS);
+  }, [copyToastAnim]);
+
+  const onCopyCode = useCallback(
+    (code: string) => {
+      if (!code) return;
+      try {
+        Clipboard.setString(code);
+      } catch {
+        void Share.share({ message: code }).catch(() => {});
+        return;
+      }
+      triggerHaptic('tick');
+      showCopyToast();
+    },
+    [showCopyToast],
+  );
+
+  const onCopy = useCallback(
+    (text: string) => {
+      const clean = text.trim();
+      if (!clean) return;
+      try {
+        Clipboard.setString(clean);
+      } catch {
+        void Share.share({ message: clean }).catch(() => {});
+        return;
+      }
+      triggerHaptic('tick');
+      showCopyToast();
+    },
+    [showCopyToast],
+  );
 
   const onRemoveAttachment = useCallback((id: string) => {
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
@@ -1548,9 +1727,10 @@ export default function ChatScreen() {
         onReply={onStartReplyMessage}
         onRetry={onRetryAssistantError}
         onPressReplyQuote={onPressReplyQuote}
+        onCopyCode={onCopyCode}
       />
     ),
-    [engine, onOpenMessageActions, onStartReplyMessage, onRetryAssistantError, onPressReplyQuote],
+    [engine, onOpenMessageActions, onStartReplyMessage, onRetryAssistantError, onPressReplyQuote, onCopyCode],
   );
 
   const isEmpty = messages.length === 0;
@@ -1689,6 +1869,38 @@ export default function ChatScreen() {
           >
             <Icon name="chevron-down" size={20} color={t.text} />
           </Pressable>
+        ) : null}
+
+        {copyToastVisible ? (
+          <Animated.View
+            pointerEvents="none"
+            accessibilityLiveRegion="polite"
+            style={[
+              st.copyToastWrap,
+              {
+                bottom: composerHeight + space(2.5),
+                opacity: copyToastAnim,
+                transform: [
+                  {
+                    translateY: copyToastAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [6, 0],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          >
+            <View
+              style={[
+                st.copyToastPill,
+                { backgroundColor: t.cardAlt, borderColor: t.border },
+              ]}
+            >
+              <Icon name="check" size={14} color={t.accent} />
+              <Text style={[st.copyToastText, { color: t.text }]}>Copied</Text>
+            </View>
+          </Animated.View>
         ) : null}
 
         <View
@@ -2280,13 +2492,62 @@ const st = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
   },
   codeBlock: {
-    borderRadius: 10,
+    borderRadius: radius.sm,
     borderWidth: StyleSheet.hairlineWidth,
-    padding: space(2.5),
-    gap: 4,
+    overflow: 'hidden',
   },
-  codeLang: { fontSize: 10.5 },
+  codeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: space(2),
+    paddingLeft: space(2.5),
+    paddingRight: space(1.5),
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  codeLang: { fontSize: 11, flexShrink: 1 },
+  codeCopyChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radius.pill,
+    overflow: 'hidden',
+  },
+  codeCopyChipText: { fontSize: 11, fontWeight: '500' },
+  codeBodyScroll: { flexGrow: 1 },
+  codeBodyPress: {
+    flexGrow: 1,
+    paddingHorizontal: space(2.5),
+    paddingVertical: space(2),
+  },
   codeText: { fontSize: 12.5, lineHeight: 18 },
+  copyToastWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  copyToastPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 13,
+    paddingVertical: 7,
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  copyToastText: {
+    fontSize: 12.5,
+    fontWeight: '500',
+  },
   typingRow: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 5, paddingHorizontal: 2 },
   typingDot: { width: 7, height: 7, borderRadius: 3.5 },
   typingFooter: { paddingTop: space(2.5) },

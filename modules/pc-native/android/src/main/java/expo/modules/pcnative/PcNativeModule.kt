@@ -1,14 +1,24 @@
 package expo.modules.pcnative
 
 import android.app.Activity
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Base64
+import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
+import android.webkit.MimeTypeMap
+import android.widget.EditText
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.view.OnReceiveContentListener
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.FragmentActivity
 import expo.modules.kotlin.Promise
@@ -16,6 +26,7 @@ import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.ByteArrayOutputStream
+import java.lang.ref.WeakReference
 
 class PcNativeModule : Module() {
   companion object {
@@ -30,29 +41,61 @@ class PcNativeModule : Module() {
   @Volatile
   private var pendingPickPromise: Promise? = null
 
-  private fun readPickedUri(context: Context, uri: Uri): Map<String, Any> {
+  // Accessed only on the main thread (Queues.MAIN / main Looper).
+  private val attachedPasteViews = HashMap<Int, WeakReference<EditText>>()
+
+  private fun findEditText(view: View?): EditText? {
+    if (view == null) return null
+    if (view is EditText) return view
+    if (view is ViewGroup) {
+      for (i in 0 until view.childCount) {
+        val found = findEditText(view.getChildAt(i))
+        if (found != null) return found
+      }
+    }
+    return null
+  }
+
+  private fun readPickedUri(
+    context: Context,
+    uri: Uri,
+    fallbackMime: String? = null,
+    defaultBaseName: String = "attachment",
+  ): Map<String, Any> {
     val resolver = context.contentResolver
     var displayName: String? = null
     var reportedSize = -1L
-    resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-      if (cursor.moveToFirst()) {
-        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-        if (nameIdx >= 0 && !cursor.isNull(nameIdx)) {
-          displayName = cursor.getString(nameIdx)
-        }
-        val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-        if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
-          reportedSize = cursor.getLong(sizeIdx)
+    try {
+      resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) {
+          val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+          if (nameIdx >= 0 && !cursor.isNull(nameIdx)) {
+            displayName = cursor.getString(nameIdx)
+          }
+          val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+          if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+            reportedSize = cursor.getLong(sizeIdx)
+          }
         }
       }
+    } catch (_: Exception) {
+      // Some IME content providers do not support OpenableColumns queries; fall back to URI/MIME below.
     }
-    val safeName = displayName?.trim()?.takeIf { it.isNotEmpty() }
+    val mimeType = resolver.getType(uri)?.trim()?.takeIf { it.isNotEmpty() }
+      ?: fallbackMime?.trim()?.takeIf { it.isNotEmpty() }
+      ?: "application/octet-stream"
+    val rawName = displayName?.trim()?.takeIf { it.isNotEmpty() }
       ?: uri.lastPathSegment?.substringAfterLast('/')?.trim()?.takeIf { it.isNotEmpty() }
-      ?: "attachment"
+      ?: defaultBaseName
+    val safeName = if (rawName.contains('.')) {
+      rawName
+    } else {
+      val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)?.takeIf { it.isNotEmpty() }
+      if (ext != null) "$rawName.$ext" else rawName
+    }
     if (reportedSize > MAX_ATTACHMENT_BYTES) {
       throw PcException("E_FILE_TOO_LARGE", "$safeName exceeds 15 MB limit")
     }
-    val mimeType = resolver.getType(uri)?.trim()?.takeIf { it.isNotEmpty() } ?: "application/octet-stream"
     val bytes = resolver.openInputStream(uri)?.use { input ->
       val out = ByteArrayOutputStream()
       val buf = ByteArray(16 * 1024)
@@ -81,7 +124,7 @@ class PcNativeModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("PcNative")
 
-    Events("onChatPush")
+    Events("onChatPush", "onImagePaste")
 
     OnCreate {
       appContext.reactContext?.let { Notifier.ensureChannels(it) }
@@ -98,6 +141,17 @@ class PcNativeModule : Module() {
       ChatForegroundState.onPush = null
       pendingPickPromise?.resolve(emptyList<Map<String, Any>>())
       pendingPickPromise = null
+      Handler(Looper.getMainLooper()).post {
+        attachedPasteViews.values.forEach { ref ->
+          ref.get()?.let { editText ->
+            try {
+              ViewCompat.setOnReceiveContentListener(editText, null, null)
+            } catch (_: Exception) {
+            }
+          }
+        }
+        attachedPasteViews.clear()
+      }
     }
 
     OnNewIntent { intent ->
@@ -204,6 +258,109 @@ class PcNativeModule : Module() {
       } catch (e: Exception) {
         pendingPickPromise = null
         promise.reject(PcException("E_PICK_LAUNCH", e.message ?: "Could not open file picker", e))
+      }
+    }.runOnQueue(Queues.MAIN)
+
+    // ---- native image paste on ReactEditText (Android clipboard / Samsung Keyboard / Gboard)
+    AsyncFunction("attachImagePaste") { viewTag: Int ->
+      val resolved = try {
+        appContext.findView<View>(viewTag)
+      } catch (_: Exception) {
+        null
+      }
+      val editText = findEditText(resolved) ?: return@AsyncFunction false
+      val existing = attachedPasteViews[viewTag]?.get()
+      if (existing === editText) {
+        return@AsyncFunction true
+      }
+      if (existing != null) {
+        try {
+          ViewCompat.setOnReceiveContentListener(existing, null, null)
+        } catch (_: Exception) {
+        }
+      }
+      val listener = OnReceiveContentListener { _, payload ->
+        val split = payload.partition { item ->
+          val uri = item.uri
+          uri != null && (uri.scheme == ContentResolver.SCHEME_CONTENT || uri.scheme == ContentResolver.SCHEME_FILE)
+        }
+        val uriContent = split.first
+        val remaining = split.second
+        if (uriContent == null) {
+          return@OnReceiveContentListener remaining
+        }
+        val clip = uriContent.clip
+        val uris = ArrayList<Uri>()
+        for (i in 0 until clip.itemCount) {
+          clip.getItemAt(i)?.uri?.let { uris.add(it) }
+        }
+        val selected = uris.take(MAX_PICK_FILES)
+        if (selected.isEmpty()) {
+          return@OnReceiveContentListener remaining
+        }
+        var fallbackMime: String? = null
+        val desc = clip.description
+        for (i in 0 until desc.mimeTypeCount) {
+          val m = desc.getMimeType(i)?.trim()
+          if (!m.isNullOrEmpty() && m.startsWith("image/") && m != "image/*") {
+            fallbackMime = m
+            break
+          }
+        }
+        val appCtx = appContext.reactContext?.applicationContext ?: editText.context.applicationContext
+        Thread {
+          @Suppress("UNUSED_VARIABLE")
+          val keepAlive = uriContent
+          val items = ArrayList<Map<String, Any>>()
+          var firstError: String? = null
+          for (uri in selected) {
+            try {
+              items.add(readPickedUri(appCtx, uri, fallbackMime = fallbackMime, defaultBaseName = "pasted-image"))
+            } catch (e: PcException) {
+              if (firstError == null) firstError = e.message ?: "Failed to read pasted image"
+            } catch (e: Exception) {
+              if (firstError == null) firstError = e.message ?: "Failed to read pasted image"
+            }
+          }
+          if (items.isNotEmpty() || firstError != null) {
+            val eventPayload = mutableMapOf<String, Any>("items" to items)
+            if (firstError != null) {
+              eventPayload["error"] = firstError
+            }
+            try {
+              sendEvent("onImagePaste", eventPayload)
+            } catch (_: Exception) {
+            }
+          }
+        }.start()
+        remaining
+      }
+      ViewCompat.setOnReceiveContentListener(editText, arrayOf("image/*"), listener)
+      attachedPasteViews[viewTag] = WeakReference(editText)
+      if (editText.isFocused) {
+        try {
+          val imm = editText.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+          imm?.restartInput(editText)
+        } catch (_: Exception) {
+        }
+      }
+      true
+    }.runOnQueue(Queues.MAIN)
+
+    AsyncFunction("detachImagePaste") { viewTag: Int ->
+      val tracked = attachedPasteViews.remove(viewTag)?.get()
+      val target = tracked ?: findEditText(
+        try {
+          appContext.findView<View>(viewTag)
+        } catch (_: Exception) {
+          null
+        },
+      )
+      if (target != null) {
+        try {
+          ViewCompat.setOnReceiveContentListener(target, null, null)
+        } catch (_: Exception) {
+        }
       }
     }.runOnQueue(Queues.MAIN)
 

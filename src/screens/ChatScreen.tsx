@@ -6,6 +6,7 @@ import {
   Alert,
   Animated,
   AppState,
+  findNodeHandle,
   FlatList,
   Image,
   Keyboard,
@@ -23,7 +24,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { PcNative } from '../../modules/pc-native';
+import { PcNative, PickedAttachment } from '../../modules/pc-native';
 import { AgentModelPickerModal, AgentSelectionResult } from '../components/AgentModelPickerModal';
 import { Banner, Button, Icon, Screen } from '../components/ui';
 import { AgentSettings, getAgentSettings, setAgent, updateAgentSettings } from '../lib/api';
@@ -378,6 +379,10 @@ export default function ChatScreen() {
   const [applyModelErr, setApplyModelErr] = useState<string | null>(null);
 
   const listRef = useRef<FlatList<ChatMessage>>(null);
+  const inputRef = useRef<TextInput>(null);
+  const pasteViewTagRef = useRef<number | null>(null);
+  const pendingCountRef = useRef(0);
+  const uploadingCountRef = useRef(0);
   const mountedRef = useRef(true);
   const isFocusedRef = useRef(isFocused);
   const isForeground = isFocused && appActive;
@@ -412,6 +417,10 @@ export default function ChatScreen() {
   useEffect(() => {
     messagesCountRef.current = messages.length;
   }, [messages.length]);
+
+  useEffect(() => {
+    pendingCountRef.current = pendingAttachments.length;
+  }, [pendingAttachments.length]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -704,6 +713,115 @@ export default function ChatScreen() {
     setAttachSheetVisible(true);
   }, [sending, pendingAttachments.length]);
 
+  const uploadPickedItems = useCallback(async (picked: PickedAttachment[], initialError?: string) => {
+    if (!mountedRef.current) return;
+    if (picked.length === 0) {
+      if (initialError) setErr(initialError);
+      return;
+    }
+    const slots = MAX_ATTACHMENTS - (pendingCountRef.current + uploadingCountRef.current);
+    if (slots <= 0) {
+      setErr(`Up to ${MAX_ATTACHMENTS} attachments per message.`);
+      return;
+    }
+    const batch = picked.slice(0, slots);
+    if (initialError) {
+      setErr(initialError);
+    } else if (picked.length > slots) {
+      setErr(`Up to ${MAX_ATTACHMENTS} attachments per message.`);
+    } else {
+      setErr(null);
+    }
+    uploadingCountRef.current += batch.length;
+    setUploadingCount((c) => c + batch.length);
+    for (const item of batch) {
+      try {
+        const uploaded = await uploadChatAttachment({
+          name: item.name,
+          mimeType: item.mimeType,
+          base64: item.base64,
+        });
+        if (!mountedRef.current) return;
+        setPendingAttachments((prev) => {
+          if (prev.length >= MAX_ATTACHMENTS) return prev;
+          const next = [...prev, uploaded];
+          pendingCountRef.current = next.length;
+          return next;
+        });
+      } catch (e) {
+        if (mountedRef.current) {
+          setErr((e as Error).message || `Failed to upload ${item.name}`);
+        }
+      } finally {
+        uploadingCountRef.current = Math.max(0, uploadingCountRef.current - 1);
+        if (mountedRef.current) {
+          setUploadingCount((c) => Math.max(0, c - 1));
+        }
+      }
+    }
+  }, []);
+
+  const ensureImagePasteAttached = useCallback(() => {
+    if (Platform.OS !== 'android' || !PcNative?.attachImagePaste) return;
+    const tag = findNodeHandle(inputRef.current);
+    if (typeof tag !== 'number' || tag <= 0) return;
+    if (pasteViewTagRef.current === tag) return;
+    pasteViewTagRef.current = tag;
+    try {
+      void PcNative.attachImagePaste(tag)
+        .then((ok) => {
+          if (!ok && pasteViewTagRef.current === tag) {
+            pasteViewTagRef.current = null;
+          }
+        })
+        .catch(() => {
+          if (pasteViewTagRef.current === tag) {
+            pasteViewTagRef.current = null;
+          }
+        });
+    } catch {
+      if (pasteViewTagRef.current === tag) {
+        pasteViewTagRef.current = null;
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    ensureImagePasteAttached();
+    return () => {
+      const tag = pasteViewTagRef.current;
+      pasteViewTagRef.current = null;
+      if (tag !== null) {
+        try {
+          void PcNative?.detachImagePaste?.(tag)?.catch?.(() => {});
+        } catch {
+          // Ignore on older APKs without detachImagePaste.
+        }
+      }
+    };
+  }, [ensureImagePasteAttached]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    let sub: { remove(): void } | undefined;
+    try {
+      sub = PcNative?.addListener?.('onImagePaste', (event) => {
+        if (!mountedRef.current) return;
+        const items = Array.isArray(event?.items) ? event.items : [];
+        void uploadPickedItems(items, event?.error);
+      });
+    } catch {
+      // Ignore on older APKs without onImagePaste.
+    }
+    return () => {
+      try {
+        sub?.remove?.();
+      } catch {
+        // Ignore cleanup errors.
+      }
+    };
+  }, [uploadPickedItems]);
+
   const onPickAttachments = useCallback(
     async (kind: 'image' | 'file') => {
       setAttachSheetVisible(false);
@@ -711,7 +829,7 @@ export default function ChatScreen() {
         setErr('Update the app APK to attach files.');
         return;
       }
-      const slots = MAX_ATTACHMENTS - pendingAttachments.length;
+      const slots = MAX_ATTACHMENTS - (pendingCountRef.current + uploadingCountRef.current);
       if (slots <= 0) {
         setErr(`Up to ${MAX_ATTACHMENTS} attachments per message.`);
         return;
@@ -720,36 +838,14 @@ export default function ChatScreen() {
       try {
         const picked = await PcNative.pickAttachments(kind);
         if (!mountedRef.current || !picked || picked.length === 0) return;
-        const batch = picked.slice(0, slots);
-        setUploadingCount((c) => c + batch.length);
-        for (const item of batch) {
-          try {
-            const uploaded = await uploadChatAttachment({
-              name: item.name,
-              mimeType: item.mimeType,
-              base64: item.base64,
-            });
-            if (!mountedRef.current) return;
-            setPendingAttachments((prev) =>
-              prev.length >= MAX_ATTACHMENTS ? prev : [...prev, uploaded],
-            );
-          } catch (e) {
-            if (mountedRef.current) {
-              setErr((e as Error).message || `Failed to upload ${item.name}`);
-            }
-          } finally {
-            if (mountedRef.current) {
-              setUploadingCount((c) => Math.max(0, c - 1));
-            }
-          }
-        }
+        await uploadPickedItems(picked);
       } catch (e) {
         if (mountedRef.current) {
           setErr((e as Error).message || 'Could not pick attachment');
         }
       }
     },
-    [pendingAttachments.length],
+    [uploadPickedItems],
   );
 
   const onSend = useCallback(async () => {
@@ -1111,6 +1207,8 @@ export default function ChatScreen() {
               <Icon name="plus" size={20} color={t.text} />
             </Pressable>
             <TextInput
+              ref={inputRef}
+              onLayout={ensureImagePasteAttached}
               value={draft}
               onChangeText={setDraft}
               placeholder={`Message ${engineLabel(engine)}`}

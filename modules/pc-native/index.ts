@@ -59,6 +59,11 @@ export type PickedAttachment = {
   base64: string;
 };
 
+export type ImagePasteEvent = {
+  items: PickedAttachment[];
+  error?: string;
+};
+
 export type RootApprovalInput = {
   decision: 'approve' | 'deny';
   id: string;
@@ -120,13 +125,23 @@ export type PcNativeModule = {
   setChatVisible?(visible: boolean): void;
   /** Persist optional custom chat endpoint URL + bearer token for inline notification replies. */
   setChatConfig?(baseUrl: string, token: string): void;
-  /** Subscribe to native module events (e.g. 'onChatPush' when an FCM chat message arrives). */
-  addListener?(
-    eventName: 'onChatPush',
-    listener: (event: { id: string; title: string; body: string }) => void,
-  ): { remove(): void };
+  /** Subscribe to native module events (e.g. 'onChatPush', 'onImagePaste'). */
+  addListener?: {
+    (
+      eventName: 'onChatPush',
+      listener: (event: { id: string; title: string; body: string }) => void,
+    ): { remove(): void };
+    (
+      eventName: 'onImagePaste',
+      listener: (event: ImagePasteEvent) => void,
+    ): { remove(): void };
+  };
   /** Pick up to 4 images or files via Android's system document picker (max 15 MB each). Empty array on cancel. */
   pickAttachments?(kind: 'image' | 'file'): Promise<PickedAttachment[]>;
+  /** Attach Android OnReceiveContentListener ("image/*") to a React Native TextInput view tag. */
+  attachImagePaste?(viewTag: number): Promise<boolean>;
+  /** Detach the native image-paste listener from a React Native TextInput view tag. */
+  detachImagePaste?(viewTag: number): Promise<void>;
   liveStatus(): LiveStatus;
   /** Start live download progress for these active downloads (pc-api ids). false = not started (notifications
    *  off, the user already stopped it for all of them, or Android refused the foreground service). */

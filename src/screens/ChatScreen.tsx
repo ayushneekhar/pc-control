@@ -1,3 +1,4 @@
+import { LegendList, LegendListRef, LegendListRenderItemProps } from '@legendapp/list/react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -6,8 +7,8 @@ import {
   Alert,
   Animated,
   AppState,
+  Clipboard,
   findNodeHandle,
-  FlatList,
   Image,
   Keyboard,
   KeyboardAvoidingView,
@@ -44,9 +45,11 @@ import {
   ChatEngine,
   ChatMessage,
   computeAndroidKeyboardOffset,
+  findPrecedingUserMessage,
   formatAttachmentSize,
   formatChatTime,
   formatComposerChipLabel,
+  formatMessagePreview,
   makeClientId,
   mergeChatMessages,
   parseMessageSegments,
@@ -269,15 +272,21 @@ function BubbleAttachments({ attachments }: { attachments: ChatAttachment[] }) {
   );
 }
 
-function MessageBubble({
-  msg,
-  showEngine,
-  onCopy,
-}: {
+type MessageBubbleProps = {
   msg: ChatMessage;
   showEngine: boolean;
-  onCopy: (text: string) => void;
-}) {
+  canRetry: boolean;
+  onLongPress: (msg: ChatMessage) => void;
+  onRetry: (msg: ChatMessage) => void;
+};
+
+const MessageBubble = React.memo(function MessageBubble({
+  msg,
+  showEngine,
+  canRetry,
+  onLongPress,
+  onRetry,
+}: MessageBubbleProps) {
   const t = useTheme();
   const timeStr = formatChatTime(msg.created_at);
 
@@ -297,21 +306,21 @@ function MessageBubble({
   const isUser = msg.role === 'user';
   const isPending = msg.status === 'pending';
   const isError = msg.status === 'error';
-  const copyable = (msg.text || msg.error || '').trim();
   const attachments = msg.attachments ?? [];
   const hasText = msg.text.trim().length > 0;
+  const canOpenActions = !isPending && (isUser || isError || hasText || attachments.length > 0);
 
   return (
     <View style={[st.bubbleRow, isUser ? st.bubbleRowUser : st.bubbleRowAssistant]}>
       <Pressable
-        onLongPress={copyable ? () => onCopy(copyable) : undefined}
+        onLongPress={canOpenActions ? () => onLongPress(msg) : undefined}
         delayLongPress={260}
         style={({ pressed }) => [
           st.bubble,
           isUser
             ? [st.bubbleUser, { backgroundColor: t.cardAlt }]
             : [st.bubbleAssistant, { backgroundColor: isError ? t.badSoft : t.card }],
-          pressed && copyable && { opacity: 0.85 },
+          pressed && canOpenActions && { opacity: 0.85 },
         ]}
       >
         {showEngine ? (
@@ -330,7 +339,30 @@ function MessageBubble({
             <Text selectable style={[st.errorText, { color: t.bad }]}>
               {msg.error || 'Request failed'}
             </Text>
-            {timeStr ? <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text> : null}
+            <View style={st.errorFooter}>
+              {canRetry ? (
+                <Pressable
+                  onPress={() => onRetry(msg)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Retry message"
+                  android_ripple={{ color: t.ripple, foreground: true }}
+                  style={({ pressed }) => [
+                    st.retryBtn,
+                    {
+                      backgroundColor: t.card,
+                      borderColor: t.border,
+                      opacity: pressed ? 0.8 : 1,
+                    },
+                  ]}
+                >
+                  <Icon name="refresh" size={13} color={t.bad} />
+                  <Text style={[st.retryBtnText, { color: t.bad }]}>Retry</Text>
+                </Pressable>
+              ) : (
+                <View />
+              )}
+              {timeStr ? <Text style={[st.timeBlock, { color: t.textFaint }]}>{timeStr}</Text> : null}
+            </View>
           </>
         ) : hasText ? (
           <MessageBody text={msg.text} isUser={isUser} timeStr={timeStr} />
@@ -340,7 +372,14 @@ function MessageBubble({
       </Pressable>
     </View>
   );
-}
+});
+
+type EditingMessageState = {
+  messageId: string;
+  previewText: string;
+  previousDraft: string;
+  previousAttachments: ChatAttachment[];
+};
 
 export default function ChatScreen() {
   const t = useTheme();
@@ -360,6 +399,8 @@ export default function ChatScreen() {
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
   const [uploadingCount, setUploadingCount] = useState(0);
   const [attachSheetVisible, setAttachSheetVisible] = useState(false);
+  const [actionSheetMsg, setActionSheetMsg] = useState<ChatMessage | null>(null);
+  const [editingState, setEditingState] = useState<EditingMessageState | null>(null);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [appActive, setAppActive] = useState(() => AppState.currentState === 'active');
@@ -378,7 +419,7 @@ export default function ChatScreen() {
   const [applyingModel, setApplyingModel] = useState(false);
   const [applyModelErr, setApplyModelErr] = useState<string | null>(null);
 
-  const listRef = useRef<FlatList<ChatMessage>>(null);
+  const listRef = useRef<LegendListRef>(null);
   const inputRef = useRef<TextInput>(null);
   const pasteViewTagRef = useRef<number | null>(null);
   const pendingCountRef = useRef(0);
@@ -386,10 +427,11 @@ export default function ChatScreen() {
   const mountedRef = useRef(true);
   const isFocusedRef = useRef(isFocused);
   const isForeground = isFocused && appActive;
+  const messagesRef = useRef<ChatMessage[]>(messages);
   const messagesCountRef = useRef(messages.length);
+  const sendingRef = useRef(sending);
   const nearBottomRef = useRef(true);
-  const loadingOlderRef = useRef(false);
-  const settleScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadMessagesRef = useRef<(opts?: { silent?: boolean }) => Promise<void>>(async () => {});
 
   useEffect(() => {
@@ -415,8 +457,13 @@ export default function ChatScreen() {
   }, []);
 
   useEffect(() => {
+    messagesRef.current = messages;
     messagesCountRef.current = messages.length;
-  }, [messages.length]);
+  }, [messages]);
+
+  useEffect(() => {
+    sendingRef.current = sending;
+  }, [sending]);
 
   useEffect(() => {
     pendingCountRef.current = pendingAttachments.length;
@@ -426,7 +473,7 @@ export default function ChatScreen() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      if (settleScrollTimerRef.current) clearTimeout(settleScrollTimerRef.current);
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
     };
   }, []);
 
@@ -452,25 +499,19 @@ export default function ChatScreen() {
 
   const scrollToBottom = useCallback((animated: boolean) => {
     if (messagesCountRef.current > 0) {
-      listRef.current?.scrollToEnd({ animated });
+      void listRef.current?.scrollToEnd({ animated });
     }
-  }, []);
-
-  const scrollToBottomSettled = useCallback((animated: boolean) => {
-    if (messagesCountRef.current <= 0) return;
-    listRef.current?.scrollToEnd({ animated });
-    if (settleScrollTimerRef.current) clearTimeout(settleScrollTimerRef.current);
-    settleScrollTimerRef.current = setTimeout(() => {
-      if (mountedRef.current && nearBottomRef.current && !loadingOlderRef.current && messagesCountRef.current > 0) {
-        listRef.current?.scrollToEnd({ animated: true });
-      }
-    }, 80);
   }, []);
 
   const onListScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    if (contentSize.height <= layoutMeasurement.height + 24) {
+      nearBottomRef.current = true;
+      setShowScrollDown((prev) => (prev ? false : prev));
+      return;
+    }
     const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
-    const isNear = distanceFromBottom <= 120;
+    const isNear = nearBottomRef.current ? distanceFromBottom <= 160 : distanceFromBottom <= 80;
     nearBottomRef.current = isNear;
     setShowScrollDown((prev) => (prev === !isNear ? prev : !isNear));
   }, []);
@@ -478,23 +519,8 @@ export default function ChatScreen() {
   const onPressScrollToBottom = useCallback(() => {
     nearBottomRef.current = true;
     setShowScrollDown(false);
-    scrollToBottomSettled(true);
-  }, [scrollToBottomSettled]);
-
-  const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
-  const lastMsgSig = lastMsg
-    ? `${lastMsg.id}:${lastMsg.status}:${lastMsg.text.length}:${lastMsg.error?.length ?? 0}:${lastMsg.attachments?.length ?? 0}`
-    : '';
-  const prevLastMsgSigRef = useRef(lastMsgSig);
-
-  useEffect(() => {
-    const prev = prevLastMsgSigRef.current;
-    prevLastMsgSigRef.current = lastMsgSig;
-    if (!lastMsgSig || lastMsgSig === prev) return;
-    if (!nearBottomRef.current || loadingOlderRef.current) return;
-    const raf = requestAnimationFrame(() => scrollToBottomSettled(true));
-    return () => cancelAnimationFrame(raf);
-  }, [lastMsgSig, scrollToBottomSettled]);
+    scrollToBottom(true);
+  }, [scrollToBottom]);
 
   // Dismiss keyboard and clear any Android keyboard offset when leaving the Chat tab.
   useEffect(() => {
@@ -506,35 +532,19 @@ export default function ChatScreen() {
   }, [isFocused, androidPadAnim]);
 
   useEffect(() => {
-    let scrollTimer: ReturnType<typeof setTimeout> | null = null;
-    const scheduleScroll = () => {
-      if (scrollTimer) clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(() => scrollToBottom(true), 60);
-    };
-
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-
-    const showSub = Keyboard.addListener(showEvent, (e) => {
+    if (Platform.OS !== 'android') return;
+    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
       if (!isFocusedRef.current) return;
-      if (Platform.OS === 'android') {
-        setKbHeight(e.endCoordinates?.height ?? 0);
-      } else {
-        scheduleScroll();
-      }
+      setKbHeight(e.endCoordinates?.height ?? 0);
     });
-    const hideSub = Keyboard.addListener(hideEvent, () => {
-      if (Platform.OS === 'android') {
-        setKbHeight(0);
-      }
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => {
+      setKbHeight(0);
     });
-
     return () => {
-      if (scrollTimer) clearTimeout(scrollTimer);
       showSub.remove();
       hideSub.remove();
     };
-  }, [scrollToBottom]);
+  }, []);
 
   const effectiveKbHeight = isFocused ? kbHeight : 0;
 
@@ -571,12 +581,8 @@ export default function ChatScreen() {
       toValue: targetAndroidPad,
       duration: targetAndroidPad > 0 ? 150 : 110,
       useNativeDriver: false,
-    }).start(({ finished }) => {
-      if (finished && effectiveKbHeight > 0) {
-        scrollToBottom(true);
-      }
-    });
-  }, [targetAndroidPad, effectiveKbHeight, isFocused, androidPadAnim, scrollToBottom]);
+    }).start();
+  }, [targetAndroidPad, isFocused, androidPadAnim]);
 
   const persistCache = useCallback((nextMsgs: ChatMessage[], nextEngine: ChatEngine, nextHasMore: boolean) => {
     const clean = nextMsgs.filter((m) => !m.optimistic).slice(-80);
@@ -674,10 +680,10 @@ export default function ChatScreen() {
   }, [polling, loadMessages]);
 
   const onLoadOlder = useCallback(async () => {
-    if (loadingOlder || !hasMore || messages.length === 0) return;
-    const oldest = messages[0];
+    const current = messagesRef.current;
+    if (loadingOlder || !hasMore || current.length === 0) return;
+    const oldest = current[0];
     if (!oldest || oldest.optimistic) return;
-    loadingOlderRef.current = true;
     setLoadingOlder(true);
     try {
       const res = await fetchChatMessages(oldest.id, 50);
@@ -689,14 +695,17 @@ export default function ChatScreen() {
       setErr((e as Error).message || 'Failed to load older messages');
     } finally {
       if (mountedRef.current) setLoadingOlder(false);
-      setTimeout(() => {
-        loadingOlderRef.current = false;
-      }, 200);
     }
-  }, [loadingOlder, hasMore, messages]);
+  }, [loadingOlder, hasMore]);
 
   const onCopy = useCallback((text: string) => {
-    void Share.share({ message: text }).catch(() => {});
+    const clean = text.trim();
+    if (!clean) return;
+    try {
+      Clipboard.setString(clean);
+    } catch {
+      void Share.share({ message: clean }).catch(() => {});
+    }
   }, []);
 
   const onRemoveAttachment = useCallback((id: string) => {
@@ -848,57 +857,141 @@ export default function ChatScreen() {
     [uploadPickedItems],
   );
 
-  const onSend = useCallback(async () => {
-    const trimmed = draft.trim();
-    const toSendAttachments = pendingAttachments;
-    if ((!trimmed && toSendAttachments.length === 0) || sending || uploadingCount > 0) return;
-    const clientId = makeClientId();
-    const nowSec = Date.now() / 1000;
-    const optUser: ChatMessage = {
-      id: `opt-u-${clientId}`,
-      role: 'user',
-      engine,
-      text: trimmed,
-      created_at: nowSec,
-      status: 'done',
-      client_id: clientId,
-      attachments: toSendAttachments.length > 0 ? toSendAttachments : undefined,
-      optimistic: true,
-    };
+  const sendMessagePayload = useCallback(
+    async (
+      text: string,
+      attachments: ChatAttachment[],
+      opts?: {
+        clearComposer?: boolean;
+        restoreEditOnError?: EditingMessageState | null;
+      },
+    ) => {
+      const trimmed = text.trim();
+      if ((!trimmed && attachments.length === 0) || sendingRef.current) return;
+      const clientId = makeClientId();
+      const nowSec = Date.now() / 1000;
+      const optUser: ChatMessage = {
+        id: `opt-u-${clientId}`,
+        role: 'user',
+        engine,
+        text: trimmed,
+        created_at: nowSec,
+        status: 'done',
+        client_id: clientId,
+        attachments: attachments.length > 0 ? attachments : undefined,
+        optimistic: true,
+      };
 
-    setDraft('');
-    setPendingAttachments([]);
-    setErr(null);
-    setSending(true);
-    setRunning(true);
-    nearBottomRef.current = true;
-    setShowScrollDown(false);
-    setMessages((prev) => [...prev, optUser]);
-    requestAnimationFrame(() => scrollToBottomSettled(true));
+      if (opts?.clearComposer) {
+        setDraft('');
+        setPendingAttachments([]);
+        setEditingState(null);
+      }
+      setErr(null);
+      sendingRef.current = true;
+      setSending(true);
+      setRunning(true);
+      nearBottomRef.current = true;
+      setShowScrollDown(false);
+      setMessages((prev) => [...prev, optUser]);
+      requestAnimationFrame(() => scrollToBottom(true));
 
-    try {
-      const res = await sendChatMessage(trimmed, clientId, toSendAttachments);
-      if (!mountedRef.current) return;
-      setEngine(res.engine);
-      setRunning(res.running);
-      setMessages((prev) => {
-        const confirmed = [res.user_message, ...(res.assistant_message ? [res.assistant_message] : [])];
-        const withoutOpt = prev.filter((m) => m.id !== optUser.id);
-        const next = mergeChatMessages(withoutOpt, [...withoutOpt.filter((m) => !m.optimistic), ...confirmed]);
-        persistCache(next, res.engine, hasMore);
-        return next;
-      });
-    } catch (e) {
-      if (!mountedRef.current) return;
-      setMessages((prev) => prev.filter((m) => m.id !== optUser.id));
-      setDraft(trimmed);
-      setPendingAttachments(toSendAttachments);
-      setRunning(false);
-      setErr((e as Error).message || 'Failed to send message');
-    } finally {
-      if (mountedRef.current) setSending(false);
-    }
-  }, [draft, pendingAttachments, sending, uploadingCount, engine, hasMore, persistCache, scrollToBottomSettled]);
+      try {
+        const res = await sendChatMessage(trimmed, clientId, attachments);
+        if (!mountedRef.current) return;
+        setEngine(res.engine);
+        setRunning(res.running);
+        setMessages((prev) => {
+          const confirmed = [res.user_message, ...(res.assistant_message ? [res.assistant_message] : [])];
+          const withoutOpt = prev.filter((m) => m.id !== optUser.id);
+          const next = mergeChatMessages(withoutOpt, [...withoutOpt.filter((m) => !m.optimistic), ...confirmed]);
+          persistCache(next, res.engine, hasMore);
+          return next;
+        });
+      } catch (e) {
+        if (!mountedRef.current) return;
+        setMessages((prev) => prev.filter((m) => m.id !== optUser.id));
+        if (opts?.clearComposer) {
+          setDraft(trimmed);
+          setPendingAttachments(attachments);
+          if (opts.restoreEditOnError) {
+            setEditingState(opts.restoreEditOnError);
+          }
+        }
+        setRunning(false);
+        setErr((e as Error).message || 'Failed to send message');
+      } finally {
+        sendingRef.current = false;
+        if (mountedRef.current) setSending(false);
+      }
+    },
+    [engine, hasMore, persistCache, scrollToBottom],
+  );
+
+  const onSend = useCallback(() => {
+    if (uploadingCount > 0) return;
+    void sendMessagePayload(draft, pendingAttachments, {
+      clearComposer: true,
+      restoreEditOnError: editingState,
+    });
+  }, [draft, pendingAttachments, uploadingCount, editingState, sendMessagePayload]);
+
+  const onOpenMessageActions = useCallback((msg: ChatMessage) => {
+    Keyboard.dismiss();
+    setActionSheetMsg(msg);
+  }, []);
+
+  const onStartEditMessage = useCallback(
+    (msg: ChatMessage) => {
+      setActionSheetMsg(null);
+      setEditingState((prev) => ({
+        messageId: msg.id,
+        previewText: formatMessagePreview(msg),
+        previousDraft: prev ? prev.previousDraft : draft,
+        previousAttachments: prev ? prev.previousAttachments : pendingAttachments,
+      }));
+      setDraft(msg.text);
+      setPendingAttachments(msg.attachments ? [...msg.attachments] : []);
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+      focusTimerRef.current = setTimeout(() => {
+        if (mountedRef.current) {
+          inputRef.current?.focus();
+        }
+      }, 80);
+    },
+    [draft, pendingAttachments],
+  );
+
+  const onCancelEdit = useCallback(() => {
+    setEditingState((prev) => {
+      if (prev) {
+        setDraft(prev.previousDraft);
+        setPendingAttachments(prev.previousAttachments);
+      }
+      return null;
+    });
+  }, []);
+
+  const onResendMessage = useCallback(
+    (msg: ChatMessage) => {
+      setActionSheetMsg(null);
+      void sendMessagePayload(msg.text, msg.attachments ?? []);
+    },
+    [sendMessagePayload],
+  );
+
+  const onRetryAssistantError = useCallback(
+    (msg: ChatMessage) => {
+      setActionSheetMsg(null);
+      const list = messagesRef.current;
+      const idx = list.findIndex((m) => m.id === msg.id);
+      if (idx < 0) return;
+      const userMsg = findPrecedingUserMessage(list, idx);
+      if (!userMsg) return;
+      void sendMessagePayload(userMsg.text, userMsg.attachments ?? []);
+    },
+    [sendMessagePayload],
+  );
 
   const onNewChat = useCallback(() => {
     Alert.alert('New conversation', `Start a fresh ${engineLabel(engine)} session?`, [
@@ -920,7 +1013,7 @@ export default function ChatScreen() {
                 persistCache(next, res.engine, hasMore);
                 return next;
               });
-              requestAnimationFrame(() => scrollToBottomSettled(true));
+              requestAnimationFrame(() => scrollToBottom(true));
             })
             .catch((e) => {
               if (!mountedRef.current) return;
@@ -932,7 +1025,7 @@ export default function ChatScreen() {
         },
       },
     ]);
-  }, [engine, hasMore, persistCache, scrollToBottomSettled]);
+  }, [engine, hasMore, persistCache, scrollToBottom]);
 
   const openModelPicker = useCallback(() => {
     Keyboard.dismiss();
@@ -991,14 +1084,89 @@ export default function ChatScreen() {
   }, [engine, agentSettings]);
 
   const showTypingIndicator = running || sending;
-
-  useEffect(() => {
-    if (!showTypingIndicator || !nearBottomRef.current || loadingOlderRef.current) return;
-    const raf = requestAnimationFrame(() => scrollToBottomSettled(true));
-    return () => cancelAnimationFrame(raf);
-  }, [showTypingIndicator, scrollToBottomSettled]);
-
   const canSend = (draft.trim().length > 0 || pendingAttachments.length > 0) && !sending && uploadingCount === 0;
+
+  const keyExtractor = useCallback((item: ChatMessage) => item.id, []);
+
+  const renderItem = useCallback(
+    ({ item, index, data }: LegendListRenderItemProps<ChatMessage>) => (
+      <MessageBubble
+        msg={item}
+        showEngine={shouldShowEngineTag(data, index, engine)}
+        canRetry={
+          item.role === 'assistant' &&
+          item.status === 'error' &&
+          findPrecedingUserMessage(data, index) !== null
+        }
+        onLongPress={onOpenMessageActions}
+        onRetry={onRetryAssistantError}
+      />
+    ),
+    [engine, onOpenMessageActions, onRetryAssistantError],
+  );
+
+  const isEmpty = messages.length === 0;
+  const listContentStyle = useMemo(
+    () => [st.listContent, { paddingBottom: composerHeight + space(3) }, isEmpty && st.listContentEmpty],
+    [composerHeight, isEmpty],
+  );
+
+  const listHeader = useMemo(
+    () =>
+      hasMore ? (
+        <View style={st.olderWrap}>
+          <Button
+            label="Load earlier"
+            kind="subtle"
+            compact
+            busy={loadingOlder}
+            onPress={() => void onLoadOlder()}
+          />
+        </View>
+      ) : null,
+    [hasMore, loadingOlder, onLoadOlder],
+  );
+
+  const listFooter = useMemo(
+    () =>
+      showTypingIndicator ? (
+        <View style={[st.bubbleRow, st.bubbleRowAssistant, st.typingFooter]}>
+          <View style={[st.bubble, st.bubbleAssistant, { backgroundColor: t.card }]}>
+            <TypingDots />
+          </View>
+        </View>
+      ) : null,
+    [showTypingIndicator, t.card],
+  );
+
+  const listEmpty = useMemo(
+    () => (
+      <View style={st.emptyWrap}>
+        <View style={[st.emptyIcon, { backgroundColor: t.card }]}>
+          <Icon name="message-text-outline" size={22} color={t.textFaint} />
+        </View>
+        <Text style={[st.emptyLabel, { color: t.textFaint }]}>Start a conversation</Text>
+      </View>
+    ),
+    [t.card, t.textFaint],
+  );
+
+  const actionSheetView = useMemo(() => {
+    if (!actionSheetMsg) return null;
+    const isUserMsg = actionSheetMsg.role === 'user';
+    const isErrMsg = actionSheetMsg.status === 'error';
+    const copyText = (actionSheetMsg.text || actionSheetMsg.error || '').trim();
+    const preview = formatMessagePreview(actionSheetMsg);
+    const timeStr = formatChatTime(actionSheetMsg.created_at);
+    const metaLabel = isUserMsg
+      ? 'You'
+      : isErrMsg
+        ? `${engineLabel(actionSheetMsg.engine)} · Error`
+        : engineLabel(actionSheetMsg.engine);
+    const idx = isErrMsg && !isUserMsg ? messages.findIndex((m) => m.id === actionSheetMsg.id) : -1;
+    const canRetry = idx >= 0 && findPrecedingUserMessage(messages, idx) !== null;
+    return { msg: actionSheetMsg, isUserMsg, isErrMsg, copyText, preview, timeStr, metaLabel, canRetry };
+  }, [actionSheetMsg, messages]);
 
   const headerRight = (
     <View style={st.headerRight}>
@@ -1034,61 +1202,25 @@ export default function ChatScreen() {
         {loadingInitial && messages.length === 0 ? (
           <ChatSkeleton />
         ) : (
-          <FlatList
+          <LegendList
             ref={listRef}
             data={messages}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item, index }) => (
-              <MessageBubble
-                msg={item}
-                showEngine={shouldShowEngineTag(messages, index, engine)}
-                onCopy={onCopy}
-              />
-            )}
-            contentContainerStyle={[
-              st.listContent,
-              { paddingBottom: composerHeight + space(3) },
-              messages.length === 0 && st.listContentEmpty,
-            ]}
+            keyExtractor={keyExtractor}
+            renderItem={renderItem}
+            initialScrollAtEnd
+            alignItemsAtEnd
+            maintainScrollAtEnd
+            maintainScrollAtEndThreshold={0.15}
+            maintainVisibleContentPosition
+            estimatedItemSize={72}
+            contentContainerStyle={listContentStyle}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="interactive"
             onScroll={onListScroll}
             scrollEventThrottle={100}
-            onContentSizeChange={() => {
-              if (messages.length > 0 && nearBottomRef.current && !loadingOlderRef.current) {
-                scrollToBottomSettled(false);
-              }
-            }}
-            ListHeaderComponent={
-              hasMore ? (
-                <View style={st.olderWrap}>
-                  <Button
-                    label="Load earlier"
-                    kind="subtle"
-                    compact
-                    busy={loadingOlder}
-                    onPress={() => void onLoadOlder()}
-                  />
-                </View>
-              ) : null
-            }
-            ListFooterComponent={
-              showTypingIndicator ? (
-                <View style={[st.bubbleRow, st.bubbleRowAssistant]}>
-                  <View style={[st.bubble, st.bubbleAssistant, { backgroundColor: t.card }]}>
-                    <TypingDots />
-                  </View>
-                </View>
-              ) : null
-            }
-            ListEmptyComponent={
-              <View style={st.emptyWrap}>
-                <View style={[st.emptyIcon, { backgroundColor: t.card }]}>
-                  <Icon name="message-text-outline" size={22} color={t.textFaint} />
-                </View>
-                <Text style={[st.emptyLabel, { color: t.textFaint }]}>Start a conversation</Text>
-              </View>
-            }
+            ListHeaderComponent={listHeader}
+            ListFooterComponent={listFooter}
+            ListEmptyComponent={listEmpty}
           />
         )}
         {showScrollDown && messages.length > 0 ? (
@@ -1180,12 +1312,40 @@ export default function ChatScreen() {
             </ScrollView>
           ) : null}
 
+          {editingState ? (
+            <View
+              style={[
+                st.editingBar,
+                { backgroundColor: t.card, borderColor: t.border },
+              ]}
+            >
+              <View style={st.editingBarLeft}>
+                <Icon name="pencil-outline" size={14} color={t.accent} />
+                <Text style={[st.editingBarLabel, { color: t.accent }]}>Editing message</Text>
+                {editingState.previewText ? (
+                  <Text numberOfLines={1} style={[st.editingBarPreview, { color: t.textFaint }]}>
+                    · {editingState.previewText}
+                  </Text>
+                ) : null}
+              </View>
+              <Pressable
+                onPress={onCancelEdit}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel editing message"
+                hitSlop={8}
+                style={({ pressed }) => [st.editingBarClose, pressed && { opacity: 0.7 }]}
+              >
+                <Icon name="close" size={16} color={t.textDim} />
+              </Pressable>
+            </View>
+          ) : null}
+
           <View
             style={[
               st.composerPill,
               {
                 backgroundColor: t.card,
-                borderColor: t.border,
+                borderColor: editingState ? t.accent : t.border,
               },
             ]}
           >
@@ -1331,6 +1491,127 @@ export default function ChatScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+      <Modal
+        visible={actionSheetView !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setActionSheetMsg(null)}
+      >
+        <Pressable style={st.sheetBackdrop} onPress={() => setActionSheetMsg(null)}>
+          {actionSheetView ? (
+            <Pressable
+              onPress={() => {}}
+              style={[st.sheetCard, { backgroundColor: t.card, borderColor: t.border }]}
+            >
+              <View style={[st.sheetPreview, { backgroundColor: t.cardAlt }]}>
+                <Text style={[st.sheetPreviewMeta, { color: actionSheetView.isErrMsg ? t.bad : t.textDim }]}>
+                  {actionSheetView.metaLabel}
+                  {actionSheetView.timeStr ? ` · ${actionSheetView.timeStr}` : ''}
+                </Text>
+                {actionSheetView.preview ? (
+                  <Text numberOfLines={2} style={[st.sheetPreviewText, { color: t.text }]}>
+                    {actionSheetView.preview}
+                  </Text>
+                ) : null}
+              </View>
+
+              {actionSheetView.isUserMsg ? (
+                <>
+                  <Pressable
+                    onPress={() => onStartEditMessage(actionSheetView.msg)}
+                    android_ripple={{ color: t.ripple, foreground: true }}
+                    style={({ pressed }) => [
+                      st.sheetRow,
+                      { backgroundColor: pressed ? t.cardAlt : 'transparent' },
+                    ]}
+                  >
+                    <View style={[st.sheetIconWrap, { backgroundColor: t.cardAlt }]}>
+                      <Icon name="pencil-outline" size={20} color={t.accent} />
+                    </View>
+                    <View style={st.sheetRowText}>
+                      <Text style={[st.sheetRowTitle, { color: t.text }]}>Edit & resend</Text>
+                      <Text style={[st.sheetRowSub, { color: t.textFaint }]}>
+                        Modify in composer before sending
+                      </Text>
+                    </View>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => onResendMessage(actionSheetView.msg)}
+                    disabled={sending}
+                    android_ripple={{ color: t.ripple, foreground: true }}
+                    style={({ pressed }) => [
+                      st.sheetRow,
+                      {
+                        backgroundColor: pressed ? t.cardAlt : 'transparent',
+                        opacity: sending ? 0.45 : 1,
+                      },
+                    ]}
+                  >
+                    <View style={[st.sheetIconWrap, { backgroundColor: t.cardAlt }]}>
+                      <Icon name="refresh" size={20} color={t.textDim} />
+                    </View>
+                    <View style={st.sheetRowText}>
+                      <Text style={[st.sheetRowTitle, { color: t.text }]}>Resend</Text>
+                      <Text style={[st.sheetRowSub, { color: t.textFaint }]}>
+                        Send again immediately
+                      </Text>
+                    </View>
+                  </Pressable>
+                </>
+              ) : null}
+
+              {!actionSheetView.isUserMsg && actionSheetView.isErrMsg && actionSheetView.canRetry ? (
+                <Pressable
+                  onPress={() => onRetryAssistantError(actionSheetView.msg)}
+                  disabled={sending}
+                  android_ripple={{ color: t.ripple, foreground: true }}
+                  style={({ pressed }) => [
+                    st.sheetRow,
+                    {
+                      backgroundColor: pressed ? t.cardAlt : 'transparent',
+                      opacity: sending ? 0.45 : 1,
+                    },
+                  ]}
+                >
+                  <View style={[st.sheetIconWrap, { backgroundColor: t.cardAlt }]}>
+                    <Icon name="refresh" size={20} color={t.accent} />
+                  </View>
+                  <View style={st.sheetRowText}>
+                    <Text style={[st.sheetRowTitle, { color: t.text }]}>Retry</Text>
+                    <Text style={[st.sheetRowSub, { color: t.textFaint }]}>
+                      Resend your previous message
+                    </Text>
+                  </View>
+                </Pressable>
+              ) : null}
+
+              {actionSheetView.copyText ? (
+                <Pressable
+                  onPress={() => {
+                    setActionSheetMsg(null);
+                    onCopy(actionSheetView.copyText);
+                  }}
+                  android_ripple={{ color: t.ripple, foreground: true }}
+                  style={({ pressed }) => [
+                    st.sheetRow,
+                    { backgroundColor: pressed ? t.cardAlt : 'transparent' },
+                  ]}
+                >
+                  <View style={[st.sheetIconWrap, { backgroundColor: t.cardAlt }]}>
+                    <Icon name="content-copy" size={20} color={t.textDim} />
+                  </View>
+                  <View style={st.sheetRowText}>
+                    <Text style={[st.sheetRowTitle, { color: t.text }]}>Copy</Text>
+                    <Text style={[st.sheetRowSub, { color: t.textFaint }]}>
+                      {actionSheetView.isErrMsg ? 'Copy error details' : 'Copy message text'}
+                    </Text>
+                  </View>
+                </Pressable>
+              ) : null}
+            </Pressable>
+          ) : null}
+        </Pressable>
+      </Modal>
     </Screen>
   );
 }
@@ -1421,7 +1702,26 @@ const st = StyleSheet.create({
   codeText: { fontSize: 12.5, lineHeight: 18 },
   typingRow: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 5, paddingHorizontal: 2 },
   typingDot: { width: 7, height: 7, borderRadius: 3.5 },
+  typingFooter: { paddingTop: space(2.5) },
   errorText: { fontSize: 14, lineHeight: 20 },
+  errorFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: space(2),
+    marginTop: 4,
+  },
+  retryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  retryBtnText: { fontSize: 12.5, fontWeight: '500' },
   systemRow: { flexDirection: 'row', alignItems: 'center', gap: space(2.5), paddingVertical: space(2) },
   systemLine: { flex: 1, height: StyleSheet.hairlineWidth },
   systemText: { fontSize: 11.5, fontVariant: ['tabular-nums'] },
@@ -1447,6 +1747,42 @@ const st = StyleSheet.create({
     right: 0,
     bottom: 0,
     backgroundColor: 'transparent',
+  },
+  editingBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginHorizontal: screenPad,
+    marginTop: space(1),
+    paddingLeft: 12,
+    paddingRight: 8,
+    paddingVertical: 7,
+    borderRadius: radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  editingBarLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    minWidth: 0,
+  },
+  editingBarLabel: {
+    fontSize: 12.5,
+    fontWeight: '500',
+    flexShrink: 0,
+  },
+  editingBarPreview: {
+    fontSize: 12,
+    flexShrink: 1,
+  },
+  editingBarClose: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   composerPill: {
     flexDirection: 'row',
@@ -1604,6 +1940,22 @@ const st = StyleSheet.create({
     letterSpacing: 0.6,
     paddingHorizontal: 8,
     paddingBottom: 6,
+  },
+  sheetPreview: {
+    borderRadius: radius.sm,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    marginBottom: 4,
+    gap: 3,
+  },
+  sheetPreviewMeta: {
+    fontSize: 11.5,
+    fontWeight: '500',
+    fontVariant: ['tabular-nums'],
+  },
+  sheetPreviewText: {
+    fontSize: 13.5,
+    lineHeight: 18,
   },
   sheetRow: {
     flexDirection: 'row',

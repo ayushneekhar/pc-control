@@ -217,7 +217,11 @@ export function formatChatTime(epochSec: number, nowMs = Date.now()): string {
  * compared to the previous assistant message, or when the first assistant message differs from
  * the currently active header engine.
  */
-export function shouldShowEngineTag(messages: ChatMessage[], index: number, activeEngine: ChatEngine): boolean {
+export function shouldShowEngineTag(
+  messages: readonly ChatMessage[],
+  index: number,
+  activeEngine: ChatEngine,
+): boolean {
   const msg = messages[index];
   if (!msg || msg.role !== 'assistant') return false;
   if (msg.status === 'error') return true;
@@ -227,6 +231,54 @@ export function shouldShowEngineTag(messages: ChatMessage[], index: number, acti
     }
   }
   return msg.engine !== activeEngine;
+}
+
+function hasSendableContent(msg: ChatMessage): boolean {
+  return msg.text.trim().length > 0 || (msg.attachments?.length ?? 0) > 0;
+}
+
+/**
+ * Finds the preceding user message that corresponds to the message at `index`
+ * (typically an assistant error bubble) so it can be retried with one tap.
+ * Stops at system conversation boundaries.
+ */
+export function findPrecedingUserMessage(messages: readonly ChatMessage[], index: number): ChatMessage | null {
+  if (index <= 0 || index >= messages.length) return null;
+  const target = messages[index];
+  const replyTo = target?.reply_to?.trim();
+  if (replyTo) {
+    for (let i = index - 1; i >= 0; i -= 1) {
+      const m = messages[i];
+      if (m.role === 'user' && (m.id === replyTo || m.client_id === replyTo) && hasSendableContent(m)) {
+        return m;
+      }
+    }
+  }
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.role === 'system') return null;
+    if (m.role === 'user' && hasSendableContent(m)) {
+      return m;
+    }
+  }
+  return null;
+}
+
+/** Compact single-line preview of a message for the action sheet or editing bar. */
+export function formatMessagePreview(msg: ChatMessage): string {
+  const body = msg.text.trim();
+  if (body) return body.replace(/\s+/g, ' ');
+  if (msg.status === 'error' && msg.error?.trim()) {
+    return msg.error.trim().replace(/\s+/g, ' ');
+  }
+  const atts = msg.attachments ?? [];
+  if (atts.length === 1) {
+    return atts[0].name || (atts[0].kind === 'image' ? 'Photo' : 'Attachment');
+  }
+  if (atts.length > 1) {
+    return `${atts.length} attachments`;
+  }
+  return '';
 }
 
 /**

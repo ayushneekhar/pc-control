@@ -4,9 +4,11 @@ import { _setCacheBackendForTests, CacheBackend } from './cache';
 import {
   ChatMessage,
   computeAndroidKeyboardOffset,
+  findPrecedingUserMessage,
   formatAttachmentSize,
   formatChatTime,
   formatComposerChipLabel,
+  formatMessagePreview,
   getChatEndpoint,
   mergeChatMessages,
   normalizeChatUrl,
@@ -203,4 +205,81 @@ test('formatAttachmentSize formats bytes, KB, and MB cleanly', () => {
   assert.equal(formatAttachmentSize(24 * 1024), '24 KB');
   assert.equal(formatAttachmentSize(2.4 * 1024 * 1024), '2.4 MB');
   assert.equal(formatAttachmentSize(12 * 1024 * 1024), '12 MB');
+});
+
+test('findPrecedingUserMessage resolves reply_to, falls back to nearest user, and stops at system boundary', () => {
+  const msgs: ChatMessage[] = [
+    { id: 'u1', role: 'user', engine: 'claude', text: 'first prompt', created_at: 1, status: 'done', client_id: 'c1' },
+    { id: 'a1', role: 'assistant', engine: 'claude', text: 'ok', created_at: 2, status: 'done', reply_to: 'u1' },
+    { id: 's1', role: 'system', engine: 'claude', text: 'New conversation', created_at: 3, status: 'done' },
+    { id: 'a_orphan', role: 'assistant', engine: 'claude', text: '', error: 'boom', created_at: 4, status: 'error' },
+    { id: 'u2', role: 'user', engine: 'claude', text: 'second prompt', created_at: 5, status: 'done', client_id: 'c2' },
+    { id: 'u3', role: 'user', engine: 'claude', text: 'third prompt', created_at: 6, status: 'done', client_id: 'c3' },
+    { id: 'a2', role: 'assistant', engine: 'claude', text: '', error: 'timeout', created_at: 7, status: 'error', reply_to: 'u2' },
+    { id: 'a3', role: 'assistant', engine: 'claude', text: '', error: 'failed', created_at: 8, status: 'error' },
+  ];
+
+  // System boundary blocks crossing into previous session
+  assert.equal(findPrecedingUserMessage(msgs, 3), null);
+  // reply_to matches exact user message even if another user message was sent after
+  assert.equal(findPrecedingUserMessage(msgs, 6)?.id, 'u2');
+  // Without reply_to, resolves nearest preceding user message
+  assert.equal(findPrecedingUserMessage(msgs, 7)?.id, 'u3');
+  // Out-of-bounds / first item returns null
+  assert.equal(findPrecedingUserMessage(msgs, 0), null);
+});
+
+test('formatMessagePreview collapses whitespace and falls back to error or attachment summary', () => {
+  assert.equal(
+    formatMessagePreview({
+      id: '1',
+      role: 'user',
+      engine: 'claude',
+      text: '  hello\n   world  ',
+      created_at: 1,
+      status: 'done',
+    }),
+    'hello world',
+  );
+  assert.equal(
+    formatMessagePreview({
+      id: '2',
+      role: 'assistant',
+      engine: 'claude',
+      text: '',
+      error: 'Request\ntimed out',
+      created_at: 2,
+      status: 'error',
+    }),
+    'Request timed out',
+  );
+  assert.equal(
+    formatMessagePreview({
+      id: '3',
+      role: 'user',
+      engine: 'claude',
+      text: '',
+      created_at: 3,
+      status: 'done',
+      attachments: [
+        { id: 'a1', name: 'screen.png', mime_type: 'image/png', size_bytes: 100, kind: 'image', url: '/x' },
+      ],
+    }),
+    'screen.png',
+  );
+  assert.equal(
+    formatMessagePreview({
+      id: '4',
+      role: 'user',
+      engine: 'claude',
+      text: '',
+      created_at: 4,
+      status: 'done',
+      attachments: [
+        { id: 'a1', name: 'a.png', mime_type: 'image/png', size_bytes: 100, kind: 'image', url: '/a' },
+        { id: 'a2', name: 'b.png', mime_type: 'image/png', size_bytes: 100, kind: 'image', url: '/b' },
+      ],
+    }),
+    '2 attachments',
+  );
 });

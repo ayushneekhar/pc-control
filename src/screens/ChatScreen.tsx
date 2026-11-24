@@ -1129,7 +1129,6 @@ type MessageBubbleProps = {
   canRetry: boolean;
   onLongPress: (msg: ChatMessage) => void;
   onReply: (msg: ChatMessage) => void;
-  onEdit: (msg: ChatMessage) => void;
   onCopy: (text: string) => void;
   onRetry: (msg: ChatMessage) => void;
   onPressReplyQuote: (replyId: string) => void;
@@ -1142,7 +1141,6 @@ const MessageBubble = React.memo(function MessageBubble({
   canRetry,
   onLongPress,
   onReply,
-  onEdit,
   onCopy,
   onRetry,
   onPressReplyQuote,
@@ -1150,7 +1148,6 @@ const MessageBubble = React.memo(function MessageBubble({
   onPressImage,
 }: MessageBubbleProps) {
   const t = useTheme();
-  const timeStr = formatChatTime(msg.created_at);
   const previewUrl = useMemo(
     () => (msg.role !== 'system' && msg.status !== 'pending' && msg.status !== 'error' ? extractPreviewUrl(msg.text) : null),
     [msg.role, msg.status, msg.text],
@@ -1161,10 +1158,7 @@ const MessageBubble = React.memo(function MessageBubble({
     return (
       <View style={st.systemRow}>
         <View style={[st.systemLine, { backgroundColor: t.border }]} />
-        <Text style={[st.systemText, { color: t.textFaint }]}>
-          {msg.text}
-          {timeStr ? ` · ${timeStr}` : ''}
-        </Text>
+        <Text style={[st.systemText, { color: t.textFaint }]}>{msg.text}</Text>
         <View style={[st.systemLine, { backgroundColor: t.border }]} />
       </View>
     );
@@ -1178,8 +1172,7 @@ const MessageBubble = React.memo(function MessageBubble({
   const hasText = msg.text.trim().length > 0;
   const canOpenActions = !isPending && (isUser || isError || hasText || attachments.length > 0);
   const canSwipeReply = isReplyableMessage(msg);
-  const canShowCopy = isSettled && !isError && hasText;
-  const canShowEdit = isUser && isSettled && (hasText || attachments.length > 0);
+  const canShowCopy = !isUser && isSettled && !isError && hasText;
   const handleLongPress = canOpenActions ? () => onLongPress(msg) : undefined;
 
   if (!isUser && isPending) {
@@ -1237,8 +1230,8 @@ const MessageBubble = React.memo(function MessageBubble({
           <Text selectable style={[st.errorText, { color: t.bad }]}>
             {msg.error || 'Request failed'}
           </Text>
-          <View style={st.errorFooter}>
-            {canRetry ? (
+          {canRetry ? (
+            <View style={st.errorFooter}>
               <Pressable
                 onPress={() => onRetry(msg)}
                 accessibilityRole="button"
@@ -1256,11 +1249,8 @@ const MessageBubble = React.memo(function MessageBubble({
                 <Icon name="refresh" size={13} color={t.bad} />
                 <Text style={[st.retryBtnText, { color: t.bad }]}>Retry</Text>
               </Pressable>
-            ) : (
-              <View />
-            )}
-            {timeStr ? <Text style={[st.footerTime, { color: t.textFaint }]}>{timeStr}</Text> : null}
-          </View>
+            </View>
+          ) : null}
         </>
       ) : hasText ? (
         <>
@@ -1277,55 +1267,25 @@ const MessageBubble = React.memo(function MessageBubble({
   );
 
   if (isUser) {
-    const showUserFooter = canShowEdit || canShowCopy || Boolean(timeStr);
     return (
       <SwipeableMessageRow msg={msg} enabled={canSwipeReply} onSwipeReply={onReply}>
         <View style={[st.bubbleRow, st.bubbleRowUser]}>
-          <View style={st.userBubbleColumn}>
-            <Pressable
-              onLongPress={handleLongPress}
-              delayLongPress={260}
-              style={({ pressed }) => [
-                st.bubble,
-                st.bubbleUser,
-                { backgroundColor: t.cardAlt },
-                pressed && canOpenActions && { opacity: 0.84 },
-              ]}
-            >
-              {messageContent}
-            </Pressable>
-            {showUserFooter ? (
-              <View style={st.userFooterRow}>
-                {canShowEdit || canShowCopy ? (
-                  <View style={st.footerActions}>
-                    {canShowEdit ? (
-                      <Pressable
-                        onPress={() => onEdit(msg)}
-                        hitSlop={FOOTER_ICON_HIT_SLOP}
-                        accessibilityRole="button"
-                        accessibilityLabel="Edit and resend message"
-                        style={({ pressed }) => [st.footerIconBtn, pressed && { opacity: 0.65 }]}
-                      >
-                        <Icon name="pencil" size={15} color={t.textFaint} />
-                      </Pressable>
-                    ) : null}
-                    {canShowCopy ? (
-                      <CopyIconButton msgId={msg.id} text={msg.text} onCopy={onCopy} />
-                    ) : null}
-                  </View>
-                ) : null}
-                {timeStr ? (
-                  <Text style={[st.footerTime, { color: t.textFaint }]}>{timeStr}</Text>
-                ) : null}
-              </View>
-            ) : null}
-          </View>
+          <Pressable
+            onLongPress={handleLongPress}
+            delayLongPress={260}
+            style={({ pressed }) => [
+              st.bubble,
+              st.bubbleUser,
+              { backgroundColor: t.cardAlt },
+              pressed && canOpenActions && { opacity: 0.84 },
+            ]}
+          >
+            {messageContent}
+          </Pressable>
         </View>
       </SwipeableMessageRow>
     );
   }
-
-  const showAssistantFooter = !isError && (canShowCopy || Boolean(timeStr));
 
   return (
     <View style={st.assistantGroup}>
@@ -1364,16 +1324,9 @@ const MessageBubble = React.memo(function MessageBubble({
               >
                 {messageContent}
               </Pressable>
-              {showAssistantFooter ? (
+              {canShowCopy ? (
                 <View style={st.assistantFooterRow}>
-                  <View style={st.footerActions}>
-                    {canShowCopy ? (
-                      <CopyIconButton msgId={msg.id} text={msg.text} onCopy={onCopy} />
-                    ) : null}
-                  </View>
-                  {timeStr ? (
-                    <Text style={[st.footerTime, { color: t.textFaint }]}>{timeStr}</Text>
-                  ) : null}
+                  <CopyIconButton msgId={msg.id} text={msg.text} onCopy={onCopy} />
                 </View>
               ) : null}
             </View>
@@ -2269,7 +2222,6 @@ export default function ChatScreen() {
         }
         onLongPress={onOpenMessageActions}
         onReply={onStartReplyMessage}
-        onEdit={onStartEditMessage}
         onCopy={onCopy}
         onRetry={onRetryAssistantError}
         onPressReplyQuote={onPressReplyQuote}
@@ -2280,7 +2232,6 @@ export default function ChatScreen() {
     [
       onOpenMessageActions,
       onStartReplyMessage,
-      onStartEditMessage,
       onCopy,
       onRetryAssistantError,
       onPressReplyQuote,
@@ -3004,10 +2955,6 @@ const st = StyleSheet.create({
   bubbleRow: { flexDirection: 'row', width: '100%' },
   bubbleRowUser: { justifyContent: 'flex-end' },
   bubbleRowAssistant: { justifyContent: 'flex-start' },
-  userBubbleColumn: {
-    maxWidth: '82%',
-    alignItems: 'flex-end',
-  },
   bubble: {
     borderRadius: 18,
     paddingHorizontal: 13,
@@ -3016,7 +2963,7 @@ const st = StyleSheet.create({
     gap: 3,
   },
   bubbleUser: {
-    maxWidth: '100%',
+    maxWidth: '82%',
     borderBottomRightRadius: 5,
   },
   assistantPlain: {
@@ -3040,32 +2987,14 @@ const st = StyleSheet.create({
   assistantFooterRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
     width: '100%',
     marginTop: 2,
-  },
-  userFooterRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    gap: 12,
-    marginTop: 4,
-    paddingRight: 2,
-  },
-  footerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
   },
   footerIconBtn: {
     padding: 2,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  footerTime: {
-    fontSize: 11,
-    lineHeight: 15,
-    fontVariant: ['tabular-nums'],
   },
   replyQuote: {
     borderLeftWidth: 2,
@@ -3272,7 +3201,7 @@ const st = StyleSheet.create({
   errorFooter: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
     gap: space(2),
     marginTop: 4,
   },

@@ -563,3 +563,142 @@ export function isReplyableMessage(msg: ChatMessage): boolean {
     (msg.attachments?.length ?? 0) > 0
   );
 }
+
+export type TextSelection = {
+  start: number;
+  end: number;
+};
+
+export type ChatListAutoFormatResult = {
+  text: string;
+  selection: TextSelection;
+  changed: boolean;
+};
+
+const ORDERED_LIST_RE = /^([ \t]*)(\d+)([.)]) (.*)$/;
+const BULLET_LIST_RE = /^([ \t]*)([-*•]) (.*)$/;
+
+function findSingleNewlineInsertion(
+  prevText: string,
+  nextText: string,
+  prevSelection?: TextSelection | null,
+): { insertPos: number; afterPos: number } | null {
+  if (prevSelection) {
+    const start = Math.max(0, Math.min(prevSelection.start, prevSelection.end, prevText.length));
+    const end = Math.max(0, Math.min(Math.max(prevSelection.start, prevSelection.end), prevText.length));
+    if (
+      nextText.length === prevText.length - (end - start) + 1 &&
+      nextText === `${prevText.slice(0, start)}\n${prevText.slice(end)}`
+    ) {
+      return { insertPos: start, afterPos: end };
+    }
+  }
+
+  // Fallback when prevSelection is absent or slightly stale (common on Android IME):
+  // detect a pure single-character '\n' insertion by comparing prefix/suffix.
+  if (nextText.length !== prevText.length + 1) return null;
+
+  let prefixLen = 0;
+  while (prefixLen < prevText.length && prevText[prefixLen] === nextText[prefixLen]) {
+    prefixLen += 1;
+  }
+
+  let suffixLen = 0;
+  const maxSuffix = prevText.length - prefixLen;
+  while (
+    suffixLen < maxSuffix &&
+    prevText[prevText.length - 1 - suffixLen] === nextText[nextText.length - 1 - suffixLen]
+  ) {
+    suffixLen += 1;
+  }
+
+  if (prefixLen + suffixLen !== prevText.length) return null;
+  if (nextText[prefixLen] !== '\n') return null;
+
+  return { insertPos: prefixLen, afterPos: prefixLen };
+}
+
+/**
+ * WhatsApp-style smart list continuation & double-Enter disengage for the chat composer.
+ * Triggers ONLY when a single newline ('\n') is inserted (never on paste, delete, or arbitrary edits).
+ */
+export function applyChatListAutoFormat(
+  prevText: string,
+  nextText: string,
+  prevSelection?: TextSelection | null,
+): ChatListAutoFormatResult {
+  const unchangedCursor = nextText.length;
+  const insertion = findSingleNewlineInsertion(prevText, nextText, prevSelection);
+  if (!insertion) {
+    return {
+      text: nextText,
+      selection: { start: unchangedCursor, end: unchangedCursor },
+      changed: false,
+    };
+  }
+
+  const { insertPos, afterPos } = insertion;
+  const lineStart = insertPos === 0 ? 0 : prevText.lastIndexOf('\n', insertPos - 1) + 1;
+  const nextNewline = prevText.indexOf('\n', afterPos);
+  const lineEnd = nextNewline === -1 ? prevText.length : nextNewline;
+
+  const lineBeforeCursor = prevText.slice(lineStart, insertPos);
+  const lineAfterCursor = prevText.slice(afterPos, lineEnd);
+
+  let nextMarker: string | null = null;
+  let contentBefore = '';
+
+  const orderedMatch = ORDERED_LIST_RE.exec(lineBeforeCursor);
+  if (orderedMatch) {
+    const [, indent, numStr, delim, content] = orderedMatch;
+    const num = Number.parseInt(numStr, 10);
+    if (Number.isSafeInteger(num) && numStr.length <= 9) {
+      nextMarker = `${indent}${num + 1}${delim} `;
+      contentBefore = content;
+    }
+  } else {
+    const bulletMatch = BULLET_LIST_RE.exec(lineBeforeCursor);
+    if (bulletMatch) {
+      const [, indent, bullet, content] = bulletMatch;
+      nextMarker = `${indent}${bullet} `;
+      contentBefore = content;
+    }
+  }
+
+  if (!nextMarker) {
+    const cursor = insertPos + 1;
+    return {
+      text: nextText,
+      selection: { start: cursor, end: cursor },
+      changed: false,
+    };
+  }
+
+  // Double-Enter disengage: line only contains the list marker (and optional whitespace).
+  if (contentBefore.trim().length === 0 && lineAfterCursor.trim().length === 0) {
+    const beforeLine = prevText.slice(0, lineStart);
+    const afterLine = prevText.slice(lineEnd);
+    const formatted = beforeLine + afterLine;
+    const cursor = beforeLine.length;
+    return {
+      text: formatted,
+      selection: { start: cursor, end: cursor },
+      changed: true,
+    };
+  }
+
+  // Continue list on the next line.
+  const isMidLineSplit = contentBefore.trim().length > 0 && lineAfterCursor.trim().length > 0;
+  const rawPrefix = prevText.slice(0, insertPos);
+  const prefix = isMidLineSplit ? rawPrefix.replace(/[ \t]+$/, '') : rawPrefix;
+  const suffix = prevText.slice(afterPos).replace(/^[ \t]+/, '');
+  const inserted = `\n${nextMarker}`;
+  const formatted = prefix + inserted + suffix;
+  const cursor = prefix.length + inserted.length;
+
+  return {
+    text: formatted,
+    selection: { start: cursor, end: cursor },
+    changed: true,
+  };
+}

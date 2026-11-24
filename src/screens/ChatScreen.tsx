@@ -25,6 +25,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  TextInputSelectionChangeEventData,
   Vibration,
   View,
 } from 'react-native';
@@ -44,6 +45,7 @@ import {
   uploadChatAttachment,
 } from '../lib/chatApi';
 import {
+  applyChatListAutoFormat,
   buildReplyRef,
   CHAT_STATE_CACHE_KEY,
   ChatAttachment,
@@ -75,6 +77,7 @@ import {
   shouldShowEngineTag,
   SWIPE_REPLY_RESET_THRESHOLD,
   SWIPE_REPLY_THRESHOLD,
+  TextSelection,
 } from '../lib/chatLogic';
 import { radius, screenPad, space, useTheme } from '../theme';
 
@@ -757,6 +760,7 @@ export default function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [draft, setDraft] = useState('');
+  const [forcedSelection, setForcedSelection] = useState<TextSelection | undefined>(undefined);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
   const [uploadingCount, setUploadingCount] = useState(0);
   const [attachSheetVisible, setAttachSheetVisible] = useState(false);
@@ -783,6 +787,8 @@ export default function ChatScreen() {
 
   const listRef = useRef<LegendListRef>(null);
   const inputRef = useRef<TextInput>(null);
+  const draftRef = useRef(draft);
+  const selectionRef = useRef<TextSelection>({ start: 0, end: 0 });
   const pasteViewTagRef = useRef<number | null>(null);
   const pendingCountRef = useRef(0);
   const uploadingCountRef = useRef(0);
@@ -1219,6 +1225,45 @@ export default function ChatScreen() {
     [uploadPickedItems],
   );
 
+  useEffect(() => {
+    if (!forcedSelection) return;
+    const raf = requestAnimationFrame(() => {
+      setForcedSelection(undefined);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [forcedSelection]);
+
+  const setDraftValue = useCallback((next: string) => {
+    draftRef.current = next;
+    selectionRef.current = { start: next.length, end: next.length };
+    setForcedSelection(undefined);
+    setDraft(next);
+  }, []);
+
+  const onChangeDraft = useCallback((nextText: string) => {
+    const formatted = applyChatListAutoFormat(draftRef.current, nextText, selectionRef.current);
+    draftRef.current = formatted.text;
+    if (formatted.changed) {
+      selectionRef.current = formatted.selection;
+      const isAtEnd =
+        formatted.selection.start === formatted.text.length &&
+        formatted.selection.end === formatted.text.length;
+      // Avoid controlled selection flicker on Android when appending/disengaging at the end of text;
+      // only force selection when inserting or disengaging mid-text.
+      setForcedSelection(isAtEnd ? undefined : formatted.selection);
+    } else {
+      setForcedSelection((prev) => (prev ? undefined : prev));
+    }
+    setDraft(formatted.text);
+  }, []);
+
+  const onDraftSelectionChange = useCallback(
+    (e: NativeSyntheticEvent<TextInputSelectionChangeEventData>) => {
+      selectionRef.current = e.nativeEvent.selection;
+    },
+    [],
+  );
+
   const sendMessagePayload = useCallback(
     async (
       text: string,
@@ -1248,7 +1293,7 @@ export default function ChatScreen() {
       };
 
       if (opts?.clearComposer) {
-        setDraft('');
+        setDraftValue('');
         setPendingAttachments([]);
         setEditingState(null);
         setReplyTo(null);
@@ -1278,7 +1323,7 @@ export default function ChatScreen() {
         if (!mountedRef.current) return;
         setMessages((prev) => prev.filter((m) => m.id !== optUser.id));
         if (opts?.clearComposer) {
-          setDraft(trimmed);
+          setDraftValue(trimmed);
           setPendingAttachments(attachments);
           if (opts.restoreEditOnError) {
             setEditingState(opts.restoreEditOnError);
@@ -1294,7 +1339,7 @@ export default function ChatScreen() {
         if (mountedRef.current) setSending(false);
       }
     },
-    [engine, hasMore, persistCache, scrollToBottom],
+    [engine, hasMore, persistCache, scrollToBottom, setDraftValue],
   );
 
   const onSend = useCallback(() => {
@@ -1316,7 +1361,7 @@ export default function ChatScreen() {
     setActionSheetMsg(null);
     setEditingState((prev) => {
       if (prev) {
-        setDraft(prev.previousDraft);
+        setDraftValue(prev.previousDraft);
         setPendingAttachments(prev.previousAttachments);
       }
       return null;
@@ -1328,7 +1373,7 @@ export default function ChatScreen() {
         inputRef.current?.focus();
       }
     }, 80);
-  }, []);
+  }, [setDraftValue]);
 
   const onCancelReply = useCallback(() => {
     setReplyTo(null);
@@ -1351,7 +1396,7 @@ export default function ChatScreen() {
         previousDraft: prev ? prev.previousDraft : draft,
         previousAttachments: prev ? prev.previousAttachments : pendingAttachments,
       }));
-      setDraft(msg.text);
+      setDraftValue(msg.text);
       setPendingAttachments(msg.attachments ? [...msg.attachments] : []);
       if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
       focusTimerRef.current = setTimeout(() => {
@@ -1360,18 +1405,18 @@ export default function ChatScreen() {
         }
       }, 80);
     },
-    [draft, pendingAttachments],
+    [draft, pendingAttachments, setDraftValue],
   );
 
   const onCancelEdit = useCallback(() => {
     setEditingState((prev) => {
       if (prev) {
-        setDraft(prev.previousDraft);
+        setDraftValue(prev.previousDraft);
         setPendingAttachments(prev.previousAttachments);
       }
       return null;
     });
-  }, []);
+  }, [setDraftValue]);
 
   const onResendMessage = useCallback(
     (msg: ChatMessage) => {
@@ -1806,7 +1851,9 @@ export default function ChatScreen() {
               ref={inputRef}
               onLayout={ensureImagePasteAttached}
               value={draft}
-              onChangeText={setDraft}
+              onChangeText={onChangeDraft}
+              onSelectionChange={onDraftSelectionChange}
+              selection={forcedSelection}
               placeholder={`Message ${engineLabel(engine)}`}
               placeholderTextColor={t.textFaint}
               multiline

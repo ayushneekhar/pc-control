@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { _setCacheBackendForTests, CacheBackend } from './cache';
 import {
+  applyChatListAutoFormat,
   buildReplyRef,
   ChatMessage,
   computeAndroidKeyboardOffset,
@@ -475,4 +476,181 @@ test('isReplyableMessage excludes system, pending, and optimistic messages', () 
     }),
     false,
   );
+});
+
+test('applyChatListAutoFormat continues ordered lists and preserves delimiter and indent', () => {
+  const r1 = applyChatListAutoFormat('1. first', '1. first\n', { start: 8, end: 8 });
+  assert.deepEqual(r1, {
+    text: '1. first\n2. ',
+    selection: { start: 12, end: 12 },
+    changed: true,
+  });
+
+  // Multi-digit rollover (9 -> 10)
+  const r2 = applyChatListAutoFormat('9. x', '9. x\n', { start: 4, end: 4 });
+  assert.deepEqual(r2, {
+    text: '9. x\n10. ',
+    selection: { start: 9, end: 9 },
+    changed: true,
+  });
+
+  // Parenthesis delimiter
+  const r3 = applyChatListAutoFormat('1) a', '1) a\n', { start: 4, end: 4 });
+  assert.deepEqual(r3, {
+    text: '1) a\n2) ',
+    selection: { start: 8, end: 8 },
+    changed: true,
+  });
+
+  // Preserving indentation
+  const r4 = applyChatListAutoFormat('  1. a', '  1. a\n', { start: 6, end: 6 });
+  assert.deepEqual(r4, {
+    text: '  1. a\n  2. ',
+    selection: { start: 12, end: 12 },
+    changed: true,
+  });
+
+  const r5 = applyChatListAutoFormat('  2) item', '  2) item\n', { start: 9, end: 9 });
+  assert.deepEqual(r5, {
+    text: '  2) item\n  3) ',
+    selection: { start: 15, end: 15 },
+    changed: true,
+  });
+});
+
+test('applyChatListAutoFormat continues bulleted lists (-, *, •) and preserves indent', () => {
+  const dash = applyChatListAutoFormat('- a', '- a\n', { start: 3, end: 3 });
+  assert.deepEqual(dash, {
+    text: '- a\n- ',
+    selection: { start: 6, end: 6 },
+    changed: true,
+  });
+
+  const star = applyChatListAutoFormat('* a', '* a\n', { start: 3, end: 3 });
+  assert.deepEqual(star, {
+    text: '* a\n* ',
+    selection: { start: 6, end: 6 },
+    changed: true,
+  });
+
+  const bullet = applyChatListAutoFormat('• a', '• a\n', { start: 3, end: 3 });
+  assert.deepEqual(bullet, {
+    text: '• a\n• ',
+    selection: { start: 6, end: 6 },
+    changed: true,
+  });
+
+  const indented = applyChatListAutoFormat('  • item', '  • item\n', { start: 8, end: 8 });
+  assert.deepEqual(indented, {
+    text: '  • item\n  • ',
+    selection: { start: 13, end: 13 },
+    changed: true,
+  });
+});
+
+test('applyChatListAutoFormat disengages cleanly on double Enter for empty ordered and unordered items', () => {
+  // Ordered item disengage after previous item
+  const r1 = applyChatListAutoFormat('1. a\n2. ', '1. a\n2. \n', { start: 8, end: 8 });
+  assert.deepEqual(r1, {
+    text: '1. a\n',
+    selection: { start: 5, end: 5 },
+    changed: true,
+  });
+
+  // Unordered item disengage after previous item
+  const r2 = applyChatListAutoFormat('- a\n- ', '- a\n- \n', { start: 6, end: 6 });
+  assert.deepEqual(r2, {
+    text: '- a\n',
+    selection: { start: 4, end: 4 },
+    changed: true,
+  });
+
+  // Indented empty marker with extra trailing spaces on first line
+  const r3 = applyChatListAutoFormat('  2)   ', '  2)   \n', { start: 7, end: 7 });
+  assert.deepEqual(r3, {
+    text: '',
+    selection: { start: 0, end: 0 },
+    changed: true,
+  });
+
+  // Mid-text disengage leaves a clean blank unindented line between items
+  const r4 = applyChatListAutoFormat('1. a\n2. \n3. c', '1. a\n2. \n\n3. c', { start: 8, end: 8 });
+  assert.deepEqual(r4, {
+    text: '1. a\n\n3. c',
+    selection: { start: 5, end: 5 },
+    changed: true,
+  });
+});
+
+test('applyChatListAutoFormat splits a list item mid-line with accurate cursor placement', () => {
+  // Cursor right after "hello" before the space
+  const r1 = applyChatListAutoFormat('1. hello world', '1. hello\n world', { start: 8, end: 8 });
+  assert.deepEqual(r1, {
+    text: '1. hello\n2. world',
+    selection: { start: 12, end: 12 },
+    changed: true,
+  });
+
+  // Cursor right after the space before "world"
+  const r2 = applyChatListAutoFormat('1. hello world', '1. hello \nworld', { start: 9, end: 9 });
+  assert.deepEqual(r2, {
+    text: '1. hello\n2. world',
+    selection: { start: 12, end: 12 },
+    changed: true,
+  });
+
+  // Inserting a new item at the end of an earlier list line
+  const r3 = applyChatListAutoFormat('1. a\n2. b', '1. a\n\n2. b', { start: 4, end: 4 });
+  assert.deepEqual(r3, {
+    text: '1. a\n2. \n2. b',
+    selection: { start: 8, end: 8 },
+    changed: true,
+  });
+
+  // Works even when prevSelection is omitted (Android IME fallback)
+  const r4 = applyChatListAutoFormat('1. hello world', '1. hello\n world');
+  assert.deepEqual(r4, {
+    text: '1. hello\n2. world',
+    selection: { start: 12, end: 12 },
+    changed: true,
+  });
+});
+
+test('applyChatListAutoFormat ignores multi-line paste, deletions, and plain text', () => {
+  // Multi-line paste does NOT trigger auto-formatting
+  const paste = applyChatListAutoFormat('1. a', '1. a\nfoo\nbar', { start: 4, end: 4 });
+  assert.equal(paste.changed, false);
+  assert.equal(paste.text, '1. a\nfoo\nbar');
+
+  // Backspace / deletion does NOT trigger or re-insert markers
+  const delSpace = applyChatListAutoFormat('1. a\n2. ', '1. a\n2.', { start: 8, end: 8 });
+  assert.equal(delSpace.changed, false);
+  assert.equal(delSpace.text, '1. a\n2.');
+
+  const delBullet = applyChatListAutoFormat('- ', '-', { start: 2, end: 2 });
+  assert.equal(delBullet.changed, false);
+  assert.equal(delBullet.text, '-');
+
+  // Plain text / non-list lines unaffected
+  const plain = applyChatListAutoFormat('hello world', 'hello world\n', { start: 11, end: 11 });
+  assert.equal(plain.changed, false);
+  assert.equal(plain.text, 'hello world\n');
+
+  // Non-list punctuation (no space after marker, horizontal rule, markdown bold)
+  const noSpace = applyChatListAutoFormat('1.item', '1.item\n', { start: 6, end: 6 });
+  assert.equal(noSpace.changed, false);
+  assert.equal(noSpace.text, '1.item\n');
+
+  const hr = applyChatListAutoFormat('---', '---\n', { start: 3, end: 3 });
+  assert.equal(hr.changed, false);
+  assert.equal(hr.text, '---\n');
+
+  const bold = applyChatListAutoFormat('*bold*', '*bold*\n', { start: 6, end: 6 });
+  assert.equal(bold.changed, false);
+  assert.equal(bold.text, '*bold*\n');
+
+  // Regular typing (non-newline char)
+  const typing = applyChatListAutoFormat('1. a', '1. ab', { start: 4, end: 4 });
+  assert.equal(typing.changed, false);
+  assert.equal(typing.text, '1. ab');
 });

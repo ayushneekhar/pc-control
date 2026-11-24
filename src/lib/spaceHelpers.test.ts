@@ -6,11 +6,15 @@ import {
   filterAndSortCandidates,
   filterAndSortDriveItems,
   formatUpstreamErrors,
+  mergeEnqueuedJobs,
   parseSpaceJobsSseBlocks,
+  selectionStateForVisible,
   summarizeDriveSelection,
   summarizeSelection,
   toFreeRequest,
+  toggleSelectAllVisible,
   transferStatusLabel,
+  visibleDownloadDriveJobs,
 } from './spaceHelpers';
 
 const SAMPLE: SpaceCandidate[] = [
@@ -212,4 +216,77 @@ test('activeTransferJobs, transferStatusLabel, and parseSpaceJobsSseBlocks', () 
   assert.equal(parsed.events[0].event, 'snapshot');
   assert.equal(parsed.events[0].jobs[0].id, 'j1');
   assert.equal(parsed.rest, 'event: jobs\ndata: {"jobs":');
+});
+
+test('selectionStateForVisible and toggleSelectAllVisible handle select all / deselect all', () => {
+  const visible = ['movie:12', 'movie:15'];
+  const empty = new Set<string>();
+  assert.deepEqual(selectionStateForVisible(visible, empty), {
+    visibleCount: 2,
+    selectedVisibleCount: 0,
+    allSelected: false,
+    someSelected: false,
+  });
+
+  const all = toggleSelectAllVisible(visible, new Set(['season:5:1']));
+  assert.deepEqual(Array.from(all).sort(), ['movie:12', 'movie:15', 'season:5:1']);
+  assert.deepEqual(selectionStateForVisible(visible, all), {
+    visibleCount: 2,
+    selectedVisibleCount: 2,
+    allSelected: true,
+    someSelected: false,
+  });
+
+  const deselected = toggleSelectAllVisible(visible, all);
+  assert.deepEqual(Array.from(deselected), ['season:5:1']);
+
+  const partial = new Set(['movie:12']);
+  assert.deepEqual(selectionStateForVisible(visible, partial), {
+    visibleCount: 2,
+    selectedVisibleCount: 1,
+    allSelected: false,
+    someSelected: true,
+  });
+  assert.deepEqual(Array.from(toggleSelectAllVisible(visible, partial)).sort(), ['movie:12', 'movie:15']);
+});
+
+test('mergeEnqueuedJobs and visibleDownloadDriveJobs prioritize active, failed, and recent jobs', () => {
+  const makeJob = (id: string, status: TransferJob['status'], finished_at: number | null): TransferJob => ({
+    id,
+    op: 'offload',
+    item_id: `movie:${id}`,
+    kind: 'movie',
+    title: `Movie ${id}`,
+    subtitle: null,
+    rel_path: `Movies/Movie ${id}`,
+    size_bytes: 1000,
+    status,
+    bytes_done: 0,
+    bytes_total: 1000,
+    pct: 0,
+    speed_bps: 0,
+    eta_s: null,
+    error: status === 'failed' ? 'boom' : null,
+    warnings: [],
+    created_at: 1000,
+    started_at: 1001,
+    finished_at,
+  });
+
+  const j1 = makeJob('1', 'copying', null);
+  const j2 = makeJob('2', 'queued', null);
+  const merged = mergeEnqueuedJobs([j1], [{ ...j1, pct: 25 }, j2]);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].pct, 25);
+  assert.equal(merged[1].id, '2');
+
+  const now = 5000;
+  const recentDone = makeJob('3', 'done', now - 120);
+  const oldDone = makeJob('4', 'done', now - 7200);
+  const oldFailed = makeJob('5', 'failed', now - 7200);
+  const visible = visibleDownloadDriveJobs([oldDone, recentDone, j1, oldFailed, j2], now);
+  assert.deepEqual(
+    visible.map((j) => j.id),
+    ['1', '2', '3', '5'],
+  );
 });

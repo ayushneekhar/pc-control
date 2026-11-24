@@ -33,7 +33,6 @@ import {
   getSpaceDrive,
   offloadSpaceItems,
   restoreDriveItems,
-  serverUrl,
   SpaceCandidate,
   SpaceFreeResponse,
   SpaceHdd,
@@ -48,15 +47,18 @@ import {
   filterAndSortCandidates,
   filterAndSortDriveItems,
   formatUpstreamErrors,
-  parseSpaceJobsSseBlocks,
+  mergeEnqueuedJobs,
+  selectionStateForVisible,
   SpaceFilter,
   SpaceMode,
   SpaceSort,
   summarizeDriveSelection,
   summarizeSelection,
   toFreeRequest,
+  toggleSelectAllVisible,
   transferStatusLabel,
 } from '../lib/spaceHelpers';
+import { subscribeSpaceJobs } from '../lib/spaceJobsStream';
 import { radius, screenPad, space, useTheme } from '../theme';
 
 const CACHE_KEY_WATCHED = 'space:overview';
@@ -454,6 +456,7 @@ export default function SpaceScreen() {
   const [sseConnected, setSseConnected] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+  const [driveError, setDriveError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: 'ok' | 'warn' | 'bad'; title: string; body?: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SpaceFilter>('all');
@@ -467,12 +470,32 @@ export default function SpaceScreen() {
   const [feedback, setFeedback] = useState<SpaceFreeResponse | null>(null);
   const [driveDeleteFeedback, setDriveDeleteFeedback] = useState<DriveDeleteResponse | null>(null);
 
+  const scrollRef = useRef<ScrollView | null>(null);
+  const mountedRef = useRef(true);
+  const refreshingRef = useRef(false);
+  const jobsSeqRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const activeScope: SpaceScope = mode === 'all' ? 'all' : 'watched';
   const localData = activeScope === 'all' ? allData : watchedData;
+  const modeRef = useRef<SpaceMode>(mode);
+  const activeScopeRef = useRef<SpaceScope>(activeScope);
+
+  useEffect(() => {
+    modeRef.current = mode;
+    activeScopeRef.current = activeScope;
+  }, [activeScope, mode]);
 
   const loadLocal = useCallback(async (scope: SpaceScope) => {
     try {
       const res = await getSpace(scope);
+      if (!mountedRef.current) return;
       const key = scope === 'all' ? CACHE_KEY_ALL : CACHE_KEY_WATCHED;
       cacheSet(key, res);
       if (scope === 'all') setAllData(res);
@@ -488,16 +511,23 @@ export default function SpaceScreen() {
         return next.size === prev.size ? prev : next;
       });
     } catch (e) {
-      setError((e as Error).message);
+      if (mountedRef.current) setError((e as Error).message);
     }
   }, []);
 
   const loadDrive = useCallback(async (forceRefresh = false) => {
+    const reqSeq = jobsSeqRef.current;
     try {
       const res = await getSpaceDrive(forceRefresh);
+      if (!mountedRef.current) return;
       cacheSet(CACHE_KEY_DRIVE, res);
       setDriveData(res);
-      setJobs(res.jobs);
+      setDriveError(null);
+      // Only overwrite jobs if no newer SSE or enqueue update arrived while this request was in flight
+      if (jobsSeqRef.current === reqSeq) {
+        jobsSeqRef.current += 1;
+        setJobs(res.jobs);
+      }
       setSelectedDrivePaths((prev) => {
         if (prev.size === 0) return prev;
         const valid = new Set(res.items.map((it) => it.rel_path));
@@ -507,19 +537,23 @@ export default function SpaceScreen() {
         }
         return next.size === prev.size ? prev : next;
       });
-    } catch {
-      // Keep Drive card graceful if endpoint fails temporarily
+    } catch (e) {
+      if (mountedRef.current) {
+        setDriveError((e as Error).message);
+      }
     }
   }, []);
 
   const loadAll = useCallback(
     async (forceDrive = false) => {
+      const curMode = modeRef.current;
+      const curScope = activeScopeRef.current;
       await Promise.all([
-        mode === 'drive' ? Promise.resolve() : loadLocal(activeScope),
+        curMode === 'drive' ? Promise.resolve() : loadLocal(curScope),
         loadDrive(forceDrive),
       ]);
     },
-    [activeScope, loadDrive, loadLocal, mode],
+    [loadDrive, loadLocal],
   );
 
   // Track job transitions so completing a transfer refreshes local & drive lists
@@ -539,6 +573,7 @@ export default function SpaceScreen() {
       const nextMap: Record<string, string> = {};
       for (const j of nextJobs) nextMap[j.id] = j.status;
       prevJobStatusRef.current = nextMap;
+      jobsSeqRef.current += 1;
       setJobs(nextJobs);
       if (latestFailed) {
         setNotice({
@@ -549,89 +584,17 @@ export default function SpaceScreen() {
       }
       if (anyFinished) {
         void loadDrive(true);
-        void loadLocal(activeScope);
+        void loadLocal(activeScopeRef.current);
       }
     },
-    [activeScope, loadDrive, loadLocal],
+    [loadDrive, loadLocal],
   );
 
   // Subscribe to SSE /pc/api/space/jobs/stream while screen is focused
   useFocusEffect(
     useCallback(() => {
       void loadAll(false);
-
-      let stopped = false;
-      let xhr: XMLHttpRequest | null = null;
-      let retryTimer: ReturnType<typeof setTimeout> | null = null;
-      let retryDelay = 1500;
-      let seen = 0;
-      let buf = '';
-
-      const closeXhr = () => {
-        const cur = xhr;
-        xhr = null;
-        if (cur) {
-          cur.onprogress = cur.onerror = cur.onload = cur.onreadystatechange = null;
-          try {
-            cur.abort();
-          } catch {}
-        }
-      };
-
-      const connect = () => {
-        if (stopped) return;
-        seen = 0;
-        buf = '';
-        const x = new XMLHttpRequest();
-        xhr = x;
-        x.open('GET', serverUrl() + '/pc/api/space/jobs/stream');
-        x.setRequestHeader('Accept', 'text/event-stream');
-        x.setRequestHeader('Cache-Control', 'no-cache');
-
-        const consume = () => {
-          if (xhr !== x) return;
-          const text = x.responseText || '';
-          if (text.length <= seen) return;
-          buf += text.slice(seen);
-          seen = text.length;
-          const { events, rest } = parseSpaceJobsSseBlocks(buf);
-          buf = rest;
-          for (const ev of events) {
-            if (ev.event === 'snapshot' || ev.event === 'jobs') {
-              retryDelay = 1500;
-              setSseConnected(true);
-              handleJobsUpdate(ev.jobs);
-            }
-          }
-        };
-
-        const fail = () => {
-          if (xhr !== x) return;
-          closeXhr();
-          setSseConnected(false);
-          if (stopped) return;
-          const d = retryDelay;
-          retryDelay = Math.min(retryDelay * 2, 15000);
-          retryTimer = setTimeout(connect, d);
-        };
-
-        x.onprogress = consume;
-        x.onreadystatechange = () => {
-          if (x.readyState === 3 || x.readyState === 4) consume();
-        };
-        x.onerror = fail;
-        x.onload = fail;
-        x.send();
-      };
-
-      connect();
-
-      return () => {
-        stopped = true;
-        if (retryTimer) clearTimeout(retryTimer);
-        closeXhr();
-        setSseConnected(false);
-      };
+      return subscribeSpaceJobs(handleJobsUpdate, setSseConnected);
     }, [handleJobsUpdate, loadAll]),
   );
 
@@ -697,21 +660,68 @@ export default function SpaceScreen() {
     });
   }, []);
 
+  const visibleLocalKeys = useMemo(() => visibleLocal.map((it) => it.id), [visibleLocal]);
+  const visibleDriveKeys = useMemo(() => visibleDrive.map((it) => it.rel_path), [visibleDrive]);
+  const visibleTotalBytes = useMemo(
+    () =>
+      mode === 'drive'
+        ? visibleDrive.reduce((sum, it) => sum + it.size_bytes, 0)
+        : visibleLocal.reduce((sum, it) => sum + it.size_bytes, 0),
+    [mode, visibleDrive, visibleLocal],
+  );
+  const visibleSelection = useMemo(
+    () =>
+      mode === 'drive'
+        ? selectionStateForVisible(visibleDriveKeys, selectedDrivePaths)
+        : selectionStateForVisible(visibleLocalKeys, selectedIds),
+    [mode, selectedDrivePaths, selectedIds, visibleDriveKeys, visibleLocalKeys],
+  );
+
+  const onToggleSelectAllVisible = useCallback(() => {
+    if (mode === 'drive') {
+      setSelectedDrivePaths((prev) => toggleSelectAllVisible(visibleDriveKeys, prev));
+    } else {
+      setSelectedIds((prev) => toggleSelectAllVisible(visibleLocalKeys, prev));
+    }
+  }, [mode, visibleDriveKeys, visibleLocalKeys]);
+
+  const scrollToTop = useCallback(() => {
+    scrollRef.current?.scrollTo({ y: 0, animated: true });
+  }, []);
+
+  const onRefresh = useCallback(async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    setRefreshing(true);
+    try {
+      await loadAll(true);
+    } finally {
+      refreshingRef.current = false;
+      if (mountedRef.current) setRefreshing(false);
+    }
+  }, [loadAll]);
+
   const onCancelJob = useCallback(async (jobId: string) => {
     setCancellingId(jobId);
     try {
-      await cancelSpaceJob(jobId);
-      await loadDrive(false);
+      const res = await cancelSpaceJob(jobId);
+      if (res?.job) {
+        jobsSeqRef.current += 1;
+        setJobs((prev) => mergeEnqueuedJobs(prev, [res.job]));
+      }
+      void loadDrive(false);
     } catch (e) {
       setError((e as Error).message);
+      scrollToTop();
     } finally {
-      setCancellingId(null);
+      if (mountedRef.current) setCancellingId(null);
     }
-  }, [loadDrive]);
+  }, [loadDrive, scrollToTop]);
 
   const onConfirmAction = useCallback(async () => {
     if (busyAction || !confirmKind) return;
     setBusyAction(true);
+    setError(null);
     try {
       if (confirmKind === 'delete_local') {
         const res = await freeSpace(toFreeRequest(localSelection.selected));
@@ -725,40 +735,65 @@ export default function SpaceScreen() {
           }
           return next;
         });
+        scrollToTop();
         await loadLocal(activeScope);
       } else if (confirmKind === 'offload') {
         const res = await offloadSpaceItems(toFreeRequest(localSelection.selected));
         setConfirmKind(null);
         setSelectedIds(new Set());
+        if (res.jobs.length > 0) {
+          for (const j of res.jobs) {
+            prevJobStatusRef.current[j.id] = j.status;
+          }
+          jobsSeqRef.current += 1;
+          setJobs((prev) => mergeEnqueuedJobs(prev, res.jobs));
+        }
         const n = res.jobs.length;
+        const hasErrs = Boolean(res.errors && res.errors.length > 0);
         setNotice({
-          tone: res.errors && res.errors.length > 0 ? 'warn' : 'ok',
-          title: n > 0 ? `Queued ${n} item${n === 1 ? '' : 's'} for offload` : 'No new items queued',
-          body: res.errors && res.errors.length > 0 ? res.errors.map((e) => e.error).join('; ') : undefined,
+          tone: hasErrs ? (n > 0 ? 'warn' : 'bad') : 'ok',
+          title:
+            n > 0
+              ? `Queued ${n} item${n === 1 ? '' : 's'} for offload`
+              : hasErrs
+                ? 'Could not queue offload'
+                : 'Already queued for offload',
+          body: hasErrs ? res.errors!.map((e) => e.error).join('; ') : undefined,
         });
-        await loadDrive(false);
+        scrollToTop();
+        void loadDrive(false);
       } else if (confirmKind === 'restore') {
         const res = await restoreDriveItems(driveSelection.selected.map((it) => ({ rel_path: it.rel_path })));
         setConfirmKind(null);
         setSelectedDrivePaths(new Set());
+        if (res.jobs.length > 0) {
+          for (const j of res.jobs) {
+            prevJobStatusRef.current[j.id] = j.status;
+          }
+          jobsSeqRef.current += 1;
+          setJobs((prev) => mergeEnqueuedJobs(prev, res.jobs));
+        }
         const n = res.jobs.length;
         setNotice({
           tone: 'ok',
-          title: n > 0 ? `Queued ${n} item${n === 1 ? '' : 's'} to restore` : 'Already queued',
+          title: n > 0 ? `Queued ${n} item${n === 1 ? '' : 's'} to restore` : 'Already queued for restore',
         });
-        await loadDrive(false);
+        scrollToTop();
+        void loadDrive(false);
       } else if (confirmKind === 'delete_drive') {
         const res = await deleteDriveItems(driveSelection.selected.map((it) => ({ rel_path: it.rel_path })));
         setConfirmKind(null);
         setDriveDeleteFeedback(res);
         setSelectedDrivePaths(new Set());
+        scrollToTop();
         await loadDrive(true);
       }
     } catch (e) {
       setConfirmKind(null);
       setError((e as Error).message);
+      scrollToTop();
     } finally {
-      setBusyAction(false);
+      if (mountedRef.current) setBusyAction(false);
     }
   }, [
     activeScope,
@@ -768,6 +803,7 @@ export default function SpaceScreen() {
     loadDrive,
     loadLocal,
     localSelection.selected,
+    scrollToTop,
   ]);
 
   const upstreamErr = formatUpstreamErrors(mode === 'drive' ? driveData?.errors : localData?.errors);
@@ -779,11 +815,13 @@ export default function SpaceScreen() {
     !feedback ? 'ok' : failedCount === feedback.results.length ? 'bad' : failedCount > 0 || hasWarnings ? 'warn' : 'ok';
 
   const hasSelection = mode === 'drive' ? driveSelection.count > 0 : localSelection.count > 0;
-  const driveConfigured = Boolean(driveData?.configured);
+  // Only disable Offload when Drive is explicitly known to be unconfigured; allow attempts while loading or on transient status errors
+  const driveExplicitlyUnconfigured = driveData !== null && !driveData.configured;
 
   return (
     <Screen title="Space" onBack={() => nav.goBack()} scroll={false}>
       <ScrollView
+        ref={scrollRef}
         style={{ flex: 1 }}
         contentContainerStyle={{
           paddingHorizontal: screenPad,
@@ -793,11 +831,7 @@ export default function SpaceScreen() {
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
-            onRefresh={async () => {
-              setRefreshing(true);
-              await loadAll(true);
-              setRefreshing(false);
-            }}
+            onRefresh={() => void onRefresh()}
             tintColor={t.accent}
             colors={[t.accent]}
             progressBackgroundColor={t.card}
@@ -807,6 +841,12 @@ export default function SpaceScreen() {
         <Segmented options={MODES} value={mode} onChange={onChangeMode} />
 
         {error ? <Banner tone="bad" title={error} /> : null}
+
+        {driveError ? (
+          <Banner tone="warn" title="Drive status unavailable">
+            {driveError}
+          </Banner>
+        ) : null}
 
         {notice ? (
           <Banner tone={notice.tone} title={notice.title}>
@@ -936,6 +976,50 @@ export default function SpaceScreen() {
           </Pressable>
         </View>
 
+        {visibleSelection.visibleCount > 0 ? (
+          <View style={st.selectBar}>
+            <Pressable
+              onPress={onToggleSelectAllVisible}
+              hitSlop={6}
+              accessibilityRole="checkbox"
+              accessibilityState={{
+                checked: visibleSelection.allSelected
+                  ? true
+                  : visibleSelection.someSelected
+                    ? 'mixed'
+                    : false,
+              }}
+              accessibilityLabel={visibleSelection.allSelected ? 'Deselect all' : 'Select all'}
+              style={({ pressed }) => [st.selectAllBtn, pressed && { opacity: 0.75 }]}
+            >
+              <Icon
+                name={
+                  visibleSelection.allSelected
+                    ? 'checkbox-marked'
+                    : visibleSelection.someSelected
+                      ? 'minus-box'
+                      : 'checkbox-blank-outline'
+                }
+                size={20}
+                color={visibleSelection.allSelected || visibleSelection.someSelected ? t.accent : t.textFaint}
+              />
+              <Text
+                style={[
+                  st.selectAllText,
+                  { color: visibleSelection.allSelected ? t.accent : t.text },
+                ]}
+              >
+                {visibleSelection.allSelected ? 'Deselect all' : 'Select all'}
+              </Text>
+            </Pressable>
+            <Text style={[st.metaText, { color: t.textDim }]} numberOfLines={1}>
+              {visibleSelection.selectedVisibleCount > 0
+                ? `${visibleSelection.selectedVisibleCount} of ${visibleSelection.visibleCount} selected`
+                : `${visibleSelection.visibleCount} item${visibleSelection.visibleCount === 1 ? '' : 's'} · ${bytes(visibleTotalBytes, 1)}`}
+            </Text>
+          </View>
+        ) : null}
+
         {mode === 'drive' ? (
           !driveData ? (
             <ListSkeleton />
@@ -1024,7 +1108,7 @@ export default function SpaceScreen() {
               label="Offload to Drive"
               icon="cloud-upload"
               kind="primary"
-              disabled={!driveConfigured}
+              disabled={driveExplicitlyUnconfigured}
               style={{ flex: 1 }}
               onPress={() => setConfirmKind('offload')}
             />
@@ -1230,6 +1314,21 @@ const st = StyleSheet.create({
     gap: space(2),
     minHeight: 34,
   },
+  selectBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: space(2),
+    paddingHorizontal: space(1),
+    minHeight: 32,
+  },
+  selectAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space(2),
+    paddingVertical: 4,
+  },
+  selectAllText: { fontSize: 13, fontWeight: '500' },
   chip: {
     flexDirection: 'row',
     alignItems: 'center',

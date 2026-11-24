@@ -335,6 +335,8 @@ class GDriveOffloadManagerTests(unittest.TestCase):
         # Both rclone copy and rclone check ran
         self.assertEqual([c[1] for c in popen_cmds], ["copy", "check"])
         self.assertIn("--use-json-log", popen_cmds[0])
+        self.assertIn("--stats-log-level", popen_cmds[0])
+        self.assertEqual(popen_cmds[0][popen_cmds[0].index("--stats-log-level") + 1], "NOTICE")
         self.assertTrue(popen_cmds[0][3].endswith("gdrive:Media/Movies/Inception (2010)"))
         # Local file deleted via watched.py flow after verify
         self.assertFalse(os.path.exists(mp))
@@ -510,6 +512,48 @@ class GDriveOffloadManagerTests(unittest.TestCase):
         # Local file MUST remain untouched
         self.assertTrue(os.path.exists(mp))
         self.assertFalse(any(c[0] == "delete_movie_file" for c in wa.calls))
+
+    def test_drive_status_fast_fail_flags_and_cached_fallback_on_timeout(self):
+        mgr = self._make_manager(start_worker=False)
+        calls = []
+
+        def fake_run_ok(args, timeout=30):
+            calls.append((args, timeout))
+            if args[0] == "listremotes":
+                return _cp(0, "gdrive:\n")
+            if args[0] == "about":
+                return _cp(0, json.dumps({"total": 1000, "used": 250, "free": 750}))
+            if args[0] == "lsjson":
+                return _cp(0, "[]")
+            return _cp(0, "")
+
+        with mock.patch.object(mgr, "_run_rclone", side_effect=fake_run_ok), \
+                mock.patch("os.path.ismount", return_value=True):
+            code, st1 = mgr.drive_status(force_refresh=True)
+            self.assertEqual(code, 200)
+            self.assertEqual(st1["quota"]["used_bytes"], 250)
+            about_call = next(args for args, _ in calls if args[0] == "about")
+            self.assertIn("--low-level-retries", about_call)
+            self.assertIn("--retries", about_call)
+
+        def fake_run_timeout(args, timeout=30):
+            if args[0] == "listremotes":
+                return _cp(0, "gdrive:\n")
+            if args[0] == "about":
+                raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+            if args[0] == "lsjson":
+                raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+            return _cp(0, "")
+
+        with mock.patch.object(mgr, "_run_rclone", side_effect=fake_run_timeout), \
+                mock.patch("os.path.ismount", return_value=True):
+            code, st2 = mgr.drive_status(force_refresh=True)
+            self.assertEqual(code, 200)
+            # Preserves last known quota while surfacing error cleanly without crashing
+            self.assertEqual(st2["quota"]["used_bytes"], 250)
+            self.assertIn("quota", st2["errors"])
+            self.assertIn("movies", st2["errors"])
+            self.assertIn("shows", st2["errors"])
 
     def test_delete_from_drive_rejects_traversal_and_root(self):
         mgr = self._make_manager(start_worker=False)

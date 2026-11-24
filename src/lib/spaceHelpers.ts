@@ -89,8 +89,68 @@ export function toFreeRequest(items: SpaceCandidate[]): SpaceFreeItemRequest[] {
 
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'copying', 'verifying', 'cleaning']);
 
+export function selectionStateForVisible(visibleKeys: readonly string[], selectedKeys: ReadonlySet<string>) {
+  const visibleCount = visibleKeys.length;
+  let selectedVisibleCount = 0;
+  for (const key of visibleKeys) {
+    if (selectedKeys.has(key)) selectedVisibleCount += 1;
+  }
+  return {
+    visibleCount,
+    selectedVisibleCount,
+    allSelected: visibleCount > 0 && selectedVisibleCount === visibleCount,
+    someSelected: selectedVisibleCount > 0 && selectedVisibleCount < visibleCount,
+  };
+}
+
+export function toggleSelectAllVisible(
+  visibleKeys: readonly string[],
+  selectedKeys: ReadonlySet<string>,
+): Set<string> {
+  const next = new Set(selectedKeys);
+  if (visibleKeys.length === 0) return next;
+  const allSelected = visibleKeys.every((k) => next.has(k));
+  if (allSelected) {
+    for (const k of visibleKeys) next.delete(k);
+  } else {
+    for (const k of visibleKeys) next.add(k);
+  }
+  return next;
+}
+
+export function mergeEnqueuedJobs(existing: TransferJob[], created: TransferJob[]): TransferJob[] {
+  if (created.length === 0) return existing;
+  const byId = new Map<string, TransferJob>();
+  for (const j of existing) byId.set(j.id, j);
+  for (const j of created) byId.set(j.id, j);
+  return Array.from(byId.values());
+}
+
 export function activeTransferJobs(jobs: TransferJob[]): TransferJob[] {
   return jobs.filter((j) => ACTIVE_JOB_STATUSES.has(j.status));
+}
+
+const RECENT_TERMINAL_WINDOW_SEC = 1800; // 30 minutes
+const MAX_RECENT_TERMINAL_JOBS = 6;
+
+export function visibleDownloadDriveJobs(
+  jobs: TransferJob[],
+  nowSec = Math.floor(Date.now() / 1000),
+): TransferJob[] {
+  const active: TransferJob[] = [];
+  const terminal: TransferJob[] = [];
+  for (const j of jobs) {
+    if (ACTIVE_JOB_STATUSES.has(j.status)) {
+      active.push(j);
+    } else if (
+      j.status === 'failed' ||
+      nowSec - (j.finished_at ?? j.created_at) <= RECENT_TERMINAL_WINDOW_SEC
+    ) {
+      terminal.push(j);
+    }
+  }
+  terminal.sort((a, b) => (b.finished_at ?? b.created_at) - (a.finished_at ?? a.created_at));
+  return [...active, ...terminal.slice(0, MAX_RECENT_TERMINAL_JOBS)];
 }
 
 export function transferStatusLabel(job: TransferJob): string {

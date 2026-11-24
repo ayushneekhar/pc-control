@@ -89,10 +89,129 @@ export function toFreeRequest(items: SpaceCandidate[]): SpaceFreeItemRequest[] {
 
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'copying', 'verifying', 'cleaning']);
 
-export function selectionStateForVisible(visibleKeys: readonly string[], selectedKeys: ReadonlySet<string>) {
-  const visibleCount = visibleKeys.length;
+const ACTIVE_STATUS_PRIORITY: Record<string, number> = {
+  cleaning: 4,
+  verifying: 3,
+  copying: 2,
+  queued: 1,
+};
+
+function pickHigherPriorityJob(existing: TransferJob | undefined, candidate: TransferJob): TransferJob {
+  if (!existing) return candidate;
+  return (ACTIVE_STATUS_PRIORITY[candidate.status] ?? 0) > (ACTIVE_STATUS_PRIORITY[existing.status] ?? 0)
+    ? candidate
+    : existing;
+}
+
+export function activeOffloadJobsByLocalId(
+  candidates: readonly (Pick<SpaceCandidate, 'id'> & { rel_path?: string | null })[],
+  jobs: readonly TransferJob[],
+): Map<string, TransferJob> {
+  const map = new Map<string, TransferJob>();
+  const activeOffloads = jobs.filter((j) => j.op === 'offload' && ACTIVE_JOB_STATUSES.has(j.status));
+  if (activeOffloads.length === 0 || candidates.length === 0) return map;
+
+  const byItemId = new Map<string, TransferJob>();
+  const byRelPath = new Map<string, TransferJob>();
+  for (const job of activeOffloads) {
+    if (job.item_id) {
+      byItemId.set(job.item_id, pickHigherPriorityJob(byItemId.get(job.item_id), job));
+    }
+    if (job.rel_path) {
+      byRelPath.set(job.rel_path, pickHigherPriorityJob(byRelPath.get(job.rel_path), job));
+    }
+  }
+
+  for (const item of candidates) {
+    let matched = byItemId.get(item.id) ?? byRelPath.get(item.id);
+    if (!matched && item.rel_path) {
+      matched = byRelPath.get(item.rel_path) ?? byItemId.get(item.rel_path);
+    }
+    if (matched) {
+      map.set(item.id, matched);
+    }
+  }
+  return map;
+}
+
+export function activeRestoreJobsByDrivePath(
+  items: readonly Pick<DriveItem, 'id' | 'rel_path'>[],
+  jobs: readonly TransferJob[],
+): Map<string, TransferJob> {
+  const map = new Map<string, TransferJob>();
+  const activeRestores = jobs.filter((j) => j.op === 'restore' && ACTIVE_JOB_STATUSES.has(j.status));
+  if (activeRestores.length === 0 || items.length === 0) return map;
+
+  const byItemId = new Map<string, TransferJob>();
+  const byRelPath = new Map<string, TransferJob>();
+  for (const job of activeRestores) {
+    if (job.item_id) {
+      byItemId.set(job.item_id, pickHigherPriorityJob(byItemId.get(job.item_id), job));
+    }
+    if (job.rel_path) {
+      byRelPath.set(job.rel_path, pickHigherPriorityJob(byRelPath.get(job.rel_path), job));
+    }
+  }
+
+  for (const item of items) {
+    const matched =
+      byRelPath.get(item.rel_path) ??
+      byItemId.get(item.rel_path) ??
+      (item.id ? byItemId.get(item.id) ?? byRelPath.get(item.id) : undefined);
+    if (matched) {
+      map.set(item.rel_path, matched);
+    }
+  }
+  return map;
+}
+
+export function inFlightBadgeLabel(job: TransferJob): string {
+  switch (job.status) {
+    case 'queued':
+      return 'Queued';
+    case 'copying':
+      return job.op === 'restore' ? 'Restoring' : 'Uploading';
+    case 'verifying':
+      return 'Verifying';
+    case 'cleaning':
+      return 'Finishing';
+    default:
+      return transferStatusLabel(job);
+  }
+}
+
+export function pruneDisabledSelection(
+  selectedKeys: Set<string>,
+  disabledKeys: ReadonlySet<string>,
+): Set<string> {
+  if (selectedKeys.size === 0 || disabledKeys.size === 0) return selectedKeys;
+  let changed = false;
+  for (const key of selectedKeys) {
+    if (disabledKeys.has(key)) {
+      changed = true;
+      break;
+    }
+  }
+  if (!changed) return selectedKeys;
+  const next = new Set<string>();
+  for (const key of selectedKeys) {
+    if (!disabledKeys.has(key)) next.add(key);
+  }
+  return next;
+}
+
+export function selectionStateForVisible(
+  visibleKeys: readonly string[],
+  selectedKeys: ReadonlySet<string>,
+  disabledKeys?: ReadonlySet<string>,
+) {
+  const selectableKeys =
+    disabledKeys && disabledKeys.size > 0
+      ? visibleKeys.filter((k) => !disabledKeys.has(k))
+      : visibleKeys;
+  const visibleCount = selectableKeys.length;
   let selectedVisibleCount = 0;
-  for (const key of visibleKeys) {
+  for (const key of selectableKeys) {
     if (selectedKeys.has(key)) selectedVisibleCount += 1;
   }
   return {
@@ -106,14 +225,22 @@ export function selectionStateForVisible(visibleKeys: readonly string[], selecte
 export function toggleSelectAllVisible(
   visibleKeys: readonly string[],
   selectedKeys: ReadonlySet<string>,
+  disabledKeys?: ReadonlySet<string>,
 ): Set<string> {
   const next = new Set(selectedKeys);
-  if (visibleKeys.length === 0) return next;
-  const allSelected = visibleKeys.every((k) => next.has(k));
+  if (disabledKeys && disabledKeys.size > 0) {
+    for (const k of disabledKeys) next.delete(k);
+  }
+  const selectableKeys =
+    disabledKeys && disabledKeys.size > 0
+      ? visibleKeys.filter((k) => !disabledKeys.has(k))
+      : visibleKeys;
+  if (selectableKeys.length === 0) return next;
+  const allSelected = selectableKeys.every((k) => next.has(k));
   if (allSelected) {
-    for (const k of visibleKeys) next.delete(k);
+    for (const k of selectableKeys) next.delete(k);
   } else {
-    for (const k of visibleKeys) next.add(k);
+    for (const k of selectableKeys) next.add(k);
   }
   return next;
 }

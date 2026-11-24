@@ -541,6 +541,7 @@ export type SpaceScope = 'watched' | 'all';
 export type SpaceCandidate = {
   id: string;
   kind: 'movie' | 'season';
+  rel_path?: string | null;
   radarr_id?: number;
   series_id?: number;
   season_number?: number;

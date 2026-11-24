@@ -2,12 +2,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DriveItem, SpaceCandidate, TransferJob } from './api';
 import {
+  activeOffloadJobsByLocalId,
+  activeRestoreJobsByDrivePath,
   activeTransferJobs,
   filterAndSortCandidates,
   filterAndSortDriveItems,
   formatUpstreamErrors,
+  inFlightBadgeLabel,
   mergeEnqueuedJobs,
   parseSpaceJobsSseBlocks,
+  pruneDisabledSelection,
   selectionStateForVisible,
   summarizeDriveSelection,
   summarizeSelection,
@@ -289,4 +293,104 @@ test('mergeEnqueuedJobs and visibleDownloadDriveJobs prioritize active, failed, 
     visible.map((j) => j.id),
     ['1', '2', '3', '5'],
   );
+});
+
+test('activeOffloadJobsByLocalId and activeRestoreJobsByDrivePath match active jobs by item_id or rel_path', () => {
+  const makeJob = (
+    id: string,
+    op: TransferJob['op'],
+    status: TransferJob['status'],
+    item_id: string,
+    rel_path: string,
+  ): TransferJob => ({
+    id,
+    op,
+    item_id,
+    kind: 'movie',
+    title: 'Test',
+    subtitle: null,
+    rel_path,
+    size_bytes: 1000,
+    status,
+    bytes_done: 0,
+    bytes_total: 1000,
+    pct: 0,
+    speed_bps: 0,
+    eta_s: null,
+    error: null,
+    warnings: [],
+    created_at: 1,
+    started_at: null,
+    finished_at: null,
+  });
+
+  const localItems = [
+    { ...SAMPLE[0], rel_path: 'Movies/Inception (2010)' },
+    { ...SAMPLE[1], rel_path: 'Movies/Arrival (2016)' },
+    SAMPLE[2],
+  ];
+
+  const jobs: TransferJob[] = [
+    makeJob('j1', 'offload', 'queued', 'movie:12', 'Movies/Inception (2010)'),
+    makeJob('j2', 'offload', 'copying', 'other-id', 'Movies/Arrival (2016)'),
+    makeJob('j3', 'offload', 'done', 'season:5:2', 'Shows/Severance/Season 02'),
+    makeJob('j4', 'restore', 'copying', 'drive:Movies/Inception (2010)', 'Movies/Inception (2010)'),
+    makeJob('j5', 'restore', 'queued', 'drive:Shows/Severance/Season 02', 'Shows/Other'),
+    makeJob('j6', 'restore', 'failed', 'drive:Shows/Severance/Season 01', 'Shows/Severance/Season 01'),
+  ];
+
+  const localMap = activeOffloadJobsByLocalId(localItems, jobs);
+  assert.equal(localMap.get('movie:12')?.id, 'j1');
+  assert.equal(localMap.get('movie:15')?.id, 'j2');
+  assert.equal(localMap.has('season:5:2'), false);
+
+  const driveMap = activeRestoreJobsByDrivePath(DRIVE_SAMPLE, jobs);
+  assert.equal(driveMap.get('Movies/Inception (2010)')?.id, 'j4');
+  assert.equal(driveMap.get('Shows/Severance/Season 02')?.id, 'j5');
+  assert.equal(driveMap.has('Shows/Severance/Season 01'), false);
+
+  assert.equal(inFlightBadgeLabel(jobs[0]), 'Queued');
+  assert.equal(inFlightBadgeLabel(jobs[1]), 'Uploading');
+  assert.equal(inFlightBadgeLabel({ ...jobs[1], status: 'verifying' }), 'Verifying');
+  assert.equal(inFlightBadgeLabel({ ...jobs[1], status: 'cleaning' }), 'Finishing');
+  assert.equal(inFlightBadgeLabel(jobs[3]), 'Restoring');
+  assert.equal(inFlightBadgeLabel(jobs[4]), 'Queued');
+});
+
+test('selectionStateForVisible, toggleSelectAllVisible, and pruneDisabledSelection exclude locked keys', () => {
+  const visible = ['movie:12', 'movie:15', 'season:5:2'];
+  const locked = new Set(['movie:12']);
+
+  const initialSelected = new Set(['movie:12', 'movie:15']);
+  const pruned = pruneDisabledSelection(initialSelected, locked);
+  assert.deepEqual(Array.from(pruned), ['movie:15']);
+  assert.equal(pruneDisabledSelection(pruned, locked), pruned);
+
+  assert.deepEqual(selectionStateForVisible(visible, pruned, locked), {
+    visibleCount: 2,
+    selectedVisibleCount: 1,
+    allSelected: false,
+    someSelected: true,
+  });
+
+  const selectedAll = toggleSelectAllVisible(visible, initialSelected, locked);
+  assert.deepEqual(Array.from(selectedAll).sort(), ['movie:15', 'season:5:2']);
+  assert.deepEqual(selectionStateForVisible(visible, selectedAll, locked), {
+    visibleCount: 2,
+    selectedVisibleCount: 2,
+    allSelected: true,
+    someSelected: false,
+  });
+
+  const deselectedAll = toggleSelectAllVisible(visible, selectedAll, locked);
+  assert.deepEqual(Array.from(deselectedAll), []);
+
+  const allLocked = new Set(visible);
+  assert.deepEqual(selectionStateForVisible(visible, new Set(), allLocked), {
+    visibleCount: 0,
+    selectedVisibleCount: 0,
+    allSelected: false,
+    someSelected: false,
+  });
+  assert.deepEqual(Array.from(toggleSelectAllVisible(visible, new Set(), allLocked)), []);
 });

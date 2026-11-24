@@ -43,11 +43,15 @@ import {
 import { cacheGet, cacheSet } from '../lib/cache';
 import { bytes, duration, rate } from '../lib/format';
 import {
+  activeOffloadJobsByLocalId,
+  activeRestoreJobsByDrivePath,
   activeTransferJobs,
   filterAndSortCandidates,
   filterAndSortDriveItems,
   formatUpstreamErrors,
+  inFlightBadgeLabel,
   mergeEnqueuedJobs,
+  pruneDisabledSelection,
   selectionStateForVisible,
   SpaceFilter,
   SpaceMode,
@@ -315,20 +319,39 @@ function ActiveTransfersCard({
   );
 }
 
+function InFlightBadge({ job }: { job: TransferJob }) {
+  const t = useTheme();
+  const isQueued = job.status === 'queued';
+  const fg = isQueued ? t.textDim : t.accent;
+  const bg = isQueued ? t.cardAlt : t.accentSoft;
+  const dotColor = isQueued ? t.textFaint : t.accent;
+  return (
+    <View style={[st.statusBadge, { backgroundColor: bg }]}>
+      <View style={[st.statusBadgeDot, { backgroundColor: dotColor }]} />
+      <Text style={[st.statusBadgeText, { color: fg }]} numberOfLines={1}>
+        {inFlightBadgeLabel(job)}
+      </Text>
+    </View>
+  );
+}
+
 function CandidateRow({
   item,
   selected,
+  activeJob,
   last,
   showUnwatchedTag,
   onToggle,
 }: {
   item: SpaceCandidate;
   selected: boolean;
+  activeJob?: TransferJob;
   last: boolean;
   showUnwatchedTag: boolean;
   onToggle: (id: string) => void;
 }) {
   const t = useTheme();
+  const locked = Boolean(activeJob);
   const subParts: string[] = [];
   if (item.subtitle) subParts.push(item.subtitle);
   else if (item.year) subParts.push(String(item.year));
@@ -338,24 +361,27 @@ function CandidateRow({
 
   return (
     <Pressable
+      disabled={locked}
       onPress={() => onToggle(item.id)}
-      android_ripple={{ color: t.ripple, foreground: true }}
+      android_ripple={locked ? undefined : { color: t.ripple, foreground: true }}
       accessibilityRole="checkbox"
-      accessibilityState={{ checked: selected }}
+      accessibilityState={{ checked: locked ? false : selected, disabled: locked }}
       style={({ pressed }) => [
         st.itemRow,
         !last && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.border },
-        selected && { backgroundColor: t.accentSoft },
-        pressed && { opacity: 0.85 },
+        !locked && selected && { backgroundColor: t.accentSoft },
+        !locked && pressed && { opacity: 0.85 },
       ]}
     >
-      <Icon
-        name={selected ? 'checkbox-marked' : 'checkbox-blank-outline'}
-        size={22}
-        color={selected ? t.accent : t.textFaint}
-      />
+      <View style={locked ? st.disabledCheck : undefined}>
+        <Icon
+          name={!locked && selected ? 'checkbox-marked' : 'checkbox-blank-outline'}
+          size={22}
+          color={!locked && selected ? t.accent : t.textFaint}
+        />
+      </View>
       <View style={{ flex: 1, gap: 3 }}>
-        <Text style={[st.itemTitle, { color: t.text }]} numberOfLines={1}>
+        <Text style={[st.itemTitle, { color: locked ? t.textDim : t.text }]} numberOfLines={1}>
           {item.title}
         </Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
@@ -364,6 +390,7 @@ function CandidateRow({
               {subParts.join(' · ')}
             </Text>
           ) : null}
+          {activeJob ? <InFlightBadge job={activeJob} /> : null}
           {showUnwatchedTag && item.watched === false ? (
             <View style={[st.warnChip, { backgroundColor: t.cardAlt }]}>
               <Text style={[st.warnChipText, { color: t.textDim }]} numberOfLines={1}>
@@ -380,7 +407,7 @@ function CandidateRow({
           ) : null}
         </View>
       </View>
-      <Text style={[st.itemSize, { color: t.text }]} numberOfLines={1}>
+      <Text style={[st.itemSize, { color: locked ? t.textDim : t.text }]} numberOfLines={1}>
         {bytes(item.size_bytes, 1)}
       </Text>
     </Pressable>
@@ -390,15 +417,18 @@ function CandidateRow({
 function DriveItemRow({
   item,
   selected,
+  activeJob,
   last,
   onToggle,
 }: {
   item: DriveItem;
   selected: boolean;
+  activeJob?: TransferJob;
   last: boolean;
   onToggle: (relPath: string) => void;
 }) {
   const t = useTheme();
+  const locked = Boolean(activeJob);
   const subParts: string[] = [];
   if (item.subtitle) subParts.push(item.subtitle);
   else if (item.year) subParts.push(String(item.year));
@@ -408,33 +438,41 @@ function DriveItemRow({
 
   return (
     <Pressable
+      disabled={locked}
       onPress={() => onToggle(item.rel_path)}
-      android_ripple={{ color: t.ripple, foreground: true }}
+      android_ripple={locked ? undefined : { color: t.ripple, foreground: true }}
       accessibilityRole="checkbox"
-      accessibilityState={{ checked: selected }}
+      accessibilityState={{ checked: locked ? false : selected, disabled: locked }}
       style={({ pressed }) => [
         st.itemRow,
         !last && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.border },
-        selected && { backgroundColor: t.accentSoft },
-        pressed && { opacity: 0.85 },
+        !locked && selected && { backgroundColor: t.accentSoft },
+        !locked && pressed && { opacity: 0.85 },
       ]}
     >
-      <Icon
-        name={selected ? 'checkbox-marked' : 'checkbox-blank-outline'}
-        size={22}
-        color={selected ? t.accent : t.textFaint}
-      />
+      <View style={locked ? st.disabledCheck : undefined}>
+        <Icon
+          name={!locked && selected ? 'checkbox-marked' : 'checkbox-blank-outline'}
+          size={22}
+          color={!locked && selected ? t.accent : t.textFaint}
+        />
+      </View>
       <View style={{ flex: 1, gap: 3 }}>
-        <Text style={[st.itemTitle, { color: t.text }]} numberOfLines={1}>
+        <Text style={[st.itemTitle, { color: locked ? t.textDim : t.text }]} numberOfLines={1}>
           {item.title}
         </Text>
-        {subParts.length > 0 ? (
-          <Text style={[st.itemMeta, { color: t.textDim }]} numberOfLines={1}>
-            {subParts.join(' · ')}
-          </Text>
+        {subParts.length > 0 || activeJob ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+            {subParts.length > 0 ? (
+              <Text style={[st.itemMeta, { color: t.textDim }]} numberOfLines={1}>
+                {subParts.join(' · ')}
+              </Text>
+            ) : null}
+            {activeJob ? <InFlightBadge job={activeJob} /> : null}
+          </View>
         ) : null}
       </View>
-      <Text style={[st.itemSize, { color: t.text }]} numberOfLines={1}>
+      <Text style={[st.itemSize, { color: locked ? t.textDim : t.text }]} numberOfLines={1}>
         {bytes(item.size_bytes, 1)}
       </Text>
     </Pressable>
@@ -486,11 +524,37 @@ export default function SpaceScreen() {
   const localData = activeScope === 'all' ? allData : watchedData;
   const modeRef = useRef<SpaceMode>(mode);
   const activeScopeRef = useRef<SpaceScope>(activeScope);
+  const candidatesRef = useRef<SpaceCandidate[]>(localData?.candidates ?? []);
+  const driveItemsRef = useRef<DriveItem[]>(driveData?.items ?? []);
 
   useEffect(() => {
     modeRef.current = mode;
     activeScopeRef.current = activeScope;
   }, [activeScope, mode]);
+
+  useEffect(() => {
+    candidatesRef.current = localData?.candidates ?? [];
+  }, [localData?.candidates]);
+
+  useEffect(() => {
+    driveItemsRef.current = driveData?.items ?? [];
+  }, [driveData?.items]);
+
+  const pruneSelectionsForJobs = useCallback(
+    (nextJobs: TransferJob[], nextCandidates?: SpaceCandidate[], nextDriveItems?: DriveItem[]) => {
+      const localMap = activeOffloadJobsByLocalId(nextCandidates ?? candidatesRef.current, nextJobs);
+      if (localMap.size > 0) {
+        const locked = new Set(localMap.keys());
+        setSelectedIds((prev) => pruneDisabledSelection(prev, locked));
+      }
+      const driveMap = activeRestoreJobsByDrivePath(nextDriveItems ?? driveItemsRef.current, nextJobs);
+      if (driveMap.size > 0) {
+        const locked = new Set(driveMap.keys());
+        setSelectedDrivePaths((prev) => pruneDisabledSelection(prev, locked));
+      }
+    },
+    [],
+  );
 
   const loadLocal = useCallback(async (scope: SpaceScope) => {
     try {
@@ -527,6 +591,7 @@ export default function SpaceScreen() {
       if (jobsSeqRef.current === reqSeq) {
         jobsSeqRef.current += 1;
         setJobs(res.jobs);
+        pruneSelectionsForJobs(res.jobs, undefined, res.items);
       }
       setSelectedDrivePaths((prev) => {
         if (prev.size === 0) return prev;
@@ -542,7 +607,7 @@ export default function SpaceScreen() {
         setDriveError((e as Error).message);
       }
     }
-  }, []);
+  }, [pruneSelectionsForJobs]);
 
   const loadAll = useCallback(
     async (forceDrive = false) => {
@@ -575,6 +640,7 @@ export default function SpaceScreen() {
       prevJobStatusRef.current = nextMap;
       jobsSeqRef.current += 1;
       setJobs(nextJobs);
+      pruneSelectionsForJobs(nextJobs);
       if (latestFailed) {
         setNotice({
           tone: 'bad',
@@ -587,7 +653,7 @@ export default function SpaceScreen() {
         void loadLocal(activeScopeRef.current);
       }
     },
-    [loadDrive, loadLocal],
+    [loadDrive, loadLocal, pruneSelectionsForJobs],
   );
 
   // Subscribe to SSE /pc/api/space/jobs/stream while screen is focused
@@ -623,67 +689,107 @@ export default function SpaceScreen() {
   );
 
   const candidates = useMemo(() => localData?.candidates ?? [], [localData?.candidates]);
+  const activeLocalJobs = useMemo(
+    () => activeOffloadJobsByLocalId(candidates, activeJobs),
+    [activeJobs, candidates],
+  );
+  const lockedLocalIds = useMemo(() => new Set(activeLocalJobs.keys()), [activeLocalJobs]);
+
   const visibleLocal = useMemo(
     () => filterAndSortCandidates(candidates, filter, sort),
     [candidates, filter, sort],
   );
+  const effectiveSelectedIds = useMemo(
+    () => pruneDisabledSelection(selectedIds, lockedLocalIds),
+    [lockedLocalIds, selectedIds],
+  );
   const localSelection = useMemo(
-    () => summarizeSelection(candidates, selectedIds),
-    [candidates, selectedIds],
+    () => summarizeSelection(candidates, effectiveSelectedIds),
+    [candidates, effectiveSelectedIds],
   );
 
   const driveItems = useMemo(() => driveData?.items ?? [], [driveData?.items]);
+  const activeDriveJobs = useMemo(
+    () => activeRestoreJobsByDrivePath(driveItems, activeJobs),
+    [activeJobs, driveItems],
+  );
+  const lockedDrivePaths = useMemo(() => new Set(activeDriveJobs.keys()), [activeDriveJobs]);
+
   const visibleDrive = useMemo(
     () => filterAndSortDriveItems(driveItems, filter, sort),
     [driveItems, filter, sort],
   );
+  const effectiveSelectedDrivePaths = useMemo(
+    () => pruneDisabledSelection(selectedDrivePaths, lockedDrivePaths),
+    [lockedDrivePaths, selectedDrivePaths],
+  );
   const driveSelection = useMemo(
-    () => summarizeDriveSelection(driveItems, selectedDrivePaths),
-    [driveItems, selectedDrivePaths],
+    () => summarizeDriveSelection(driveItems, effectiveSelectedDrivePaths),
+    [driveItems, effectiveSelectedDrivePaths],
   );
 
-  const toggleLocalItem = useCallback((id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
+  const toggleLocalItem = useCallback(
+    (id: string) => {
+      if (lockedLocalIds.has(id)) return;
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    },
+    [lockedLocalIds],
+  );
 
-  const toggleDriveItem = useCallback((relPath: string) => {
-    setSelectedDrivePaths((prev) => {
-      const next = new Set(prev);
-      if (next.has(relPath)) next.delete(relPath);
-      else next.add(relPath);
-      return next;
-    });
-  }, []);
+  const toggleDriveItem = useCallback(
+    (relPath: string) => {
+      if (lockedDrivePaths.has(relPath)) return;
+      setSelectedDrivePaths((prev) => {
+        const next = new Set(prev);
+        if (next.has(relPath)) next.delete(relPath);
+        else next.add(relPath);
+        return next;
+      });
+    },
+    [lockedDrivePaths],
+  );
 
   const visibleLocalKeys = useMemo(() => visibleLocal.map((it) => it.id), [visibleLocal]);
   const visibleDriveKeys = useMemo(() => visibleDrive.map((it) => it.rel_path), [visibleDrive]);
   const visibleTotalBytes = useMemo(
     () =>
       mode === 'drive'
-        ? visibleDrive.reduce((sum, it) => sum + it.size_bytes, 0)
-        : visibleLocal.reduce((sum, it) => sum + it.size_bytes, 0),
-    [mode, visibleDrive, visibleLocal],
+        ? visibleDrive
+            .filter((it) => !lockedDrivePaths.has(it.rel_path))
+            .reduce((sum, it) => sum + it.size_bytes, 0)
+        : visibleLocal
+            .filter((it) => !lockedLocalIds.has(it.id))
+            .reduce((sum, it) => sum + it.size_bytes, 0),
+    [lockedDrivePaths, lockedLocalIds, mode, visibleDrive, visibleLocal],
   );
   const visibleSelection = useMemo(
     () =>
       mode === 'drive'
-        ? selectionStateForVisible(visibleDriveKeys, selectedDrivePaths)
-        : selectionStateForVisible(visibleLocalKeys, selectedIds),
-    [mode, selectedDrivePaths, selectedIds, visibleDriveKeys, visibleLocalKeys],
+        ? selectionStateForVisible(visibleDriveKeys, effectiveSelectedDrivePaths, lockedDrivePaths)
+        : selectionStateForVisible(visibleLocalKeys, effectiveSelectedIds, lockedLocalIds),
+    [
+      effectiveSelectedDrivePaths,
+      effectiveSelectedIds,
+      lockedDrivePaths,
+      lockedLocalIds,
+      mode,
+      visibleDriveKeys,
+      visibleLocalKeys,
+    ],
   );
 
   const onToggleSelectAllVisible = useCallback(() => {
     if (mode === 'drive') {
-      setSelectedDrivePaths((prev) => toggleSelectAllVisible(visibleDriveKeys, prev));
+      setSelectedDrivePaths((prev) => toggleSelectAllVisible(visibleDriveKeys, prev, lockedDrivePaths));
     } else {
-      setSelectedIds((prev) => toggleSelectAllVisible(visibleLocalKeys, prev));
+      setSelectedIds((prev) => toggleSelectAllVisible(visibleLocalKeys, prev, lockedLocalIds));
     }
-  }, [mode, visibleDriveKeys, visibleLocalKeys]);
+  }, [lockedDrivePaths, lockedLocalIds, mode, visibleDriveKeys, visibleLocalKeys]);
 
   const scrollToTop = useCallback(() => {
     scrollRef.current?.scrollTo({ y: 0, animated: true });
@@ -1035,7 +1141,8 @@ export default function SpaceScreen() {
                 <DriveItemRow
                   key={item.rel_path}
                   item={item}
-                  selected={selectedDrivePaths.has(item.rel_path)}
+                  selected={effectiveSelectedDrivePaths.has(item.rel_path)}
+                  activeJob={activeDriveJobs.get(item.rel_path)}
                   last={idx === visibleDrive.length - 1}
                   onToggle={toggleDriveItem}
                 />
@@ -1061,7 +1168,8 @@ export default function SpaceScreen() {
               <CandidateRow
                 key={item.id}
                 item={item}
-                selected={selectedIds.has(item.id)}
+                selected={effectiveSelectedIds.has(item.id)}
+                activeJob={activeLocalJobs.get(item.id)}
                 last={idx === visibleLocal.length - 1}
                 showUnwatchedTag={mode === 'all'}
                 onToggle={toggleLocalItem}
@@ -1358,6 +1466,17 @@ const st = StyleSheet.create({
     borderRadius: radius.pill,
   },
   warnChipText: { fontSize: 11.5, fontWeight: '500' },
+  statusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+  },
+  statusBadgeDot: { width: 6, height: 6, borderRadius: 3 },
+  statusBadgeText: { fontSize: 11.5, fontWeight: '500' },
+  disabledCheck: { opacity: 0.32 },
   stickyBar: {
     gap: space(2.5),
     paddingHorizontal: screenPad,

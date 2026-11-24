@@ -1084,6 +1084,7 @@ export default function ChatScreen() {
   const messagesCountRef = useRef(messages.length);
   const sendingRef = useRef(sending);
   const nearBottomRef = useRef(true);
+  const kbHeightRef = useRef(0);
   const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadMessagesRef = useRef<(opts?: { silent?: boolean }) => Promise<void>>(async () => {});
@@ -1190,9 +1191,12 @@ export default function ChatScreen() {
     if (Platform.OS !== 'android') return;
     const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
       if (!isFocusedRef.current) return;
-      setKbHeight(e.endCoordinates?.height ?? 0);
+      const h = e.endCoordinates?.height ?? 0;
+      kbHeightRef.current = h;
+      setKbHeight(h);
     });
     const hideSub = Keyboard.addListener('keyboardDidHide', () => {
+      kbHeightRef.current = 0;
       setKbHeight(0);
     });
     return () => {
@@ -1693,23 +1697,53 @@ export default function ChatScreen() {
     setActionSheetMsg(msg);
   }, []);
 
-  const onStartReplyMessage = useCallback((msg: ChatMessage) => {
-    setActionSheetMsg(null);
-    setEditingState((prev) => {
-      if (prev) {
-        setDraftValue(prev.previousDraft);
-        setPendingAttachments(prev.previousAttachments);
+  const focusComposer = useCallback((delayMs = 0) => {
+    if (focusTimerRef.current) {
+      clearTimeout(focusTimerRef.current);
+      focusTimerRef.current = null;
+    }
+    const runFocus = () => {
+      if (!mountedRef.current) return;
+      const input = inputRef.current;
+      if (!input) return;
+      // On Android, hardware-back dismissal can leave TextInput focused while the
+      // IME is hidden; blur + next-frame focus forces showSoftInput reliably.
+      if (Platform.OS === 'android' && kbHeightRef.current === 0 && input.isFocused()) {
+        input.blur();
+        requestAnimationFrame(() => {
+          if (mountedRef.current) {
+            inputRef.current?.focus();
+          }
+        });
+        return;
       }
-      return null;
-    });
-    setReplyTo(buildReplyRef(msg));
-    if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
-    focusTimerRef.current = setTimeout(() => {
-      if (mountedRef.current) {
-        inputRef.current?.focus();
-      }
-    }, 80);
-  }, [setDraftValue]);
+      input.focus();
+    };
+    if (delayMs > 0) {
+      focusTimerRef.current = setTimeout(() => {
+        focusTimerRef.current = null;
+        requestAnimationFrame(runFocus);
+      }, delayMs);
+    } else {
+      requestAnimationFrame(runFocus);
+    }
+  }, []);
+
+  const onStartReplyMessage = useCallback(
+    (msg: ChatMessage, opts?: { fromSheet?: boolean }) => {
+      setActionSheetMsg(null);
+      setEditingState((prev) => {
+        if (prev) {
+          setDraftValue(prev.previousDraft);
+          setPendingAttachments(prev.previousAttachments);
+        }
+        return null;
+      });
+      setReplyTo(buildReplyRef(msg));
+      focusComposer(opts?.fromSheet ? 220 : 60);
+    },
+    [focusComposer, setDraftValue],
+  );
 
   const onCancelReply = useCallback(() => {
     setReplyTo(null);
@@ -1734,14 +1768,9 @@ export default function ChatScreen() {
       }));
       setDraftValue(msg.text);
       setPendingAttachments(msg.attachments ? [...msg.attachments] : []);
-      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
-      focusTimerRef.current = setTimeout(() => {
-        if (mountedRef.current) {
-          inputRef.current?.focus();
-        }
-      }, 80);
+      focusComposer(220);
     },
-    [draft, pendingAttachments, setDraftValue],
+    [draft, focusComposer, pendingAttachments, setDraftValue],
   );
 
   const onCancelEdit = useCallback(() => {
@@ -2378,7 +2407,7 @@ export default function ChatScreen() {
               </View>
 
               <Pressable
-                onPress={() => onStartReplyMessage(actionSheetView.msg)}
+                onPress={() => onStartReplyMessage(actionSheetView.msg, { fromSheet: true })}
                 android_ripple={{ color: t.ripple, foreground: true }}
                 style={({ pressed }) => [
                   st.sheetRow,

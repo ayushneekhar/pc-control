@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { SpaceCandidate } from './api';
+import type { DriveItem, SpaceCandidate, TransferJob } from './api';
 import {
+  activeTransferJobs,
   filterAndSortCandidates,
+  filterAndSortDriveItems,
   formatUpstreamErrors,
+  parseSpaceJobsSseBlocks,
+  summarizeDriveSelection,
   summarizeSelection,
   toFreeRequest,
+  transferStatusLabel,
 } from './spaceHelpers';
 
 const SAMPLE: SpaceCandidate[] = [
@@ -115,4 +120,96 @@ test('formatUpstreamErrors ignores hdd and formats service names', () => {
   assert.equal(formatUpstreamErrors({}), null);
   assert.equal(formatUpstreamErrors({ hdd: 'HDD not mounted' }), null);
   assert.equal(formatUpstreamErrors({ radarr: 'down', qbt: 'timeout' }), 'Radarr, qBittorrent unavailable');
+  assert.equal(formatUpstreamErrors({ quota: 'err' }), 'Drive quota unavailable');
+});
+
+const DRIVE_SAMPLE: DriveItem[] = [
+  {
+    id: 'drive:Movies/Inception (2010)',
+    kind: 'movie',
+    rel_path: 'Movies/Inception (2010)',
+    title: 'Inception',
+    subtitle: null,
+    year: 2010,
+    episode_count: null,
+    size_bytes: 10_000_000_000,
+  },
+  {
+    id: 'drive:Shows/Severance/Season 02',
+    kind: 'season',
+    rel_path: 'Shows/Severance/Season 02',
+    title: 'Severance',
+    subtitle: 'Season 2',
+    year: 2022,
+    episode_count: 10,
+    season_number: 2,
+    size_bytes: 16_000_000_000,
+  },
+  {
+    id: 'drive:Shows/Severance/Season 01',
+    kind: 'season',
+    rel_path: 'Shows/Severance/Season 01',
+    title: 'Severance',
+    subtitle: 'Season 1',
+    year: 2022,
+    episode_count: 9,
+    season_number: 1,
+    size_bytes: 12_000_000_000,
+  },
+];
+
+test('filterAndSortDriveItems and summarizeDriveSelection', () => {
+  assert.deepEqual(
+    filterAndSortDriveItems(DRIVE_SAMPLE, 'all', 'size').map((x) => x.rel_path),
+    ['Shows/Severance/Season 02', 'Shows/Severance/Season 01', 'Movies/Inception (2010)'],
+  );
+  assert.deepEqual(
+    filterAndSortDriveItems(DRIVE_SAMPLE, 'season', 'title').map((x) => x.rel_path),
+    ['Shows/Severance/Season 01', 'Shows/Severance/Season 02'],
+  );
+  const sel = summarizeDriveSelection(
+    DRIVE_SAMPLE,
+    new Set(['Movies/Inception (2010)', 'Shows/Severance/Season 01']),
+  );
+  assert.equal(sel.count, 2);
+  assert.equal(sel.totalBytes, 22_000_000_000);
+});
+
+test('activeTransferJobs, transferStatusLabel, and parseSpaceJobsSseBlocks', () => {
+  const baseJob: TransferJob = {
+    id: 'j1',
+    op: 'offload',
+    item_id: 'movie:12',
+    kind: 'movie',
+    title: 'Inception',
+    subtitle: null,
+    rel_path: 'Movies/Inception (2010)',
+    size_bytes: 1000,
+    status: 'copying',
+    bytes_done: 500,
+    bytes_total: 1000,
+    pct: 50,
+    speed_bps: 100,
+    eta_s: 5,
+    error: null,
+    warnings: [],
+    created_at: 1,
+    started_at: 2,
+    finished_at: null,
+  };
+  const doneJob: TransferJob = { ...baseJob, id: 'j2', status: 'done', pct: 100 };
+  const restoreJob: TransferJob = { ...baseJob, id: 'j3', op: 'restore', status: 'verifying' };
+
+  assert.deepEqual(activeTransferJobs([baseJob, doneJob, restoreJob]).map((j) => j.id), ['j1', 'j3']);
+  assert.equal(transferStatusLabel(baseJob), 'Offloading');
+  assert.equal(transferStatusLabel({ ...baseJob, op: 'restore' }), 'Restoring');
+  assert.equal(transferStatusLabel(restoreJob), 'Verifying');
+  assert.equal(transferStatusLabel(doneJob), 'Done');
+
+  const raw = `: ping\n\nevent: snapshot\ndata: ${JSON.stringify({ jobs: [baseJob] })}\n\nevent: jobs\ndata: {"jobs":`;
+  const parsed = parseSpaceJobsSseBlocks(raw);
+  assert.equal(parsed.events.length, 1);
+  assert.equal(parsed.events[0].event, 'snapshot');
+  assert.equal(parsed.events[0].jobs[0].id, 'j1');
+  assert.equal(parsed.rest, 'event: jobs\ndata: {"jobs":');
 });

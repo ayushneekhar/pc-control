@@ -1,0 +1,15 @@
+[Unit]
+Description=rclone VFS mount for Google Drive Media (Jellyfin streaming)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p %h/remote-pc/mounts/gdrive-media %h/.cache/rclone-vfs
+ExecStart=/bin/sh -c 'RCLONE="%h/.local/bin/rclone"; [ -x "$RCLONE" ] || RCLONE="/usr/bin/rclone"; exec "$RCLONE" mount gdrive:Media "%h/remote-pc/mounts/gdrive-media" --read-only --vfs-cache-mode full --vfs-cache-max-size 15G --vfs-cache-max-age 24h --dir-cache-time 72h --poll-interval 1m --vfs-read-chunk-size 64M --vfs-read-chunk-size-limit 512M --buffer-size 32M --cache-dir "%h/.cache/rclone-vfs" --rc --rc-addr 127.0.0.1:5572 --rc-no-auth'
+ExecStop=-/bin/sh -c 'fusermount3 -u "%h/remote-pc/mounts/gdrive-media" 2>/dev/null || fusermount -u "%h/remote-pc/mounts/gdrive-media" 2>/dev/null || true'
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

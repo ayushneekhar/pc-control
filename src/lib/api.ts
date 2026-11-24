@@ -551,6 +551,8 @@ export type SpaceHdd = {
   threshold_bytes: number;
 };
 
+export type SpaceScope = 'watched' | 'all';
+
 export type SpaceCandidate = {
   id: string;
   kind: 'movie' | 'season';
@@ -562,6 +564,8 @@ export type SpaceCandidate = {
   year: number | null;
   episode_count?: number;
   size_bytes: number;
+  watched?: boolean;
+  watched_by?: string[];
   watched_count: number;
   total_users: number;
   watched_users: string[];
@@ -573,6 +577,7 @@ export type SpaceCandidate = {
 export type SpaceResponse = {
   hdd: SpaceHdd;
   candidates: SpaceCandidate[];
+  scope?: SpaceScope;
   errors: Record<string, string>;
   ts: number;
 };
@@ -600,6 +605,94 @@ export type SpaceFreeResponse = {
   hdd: SpaceHdd;
 };
 
-export const getSpace = () => get<SpaceResponse>('/pc/api/space', 30000);
+export type DriveQuota = {
+  total_bytes: number | null;
+  used_bytes: number | null;
+  free_bytes: number | null;
+  trashed_bytes: number | null;
+};
+
+export type DriveItem = {
+  id: string;
+  kind: 'movie' | 'season';
+  rel_path: string;
+  title: string;
+  subtitle: string | null;
+  year: number | null;
+  episode_count: number | null;
+  size_bytes: number;
+  radarr_id?: number | null;
+  series_id?: number | null;
+  season_number?: number | null;
+  tmdb_id?: number | null;
+  offloaded_at?: number | null;
+};
+
+export type TransferJobStatus =
+  | 'queued'
+  | 'copying'
+  | 'verifying'
+  | 'cleaning'
+  | 'done'
+  | 'failed'
+  | 'cancelled';
+
+export type TransferJob = {
+  id: string;
+  op: 'offload' | 'restore';
+  item_id: string;
+  kind: 'movie' | 'season';
+  title: string;
+  subtitle: string | null;
+  rel_path: string;
+  size_bytes: number;
+  status: TransferJobStatus;
+  bytes_done: number;
+  bytes_total: number;
+  pct: number;
+  speed_bps: number;
+  eta_s: number | null;
+  error: string | null;
+  warnings: string[];
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+};
+
+export type DriveStatusResponse = {
+  configured: boolean;
+  mounted: boolean;
+  mount_point: string;
+  quota: DriveQuota | null;
+  items: DriveItem[];
+  jobs: TransferJob[];
+  errors: Record<string, string>;
+  ts: number;
+};
+
+export type SpaceJobEnqueueResponse = {
+  ok: boolean;
+  jobs: TransferJob[];
+  errors?: { id: string; error: string }[];
+};
+
+export type DriveDeleteResponse = {
+  ok: boolean;
+  results: { rel_path: string; ok: boolean; error: string | null }[];
+  warnings: string[];
+};
+
+export const getSpace = (scope: SpaceScope = 'watched') =>
+  get<SpaceResponse>(scope === 'all' ? '/pc/api/space?scope=all' : '/pc/api/space', 30000);
 export const freeSpace = (items: SpaceFreeItemRequest[]) =>
   post<SpaceFreeResponse>('/pc/api/space/free', { items }, 120000);
+export const getSpaceDrive = (refresh = false) =>
+  get<DriveStatusResponse>(refresh ? '/pc/api/space/drive?refresh=1' : '/pc/api/space/drive', 45000);
+export const offloadSpaceItems = (items: SpaceFreeItemRequest[]) =>
+  post<SpaceJobEnqueueResponse>('/pc/api/space/offload', { items }, 30000);
+export const restoreDriveItems = (items: { rel_path: string }[]) =>
+  post<SpaceJobEnqueueResponse>('/pc/api/space/restore', { items }, 30000);
+export const deleteDriveItems = (items: { rel_path: string }[]) =>
+  post<DriveDeleteResponse>('/pc/api/space/drive/delete', { items }, 120000);
+export const cancelSpaceJob = (jobId: string) =>
+  post<{ ok: boolean; job: TransferJob }>(`/pc/api/space/jobs/${encodeURIComponent(jobId)}/cancel`, {}, 15000);

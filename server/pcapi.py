@@ -4008,9 +4008,22 @@ def _space_module():
     return space
 
 
+def _gdrive_offload_manager():
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import gdrive_offload
+    notify_fn = (lambda cat, title, body: NOTIFY.send_async(cat, title, body)) if NOTIFY is not None else None
+    return gdrive_offload.get_manager(notify_fn=notify_fn)
+
+
 def route_round4_get(path, qs):
     if path == "/api/space":
-        return _space_module().get_space()
+        scope = (qs.get("scope") or ["watched"])[0]
+        return _space_module().get_space(scope=scope)
+    if path == "/api/space/drive":
+        refresh = (qs.get("refresh") or [""])[0] in ("1", "true", "yes")
+        return _gdrive_offload_manager().drive_status(force_refresh=refresh)
     if path == "/api/downloads/all":
         return 200, downloads_all()
     if path == "/api/kbd-lock":
@@ -4031,6 +4044,15 @@ def route_round4_get(path, qs):
 def route_round4_post(path, b):
     if path == "/api/space/free":
         return _space_module().free_space(b)
+    if path == "/api/space/offload":
+        return _gdrive_offload_manager().enqueue_offload(b)
+    if path == "/api/space/restore":
+        return _gdrive_offload_manager().enqueue_restore(b)
+    if path == "/api/space/drive/delete":
+        return _gdrive_offload_manager().delete_from_drive(b)
+    m = re.fullmatch(r"/api/space/jobs/([0-9a-zA-Z_-]+)/cancel", path)
+    if m:
+        return _gdrive_offload_manager().cancel_job(m.group(1))
     if path == "/api/downloads/pause":
         return downloads_action("pause", b)
     if path == "/api/downloads/resume":
@@ -4161,6 +4183,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*rootd_or_503({"op": "enroll_status",
                                                      "fingerprint": qs.get("fingerprint", [""])[0]}))
             if path == "/api/events": return self.sse()
+            if path == "/api/space/jobs/stream": return self.sse_space_jobs()
             if path == "/api/crash": return self.send_json(200, {"crashes": CRASHES.list()})
             if path == "/api/downloads":
                 return self.send_json(200, {**DOWNLOADS.active(), "enabled": NOTIFY.wants("live")["app"],
@@ -4379,6 +4402,35 @@ class H(BaseHTTPRequestHandler):
             pass
         finally:
             HUB.unsubscribe(q)
+
+    def sse_space_jobs(self):
+        mgr = _gdrive_offload_manager()
+        q = mgr.subscribe()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            self.close_connection = True
+            self.write_event("snapshot", {"jobs": mgr.snapshot_jobs(), "ts": int(time.time())})
+            self.wfile.write(b"retry: 3000\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    msg = q.get(timeout=20)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                if msg is None:
+                    break
+                self.write_event(*msg)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            mgr.unsubscribe(q)
 
     def write_event(self, event, data):
         self.wfile.write(f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode())

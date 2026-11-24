@@ -1,5 +1,5 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Modal,
   Pressable,
@@ -10,34 +10,72 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Banner, Bar, Button, Card, Empty, Icon, List, Pill, Screen } from '../components/ui';
 import {
+  Banner,
+  Bar,
+  Button,
+  Card,
+  Empty,
+  Icon,
+  List,
+  Pill,
+  Screen,
+  Segmented,
+} from '../components/ui';
+import {
+  cancelSpaceJob,
+  deleteDriveItems,
+  DriveDeleteResponse,
+  DriveItem,
+  DriveStatusResponse,
   freeSpace,
   getSpace,
+  getSpaceDrive,
+  offloadSpaceItems,
+  restoreDriveItems,
+  serverUrl,
   SpaceCandidate,
   SpaceFreeResponse,
   SpaceHdd,
   SpaceResponse,
+  SpaceScope,
+  TransferJob,
 } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
-import { bytes } from '../lib/format';
+import { bytes, duration, rate } from '../lib/format';
 import {
+  activeTransferJobs,
   filterAndSortCandidates,
+  filterAndSortDriveItems,
   formatUpstreamErrors,
+  parseSpaceJobsSseBlocks,
   SpaceFilter,
+  SpaceMode,
   SpaceSort,
+  summarizeDriveSelection,
   summarizeSelection,
   toFreeRequest,
+  transferStatusLabel,
 } from '../lib/spaceHelpers';
 import { radius, screenPad, space, useTheme } from '../theme';
 
-const CACHE_KEY = 'space:overview';
+const CACHE_KEY_WATCHED = 'space:overview';
+const CACHE_KEY_ALL = 'space:overview:all';
+const CACHE_KEY_DRIVE = 'space:drive';
+
+const MODES: { id: SpaceMode; label: string }[] = [
+  { id: 'watched', label: 'Watched' },
+  { id: 'all', label: 'All Local' },
+  { id: 'drive', label: 'On Drive' },
+];
 
 const FILTERS: { id: SpaceFilter; label: string }[] = [
   { id: 'all', label: 'All' },
   { id: 'movie', label: 'Movies' },
   { id: 'season', label: 'TV' },
 ];
+
+type ConfirmKind = 'delete_local' | 'offload' | 'restore' | 'delete_drive' | null;
 
 function HddSkeleton() {
   const t = useTheme();
@@ -133,15 +171,159 @@ function HddSummaryCard({ hdd }: { hdd: SpaceHdd }) {
   );
 }
 
+function DriveStatusCard({ drive }: { drive: DriveStatusResponse | null }) {
+  const t = useTheme();
+  if (!drive) return null;
+
+  const quota = drive.quota;
+  const total = quota?.total_bytes ?? 0;
+  const used = quota?.used_bytes ?? 0;
+  const free = quota?.free_bytes ?? (total > 0 ? Math.max(0, total - used) : 0);
+  const pct = total > 0 ? (used / total) * 100 : 0;
+  const barColor = pct > 90 ? t.warn : t.accent;
+
+  return (
+    <Card style={{ gap: space(2) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2), flex: 1 }}>
+          <Icon name="google-drive" size={18} color={t.textDim} />
+          <Text style={[st.driveTitle, { color: t.text }]} numberOfLines={1}>
+            Google Drive
+          </Text>
+        </View>
+        {!drive.configured ? (
+          <Pill label="Drive not configured" tone="dim" />
+        ) : drive.mounted ? (
+          <Pill label="Playable in Jellyfin" tone="ok" dot />
+        ) : (
+          <Pill label="Mount offline" tone="warn" dot />
+        )}
+      </View>
+
+      {!drive.configured ? (
+        <Text style={[st.metaText, { color: t.textDim }]}>
+          Configure the &apos;gdrive&apos; remote in rclone and enable rclone-gdrive.service to offload media.
+        </Text>
+      ) : total > 0 ? (
+        <>
+          <Bar pct={pct} color={barColor} height={5} />
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}>
+            <Text style={[st.metaText, { color: t.textDim }]} numberOfLines={1}>
+              {bytes(used, 1)} / {bytes(total, 1)}
+            </Text>
+            <Text style={[st.metaText, { color: t.textDim }]} numberOfLines={1}>
+              {bytes(free, 1)} free · {drive.items.length} item{drive.items.length === 1 ? '' : 's'}
+            </Text>
+          </View>
+        </>
+      ) : (
+        <Text style={[st.metaText, { color: t.textDim }]}>
+          {drive.items.length} offloaded item{drive.items.length === 1 ? '' : 's'}
+        </Text>
+      )}
+    </Card>
+  );
+}
+
+function ActiveTransfersCard({
+  jobs,
+  cancellingId,
+  onCancel,
+}: {
+  jobs: TransferJob[];
+  cancellingId: string | null;
+  onCancel: (jobId: string) => void;
+}) {
+  const t = useTheme();
+  if (jobs.length === 0) return null;
+
+  return (
+    <Card style={{ gap: space(3) }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(2) }}>
+          <Icon name="cloud-sync" size={18} color={t.accent} />
+          <Text style={[st.driveTitle, { color: t.text }]}>
+            Active Transfers
+          </Text>
+        </View>
+        <Pill label={`${jobs.length} active`} tone="accent" dot />
+      </View>
+
+      {jobs.map((job, idx) => {
+        const label = transferStatusLabel(job);
+        const isCopying = job.status === 'copying';
+        const isVerifying = job.status === 'verifying';
+        const canCancel = job.status !== 'cleaning';
+        const tone = isVerifying ? 'warn' : job.status === 'queued' ? 'dim' : 'accent';
+        const metaParts: string[] = [];
+        if (isCopying) {
+          metaParts.push(`${job.pct.toFixed(0)}%`);
+          if (job.speed_bps > 0) metaParts.push(rate(job.speed_bps));
+          if (job.eta_s != null && job.eta_s > 0) metaParts.push(`${duration(job.eta_s)} left`);
+        } else if (isVerifying) {
+          metaParts.push('Checking MD5 hashes');
+        } else if (job.status === 'cleaning') {
+          metaParts.push(job.op === 'offload' ? 'Removing local copy' : 'Cleaning remote copy');
+        } else {
+          metaParts.push(bytes(job.size_bytes, 1));
+        }
+
+        return (
+          <View
+            key={job.id}
+            style={[
+              { gap: space(1.5) },
+              idx > 0 && { paddingTop: space(2.5), borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.border },
+            ]}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}>
+              <View style={{ flex: 1, gap: 2 }}>
+                <Text style={[st.itemTitle, { color: t.text }]} numberOfLines={1}>
+                  {job.title}
+                  {job.subtitle ? ` · ${job.subtitle}` : ''}
+                </Text>
+                <Text style={[st.metaText, { color: t.textDim }]} numberOfLines={1}>
+                  {metaParts.join(' · ')}
+                </Text>
+              </View>
+              <Pill label={label} tone={tone} />
+            </View>
+
+            <Bar
+              pct={job.status === 'queued' ? 0 : isVerifying || job.status === 'cleaning' ? 100 : job.pct}
+              color={isVerifying ? t.warn : t.accent}
+              height={5}
+            />
+
+            {canCancel ? (
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+                <Button
+                  label="Cancel"
+                  kind="subtle"
+                  compact
+                  busy={cancellingId === job.id}
+                  onPress={() => onCancel(job.id)}
+                />
+              </View>
+            ) : null}
+          </View>
+        );
+      })}
+    </Card>
+  );
+}
+
 function CandidateRow({
   item,
   selected,
   last,
+  showUnwatchedTag,
   onToggle,
 }: {
   item: SpaceCandidate;
   selected: boolean;
   last: boolean;
+  showUnwatchedTag: boolean;
   onToggle: (id: string) => void;
 }) {
   const t = useTheme();
@@ -180,7 +362,13 @@ function CandidateRow({
               {subParts.join(' · ')}
             </Text>
           ) : null}
-          {item.warn_unwatched && item.unwatched_users.length > 0 ? (
+          {showUnwatchedTag && item.watched === false ? (
+            <View style={[st.warnChip, { backgroundColor: t.cardAlt }]}>
+              <Text style={[st.warnChipText, { color: t.textDim }]} numberOfLines={1}>
+                Unwatched
+              </Text>
+            </View>
+          ) : item.warn_unwatched && item.unwatched_users.length > 0 ? (
             <View style={[st.warnChip, { backgroundColor: t.warnSoft }]}>
               <Icon name="alert" size={12} color={t.warn} />
               <Text style={[st.warnChipText, { color: t.warn }]} numberOfLines={1}>
@@ -197,25 +385,98 @@ function CandidateRow({
   );
 }
 
+function DriveItemRow({
+  item,
+  selected,
+  last,
+  onToggle,
+}: {
+  item: DriveItem;
+  selected: boolean;
+  last: boolean;
+  onToggle: (relPath: string) => void;
+}) {
+  const t = useTheme();
+  const subParts: string[] = [];
+  if (item.subtitle) subParts.push(item.subtitle);
+  else if (item.year) subParts.push(String(item.year));
+  if (item.kind === 'season' && item.episode_count) {
+    subParts.push(`${item.episode_count} ep`);
+  }
+
+  return (
+    <Pressable
+      onPress={() => onToggle(item.rel_path)}
+      android_ripple={{ color: t.ripple, foreground: true }}
+      accessibilityRole="checkbox"
+      accessibilityState={{ checked: selected }}
+      style={({ pressed }) => [
+        st.itemRow,
+        !last && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.border },
+        selected && { backgroundColor: t.accentSoft },
+        pressed && { opacity: 0.85 },
+      ]}
+    >
+      <Icon
+        name={selected ? 'checkbox-marked' : 'checkbox-blank-outline'}
+        size={22}
+        color={selected ? t.accent : t.textFaint}
+      />
+      <View style={{ flex: 1, gap: 3 }}>
+        <Text style={[st.itemTitle, { color: t.text }]} numberOfLines={1}>
+          {item.title}
+        </Text>
+        {subParts.length > 0 ? (
+          <Text style={[st.itemMeta, { color: t.textDim }]} numberOfLines={1}>
+            {subParts.join(' · ')}
+          </Text>
+        ) : null}
+      </View>
+      <Text style={[st.itemSize, { color: t.text }]} numberOfLines={1}>
+        {bytes(item.size_bytes, 1)}
+      </Text>
+    </Pressable>
+  );
+}
+
 export default function SpaceScreen() {
   const t = useTheme();
   const nav = useNavigation<any>();
   const insets = useSafeAreaInsets();
-  const [data, setData] = useState<SpaceResponse | null>(() => cacheGet<SpaceResponse>(CACHE_KEY));
+
+  const [mode, setMode] = useState<SpaceMode>('watched');
+  const [watchedData, setWatchedData] = useState<SpaceResponse | null>(() => cacheGet<SpaceResponse>(CACHE_KEY_WATCHED));
+  const [allData, setAllData] = useState<SpaceResponse | null>(() => cacheGet<SpaceResponse>(CACHE_KEY_ALL));
+  const [driveData, setDriveData] = useState<DriveStatusResponse | null>(() =>
+    cacheGet<DriveStatusResponse>(CACHE_KEY_DRIVE),
+  );
+  const [jobs, setJobs] = useState<TransferJob[]>(() => cacheGet<DriveStatusResponse>(CACHE_KEY_DRIVE)?.jobs ?? []);
+  const [sseConnected, setSseConnected] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ tone: 'ok' | 'warn' | 'bad'; title: string; body?: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SpaceFilter>('all');
   const [sort, setSort] = useState<SpaceSort>('size');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [freeing, setFreeing] = useState(false);
-  const [feedback, setFeedback] = useState<SpaceFreeResponse | null>(null);
+  const [selectedDrivePaths, setSelectedDrivePaths] = useState<Set<string>>(() => new Set());
 
-  const load = useCallback(async () => {
+  const [confirmKind, setConfirmKind] = useState<ConfirmKind>(null);
+  const [busyAction, setBusyAction] = useState(false);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<SpaceFreeResponse | null>(null);
+  const [driveDeleteFeedback, setDriveDeleteFeedback] = useState<DriveDeleteResponse | null>(null);
+
+  const activeScope: SpaceScope = mode === 'all' ? 'all' : 'watched';
+  const localData = activeScope === 'all' ? allData : watchedData;
+
+  const loadLocal = useCallback(async (scope: SpaceScope) => {
     try {
-      const res = await getSpace();
-      cacheSet(CACHE_KEY, res);
-      setData(res);
+      const res = await getSpace(scope);
+      const key = scope === 'all' ? CACHE_KEY_ALL : CACHE_KEY_WATCHED;
+      cacheSet(key, res);
+      if (scope === 'all') setAllData(res);
+      else setWatchedData(res);
       setError(null);
       setSelectedIds((prev) => {
         if (prev.size === 0) return prev;
@@ -231,23 +492,194 @@ export default function SpaceScreen() {
     }
   }, []);
 
-  useFocusEffect(
-    useCallback(() => {
-      void load();
-    }, [load]),
+  const loadDrive = useCallback(async (forceRefresh = false) => {
+    try {
+      const res = await getSpaceDrive(forceRefresh);
+      cacheSet(CACHE_KEY_DRIVE, res);
+      setDriveData(res);
+      setJobs(res.jobs);
+      setSelectedDrivePaths((prev) => {
+        if (prev.size === 0) return prev;
+        const valid = new Set(res.items.map((it) => it.rel_path));
+        const next = new Set<string>();
+        for (const p of prev) {
+          if (valid.has(p)) next.add(p);
+        }
+        return next.size === prev.size ? prev : next;
+      });
+    } catch {
+      // Keep Drive card graceful if endpoint fails temporarily
+    }
+  }, []);
+
+  const loadAll = useCallback(
+    async (forceDrive = false) => {
+      await Promise.all([
+        mode === 'drive' ? Promise.resolve() : loadLocal(activeScope),
+        loadDrive(forceDrive),
+      ]);
+    },
+    [activeScope, loadDrive, loadLocal, mode],
   );
 
-  const candidates = useMemo(() => data?.candidates ?? [], [data?.candidates]);
-  const visible = useMemo(
+  // Track job transitions so completing a transfer refreshes local & drive lists
+  const prevJobStatusRef = useRef<Record<string, string>>({});
+  const handleJobsUpdate = useCallback(
+    (nextJobs: TransferJob[]) => {
+      const prev = prevJobStatusRef.current;
+      let anyFinished = false;
+      let latestFailed: TransferJob | null = null;
+      for (const j of nextJobs) {
+        const was = prev[j.id];
+        if (was && was !== j.status) {
+          if (j.status === 'done') anyFinished = true;
+          if (j.status === 'failed') latestFailed = j;
+        }
+      }
+      const nextMap: Record<string, string> = {};
+      for (const j of nextJobs) nextMap[j.id] = j.status;
+      prevJobStatusRef.current = nextMap;
+      setJobs(nextJobs);
+      if (latestFailed) {
+        setNotice({
+          tone: 'bad',
+          title: `${latestFailed.op === 'restore' ? 'Restore' : 'Offload'} failed: ${latestFailed.title}`,
+          body: latestFailed.error || 'Original files were kept.',
+        });
+      }
+      if (anyFinished) {
+        void loadDrive(true);
+        void loadLocal(activeScope);
+      }
+    },
+    [activeScope, loadDrive, loadLocal],
+  );
+
+  // Subscribe to SSE /pc/api/space/jobs/stream while screen is focused
+  useFocusEffect(
+    useCallback(() => {
+      void loadAll(false);
+
+      let stopped = false;
+      let xhr: XMLHttpRequest | null = null;
+      let retryTimer: ReturnType<typeof setTimeout> | null = null;
+      let retryDelay = 1500;
+      let seen = 0;
+      let buf = '';
+
+      const closeXhr = () => {
+        const cur = xhr;
+        xhr = null;
+        if (cur) {
+          cur.onprogress = cur.onerror = cur.onload = cur.onreadystatechange = null;
+          try {
+            cur.abort();
+          } catch {}
+        }
+      };
+
+      const connect = () => {
+        if (stopped) return;
+        seen = 0;
+        buf = '';
+        const x = new XMLHttpRequest();
+        xhr = x;
+        x.open('GET', serverUrl() + '/pc/api/space/jobs/stream');
+        x.setRequestHeader('Accept', 'text/event-stream');
+        x.setRequestHeader('Cache-Control', 'no-cache');
+
+        const consume = () => {
+          if (xhr !== x) return;
+          const text = x.responseText || '';
+          if (text.length <= seen) return;
+          buf += text.slice(seen);
+          seen = text.length;
+          const { events, rest } = parseSpaceJobsSseBlocks(buf);
+          buf = rest;
+          for (const ev of events) {
+            if (ev.event === 'snapshot' || ev.event === 'jobs') {
+              retryDelay = 1500;
+              setSseConnected(true);
+              handleJobsUpdate(ev.jobs);
+            }
+          }
+        };
+
+        const fail = () => {
+          if (xhr !== x) return;
+          closeXhr();
+          setSseConnected(false);
+          if (stopped) return;
+          const d = retryDelay;
+          retryDelay = Math.min(retryDelay * 2, 15000);
+          retryTimer = setTimeout(connect, d);
+        };
+
+        x.onprogress = consume;
+        x.onreadystatechange = () => {
+          if (x.readyState === 3 || x.readyState === 4) consume();
+        };
+        x.onerror = fail;
+        x.onload = fail;
+        x.send();
+      };
+
+      connect();
+
+      return () => {
+        stopped = true;
+        if (retryTimer) clearTimeout(retryTimer);
+        closeXhr();
+        setSseConnected(false);
+      };
+    }, [handleJobsUpdate, loadAll]),
+  );
+
+  // Graceful polling fallback if SSE is disconnected while jobs are active
+  const activeJobs = useMemo(() => activeTransferJobs(jobs), [jobs]);
+  useEffect(() => {
+    if (sseConnected || activeJobs.length === 0) return;
+    const id = setInterval(() => {
+      void loadDrive(false);
+    }, 4000);
+    return () => clearInterval(id);
+  }, [activeJobs.length, loadDrive, sseConnected]);
+
+  const onChangeMode = useCallback(
+    (nextMode: SpaceMode) => {
+      setMode(nextMode);
+      setSelectedIds(new Set());
+      setSelectedDrivePaths(new Set());
+      if (nextMode === 'drive') {
+        void loadDrive(false);
+      } else {
+        void loadLocal(nextMode);
+      }
+    },
+    [loadDrive, loadLocal],
+  );
+
+  const candidates = useMemo(() => localData?.candidates ?? [], [localData?.candidates]);
+  const visibleLocal = useMemo(
     () => filterAndSortCandidates(candidates, filter, sort),
     [candidates, filter, sort],
   );
-  const selection = useMemo(
+  const localSelection = useMemo(
     () => summarizeSelection(candidates, selectedIds),
     [candidates, selectedIds],
   );
 
-  const toggleItem = useCallback((id: string) => {
+  const driveItems = useMemo(() => driveData?.items ?? [], [driveData?.items]);
+  const visibleDrive = useMemo(
+    () => filterAndSortDriveItems(driveItems, filter, sort),
+    [driveItems, filter, sort],
+  );
+  const driveSelection = useMemo(
+    () => summarizeDriveSelection(driveItems, selectedDrivePaths),
+    [driveItems, selectedDrivePaths],
+  );
+
+  const toggleLocalItem = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -256,44 +688,89 @@ export default function SpaceScreen() {
     });
   }, []);
 
-  const clearSelection = useCallback(() => {
-    setSelectedIds(new Set());
+  const toggleDriveItem = useCallback((relPath: string) => {
+    setSelectedDrivePaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(relPath)) next.delete(relPath);
+      else next.add(relPath);
+      return next;
+    });
   }, []);
 
-  const onConfirmFree = useCallback(async () => {
-    if (selection.count === 0 || freeing) return;
-    setFreeing(true);
+  const onCancelJob = useCallback(async (jobId: string) => {
+    setCancellingId(jobId);
     try {
-      const res = await freeSpace(toFreeRequest(selection.selected));
-      setFeedback(res);
-      setConfirmOpen(false);
-      const succeededIds = new Set(res.results.filter((r) => r.ok).map((r) => r.id));
-      setSelectedIds((prev) => {
-        const next = new Set<string>();
-        for (const id of prev) {
-          if (!succeededIds.has(id)) next.add(id);
-        }
-        return next;
-      });
-      if (data) {
-        const updated: SpaceResponse = {
-          ...data,
-          hdd: res.hdd,
-          candidates: data.candidates.filter((c) => !succeededIds.has(c.id)),
-        };
-        cacheSet(CACHE_KEY, updated);
-        setData(updated);
-      }
-      await load();
+      await cancelSpaceJob(jobId);
+      await loadDrive(false);
     } catch (e) {
-      setConfirmOpen(false);
       setError((e as Error).message);
     } finally {
-      setFreeing(false);
+      setCancellingId(null);
     }
-  }, [data, freeing, load, selection.count, selection.selected]);
+  }, [loadDrive]);
 
-  const upstreamErr = formatUpstreamErrors(data?.errors);
+  const onConfirmAction = useCallback(async () => {
+    if (busyAction || !confirmKind) return;
+    setBusyAction(true);
+    try {
+      if (confirmKind === 'delete_local') {
+        const res = await freeSpace(toFreeRequest(localSelection.selected));
+        setFeedback(res);
+        setConfirmKind(null);
+        const succeededIds = new Set(res.results.filter((r) => r.ok).map((r) => r.id));
+        setSelectedIds((prev) => {
+          const next = new Set<string>();
+          for (const id of prev) {
+            if (!succeededIds.has(id)) next.add(id);
+          }
+          return next;
+        });
+        await loadLocal(activeScope);
+      } else if (confirmKind === 'offload') {
+        const res = await offloadSpaceItems(toFreeRequest(localSelection.selected));
+        setConfirmKind(null);
+        setSelectedIds(new Set());
+        const n = res.jobs.length;
+        setNotice({
+          tone: res.errors && res.errors.length > 0 ? 'warn' : 'ok',
+          title: n > 0 ? `Queued ${n} item${n === 1 ? '' : 's'} for offload` : 'No new items queued',
+          body: res.errors && res.errors.length > 0 ? res.errors.map((e) => e.error).join('; ') : undefined,
+        });
+        await loadDrive(false);
+      } else if (confirmKind === 'restore') {
+        const res = await restoreDriveItems(driveSelection.selected.map((it) => ({ rel_path: it.rel_path })));
+        setConfirmKind(null);
+        setSelectedDrivePaths(new Set());
+        const n = res.jobs.length;
+        setNotice({
+          tone: 'ok',
+          title: n > 0 ? `Queued ${n} item${n === 1 ? '' : 's'} to restore` : 'Already queued',
+        });
+        await loadDrive(false);
+      } else if (confirmKind === 'delete_drive') {
+        const res = await deleteDriveItems(driveSelection.selected.map((it) => ({ rel_path: it.rel_path })));
+        setConfirmKind(null);
+        setDriveDeleteFeedback(res);
+        setSelectedDrivePaths(new Set());
+        await loadDrive(true);
+      }
+    } catch (e) {
+      setConfirmKind(null);
+      setError((e as Error).message);
+    } finally {
+      setBusyAction(false);
+    }
+  }, [
+    activeScope,
+    busyAction,
+    confirmKind,
+    driveSelection.selected,
+    loadDrive,
+    loadLocal,
+    localSelection.selected,
+  ]);
+
+  const upstreamErr = formatUpstreamErrors(mode === 'drive' ? driveData?.errors : localData?.errors);
   const failedCount = feedback ? feedback.results.filter((r) => !r.ok).length : 0;
   const hasWarnings = feedback
     ? feedback.warnings.length > 0 || feedback.results.some((r) => r.warnings.length > 0)
@@ -301,13 +778,16 @@ export default function SpaceScreen() {
   const feedbackTone =
     !feedback ? 'ok' : failedCount === feedback.results.length ? 'bad' : failedCount > 0 || hasWarnings ? 'warn' : 'ok';
 
+  const hasSelection = mode === 'drive' ? driveSelection.count > 0 : localSelection.count > 0;
+  const driveConfigured = Boolean(driveData?.configured);
+
   return (
     <Screen title="Space" onBack={() => nav.goBack()} scroll={false}>
       <ScrollView
         style={{ flex: 1 }}
         contentContainerStyle={{
           paddingHorizontal: screenPad,
-          paddingBottom: selection.count > 0 ? space(24) + insets.bottom : space(8) + insets.bottom,
+          paddingBottom: hasSelection ? space(28) + insets.bottom : space(8) + insets.bottom,
           gap: space(3),
         }}
         refreshControl={
@@ -315,7 +795,7 @@ export default function SpaceScreen() {
             refreshing={refreshing}
             onRefresh={async () => {
               setRefreshing(true);
-              await load();
+              await loadAll(true);
               setRefreshing(false);
             }}
             tintColor={t.accent}
@@ -324,7 +804,24 @@ export default function SpaceScreen() {
           />
         }
       >
+        <Segmented options={MODES} value={mode} onChange={onChangeMode} />
+
         {error ? <Banner tone="bad" title={error} /> : null}
+
+        {notice ? (
+          <Banner tone={notice.tone} title={notice.title}>
+            <View style={{ gap: 6, marginTop: 2 }}>
+              {notice.body ? <Text style={{ color: t.textDim, fontSize: 13 }}>{notice.body}</Text> : null}
+              <Button
+                label="Dismiss"
+                kind="subtle"
+                compact
+                style={{ alignSelf: 'flex-start' }}
+                onPress={() => setNotice(null)}
+              />
+            </View>
+          </Banner>
+        ) : null}
 
         {feedback ? (
           <Banner
@@ -341,11 +838,7 @@ export default function SpaceScreen() {
               {feedback.results.map((r) => (
                 <View key={r.id} style={{ gap: 2 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Icon
-                      name={r.ok ? 'check' : 'close-circle'}
-                      size={14}
-                      color={r.ok ? t.ok : t.bad}
-                    />
+                    <Icon name={r.ok ? 'check' : 'close-circle'} size={14} color={r.ok ? t.ok : t.bad} />
                     <Text style={{ color: t.text, fontSize: 13, flex: 1 }} numberOfLines={1}>
                       {r.label}
                     </Text>
@@ -355,9 +848,7 @@ export default function SpaceScreen() {
                       </Text>
                     ) : null}
                   </View>
-                  {r.error ? (
-                    <Text style={{ color: t.bad, fontSize: 12, paddingLeft: 20 }}>{r.error}</Text>
-                  ) : null}
+                  {r.error ? <Text style={{ color: t.bad, fontSize: 12, paddingLeft: 20 }}>{r.error}</Text> : null}
                   {r.warnings.map((w, idx) => (
                     <Text key={idx} style={{ color: t.warn, fontSize: 12, paddingLeft: 20 }}>
                       {w}
@@ -381,7 +872,39 @@ export default function SpaceScreen() {
           </Banner>
         ) : null}
 
-        {data ? <HddSummaryCard hdd={data.hdd} /> : <HddSkeleton />}
+        {driveDeleteFeedback ? (
+          <Banner
+            tone={driveDeleteFeedback.ok ? 'ok' : 'warn'}
+            title={
+              driveDeleteFeedback.ok
+                ? `Deleted ${driveDeleteFeedback.results.length} item${driveDeleteFeedback.results.length === 1 ? '' : 's'} from Drive`
+                : 'Some Drive items could not be deleted'
+            }
+          >
+            <View style={{ gap: 4, marginTop: 2 }}>
+              {driveDeleteFeedback.results
+                .filter((r) => !r.ok)
+                .map((r) => (
+                  <Text key={r.rel_path} style={{ color: t.bad, fontSize: 12 }}>
+                    {r.rel_path}: {r.error}
+                  </Text>
+                ))}
+              <Button
+                label="Dismiss"
+                kind="subtle"
+                compact
+                style={{ alignSelf: 'flex-start', marginTop: 4 }}
+                onPress={() => setDriveDeleteFeedback(null)}
+              />
+            </View>
+          </Banner>
+        ) : null}
+
+        {mode !== 'drive' ? (localData ? <HddSummaryCard hdd={localData.hdd} /> : <HddSkeleton />) : null}
+
+        <DriveStatusCard drive={driveData} />
+
+        <ActiveTransfersCard jobs={activeJobs} cancellingId={cancellingId} onCancel={(id) => void onCancelJob(id)} />
 
         {upstreamErr ? <Banner tone="warn" title={upstreamErr} /> : null}
 
@@ -395,14 +918,9 @@ export default function SpaceScreen() {
                   onPress={() => setFilter(f.id)}
                   accessibilityRole="button"
                   accessibilityState={{ selected: active }}
-                  style={[
-                    st.chip,
-                    { backgroundColor: active ? t.accentSoft : t.card },
-                  ]}
+                  style={[st.chip, { backgroundColor: active ? t.accentSoft : t.card }]}
                 >
-                  <Text style={[st.chipText, { color: active ? t.accent : t.textDim }]}>
-                    {f.label}
-                  </Text>
+                  <Text style={[st.chipText, { color: active ? t.accent : t.textDim }]}>{f.label}</Text>
                 </Pressable>
               );
             })}
@@ -414,23 +932,55 @@ export default function SpaceScreen() {
             style={[st.chip, { backgroundColor: t.card }]}
           >
             <Icon name="sort-variant" size={15} color={t.textDim} />
-            <Text style={[st.chipText, { color: t.text }]}>
-              {sort === 'size' ? 'Largest' : 'Title'}
-            </Text>
+            <Text style={[st.chipText, { color: t.text }]}>{sort === 'size' ? 'Largest' : 'Title'}</Text>
           </Pressable>
         </View>
 
-        {!data ? (
+        {mode === 'drive' ? (
+          !driveData ? (
+            <ListSkeleton />
+          ) : !driveData.configured ? (
+            <Empty
+              icon="google-drive"
+              title="Drive not configured"
+              body="Add a 'gdrive' remote in rclone on your PC to offload and stream media."
+            />
+          ) : visibleDrive.length > 0 ? (
+            <List>
+              {visibleDrive.map((item, idx) => (
+                <DriveItemRow
+                  key={item.rel_path}
+                  item={item}
+                  selected={selectedDrivePaths.has(item.rel_path)}
+                  last={idx === visibleDrive.length - 1}
+                  onToggle={toggleDriveItem}
+                />
+              ))}
+            </List>
+          ) : (
+            <Empty
+              icon="cloud-check"
+              title={
+                filter === 'movie'
+                  ? 'No offloaded movies'
+                  : filter === 'season'
+                    ? 'No offloaded TV seasons'
+                    : 'Nothing on Drive yet'
+              }
+            />
+          )
+        ) : !localData ? (
           <ListSkeleton />
-        ) : visible.length > 0 ? (
+        ) : visibleLocal.length > 0 ? (
           <List>
-            {visible.map((item, idx) => (
+            {visibleLocal.map((item, idx) => (
               <CandidateRow
                 key={item.id}
                 item={item}
                 selected={selectedIds.has(item.id)}
-                last={idx === visible.length - 1}
-                onToggle={toggleItem}
+                last={idx === visibleLocal.length - 1}
+                showUnwatchedTag={mode === 'all'}
+                onToggle={toggleLocalItem}
               />
             ))}
           </List>
@@ -438,17 +988,19 @@ export default function SpaceScreen() {
           <Empty
             icon="check-circle"
             title={
-              filter === 'movie'
-                ? 'No watched movies'
-                : filter === 'season'
-                  ? 'No watched TV seasons'
-                  : 'No watched items'
+              mode === 'all'
+                ? 'No local media found'
+                : filter === 'movie'
+                  ? 'No watched movies'
+                  : filter === 'season'
+                    ? 'No watched TV seasons'
+                    : 'No watched items'
             }
           />
         )}
       </ScrollView>
 
-      {selection.count > 0 ? (
+      {mode !== 'drive' && localSelection.count > 0 ? (
         <View
           style={[
             st.stickyBar,
@@ -459,88 +1011,205 @@ export default function SpaceScreen() {
             },
           ]}
         >
-          <View style={{ flex: 1, gap: 2 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
             <Text style={[st.stickyCount, { color: t.text }]}>
-              {selection.count} selected · {bytes(selection.totalBytes, 1)}
+              {localSelection.count} selected · {bytes(localSelection.totalBytes, 1)}
             </Text>
-            <Pressable onPress={clearSelection} hitSlop={8} style={{ alignSelf: 'flex-start' }}>
+            <Pressable onPress={() => setSelectedIds(new Set())} hitSlop={8}>
               <Text style={{ color: t.textDim, fontSize: 12.5 }}>Clear</Text>
             </Pressable>
           </View>
-          <Button
-            label={`Free ${bytes(selection.totalBytes, 1)}`}
-            kind="primary"
-            onPress={() => setConfirmOpen(true)}
-          />
+          <View style={{ flexDirection: 'row', gap: space(2) }}>
+            <Button
+              label="Offload to Drive"
+              icon="cloud-upload"
+              kind="primary"
+              disabled={!driveConfigured}
+              style={{ flex: 1 }}
+              onPress={() => setConfirmKind('offload')}
+            />
+            <Button
+              label="Delete"
+              icon="delete"
+              kind="danger"
+              onPress={() => setConfirmKind('delete_local')}
+            />
+          </View>
+        </View>
+      ) : null}
+
+      {mode === 'drive' && driveSelection.count > 0 ? (
+        <View
+          style={[
+            st.stickyBar,
+            {
+              backgroundColor: t.card,
+              borderTopColor: t.border,
+              paddingBottom: Math.max(insets.bottom, space(3)),
+            },
+          ]}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Text style={[st.stickyCount, { color: t.text }]}>
+              {driveSelection.count} selected · {bytes(driveSelection.totalBytes, 1)}
+            </Text>
+            <Pressable onPress={() => setSelectedDrivePaths(new Set())} hitSlop={8}>
+              <Text style={{ color: t.textDim, fontSize: 12.5 }}>Clear</Text>
+            </Pressable>
+          </View>
+          <View style={{ flexDirection: 'row', gap: space(2) }}>
+            <Button
+              label="Restore to HDD"
+              icon="cloud-download"
+              kind="primary"
+              style={{ flex: 1 }}
+              onPress={() => setConfirmKind('restore')}
+            />
+            <Button
+              label="Delete"
+              icon="delete"
+              kind="danger"
+              onPress={() => setConfirmKind('delete_drive')}
+            />
+          </View>
         </View>
       ) : null}
 
       <Modal
-        visible={confirmOpen}
+        visible={confirmKind !== null}
         transparent
         animationType="fade"
-        onRequestClose={() => !freeing && setConfirmOpen(false)}
+        onRequestClose={() => !busyAction && setConfirmKind(null)}
       >
         <View style={[st.modalBackdrop, { backgroundColor: t.overlay }]}>
           <View style={[st.modalCard, { backgroundColor: t.card }]}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}>
-              <Text style={[st.modalTitle, { color: t.text }]}>
-                Free {bytes(selection.totalBytes, 1)}?
-              </Text>
-              <Pill label={`${selection.count} item${selection.count === 1 ? '' : 's'}`} tone="dim" />
-            </View>
-
-            {selection.unwatched.length > 0 ? (
-              <View style={[st.unwatchedBox, { backgroundColor: t.warnSoft }]}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <Icon name="alert" size={16} color={t.warn} />
-                  <Text style={{ color: t.warn, fontSize: 13, fontWeight: '600' }}>
-                    Not watched by others
+            {confirmKind === 'delete_local' || confirmKind === 'offload' ? (
+              <>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}>
+                  <Text style={[st.modalTitle, { color: t.text }]}>
+                    {confirmKind === 'offload'
+                      ? `Offload ${bytes(localSelection.totalBytes, 1)}?`
+                      : `Delete ${bytes(localSelection.totalBytes, 1)}?`}
                   </Text>
+                  <Pill
+                    label={`${localSelection.count} item${localSelection.count === 1 ? '' : 's'}`}
+                    tone="dim"
+                  />
                 </View>
-                {selection.unwatched.map((it) => (
-                  <Text key={it.id} style={{ color: t.text, fontSize: 12.5 }} numberOfLines={2}>
-                    • {it.title}
-                    {it.subtitle ? ` · ${it.subtitle}` : ''} ({it.unwatched_users.join(', ')})
+
+                {confirmKind === 'offload' ? (
+                  <Text style={{ color: t.textDim, fontSize: 13, lineHeight: 18 }}>
+                    Uploads to Google Drive, verifies MD5 hashes, then removes the local HDD copy. Items stay playable in
+                    Jellyfin via the VFS mount.
                   </Text>
-                ))}
-              </View>
+                ) : null}
+
+                {confirmKind === 'delete_local' && localSelection.unwatched.length > 0 ? (
+                  <View style={[st.unwatchedBox, { backgroundColor: t.warnSoft }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Icon name="alert" size={16} color={t.warn} />
+                      <Text style={{ color: t.warn, fontSize: 13, fontWeight: '600' }}>Not watched by others</Text>
+                    </View>
+                    {localSelection.unwatched.map((it) => (
+                      <Text key={it.id} style={{ color: t.text, fontSize: 12.5 }} numberOfLines={2}>
+                        • {it.title}
+                        {it.subtitle ? ` · ${it.subtitle}` : ''} ({it.unwatched_users.join(', ')})
+                      </Text>
+                    ))}
+                  </View>
+                ) : null}
+
+                <ScrollView style={{ maxHeight: 220 }} contentContainerStyle={{ gap: 6 }}>
+                  {localSelection.selected.map((it) => (
+                    <View
+                      key={it.id}
+                      style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}
+                    >
+                      <Text style={{ color: t.textDim, fontSize: 13.5, flex: 1 }} numberOfLines={1}>
+                        {it.title}
+                        {it.subtitle ? ` · ${it.subtitle}` : ''}
+                      </Text>
+                      <Text style={{ color: t.text, fontSize: 13, fontWeight: '500', fontVariant: ['tabular-nums'] }}>
+                        {bytes(it.size_bytes, 1)}
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+
+                <View style={{ flexDirection: 'row', gap: space(2), marginTop: space(1) }}>
+                  <Button
+                    label="Cancel"
+                    kind="subtle"
+                    style={{ flex: 1 }}
+                    disabled={busyAction}
+                    onPress={() => setConfirmKind(null)}
+                  />
+                  <Button
+                    label={confirmKind === 'offload' ? 'Offload' : 'Delete'}
+                    icon={confirmKind === 'offload' ? 'cloud-upload' : 'delete'}
+                    kind={confirmKind === 'offload' ? 'primary' : 'danger'}
+                    style={{ flex: 1 }}
+                    busy={busyAction}
+                    onPress={() => void onConfirmAction()}
+                  />
+                </View>
+              </>
+            ) : confirmKind === 'restore' || confirmKind === 'delete_drive' ? (
+              <>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}>
+                  <Text style={[st.modalTitle, { color: t.text }]}>
+                    {confirmKind === 'restore'
+                      ? `Restore ${bytes(driveSelection.totalBytes, 1)}?`
+                      : `Delete ${bytes(driveSelection.totalBytes, 1)} from Drive?`}
+                  </Text>
+                  <Pill
+                    label={`${driveSelection.count} item${driveSelection.count === 1 ? '' : 's'}`}
+                    tone="dim"
+                  />
+                </View>
+
+                <Text style={{ color: t.textDim, fontSize: 13, lineHeight: 18 }}>
+                  {confirmKind === 'restore'
+                    ? 'Copies back to the local HDD, verifies MD5 hashes, then removes the Google Drive copy.'
+                    : 'Permanently removes these items from Google Drive. They will no longer play in Jellyfin.'}
+                </Text>
+
+                <ScrollView style={{ maxHeight: 220 }} contentContainerStyle={{ gap: 6 }}>
+                  {driveSelection.selected.map((it) => (
+                    <View
+                      key={it.rel_path}
+                      style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}
+                    >
+                      <Text style={{ color: t.textDim, fontSize: 13.5, flex: 1 }} numberOfLines={1}>
+                        {it.title}
+                        {it.subtitle ? ` · ${it.subtitle}` : ''}
+                      </Text>
+                      <Text style={{ color: t.text, fontSize: 13, fontWeight: '500', fontVariant: ['tabular-nums'] }}>
+                        {bytes(it.size_bytes, 1)}
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+
+                <View style={{ flexDirection: 'row', gap: space(2), marginTop: space(1) }}>
+                  <Button
+                    label="Cancel"
+                    kind="subtle"
+                    style={{ flex: 1 }}
+                    disabled={busyAction}
+                    onPress={() => setConfirmKind(null)}
+                  />
+                  <Button
+                    label={confirmKind === 'restore' ? 'Restore' : 'Delete from Drive'}
+                    icon={confirmKind === 'restore' ? 'cloud-download' : 'delete'}
+                    kind={confirmKind === 'restore' ? 'primary' : 'danger'}
+                    style={{ flex: 1 }}
+                    busy={busyAction}
+                    onPress={() => void onConfirmAction()}
+                  />
+                </View>
+              </>
             ) : null}
-
-            <ScrollView style={{ maxHeight: 220 }} contentContainerStyle={{ gap: 6 }}>
-              {selection.selected.map((it) => (
-                <View
-                  key={it.id}
-                  style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space(2) }}
-                >
-                  <Text style={{ color: t.textDim, fontSize: 13.5, flex: 1 }} numberOfLines={1}>
-                    {it.title}
-                    {it.subtitle ? ` · ${it.subtitle}` : ''}
-                  </Text>
-                  <Text style={{ color: t.text, fontSize: 13, fontWeight: '500', fontVariant: ['tabular-nums'] }}>
-                    {bytes(it.size_bytes, 1)}
-                  </Text>
-                </View>
-              ))}
-            </ScrollView>
-
-            <View style={{ flexDirection: 'row', gap: space(2), marginTop: space(1) }}>
-              <Button
-                label="Cancel"
-                kind="subtle"
-                style={{ flex: 1 }}
-                disabled={freeing}
-                onPress={() => setConfirmOpen(false)}
-              />
-              <Button
-                label="Delete"
-                icon="delete"
-                kind="danger"
-                style={{ flex: 1 }}
-                busy={freeing}
-                onPress={() => void onConfirmFree()}
-              />
-            </View>
           </View>
         </View>
       </Modal>
@@ -551,6 +1220,7 @@ export default function SpaceScreen() {
 const st = StyleSheet.create({
   skel: { borderRadius: 6 },
   freeHeadline: { fontSize: 20, fontWeight: '600', fontVariant: ['tabular-nums'] },
+  driveTitle: { fontSize: 15, fontWeight: '600' },
   totalText: { fontSize: 13, fontVariant: ['tabular-nums'] },
   metaText: { fontSize: 12.5, fontVariant: ['tabular-nums'] },
   controlsRow: {
@@ -590,9 +1260,7 @@ const st = StyleSheet.create({
   },
   warnChipText: { fontSize: 11.5, fontWeight: '500' },
   stickyBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space(3),
+    gap: space(2.5),
     paddingHorizontal: screenPad,
     paddingTop: space(3),
     borderTopWidth: StyleSheet.hairlineWidth,

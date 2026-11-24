@@ -138,18 +138,20 @@ def _season_watched(ep_paths, user_data):
     return bool(ep_paths) and all(os.path.normpath(p) in user_data["paths"] for p in ep_paths)
 
 
-def _build_movie_candidates(movies, everyone, watcher=WATCHER):
+def _build_movie_candidates(movies, everyone, watcher=WATCHER, include_unwatched=False):
     out = []
-    total_users = len(everyone)
-    watcher_data = everyone[watcher]
+    users_map = everyone or {}
+    total_users = len(users_map)
+    watcher_data = users_map.get(watcher)
     for m in movies or []:
         if not m.get("hasFile") or not m.get("movieFile"):
             continue
-        if not _movie_watched(m, watcher_data):
+        is_watched = bool(watcher_data and _movie_watched(m, watcher_data))
+        if not include_unwatched and not is_watched:
             continue
         watched_users = []
         unwatched_users = []
-        for udata in everyone.values():
+        for udata in users_map.values():
             if _movie_watched(m, udata):
                 watched_users.append(udata["name"])
             else:
@@ -164,6 +166,8 @@ def _build_movie_candidates(movies, everyone, watcher=WATCHER):
             "subtitle": None,
             "year": m.get("year"),
             "size_bytes": int((m.get("movieFile") or {}).get("size") or 0),
+            "watched": is_watched,
+            "watched_by": watched_users,
             "watched_count": len(watched_users),
             "total_users": total_users,
             "watched_users": watched_users,
@@ -174,10 +178,11 @@ def _build_movie_candidates(movies, everyone, watcher=WATCHER):
     return out
 
 
-def _build_season_candidates(series_list, episode_files_by_series, everyone, watcher=WATCHER):
+def _build_season_candidates(series_list, episode_files_by_series, everyone, watcher=WATCHER, include_unwatched=False):
     out = []
-    total_users = len(everyone)
-    watcher_data = everyone[watcher]
+    users_map = everyone or {}
+    total_users = len(users_map)
+    watcher_data = users_map.get(watcher)
     for s in series_list or []:
         sid = s.get("id")
         if sid is None:
@@ -195,11 +200,12 @@ def _build_season_candidates(series_list, episode_files_by_series, everyone, wat
             if not efs:
                 continue
             ep_paths = [ef["path"] for ef in efs]
-            if not _season_watched(ep_paths, watcher_data):
+            is_watched = bool(watcher_data and _season_watched(ep_paths, watcher_data))
+            if not include_unwatched and not is_watched:
                 continue
             watched_users = []
             unwatched_users = []
-            for udata in everyone.values():
+            for udata in users_map.values():
                 if _season_watched(ep_paths, udata):
                     watched_users.append(udata["name"])
                 else:
@@ -217,6 +223,8 @@ def _build_season_candidates(series_list, episode_files_by_series, everyone, wat
                 "year": s.get("year"),
                 "episode_count": len(efs),
                 "size_bytes": int(sum(ef.get("size") or 0 for ef in efs)),
+                "watched": is_watched,
+                "watched_by": watched_users,
                 "watched_count": len(watched_users),
                 "total_users": total_users,
                 "watched_users": watched_users,
@@ -253,8 +261,10 @@ def _fetch_sonarr_all(watched_mod):
     return series_list, ep_files
 
 
-def get_space(watched_mod=None, agent_mod=None, mount=None, watcher=WATCHER):
+def get_space(watched_mod=None, agent_mod=None, mount=None, watcher=WATCHER, scope="watched"):
     """GET /pc/api/space handler. Always returns (200, payload) with graceful partial errors."""
+    norm_scope = "all" if str(scope or "").strip().lower() == "all" else "watched"
+    include_unwatched = norm_scope == "all"
     errors = {}
     if watched_mod is None or agent_mod is None:
         try:
@@ -266,6 +276,7 @@ def get_space(watched_mod=None, agent_mod=None, mount=None, watcher=WATCHER):
             return 200, {
                 "hdd": hdd_stats(mnt),
                 "candidates": [],
+                "scope": norm_scope,
                 "errors": {"backend": _clip(f"localagent unavailable: {e}")},
                 "ts": int(time.time()),
             }
@@ -313,17 +324,22 @@ def get_space(watched_mod=None, agent_mod=None, mount=None, watcher=WATCHER):
                 errors["sonarr"] = _clip(f"Sonarr unavailable: {e}")
 
     candidates = []
-    if mounted and everyone is not None:
+    if mounted and (everyone is not None or include_unwatched):
         if movies is not None:
-            candidates.extend(_build_movie_candidates(movies, everyone, watcher=watcher))
+            candidates.extend(
+                _build_movie_candidates(movies, everyone, watcher=watcher, include_unwatched=include_unwatched)
+            )
         if sonarr_data is not None:
             series_list, ep_files = sonarr_data
-            candidates.extend(_build_season_candidates(series_list, ep_files, everyone, watcher=watcher))
+            candidates.extend(
+                _build_season_candidates(series_list, ep_files, everyone, watcher=watcher, include_unwatched=include_unwatched)
+            )
         candidates.sort(key=lambda c: (-c["size_bytes"], c["title"].lower(), c["id"]))
 
     return 200, {
         "hdd": hdd_stats(mnt, pend),
         "candidates": candidates,
+        "scope": norm_scope,
         "errors": errors,
         "ts": int(time.time()),
     }

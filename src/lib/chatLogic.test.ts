@@ -11,8 +11,10 @@ import {
   chatAttachmentRequiresFetch,
   ChatMessage,
   computeAndroidKeyboardOffset,
+  computeInlineImageSize,
   computeSwipeReplyOffset,
   currentProgressStepText,
+  deriveImageDisplayName,
   extractPreviewUrl,
   findPrecedingUserMessage,
   formatAttachmentSize,
@@ -25,6 +27,8 @@ import {
   getChatEndpoint,
   getChatMessageKey,
   getReplyRef,
+  INLINE_IMAGE_MAX_HEIGHT,
+  isRenderableImageUrl,
   isReplyableMessage,
   mergeChatMessages,
   normalizeChatUrl,
@@ -1137,4 +1141,107 @@ test('buildChatListItems appends trailing pending thinking item only when in fli
     activeProgress: progress,
   });
   assert.equal(deduped, withPending);
+});
+
+test('parseMessageSegments extracts inline and linked Markdown images while preserving links and code', () => {
+  // Standalone portrait wallpaper image with surrounding text
+  assert.deepEqual(
+    parseMessageSegments(
+      'Here is your wallpaper:\n\n![AMOLED Minimal](https://cdn.example.com/wall_9x16.png)\n\nTap to view full screen.',
+    ),
+    [
+      { kind: 'text', text: 'Here is your wallpaper:' },
+      { kind: 'image', alt: 'AMOLED Minimal', url: 'https://cdn.example.com/wall_9x16.png' },
+      { kind: 'text', text: 'Tap to view full screen.' },
+    ],
+  );
+
+  // Linked image, title attribute, balanced parens, relative server path, and angle-bracket URL
+  assert.deepEqual(
+    parseMessageSegments(
+      [
+        '[![Wallpaper](https://cdn.example.com/thumb.jpg)](https://cdn.example.com/full.jpg)',
+        '![Wiki](https://en.wikipedia.org/wiki/Image_(1).png "Title")',
+        '![Server](/pc/api/chat/attachments/abc123)',
+        '![](<https://cdn.example.com/my wall.png>)',
+      ].join('\n'),
+    ),
+    [
+      {
+        kind: 'image',
+        alt: 'Wallpaper',
+        url: 'https://cdn.example.com/thumb.jpg',
+        linkUrl: 'https://cdn.example.com/full.jpg',
+      },
+      { kind: 'image', alt: 'Wiki', url: 'https://en.wikipedia.org/wiki/Image_(1).png' },
+      { kind: 'image', alt: 'Server', url: '/pc/api/chat/attachments/abc123' },
+      { kind: 'image', alt: '', url: 'https://cdn.example.com/my wall.png' },
+    ],
+  );
+
+  // Regular links, inline code, fenced code blocks, escaped syntax, and invalid URLs stay untouched
+  assert.deepEqual(
+    parseMessageSegments(
+      'See [Docs](https://example.com/docs), inline `![code](https://example.com/a.png)`, escaped \\![lit](https://example.com/b.png), and ![bad](javascript:alert(1)).',
+    ),
+    [
+      {
+        kind: 'text',
+        text: 'See [Docs](https://example.com/docs), inline `![code](https://example.com/a.png)`, escaped \\![lit](https://example.com/b.png), and ![bad](javascript:alert(1)).',
+      },
+    ],
+  );
+
+  assert.deepEqual(parseMessageSegments('```md\n![inside](https://example.com/x.png)\n```'), [
+    { kind: 'codeblock', lang: 'md', code: '![inside](https://example.com/x.png)' },
+  ]);
+
+  // extractPreviewUrl skips standalone images but still finds real links alongside images
+  assert.equal(extractPreviewUrl('![Wallpaper](https://cdn.example.com/wall.png)'), null);
+  assert.equal(
+    extractPreviewUrl(
+      '![Wallpaper](https://cdn.example.com/wall.png)\nSource: [Unsplash](https://unsplash.com/photos/abc)',
+    ),
+    'https://unsplash.com/photos/abc',
+  );
+});
+
+test('computeInlineImageSize preserves natural aspect ratio and clamps tall portraits cleanly', () => {
+  // 9:16 portrait wallpaper in 360dp container -> clamped to max height 440dp with exact 9:16 width
+  const portrait = computeInlineImageSize(1440, 2560, 360, INLINE_IMAGE_MAX_HEIGHT);
+  assert.equal(portrait.height, 440);
+  assert.equal(portrait.width, Math.round(440 * (9 / 16)));
+
+  // 9:19.5 tall phone wallpaper -> clamped to 440dp height, proportional narrower width
+  const tallPhone = computeInlineImageSize(1440, 3120, 360, INLINE_IMAGE_MAX_HEIGHT);
+  assert.equal(tallPhone.height, 440);
+  assert.equal(tallPhone.width, Math.round(440 * (1440 / 3120)));
+
+  // 16:9 landscape -> fills container width at exact 16:9 height
+  const landscape = computeInlineImageSize(1920, 1080, 360, INLINE_IMAGE_MAX_HEIGHT);
+  assert.equal(landscape.width, 360);
+  assert.equal(landscape.height, Math.round(360 / (16 / 9)));
+
+  // 1:1 square -> fills container width
+  const square = computeInlineImageSize(1024, 1024, 340, INLINE_IMAGE_MAX_HEIGHT);
+  assert.deepEqual(square, { width: 340, height: 340 });
+
+  // Unloaded / invalid dimensions -> clean bounded placeholder
+  const placeholder = computeInlineImageSize(0, 0, 360, INLINE_IMAGE_MAX_HEIGHT);
+  assert.ok(placeholder.width > 0 && placeholder.width <= 360);
+  assert.ok(placeholder.height > 0 && placeholder.height <= INLINE_IMAGE_MAX_HEIGHT);
+});
+
+test('isRenderableImageUrl and deriveImageDisplayName handle URLs and alt text cleanly', () => {
+  assert.equal(isRenderableImageUrl('https://example.com/a.png'), true);
+  assert.equal(isRenderableImageUrl('http://100.64.0.1:1990/img.jpg'), true);
+  assert.equal(isRenderableImageUrl('/pc/api/chat/attachments/1'), true);
+  assert.equal(isRenderableImageUrl('data:image/png;base64,AQID'), true);
+  assert.equal(isRenderableImageUrl('//protocol-relative.example.com/a.png'), false);
+  assert.equal(isRenderableImageUrl('javascript:alert(1)'), false);
+  assert.equal(isRenderableImageUrl(''), false);
+
+  assert.equal(deriveImageDisplayName('Dark Wallpaper', 'https://example.com/x.png'), 'Dark Wallpaper');
+  assert.equal(deriveImageDisplayName('', 'https://example.com/walls/amoled%20night.png?w=1080'), 'amoled night.png');
+  assert.equal(deriveImageDisplayName('', 'data:image/png;base64,AQID'), 'Image');
 });

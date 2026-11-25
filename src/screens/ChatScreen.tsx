@@ -8,9 +8,12 @@ import {
   Animated,
   AppState,
   Clipboard,
+  Dimensions,
   Easing,
   findNodeHandle,
+  GestureResponderEvent,
   Image,
+  ImageLoadEventData,
   Keyboard,
   KeyboardAvoidingView,
   LayoutChangeEvent,
@@ -41,8 +44,10 @@ import {
   MarkdownTextInputStyle,
   Md4cFlags,
 } from 'react-native-enriched-markdown';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PcNative, PickedAttachment } from '../../modules/pc-native';
 import { AgentModelPickerModal, AgentSelectionResult } from '../components/AgentModelPickerModal';
+import { PinchZoom, PinchZoomHandle } from '../components/PinchZoom';
 import { Banner, Button, Icon, Screen } from '../components/ui';
 import { AgentSettings } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
@@ -76,8 +81,10 @@ import {
   ChatProgressStep,
   ChatReplyRef,
   computeAndroidKeyboardOffset,
+  computeInlineImageSize,
   computeSwipeReplyOffset,
   currentProgressStepText,
+  deriveImageDisplayName,
   extractPreviewUrl,
   findPrecedingUserMessage,
   formatAttachmentSize,
@@ -88,6 +95,7 @@ import {
   formatProgressSummary,
   getChatMessageKey,
   getReplyRef,
+  INLINE_IMAGE_MAX_HEIGHT,
   isHttpUrl,
   isReplyableMessage,
   LinkPreview,
@@ -834,15 +842,249 @@ function MarkdownTableCard({
   );
 }
 
+type PreviewImageItem = {
+  url: string;
+  name: string;
+  mimeType?: string;
+  linkUrl?: string;
+};
+
+const INLINE_IMAGE_SIZE_CACHE_MAX = 120;
+const inlineImageSizeCache = new Map<string, { width: number; height: number }>();
+
+function cacheInlineImageSize(key: string, width: number, height: number): void {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+  if (inlineImageSizeCache.has(key)) {
+    inlineImageSizeCache.delete(key);
+  }
+  inlineImageSizeCache.set(key, { width, height });
+  if (inlineImageSizeCache.size > INLINE_IMAGE_SIZE_CACHE_MAX) {
+    const oldest = inlineImageSizeCache.keys().next().value;
+    if (oldest !== undefined) inlineImageSizeCache.delete(oldest);
+  }
+}
+
+function MarkdownImageCard({
+  url,
+  alt,
+  linkUrl,
+  isUser,
+  onPressImage,
+  onLongPress,
+}: {
+  url: string;
+  alt: string;
+  linkUrl?: string;
+  isUser: boolean;
+  onPressImage: (img: PreviewImageItem) => void;
+  onLongPress?: () => void;
+}) {
+  const t = useTheme();
+  const source = resolveChatAttachmentSource(url);
+  const needsFetch = chatAttachmentRequiresFetch(source);
+  const cacheKey = attachmentImageCacheKey(source);
+  const [retryNonce, setRetryNonce] = useState(0);
+  const requestKey = `${cacheKey}:${retryNonce}`;
+  const syncUri = needsFetch ? getCachedChatAttachmentImage(url) : source.uri;
+
+  const [fetchState, setFetchState] = useState<{
+    key: string;
+    uri: string | null;
+    failed: boolean;
+  } | null>(null);
+  const [renderFailedKey, setRenderFailedKey] = useState<string | null>(null);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const [naturalSizeState, setNaturalSizeState] = useState<{
+    key: string;
+    width: number;
+    height: number;
+  } | null>(() => {
+    const cached = inlineImageSizeCache.get(cacheKey);
+    return cached ? { key: cacheKey, width: cached.width, height: cached.height } : null;
+  });
+  const [containerWidth, setContainerWidth] = useState<number>(() => {
+    const winW = Dimensions.get('window').width;
+    return isUser ? Math.max(160, Math.round(winW * 0.72)) : Math.max(200, Math.round(winW - screenPad * 2));
+  });
+
+  useEffect(() => {
+    if (!needsFetch || syncUri) return;
+    let cancelled = false;
+    void loadChatAttachmentImage(url)
+      .then((dataUri) => {
+        if (cancelled) return;
+        setFetchState({ key: requestKey, uri: dataUri, failed: false });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn('[MarkdownImageCard] fetch failed', url, err);
+        setFetchState({ key: requestKey, uri: null, failed: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [url, needsFetch, syncUri, requestKey]);
+
+  const activeFetch = fetchState?.key === requestKey ? fetchState : null;
+  const resolvedUri = syncUri ?? activeFetch?.uri ?? null;
+  const failed = renderFailedKey === requestKey || Boolean(activeFetch?.failed);
+  const loaded = loadedKey === requestKey;
+
+  const cachedSize = inlineImageSizeCache.get(cacheKey);
+  const naturalSize =
+    naturalSizeState?.key === cacheKey
+      ? naturalSizeState
+      : cachedSize
+        ? { key: cacheKey, width: cachedSize.width, height: cachedSize.height }
+        : null;
+  const hasNaturalSize = naturalSize !== null;
+
+  useEffect(() => {
+    if (!resolvedUri || failed || hasNaturalSize) return;
+    let cancelled = false;
+    Image.getSize(
+      resolvedUri,
+      (width, height) => {
+        if (cancelled || width <= 0 || height <= 0) return;
+        cacheInlineImageSize(cacheKey, width, height);
+        setNaturalSizeState({ key: cacheKey, width, height });
+      },
+      () => {
+        // onLoad will still report dimensions when the image decodes.
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedUri, failed, hasNaturalSize, cacheKey]);
+
+  const onWrapLayout = useCallback((e: LayoutChangeEvent) => {
+    const w = Math.floor(e.nativeEvent.layout.width);
+    if (w > 0) {
+      setContainerWidth((prev) => (Math.abs(prev - w) > 1 ? w : prev));
+    }
+  }, []);
+
+  const handleLoad = useCallback(
+    (e: NativeSyntheticEvent<ImageLoadEventData>) => {
+      setLoadedKey(requestKey);
+      const src = e.nativeEvent?.source;
+      if (src && src.width > 0 && src.height > 0) {
+        cacheInlineImageSize(cacheKey, src.width, src.height);
+        setNaturalSizeState({ key: cacheKey, width: src.width, height: src.height });
+      }
+    },
+    [cacheKey, requestKey],
+  );
+
+  const handleRetry = useCallback(() => {
+    setRenderFailedKey(null);
+    setRetryNonce((n) => n + 1);
+  }, []);
+
+  const displayName = useMemo(() => deriveImageDisplayName(alt, url), [alt, url]);
+  const boxSize = useMemo(
+    () =>
+      computeInlineImageSize(
+        naturalSize?.width ?? 0,
+        naturalSize?.height ?? 0,
+        containerWidth,
+        INLINE_IMAGE_MAX_HEIGHT,
+      ),
+    [naturalSize?.width, naturalSize?.height, containerWidth],
+  );
+
+  const surfaceBg = isUser ? t.bg : t.card;
+
+  const handlePress = useCallback(() => {
+    onPressImage({
+      url,
+      name: displayName,
+      linkUrl,
+    });
+  }, [displayName, linkUrl, onPressImage, url]);
+
+  return (
+    <View style={st.mdImageWrap} onLayout={onWrapLayout}>
+      {failed ? (
+        <Pressable
+          onPress={handleRetry}
+          onLongPress={onLongPress}
+          delayLongPress={260}
+          accessibilityRole="button"
+          accessibilityLabel={`Retry loading ${displayName}`}
+          style={({ pressed }) => [
+            st.mdImageFrame,
+            {
+              width: boxSize.width,
+              height: Math.min(boxSize.height, 148),
+              backgroundColor: surfaceBg,
+              borderColor: t.border,
+              opacity: pressed ? 0.8 : 1,
+            },
+          ]}
+        >
+          <View style={st.attImgFallback}>
+            <Icon name="image-broken-variant" size={22} color={t.textFaint} />
+            <Text numberOfLines={1} style={[st.attImgRetryText, { color: t.textFaint }]}>
+              Tap to retry
+            </Text>
+          </View>
+        </Pressable>
+      ) : (
+        <Pressable
+          onPress={handlePress}
+          onLongPress={onLongPress}
+          delayLongPress={260}
+          accessibilityRole="button"
+          accessibilityLabel={`Open ${displayName} full screen`}
+          style={({ pressed }) => [
+            st.mdImageFrame,
+            {
+              width: boxSize.width,
+              height: boxSize.height,
+              backgroundColor: surfaceBg,
+              borderColor: t.border,
+              opacity: pressed ? 0.88 : 1,
+            },
+          ]}
+        >
+          {resolvedUri ? (
+            <Image
+              key={requestKey}
+              source={{ uri: resolvedUri }}
+              style={StyleSheet.absoluteFill}
+              resizeMode="contain"
+              accessibilityLabel={displayName}
+              onLoad={handleLoad}
+              onError={(e) => {
+                console.warn('[MarkdownImageCard] render error', url, e.nativeEvent?.error);
+                setRenderFailedKey(requestKey);
+              }}
+            />
+          ) : null}
+          {!loaded ? (
+            <View pointerEvents="none" style={st.attImgFallback}>
+              <ActivityIndicator size="small" color={t.textFaint} />
+            </View>
+          ) : null}
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
 function MessageBody({
   text,
   isUser,
   onCopyCode,
+  onPressImage,
   onLongPress,
 }: {
   text: string;
   isUser: boolean;
   onCopyCode: (code: string) => void;
+  onPressImage: (img: PreviewImageItem) => void;
   onLongPress?: () => void;
 }) {
   const segments = useMemo(() => parseMessageSegments(text), [text]);
@@ -872,6 +1114,19 @@ function MessageBody({
               alignments={seg.alignments}
               rows={seg.rows}
               isUser={isUser}
+              onLongPress={onLongPress}
+            />
+          );
+        }
+        if (seg.kind === 'image') {
+          return (
+            <MarkdownImageCard
+              key={`${idx}:${seg.url}`}
+              url={seg.url}
+              alt={seg.alt}
+              linkUrl={seg.linkUrl}
+              isUser={isUser}
+              onPressImage={onPressImage}
               onLongPress={onLongPress}
             />
           );
@@ -1225,7 +1480,7 @@ function BubbleAttachments({
 }: {
   attachments: ChatAttachment[];
   isUser: boolean;
-  onPressImage?: (att: ChatAttachment) => void;
+  onPressImage?: (img: PreviewImageItem) => void;
   onLongPress?: () => void;
 }) {
   const t = useTheme();
@@ -1249,7 +1504,11 @@ function BubbleAttachments({
                 { backgroundColor: surfaceBg, borderColor: t.border },
               ]}
               resizeMode="cover"
-              onPress={onPressImage ? () => onPressImage(img) : undefined}
+              onPress={
+                onPressImage
+                  ? () => onPressImage({ url: img.url, name: img.name, mimeType: img.mime_type })
+                  : undefined
+              }
               onLongPress={onLongPress}
             />
           ))}
@@ -1333,7 +1592,7 @@ type MessageBubbleProps = {
   onRetry: (msg: ChatMessage) => void;
   onPressReplyQuote: (replyId: string) => void;
   onCopyCode: (code: string) => void;
-  onPressImage: (att: ChatAttachment) => void;
+  onPressImage: (img: PreviewImageItem) => void;
 };
 
 const MessageBubble = React.memo(function MessageBubble({
@@ -1458,6 +1717,7 @@ const MessageBubble = React.memo(function MessageBubble({
             text={msg.text}
             isUser={isUser}
             onCopyCode={onCopyCode}
+            onPressImage={onPressImage}
             onLongPress={handleLongPress}
           />
           {previewUrl ? <LinkPreviewCard url={previewUrl} isUser={isUser} /> : null}
@@ -1546,6 +1806,7 @@ type EditingMessageState = {
 
 export default function ChatScreen() {
   const t = useTheme();
+  const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
   const tabBarHeight = useBottomTabBarHeight();
   const cached = useMemo(() => cacheGet<ChatCacheState>(CHAT_STATE_CACHE_KEY), []);
@@ -1563,7 +1824,9 @@ export default function ChatScreen() {
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
   const [uploadingCount, setUploadingCount] = useState(0);
   const [attachSheetVisible, setAttachSheetVisible] = useState(false);
-  const [previewImageAtt, setPreviewImageAtt] = useState<ChatAttachment | null>(null);
+  const [previewImage, setPreviewImage] = useState<PreviewImageItem | null>(null);
+  const imageZoomRef = useRef<PinchZoomHandle | null>(null);
+  const lastImageTapRef = useRef(0);
   const [actionSheetMsg, setActionSheetMsg] = useState<ChatMessage | null>(null);
   const [editingState, setEditingState] = useState<EditingMessageState | null>(null);
   const [replyTo, setReplyTo] = useState<ChatReplyRef | null>(null);
@@ -2467,10 +2730,50 @@ export default function ChatScreen() {
 
   const keyExtractor = useCallback((item: ChatMessage) => getChatMessageKey(item), []);
 
-  const onPressImage = useCallback((att: ChatAttachment) => {
+  const onPressImage = useCallback((img: PreviewImageItem) => {
     Keyboard.dismiss();
-    setPreviewImageAtt(att);
+    lastImageTapRef.current = 0;
+    setPreviewImage(img);
   }, []);
+
+  const previewActionUrl = useMemo(() => {
+    if (!previewImage) return null;
+    if (previewImage.linkUrl && isHttpUrl(previewImage.linkUrl)) {
+      return previewImage.linkUrl;
+    }
+    const resolved = resolveChatAttachmentSource(previewImage.url).uri;
+    return isHttpUrl(resolved) ? resolved : null;
+  }, [previewImage]);
+
+  const onSharePreviewImage = useCallback(() => {
+    if (!previewImage || !previewActionUrl) return;
+    void Share.share({
+      message: previewActionUrl,
+      url: previewActionUrl,
+      title: previewImage.name,
+    }).catch(() => {});
+  }, [previewActionUrl, previewImage]);
+
+  const onOpenPreviewImage = useCallback(() => {
+    if (!previewActionUrl) return;
+    openExternalUrl(previewActionUrl);
+  }, [previewActionUrl]);
+
+  const onPreviewImageTap = useCallback((x: number, y: number, now: number) => {
+    if (now - lastImageTapRef.current < 300) {
+      lastImageTapRef.current = 0;
+      imageZoomRef.current?.toggleAt(x, y);
+      return;
+    }
+    lastImageTapRef.current = now;
+  }, []);
+
+  const onPreviewImagePress = useCallback(
+    (e: GestureResponderEvent) => {
+      onPreviewImageTap(e.nativeEvent.locationX, e.nativeEvent.locationY, e.nativeEvent.timestamp);
+    },
+    [onPreviewImageTap],
+  );
 
   const renderItem = useCallback(
     ({ item, index, data }: LegendListRenderItemProps<ChatMessage>) => (
@@ -2680,7 +2983,9 @@ export default function ChatScreen() {
                       style={[st.previewImg, { backgroundColor: t.cardAlt, borderColor: t.border }]}
                       resizeMode="cover"
                       compact
-                      onPress={() => onPressImage(att)}
+                      onPress={() =>
+                        onPressImage({ url: att.url, name: att.name, mimeType: att.mime_type })
+                      }
                     />
                     <Pressable
                       onPress={() => onRemoveAttachment(att.id)}
@@ -3086,37 +3391,79 @@ export default function ChatScreen() {
       </Modal>
 
       <Modal
-        visible={previewImageAtt !== null}
+        visible={previewImage !== null}
         transparent
+        statusBarTranslucent
         animationType="fade"
-        onRequestClose={() => setPreviewImageAtt(null)}
+        onRequestClose={() => setPreviewImage(null)}
       >
-        <View style={st.imageModalBackdrop}>
+        <View
+          style={[
+            st.imageModalBackdrop,
+            {
+              paddingTop: Math.max(insets.top, space(3)) + space(1.5),
+              paddingBottom: Math.max(insets.bottom, space(3)) + space(1.5),
+            },
+          ]}
+        >
           <View style={st.imageModalHeader}>
             <Text numberOfLines={1} style={st.imageModalTitle}>
-              {previewImageAtt?.name ?? ''}
+              {previewImage?.name ?? ''}
             </Text>
             <Pressable
-              onPress={() => setPreviewImageAtt(null)}
+              onPress={() => setPreviewImage(null)}
               accessibilityRole="button"
               accessibilityLabel="Close image preview"
               hitSlop={10}
-              style={({ pressed }) => [st.imageModalClose, pressed && { opacity: 0.7 }]}
+              style={({ pressed }) => [st.imageModalClose, pressed && { opacity: 0.72 }]}
             >
-              <Icon name="close" size={22} color="#fff" />
+              <Icon name="close" size={20} color="#F5F5F5" />
             </Pressable>
           </View>
-          <Pressable style={st.imageModalBody} onPress={() => setPreviewImageAtt(null)}>
-            {previewImageAtt ? (
-              <ChatAttachmentImage
-                url={previewImageAtt.url}
-                mimeType={previewImageAtt.mime_type}
-                name={previewImageAtt.name}
-                style={st.imageModalImg}
-                resizeMode="contain"
-              />
+          <View style={st.imageModalBody}>
+            {previewImage ? (
+              <PinchZoom
+                ref={imageZoomRef}
+                resetKey={previewImage.url}
+                style={st.imageModalZoom}
+                onTap={onPreviewImageTap}
+              >
+                <Pressable style={st.imageModalZoom} onPress={onPreviewImagePress}>
+                  <ChatAttachmentImage
+                    url={previewImage.url}
+                    mimeType={previewImage.mimeType}
+                    name={previewImage.name}
+                    style={st.imageModalImg}
+                    resizeMode="contain"
+                  />
+                </Pressable>
+              </PinchZoom>
             ) : null}
-          </Pressable>
+          </View>
+          {previewActionUrl ? (
+            <View style={st.imageModalActions}>
+              <Pressable
+                onPress={onSharePreviewImage}
+                accessibilityRole="button"
+                accessibilityLabel="Share image"
+                android_ripple={{ color: 'rgba(255,255,255,0.12)', foreground: true }}
+                style={({ pressed }) => [st.imageModalActionBtn, pressed && { opacity: 0.78 }]}
+              >
+                <Icon name="share-variant" size={18} color="#F5F5F5" />
+                <Text style={st.imageModalActionText}>Share</Text>
+              </Pressable>
+              <Pressable
+                onPress={onOpenPreviewImage}
+                accessibilityRole="button"
+                accessibilityLabel="Open image in browser"
+                android_ripple={{ color: 'rgba(255,255,255,0.12)', foreground: true }}
+                style={({ pressed }) => [st.imageModalActionBtn, pressed && { opacity: 0.78 }]}
+              >
+                <Icon name="open-in-new" size={18} color="#F5F5F5" />
+                <Text style={st.imageModalActionText}>Open in browser</Text>
+              </Pressable>
+            </View>
+          ) : null}
         </View>
       </Modal>
     </Screen>
@@ -3701,11 +4048,19 @@ const st = StyleSheet.create({
     fontSize: 11,
     fontWeight: '500',
   },
+  mdImageWrap: {
+    width: '100%',
+    alignItems: 'flex-start',
+  },
+  mdImageFrame: {
+    borderRadius: radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+    position: 'relative',
+  },
   imageModalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.92)',
-    paddingTop: space(6),
-    paddingBottom: space(5),
+    backgroundColor: '#000000',
   },
   imageModalHeader: {
     flexDirection: 'row',
@@ -3717,7 +4072,7 @@ const st = StyleSheet.create({
   },
   imageModalTitle: {
     flex: 1,
-    color: '#fff',
+    color: '#F5F5F5',
     fontSize: 14,
     fontWeight: '500',
   },
@@ -3725,19 +4080,48 @@ const st = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.14)',
+    backgroundColor: '#1F1F1F',
     alignItems: 'center',
     justifyContent: 'center',
   },
   imageModalBody: {
     flex: 1,
+    width: '100%',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: screenPad,
+  },
+  imageModalZoom: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   imageModalImg: {
     width: '100%',
     height: '100%',
+  },
+  imageModalActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space(2.5),
+    paddingHorizontal: screenPad,
+    paddingTop: space(2.5),
+  },
+  imageModalActionBtn: {
+    flex: 1,
+    height: 44,
+    borderRadius: radius.sm,
+    backgroundColor: '#1F1F1F',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    overflow: 'hidden',
+  },
+  imageModalActionText: {
+    color: '#F5F5F5',
+    fontSize: 14,
+    fontWeight: '500',
   },
   bubbleImgGrid: {
     flexDirection: 'row',

@@ -303,7 +303,8 @@ export type TableAlignment = 'left' | 'center' | 'right';
 export type MessageSegment =
   | { kind: 'text'; text: string }
   | { kind: 'codeblock'; lang: string; code: string }
-  | { kind: 'table'; headers: string[]; alignments: TableAlignment[]; rows: string[][] };
+  | { kind: 'table'; headers: string[]; alignments: TableAlignment[]; rows: string[][] }
+  | { kind: 'image'; alt: string; url: string; linkUrl?: string };
 
 export type InlineToken =
   | { kind: 'text'; text: string }
@@ -544,7 +545,271 @@ function parseTableSeparator(line: string): TableAlignment[] | null {
   return alignments;
 }
 
-/** Split a non-code text chunk into interleaved `text` and GFM `table` segments. */
+export const INLINE_IMAGE_MAX_HEIGHT = 440;
+export const INLINE_IMAGE_MIN_WIDTH = 64;
+export const INLINE_IMAGE_MIN_HEIGHT = 48;
+export const INLINE_IMAGE_DEFAULT_ASPECT = 4 / 3;
+
+/** Returns true for image URLs safe and valid to render inline (http(s), relative `/...`, or `data:image/...`). */
+export function isRenderableImageUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (/^https?:\/\/[^/\s]+/i.test(trimmed)) return true;
+  if (/^\/[^\s]*$/.test(trimmed) && !trimmed.startsWith('//')) return true;
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(trimmed)) return true;
+  return false;
+}
+
+/** Derive a clean display title for an inline image from its Markdown alt text or URL filename. */
+export function deriveImageDisplayName(alt: string, url: string): string {
+  const cleanAlt = alt.trim();
+  if (cleanAlt) return cleanAlt;
+  const trimmed = url.trim();
+  if (!trimmed || /^data:/i.test(trimmed)) return 'Image';
+  const withoutHash = trimmed.split('#')[0] ?? '';
+  const withoutQuery = withoutHash.split('?')[0] ?? '';
+  const parts = withoutQuery.split('/').filter(Boolean);
+  const last = parts[parts.length - 1];
+  if (!last) return 'Image';
+  try {
+    const decoded = decodeURIComponent(last).trim();
+    return decoded || 'Image';
+  } catch {
+    return last;
+  }
+}
+
+/**
+ * Compute natural-aspect-ratio display dimensions for an inline Markdown image:
+ * fits within `containerWidth` and clamps height to `maxHeight` (default 440dp)
+ * so portrait images (e.g. 9:16 wallpapers) are never cropped.
+ */
+export function computeInlineImageSize(
+  naturalWidth: number,
+  naturalHeight: number,
+  containerWidth: number,
+  maxHeight = INLINE_IMAGE_MAX_HEIGHT,
+): { width: number; height: number } {
+  const safeContainerW = Number.isFinite(containerWidth) && containerWidth > 0 ? containerWidth : 280;
+  const safeMaxH = Number.isFinite(maxHeight) && maxHeight > 0 ? maxHeight : INLINE_IMAGE_MAX_HEIGHT;
+
+  if (
+    !Number.isFinite(naturalWidth) ||
+    !Number.isFinite(naturalHeight) ||
+    naturalWidth <= 0 ||
+    naturalHeight <= 0
+  ) {
+    const placeholderW = Math.min(safeContainerW, 280);
+    const placeholderH = Math.min(safeMaxH, Math.round(placeholderW / INLINE_IMAGE_DEFAULT_ASPECT));
+    return {
+      width: Math.max(INLINE_IMAGE_MIN_WIDTH, Math.round(placeholderW)),
+      height: Math.max(INLINE_IMAGE_MIN_HEIGHT, placeholderH),
+    };
+  }
+
+  const aspect = naturalWidth / naturalHeight;
+  let width = safeContainerW;
+  let height = width / aspect;
+
+  if (height > safeMaxH) {
+    height = safeMaxH;
+    width = height * aspect;
+  }
+
+  return {
+    width: Math.min(safeContainerW, Math.max(INLINE_IMAGE_MIN_WIDTH, Math.round(width))),
+    height: Math.min(safeMaxH, Math.max(INLINE_IMAGE_MIN_HEIGHT, Math.round(height))),
+  };
+}
+
+/** Parse a Markdown parenthesized link/image destination `(url "optional title")` starting at `openParenIdx`. */
+function parseMarkdownDestination(
+  text: string,
+  openParenIdx: number,
+): { url: string; endIdx: number } | null {
+  if (text[openParenIdx] !== '(') return null;
+  let i = openParenIdx + 1;
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i += 1;
+  if (i >= text.length) return null;
+
+  let url = '';
+  if (text[i] === '<') {
+    i += 1;
+    const start = i;
+    while (i < text.length && text[i] !== '>' && text[i] !== '\n') {
+      if (text[i] === '\\' && i + 1 < text.length) i += 2;
+      else i += 1;
+    }
+    if (i >= text.length || text[i] !== '>') return null;
+    url = text.slice(start, i).trim();
+    i += 1;
+  } else {
+    const start = i;
+    let depth = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '\\' && i + 1 < text.length) {
+        i += 2;
+        continue;
+      }
+      if (ch === '(') {
+        depth += 1;
+        i += 1;
+        continue;
+      }
+      if (ch === ')') {
+        if (depth === 0) break;
+        depth -= 1;
+        i += 1;
+        continue;
+      }
+      if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') break;
+      i += 1;
+    }
+    url = text.slice(start, i).trim();
+  }
+
+  if (!url) return null;
+
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i += 1;
+  if (i < text.length && (text[i] === '"' || text[i] === "'" || text[i] === '(')) {
+    const closeCh = text[i] === '(' ? ')' : text[i];
+    i += 1;
+    while (i < text.length && text[i] !== closeCh && text[i] !== '\n') {
+      if (text[i] === '\\' && i + 1 < text.length) i += 2;
+      else i += 1;
+    }
+    if (i >= text.length || text[i] !== closeCh) return null;
+    i += 1;
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i += 1;
+  }
+
+  if (i >= text.length || text[i] !== ')') return null;
+  return { url, endIdx: i + 1 };
+}
+
+/** Parse `![alt](url)` starting at `bangIdx` (pointing at `!`). */
+function parseMarkdownImageAt(
+  text: string,
+  bangIdx: number,
+): { alt: string; url: string; endIdx: number } | null {
+  if (text[bangIdx] !== '!' || text[bangIdx + 1] !== '[') return null;
+  let i = bangIdx + 2;
+  let alt = '';
+  let depth = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\\' && i + 1 < text.length) {
+      alt += text[i + 1];
+      i += 2;
+      continue;
+    }
+    if (ch === '\n' && text[i + 1] === '\n') return null;
+    if (ch === '[') {
+      depth += 1;
+      alt += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === ']') {
+      if (depth === 0) break;
+      depth -= 1;
+      alt += ch;
+      i += 1;
+      continue;
+    }
+    alt += ch;
+    i += 1;
+  }
+  if (i >= text.length || text[i] !== ']' || text[i + 1] !== '(') return null;
+  const dest = parseMarkdownDestination(text, i + 1);
+  if (!dest || !isRenderableImageUrl(dest.url)) return null;
+  return { alt: alt.trim(), url: dest.url, endIdx: dest.endIdx };
+}
+
+/** Split a non-code, non-table text chunk into interleaved `text` and Markdown `image` segments. */
+function splitTextAndImages(text: string): MessageSegment[] {
+  if (!text || !text.includes('![')) {
+    return text.trim().length > 0 ? [{ kind: 'text', text }] : [];
+  }
+
+  const out: MessageSegment[] = [];
+  let textStart = 0;
+
+  const flushTextUntil = (endIdx: number) => {
+    if (endIdx <= textStart) return;
+    const chunk = text.slice(textStart, endIdx).replace(/^\n+|\n+$/g, '');
+    if (chunk.trim().length > 0) {
+      out.push({ kind: 'text', text: chunk });
+    }
+  };
+
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+
+    // Skip escaped characters so `\![alt](url)` stays literal text.
+    if (ch === '\\' && i + 1 < text.length) {
+      i += 2;
+      continue;
+    }
+
+    // Skip inline code spans so `` `![alt](url)` `` stays literal text.
+    if (ch === '`') {
+      let tickCount = 1;
+      while (i + tickCount < text.length && text[i + tickCount] === '`') {
+        tickCount += 1;
+      }
+      const closer = '`'.repeat(tickCount);
+      const closeIdx = text.indexOf(closer, i + tickCount);
+      if (closeIdx !== -1) {
+        i = closeIdx + tickCount;
+        continue;
+      }
+      i += tickCount;
+      continue;
+    }
+
+    // Linked image: `[![alt](imgUrl)](linkUrl)`
+    if (ch === '[' && text[i + 1] === '!' && text[i + 2] === '[') {
+      const inner = parseMarkdownImageAt(text, i + 1);
+      if (inner && text[inner.endIdx] === ']' && text[inner.endIdx + 1] === '(') {
+        const outerDest = parseMarkdownDestination(text, inner.endIdx + 1);
+        if (outerDest) {
+          flushTextUntil(i);
+          const resolvedLink = resolveChatLinkUrl(outerDest.url);
+          out.push(
+            resolvedLink
+              ? { kind: 'image', alt: inner.alt, url: inner.url, linkUrl: resolvedLink }
+              : { kind: 'image', alt: inner.alt, url: inner.url },
+          );
+          i = outerDest.endIdx;
+          textStart = i;
+          continue;
+        }
+      }
+    }
+
+    // Standalone or inline image: `![alt](imgUrl)`
+    if (ch === '!' && text[i + 1] === '[') {
+      const parsed = parseMarkdownImageAt(text, i);
+      if (parsed) {
+        flushTextUntil(i);
+        out.push({ kind: 'image', alt: parsed.alt, url: parsed.url });
+        i = parsed.endIdx;
+        textStart = i;
+        continue;
+      }
+    }
+
+    i += 1;
+  }
+
+  flushTextUntil(text.length);
+  return out;
+}
+
+/** Split a non-code text chunk into interleaved `text`, `image`, and GFM `table` segments. */
 function splitTextAndTables(text: string): MessageSegment[] {
   const normalized = text.replace(/\r\n?/g, '\n');
   const lines = normalized.split('\n');
@@ -555,7 +820,7 @@ function splitTextAndTables(text: string): MessageSegment[] {
     const joined = textBuf.join('\n').replace(/^\n+|\n+$/g, '');
     textBuf.length = 0;
     if (joined.trim().length > 0) {
-      out.push({ kind: 'text', text: joined });
+      out.push(...splitTextAndImages(joined));
     }
   };
 

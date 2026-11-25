@@ -44,7 +44,7 @@ fi
 # For JS-only OTAs, fetch the previous bundle.zip from ota-android so we can build a tiny bsdiff patch.
 PREV_DIR=""
 PATCH_ARGS=()
-cleanup() { [ -n "$PREV_DIR" ] && rm -rf "$PREV_DIR"; }
+cleanup() { if [ -n "$PREV_DIR" ]; then rm -rf "$PREV_DIR"; fi; }
 trap cleanup EXIT
 if [ "$IS_JS_ONLY" = 1 ]; then
   PREV_DIR=$(mktemp -d)

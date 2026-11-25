@@ -15,7 +15,8 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { PcNative } from '../../modules/pc-native';
 import { serverUrl } from './api';
-import { ApkRelease, parseApkVersion, parseOtaManifest } from './otaManifest';
+import { fetchLatestApk, resolveApkDownloadUrl } from './apkUpdateLogic';
+import { ApkRelease, parseOtaManifest } from './otaManifest';
 import { OtaTrigger, parseOtaTrigger } from './otaTriggerLogic';
 
 export type { ApkRelease } from './otaManifest';
@@ -409,42 +410,23 @@ export function clearOtaRecovery() {
 
 let lastApkFromMirror = false;
 
-/** APK download URL using the transport that last succeeded (laptop tailnet mirror first when reachable, else GitHub). */
+/** APK download URL: GitHub Releases by default, falling back to the laptop tailnet mirror only if GitHub was unreachable. */
 export function apkDownloadUrl(): string {
   const base = serverUrl();
-  return lastApkFromMirror && base ? mirrorApkUrls().apkUrl : APK_URLS.apkUrl;
+  return resolveApkDownloadUrl(APK_URLS.apkUrl, base ? mirrorApkUrls().apkUrl : null, lastApkFromMirror);
 }
 
-/** Newest APK release. Tries the laptop mirror over Tailscale first (fast when Tailscale is on),
- *  then falls back to GitHub Releases. Throws one clean message on failure. */
+/** Newest APK release. Tries GitHub Releases first, then falls back to the laptop mirror over Tailscale
+ *  if GitHub is unreachable. Throws one clean message on failure. */
 export async function latestApk(): Promise<ApkRelease> {
   const base = serverUrl();
-  let mirrorErr: string | null = null;
-  if (base) {
-    const mirror = mirrorApkUrls();
-    try {
-      const r = await fetchTextOnce(mirror.versionUrl, 5000);
-      const parsed = parseApkVersion(r.status, r.body);
-      if (parsed.ok) {
-        lastApkFromMirror = true;
-        return parsed.release;
-      }
-      mirrorErr = parsed.error;
-      console.warn(`[ota] laptop mirror APK version unusable (${parsed.error}); falling back to GitHub`);
-    } catch (e) {
-      mirrorErr = (e as Error).message;
-      console.warn(`[ota] laptop mirror APK check failed (${mirrorErr}); falling back to GitHub`);
-    }
-  }
-
-  try {
-    const [status, body] = await getText(APK_URLS.versionUrl, 'app releases');
-    const r = parseApkVersion(status, body);
-    if (!r.ok) throw new Error(r.error);
-    lastApkFromMirror = false;
-    return r.release;
-  } catch (e) {
-    const ghErr = (e as Error).message;
-    throw new Error(mirrorErr ? `${ghErr} (laptop mirror: ${mirrorErr})` : ghErr);
-  }
+  const res = await fetchLatestApk({
+    githubVersionUrl: APK_URLS.versionUrl,
+    mirrorVersionUrl: base ? mirrorApkUrls().versionUrl : null,
+    fetchGithub: (url) => getText(url, 'app releases'),
+    fetchMirror: (url) => fetchTextOnce(url, 5000),
+    warn: (msg) => console.warn(msg),
+  });
+  lastApkFromMirror = res.fromMirror;
+  return res.release;
 }

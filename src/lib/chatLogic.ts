@@ -87,6 +87,50 @@ export type ChatCacheState = {
 
 export const CHAT_ENDPOINT_CACHE_KEY = 'chat:endpoint';
 export const CHAT_STATE_CACHE_KEY = 'chat:state';
+export const THINKING_INDICATOR_ID = '__chat_thinking__';
+
+/**
+ * Stable list key for a ChatMessage so an optimistic user bubble keeps the exact same key
+ * once confirmed by the server (preventing container remount and scroll jumps mid-send).
+ */
+export function getChatMessageKey(msg: Pick<ChatMessage, 'id' | 'role' | 'client_id'>): string {
+  if (msg.role === 'user' && msg.client_id) {
+    return `u:${msg.client_id}`;
+  }
+  return msg.id;
+}
+
+/**
+ * Builds the message array rendered by the chat list, appending a trailing pending assistant
+ * item for the live thinking/progress indicator whenever a reply is in flight and no pending
+ * message already exists in `messages`. Keeping the indicator as a real list item ensures it
+ * participates in list virtualization, spacing, and scrollToEnd targeting cleanly.
+ */
+export function buildChatListItems(
+  messages: readonly ChatMessage[],
+  opts: {
+    running: boolean;
+    sending: boolean;
+    engine: ChatEngine;
+    activeProgress?: ChatProgress | null;
+  },
+): ChatMessage[] {
+  const hasPendingMsg = messages.some((m) => m.status === 'pending');
+  if ((!opts.running && !opts.sending) || hasPendingMsg) {
+    return messages as ChatMessage[];
+  }
+  const thinkingItem: ChatMessage = {
+    id: THINKING_INDICATOR_ID,
+    role: 'assistant',
+    engine: opts.activeProgress?.engine ?? opts.engine,
+    text: '',
+    created_at: opts.activeProgress?.started ?? 0,
+    status: 'pending',
+    progress: opts.activeProgress ?? null,
+    optimistic: true,
+  };
+  return [...messages, thinkingItem];
+}
 
 export function normalizeChatUrl(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, '');

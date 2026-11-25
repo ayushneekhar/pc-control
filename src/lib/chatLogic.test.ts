@@ -6,6 +6,7 @@ import {
   attachmentImageCacheKey,
   buildAttachmentDataUri,
   buildChatAttachmentSource,
+  buildChatListItems,
   buildReplyRef,
   chatAttachmentRequiresFetch,
   ChatMessage,
@@ -22,6 +23,7 @@ import {
   formatProgressDuration,
   formatProgressSummary,
   getChatEndpoint,
+  getChatMessageKey,
   getReplyRef,
   isReplyableMessage,
   mergeChatMessages,
@@ -42,6 +44,7 @@ import {
   shouldShowEngineTag,
   SWIPE_REPLY_MAX_DRAG,
   SWIPE_REPLY_THRESHOLD,
+  THINKING_INDICATOR_ID,
 } from './chatLogic';
 
 function memBackend(): CacheBackend {
@@ -1040,4 +1043,98 @@ test('parseMessageSegments ignores malformed and non-table pipe lines', () => {
   // Standalone thematic break and prose with pipes
   const prose = 'Use foo | bar\n---\nNext paragraph';
   assert.deepEqual(parseMessageSegments(prose), [{ kind: 'text', text: prose }]);
+});
+
+test('getChatMessageKey stays stable across optimistic and server-confirmed user messages', () => {
+  const optimistic: ChatMessage = {
+    id: 'opt-u-c-123',
+    role: 'user',
+    engine: 'claude',
+    text: 'hi',
+    created_at: 10,
+    status: 'done',
+    client_id: 'c-123',
+    optimistic: true,
+  };
+  const confirmed: ChatMessage = {
+    id: 'msg-server-99',
+    role: 'user',
+    engine: 'claude',
+    text: 'hi',
+    created_at: 10.2,
+    status: 'done',
+    client_id: 'c-123',
+  };
+  const assistant: ChatMessage = {
+    id: 'msg-asst-100',
+    role: 'assistant',
+    engine: 'claude',
+    text: 'hello',
+    created_at: 11,
+    status: 'done',
+    client_id: 'c-123',
+  };
+  const userWithoutClientId: ChatMessage = {
+    id: 'msg-user-legacy',
+    role: 'user',
+    engine: 'claude',
+    text: 'legacy',
+    created_at: 1,
+    status: 'done',
+  };
+
+  assert.equal(getChatMessageKey(optimistic), 'u:c-123');
+  assert.equal(getChatMessageKey(confirmed), 'u:c-123');
+  assert.equal(getChatMessageKey(assistant), 'msg-asst-100');
+  assert.equal(getChatMessageKey(userWithoutClientId), 'msg-user-legacy');
+});
+
+test('buildChatListItems appends trailing pending thinking item only when in flight without a pending message', () => {
+  const base: ChatMessage[] = [
+    { id: 'u1', role: 'user', engine: 'claude', text: 'check status', created_at: 10, status: 'done', client_id: 'c1' },
+  ];
+  const progress = {
+    engine: 'gemini' as const,
+    started: 11,
+    steps: [{ t: 12, text: 'Inspecting files' }],
+  };
+
+  // Idle: returns the exact original array without appending
+  const idle = buildChatListItems(base, { running: false, sending: false, engine: 'claude', activeProgress: null });
+  assert.equal(idle, base);
+
+  // Sending or running with no pending message: appends synthetic thinking item at the end
+  const inFlight = buildChatListItems(base, { running: true, sending: false, engine: 'claude', activeProgress: progress });
+  assert.equal(inFlight.length, 2);
+  assert.equal(inFlight[0], base[0]);
+  assert.deepEqual(inFlight[1], {
+    id: THINKING_INDICATOR_ID,
+    role: 'assistant',
+    engine: 'gemini',
+    text: '',
+    created_at: 11,
+    status: 'pending',
+    progress,
+    optimistic: true,
+  });
+  assert.equal(isReplyableMessage(inFlight[1]), false);
+
+  // Sending only (before server confirms running): still appends thinking item
+  const sendingOnly = buildChatListItems(base, { running: false, sending: true, engine: 'claude', activeProgress: null });
+  assert.equal(sendingOnly.length, 2);
+  assert.equal(sendingOnly[1].id, THINKING_INDICATOR_ID);
+  assert.equal(sendingOnly[1].engine, 'claude');
+
+  // If a real pending assistant message already exists, never duplicate the thinking item
+  const withPending: ChatMessage[] = [
+    ...base,
+    { id: 'a-pend', role: 'assistant', engine: 'claude', text: '', created_at: 12, status: 'pending' },
+  ];
+  const deduped = buildChatListItems(withPending, {
+    running: true,
+    sending: true,
+    engine: 'claude',
+    activeProgress: progress,
+  });
+  assert.equal(deduped, withPending);
 });

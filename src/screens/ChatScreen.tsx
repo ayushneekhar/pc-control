@@ -64,6 +64,7 @@ import {
 } from '../lib/chatApi';
 import {
   attachmentImageCacheKey,
+  buildChatListItems,
   buildReplyRef,
   CHAT_STATE_CACHE_KEY,
   ChatAttachment,
@@ -85,6 +86,7 @@ import {
   formatEngineLabel,
   formatMessagePreview,
   formatProgressSummary,
+  getChatMessageKey,
   getReplyRef,
   isHttpUrl,
   isReplyableMessage,
@@ -1571,7 +1573,10 @@ export default function ChatScreen() {
   const [kbHeight, setKbHeight] = useState(0);
   const [outerHeight, setOuterHeight] = useState(0);
   const [baseHeight, setBaseHeight] = useState(0);
-  const [composerHeight, setComposerHeight] = useState(64);
+  const [scrollToBottomReq, setScrollToBottomReq] = useState<{ nonce: number; animated: boolean }>({
+    nonce: 0,
+    animated: true,
+  });
   const [androidPadAnim] = useState(() => new Animated.Value(0));
   const [copyToastVisible, setCopyToastVisible] = useState(false);
   const [copyToastAnim] = useState(() => new Animated.Value(0));
@@ -1597,10 +1602,19 @@ export default function ChatScreen() {
   const mountedRef = useRef(true);
   const isFocusedRef = useRef(isFocused);
   const isForeground = isFocused && appActive;
+  const listData = useMemo(
+    () => buildChatListItems(messages, { running, sending, engine, activeProgress }),
+    [messages, running, sending, engine, activeProgress],
+  );
+
   const messagesRef = useRef<ChatMessage[]>(messages);
-  const messagesCountRef = useRef(messages.length);
+  const listDataCountRef = useRef(listData.length);
   const sendingRef = useRef(sending);
   const nearBottomRef = useRef(true);
+  const atBottomRef = useRef(true);
+  const userDraggingRef = useRef(false);
+  const programmaticScrollRef = useRef(false);
+  const scrollToBottomSeqRef = useRef(0);
   const kbHeightRef = useRef(0);
   const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1630,8 +1644,11 @@ export default function ChatScreen() {
 
   useEffect(() => {
     messagesRef.current = messages;
-    messagesCountRef.current = messages.length;
   }, [messages]);
+
+  useEffect(() => {
+    listDataCountRef.current = listData.length;
+  }, [listData.length]);
 
   useEffect(() => {
     sendingRef.current = sending;
@@ -1672,27 +1689,67 @@ export default function ChatScreen() {
   }, [clearChatNotifs]);
 
   const scrollToBottom = useCallback((animated: boolean) => {
-    if (messagesCountRef.current > 0) {
-      void listRef.current?.scrollToEnd({ animated });
-    }
+    if (listDataCountRef.current <= 0) return;
+    const list = listRef.current;
+    if (!list) return;
+    const seq = ++scrollToBottomSeqRef.current;
+    programmaticScrollRef.current = true;
+    nearBottomRef.current = true;
+    setShowScrollDown(false);
+    void list
+      .scrollToEnd({ animated })
+      .then(() => {
+        if (scrollToBottomSeqRef.current !== seq || !mountedRef.current) return;
+        if (animated && !atBottomRef.current && !userDraggingRef.current) {
+          return listRef.current?.scrollToEnd({ animated: false });
+        }
+        return undefined;
+      })
+      .finally(() => {
+        if (scrollToBottomSeqRef.current === seq) {
+          programmaticScrollRef.current = false;
+        }
+      });
+  }, []);
+
+  useEffect(() => {
+    if (scrollToBottomReq.nonce === 0) return;
+    scrollToBottom(scrollToBottomReq.animated);
+  }, [scrollToBottomReq, scrollToBottom]);
+
+  const onListScrollBeginDrag = useCallback(() => {
+    userDraggingRef.current = true;
+    scrollToBottomSeqRef.current += 1;
+    programmaticScrollRef.current = false;
+  }, []);
+
+  const onListScrollEndDrag = useCallback(() => {
+    userDraggingRef.current = false;
   }, []);
 
   const onListScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
     if (contentSize.height <= layoutMeasurement.height + 24) {
+      atBottomRef.current = true;
       nearBottomRef.current = true;
       setShowScrollDown((prev) => (prev ? false : prev));
       return;
     }
     const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+    atBottomRef.current = distanceFromBottom <= 24;
+    if (programmaticScrollRef.current) {
+      if (distanceFromBottom <= 80) {
+        nearBottomRef.current = true;
+        setShowScrollDown((prev) => (prev ? false : prev));
+      }
+      return;
+    }
     const isNear = nearBottomRef.current ? distanceFromBottom <= 160 : distanceFromBottom <= 80;
     nearBottomRef.current = isNear;
     setShowScrollDown((prev) => (prev === !isNear ? prev : !isNear));
   }, []);
 
   const onPressScrollToBottom = useCallback(() => {
-    nearBottomRef.current = true;
-    setShowScrollDown(false);
     scrollToBottom(true);
   }, [scrollToBottom]);
 
@@ -2156,7 +2213,7 @@ export default function ChatScreen() {
       nearBottomRef.current = true;
       setShowScrollDown(false);
       setMessages((prev) => [...prev, optUser]);
-      requestAnimationFrame(() => scrollToBottom(true));
+      setScrollToBottomReq((prev) => ({ nonce: prev.nonce + 1, animated: true }));
 
       try {
         const res = await sendChatMessage(trimmed, clientId, attachments, opts?.replyTo?.id);
@@ -2191,7 +2248,7 @@ export default function ChatScreen() {
         if (mountedRef.current) setSending(false);
       }
     },
-    [engine, hasMore, persistCache, scrollToBottom, setDraftValue],
+    [engine, hasMore, persistCache, setDraftValue],
   );
 
   const onSend = useCallback(() => {
@@ -2336,7 +2393,7 @@ export default function ChatScreen() {
                 persistCache(next, res.engine, hasMore);
                 return next;
               });
-              requestAnimationFrame(() => scrollToBottom(true));
+              setScrollToBottomReq((prev) => ({ nonce: prev.nonce + 1, animated: true }));
             })
             .catch((e) => {
               if (!mountedRef.current) return;
@@ -2348,7 +2405,7 @@ export default function ChatScreen() {
         },
       },
     ]);
-  }, [engine, hasMore, persistCache, scrollToBottom]);
+  }, [engine, hasMore, persistCache]);
 
   const openModelPicker = useCallback(() => {
     Keyboard.dismiss();
@@ -2406,11 +2463,9 @@ export default function ChatScreen() {
     return `Switch model and effort: ${provider}, ${summary}`;
   }, [engine, agentSettings]);
 
-  const hasPendingMsg = useMemo(() => messages.some((m) => m.status === 'pending'), [messages]);
-  const showTypingIndicator = (running || sending) && !hasPendingMsg;
   const canSend = (draft.trim().length > 0 || pendingAttachments.length > 0) && !sending && uploadingCount === 0;
 
-  const keyExtractor = useCallback((item: ChatMessage) => item.id, []);
+  const keyExtractor = useCallback((item: ChatMessage) => getChatMessageKey(item), []);
 
   const onPressImage = useCallback((att: ChatAttachment) => {
     Keyboard.dismiss();
@@ -2446,10 +2501,10 @@ export default function ChatScreen() {
     ],
   );
 
-  const isEmpty = messages.length === 0;
+  const isEmpty = listData.length === 0;
   const listContentStyle = useMemo(
-    () => [st.listContent, { paddingBottom: composerHeight + space(3) }, isEmpty && st.listContentEmpty],
-    [composerHeight, isEmpty],
+    () => [st.listContent, isEmpty && st.listContentEmpty],
+    [isEmpty],
   );
 
   const listHeader = useMemo(
@@ -2466,18 +2521,6 @@ export default function ChatScreen() {
         </View>
       ) : null,
     [hasMore, loadingOlder, onLoadOlder],
-  );
-
-  const listFooter = useMemo(
-    () =>
-      showTypingIndicator ? (
-        <View style={[st.assistantGroup, st.typingFooter]}>
-          <View style={st.assistantMeta}>
-            <ThinkingProgressContent progress={activeProgress} />
-          </View>
-        </View>
-      ) : null,
-    [showTypingIndicator, activeProgress],
   );
 
   const listEmpty = useMemo(
@@ -2540,12 +2583,12 @@ export default function ChatScreen() {
       ) : null}
 
       <View style={st.listWrap}>
-        {loadingInitial && messages.length === 0 ? (
+        {loadingInitial && listData.length === 0 ? (
           <ChatSkeleton />
         ) : (
           <LegendList
             ref={listRef}
-            data={messages}
+            data={listData}
             keyExtractor={keyExtractor}
             renderItem={renderItem}
             initialScrollAtEnd
@@ -2558,13 +2601,14 @@ export default function ChatScreen() {
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="interactive"
             onScroll={onListScroll}
+            onScrollBeginDrag={onListScrollBeginDrag}
+            onScrollEndDrag={onListScrollEndDrag}
             scrollEventThrottle={100}
             ListHeaderComponent={listHeader}
-            ListFooterComponent={listFooter}
             ListEmptyComponent={listEmpty}
           />
         )}
-        {showScrollDown && messages.length > 0 ? (
+        {showScrollDown && listData.length > 0 ? (
           <Pressable
             onPress={onPressScrollToBottom}
             accessibilityRole="button"
@@ -2573,7 +2617,7 @@ export default function ChatScreen() {
             style={({ pressed }) => [
               st.scrollDownBtn,
               {
-                bottom: composerHeight + space(2),
+                bottom: space(2),
                 backgroundColor: t.card,
                 borderColor: t.border,
                 opacity: pressed ? 0.8 : 1,
@@ -2591,7 +2635,7 @@ export default function ChatScreen() {
             style={[
               st.copyToastWrap,
               {
-                bottom: composerHeight + space(2.5),
+                bottom: space(2.5),
                 opacity: copyToastAnim,
                 transform: [
                   {
@@ -2615,15 +2659,9 @@ export default function ChatScreen() {
             </View>
           </Animated.View>
         ) : null}
+      </View>
 
-        <View
-          pointerEvents="box-none"
-          style={st.floatingBottom}
-          onLayout={(e) => {
-            const h = Math.ceil(e.nativeEvent.layout.height);
-            if (h > 0) setComposerHeight((prev) => (prev === h ? prev : h));
-          }}
-        >
+      <View style={st.composerDock}>
           {pendingAttachments.length > 0 || uploadingCount > 0 ? (
             <ScrollView
               horizontal
@@ -2832,7 +2870,6 @@ export default function ChatScreen() {
               </Pressable>
             </View>
           </View>
-        </View>
       </View>
     </>
   );
@@ -3098,11 +3135,11 @@ const st = StyleSheet.create({
     overflow: 'hidden',
   },
   newBtnText: { fontSize: 13, fontWeight: '500' },
-  listWrap: { flex: 1, position: 'relative' },
+  listWrap: { flex: 1, position: 'relative', overflow: 'hidden' },
   listContent: {
     paddingHorizontal: screenPad,
     paddingTop: space(1),
-    paddingBottom: space(4),
+    paddingBottom: space(3),
     gap: space(3.5),
     flexGrow: 1,
   },
@@ -3444,7 +3481,6 @@ const st = StyleSheet.create({
     fontSize: 12.5,
     lineHeight: 17,
   },
-  typingFooter: { paddingTop: space(3) },
   errorText: { fontSize: 14, lineHeight: 20 },
   errorFooter: {
     flexDirection: 'row',
@@ -3483,12 +3519,8 @@ const st = StyleSheet.create({
     shadowRadius: 4,
     shadowOffset: { width: 0, height: 2 },
   },
-  floatingBottom: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'transparent',
+  composerDock: {
+    flexShrink: 0,
   },
   replyBar: {
     flexDirection: 'row',

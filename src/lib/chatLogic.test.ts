@@ -910,3 +910,134 @@ test('resolveChatLinkUrl resolves http(s) and t3-thread URLs and rejects others'
   assert.equal(resolveChatLinkUrl('javascript:alert(1)'), null);
   assert.equal(resolveChatLinkUrl(''), null);
 });
+
+test('parseMessageSegments parses standard GFM tables with alignment markers and surrounding text', () => {
+  const md = [
+    'Summary:',
+    '',
+    '| Service | Status | CPU |',
+    '| :--- | :---: | ---: |',
+    '| pc-api | up | 1.2% |',
+    '| caddy | up | 0.4% |',
+    '',
+    'All healthy.',
+  ].join('\n');
+
+  assert.deepEqual(parseMessageSegments(md), [
+    { kind: 'text', text: 'Summary:' },
+    {
+      kind: 'table',
+      headers: ['Service', 'Status', 'CPU'],
+      alignments: ['left', 'center', 'right'],
+      rows: [
+        ['pc-api', 'up', '1.2%'],
+        ['caddy', 'up', '0.4%'],
+      ],
+    },
+    { kind: 'text', text: 'All healthy.' },
+  ]);
+
+  // Tables without outer pipes and with plain `---` separators default to left alignment
+  const compact = ['Name | Count', '--- | ---:', 'Alpha | 10', 'Beta | 20'].join('\n');
+  assert.deepEqual(parseMessageSegments(compact), [
+    {
+      kind: 'table',
+      headers: ['Name', 'Count'],
+      alignments: ['left', 'right'],
+      rows: [
+        ['Alpha', '10'],
+        ['Beta', '20'],
+      ],
+    },
+  ]);
+
+  // Uneven rows pad missing cells with empty strings and truncate extra cells; header-only tables parse cleanly
+  const uneven = [
+    '| A | B | C |',
+    '| --- | --- | --- |',
+    '| 1 |',
+    '| 1 | 2 | 3 | 4 |',
+  ].join('\n');
+  assert.deepEqual(parseMessageSegments(uneven), [
+    {
+      kind: 'table',
+      headers: ['A', 'B', 'C'],
+      alignments: ['left', 'left', 'left'],
+      rows: [
+        ['1', '', ''],
+        ['1', '2', '3'],
+      ],
+    },
+  ]);
+
+  assert.deepEqual(parseMessageSegments('| Only | Header |\n| --- | :---: |'), [
+    {
+      kind: 'table',
+      headers: ['Only', 'Header'],
+      alignments: ['left', 'center'],
+      rows: [],
+    },
+  ]);
+});
+
+test('parseMessageSegments preserves inline code, escaped pipes, bold, and links inside table cells', () => {
+  const md = [
+    '| Feature | Command | Docs |',
+    '| --- | --- | --- |',
+    '| **Pipe** | `echo a | b` | [Guide](https://example.com/guide) |',
+    '| Escaped | a \\| b | [Thread](t3-thread://v2/env-1/thr-2) |',
+  ].join('\n');
+
+  assert.deepEqual(parseMessageSegments(md), [
+    {
+      kind: 'table',
+      headers: ['Feature', 'Command', 'Docs'],
+      alignments: ['left', 'left', 'left'],
+      rows: [
+        ['**Pipe**', '`echo a | b`', '[Guide](https://example.com/guide)'],
+        ['Escaped', 'a | b', '[Thread](t3-thread://v2/env-1/thr-2)'],
+      ],
+    },
+  ]);
+
+  // Inline tokens inside table cells remain parseable and external URLs work for link previews
+  assert.equal(extractPreviewUrl(md), 'https://example.com/guide');
+});
+
+test('parseMessageSegments does NOT parse tables inside fenced code blocks', () => {
+  const md = [
+    'Example markdown:',
+    '```markdown',
+    '| Col A | Col B |',
+    '| --- | ---: |',
+    '| 1 | 2 |',
+    '```',
+  ].join('\n');
+
+  assert.deepEqual(parseMessageSegments(md), [
+    { kind: 'text', text: 'Example markdown:' },
+    {
+      kind: 'codeblock',
+      lang: 'markdown',
+      code: '| Col A | Col B |\n| --- | ---: |\n| 1 | 2 |',
+    },
+  ]);
+});
+
+test('parseMessageSegments ignores malformed and non-table pipe lines', () => {
+  // Mismatched header vs separator column count
+  const mismatched = '| A | B |\n| --- | --- | --- |\n| 1 | 2 |';
+  assert.deepEqual(parseMessageSegments(mismatched), [{ kind: 'text', text: mismatched }]);
+
+  // Missing separator row
+  const noSep = '| A | B |\n| 1 | 2 |';
+  assert.deepEqual(parseMessageSegments(noSep), [{ kind: 'text', text: noSep }]);
+
+  // Invalid separator characters
+  const badSep = '| A | B |\n| --- | abc |\n| 1 | 2 |';
+  assert.deepEqual(parseMessageSegments(badSep), [{ kind: 'text', text: badSep }]);
+
+  // Standalone thematic break and prose with pipes
+  const prose = 'Use foo | bar\n---\nNext paragraph';
+  assert.deepEqual(parseMessageSegments(prose), [{ kind: 'text', text: prose }]);
+});

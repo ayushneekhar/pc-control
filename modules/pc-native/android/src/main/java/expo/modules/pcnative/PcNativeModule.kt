@@ -36,6 +36,15 @@ class PcNativeModule : Module() {
     private const val REQ_PICK_ATTACHMENTS = 9417
     private const val MAX_PICK_FILES = 4
     private const val MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024
+    private val IMAGE_PASTE_MIME_TYPES = arrayOf(
+      "image/*",
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+      "image/gif",
+      "image/heic",
+      "image/heif",
+    )
   }
 
   private val ctx: Context
@@ -341,7 +350,9 @@ class PcNativeModule : Module() {
         val appCtx = appContext.reactContext?.applicationContext ?: editText.context.applicationContext
         Thread {
           @Suppress("UNUSED_VARIABLE")
-          val keepAlive = uriContent
+          val keepAlivePayload = payload
+          @Suppress("UNUSED_VARIABLE")
+          val keepAliveUriContent = uriContent
           val items = ArrayList<Map<String, Any>>()
           var firstError: String? = null
           for (uri in selected) {
@@ -366,7 +377,7 @@ class PcNativeModule : Module() {
         }.start()
         remaining
       }
-      ViewCompat.setOnReceiveContentListener(editText, arrayOf("image/*"), listener)
+      ViewCompat.setOnReceiveContentListener(editText, IMAGE_PASTE_MIME_TYPES, listener)
       attachedPasteViews[viewTag] = WeakReference(editText)
       if (editText.isFocused) {
         try {

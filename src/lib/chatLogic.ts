@@ -254,9 +254,12 @@ export function shouldPollChat(
   return messages.some((m) => m.status === 'pending');
 }
 
+export type TableAlignment = 'left' | 'center' | 'right';
+
 export type MessageSegment =
   | { kind: 'text'; text: string }
-  | { kind: 'codeblock'; lang: string; code: string };
+  | { kind: 'codeblock'; lang: string; code: string }
+  | { kind: 'table'; headers: string[]; alignments: TableAlignment[]; rows: string[][] };
 
 export type InlineToken =
   | { kind: 'text'; text: string }
@@ -385,17 +388,171 @@ export function parseInlineTokens(text: string): InlineToken[] {
 export function extractPreviewUrl(text: string): string | null {
   if (!text) return null;
   for (const seg of parseMessageSegments(text)) {
-    if (seg.kind !== 'text') continue;
-    for (const tok of parseInlineTokens(seg.text)) {
-      if (tok.kind === 'link' && tok.external) {
-        return tok.url;
+    if (seg.kind === 'text') {
+      for (const tok of parseInlineTokens(seg.text)) {
+        if (tok.kind === 'link' && tok.external) {
+          return tok.url;
+        }
+      }
+    } else if (seg.kind === 'table') {
+      for (const row of [seg.headers, ...seg.rows]) {
+        for (const cell of row) {
+          for (const tok of parseInlineTokens(cell)) {
+            if (tok.kind === 'link' && tok.external) {
+              return tok.url;
+            }
+          }
+        }
       }
     }
   }
   return null;
 }
 
-/** Split message text into plain text and fenced code blocks (```lang ... ```). */
+/** Split a GFM table row into trimmed cells, respecting inline code spans and escaped pipes (`\|`). */
+function splitTableRow(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+
+  // Find unescaped pipe positions outside backtick code spans.
+  const pipeIndices: number[] = [];
+  let inCode = false;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (ch === '\\' && !inCode && i + 1 < trimmed.length) {
+      i += 1;
+      continue;
+    }
+    if (ch === '`') {
+      inCode = !inCode;
+      continue;
+    }
+    if (ch === '|' && !inCode) {
+      pipeIndices.push(i);
+    }
+  }
+  if (pipeIndices.length === 0) return null;
+
+  let start = 0;
+  let end = trimmed.length;
+  let firstPipe = 0;
+  let lastPipe = pipeIndices.length - 1;
+
+  if (pipeIndices[firstPipe] === 0) {
+    start = 1;
+    firstPipe += 1;
+  }
+  if (lastPipe >= firstPipe && pipeIndices[lastPipe] === trimmed.length - 1) {
+    end = trimmed.length - 1;
+    lastPipe -= 1;
+  }
+
+  const rawCells: string[] = [];
+  let cursor = start;
+  for (let p = firstPipe; p <= lastPipe; p += 1) {
+    const idx = pipeIndices[p];
+    rawCells.push(trimmed.slice(cursor, idx));
+    cursor = idx + 1;
+  }
+  rawCells.push(trimmed.slice(cursor, end));
+
+  if (rawCells.length === 0) return null;
+
+  return rawCells.map((cell) => {
+    // Unescape `\|` outside inline code spans.
+    let out = '';
+    let code = false;
+    for (let i = 0; i < cell.length; i += 1) {
+      const ch = cell[i];
+      if (ch === '`') {
+        code = !code;
+        out += ch;
+      } else if (ch === '\\' && !code && i + 1 < cell.length && cell[i + 1] === '|') {
+        out += '|';
+        i += 1;
+      } else {
+        out += ch;
+      }
+    }
+    return out.trim();
+  });
+}
+
+const TABLE_ALIGN_CELL_RE = /^:?-{1,}:?$/;
+
+/** Parse a GFM delimiter row (e.g. `| --- | :---: | ---: |`) into column alignments, or null if invalid. */
+function parseTableSeparator(line: string): TableAlignment[] | null {
+  const cells = splitTableRow(line);
+  if (!cells || cells.length === 0) return null;
+  const alignments: TableAlignment[] = [];
+  for (const cell of cells) {
+    if (!TABLE_ALIGN_CELL_RE.test(cell)) return null;
+    const left = cell.startsWith(':');
+    const right = cell.endsWith(':');
+    if (left && right) {
+      alignments.push('center');
+    } else if (right) {
+      alignments.push('right');
+    } else {
+      alignments.push('left');
+    }
+  }
+  return alignments;
+}
+
+/** Split a non-code text chunk into interleaved `text` and GFM `table` segments. */
+function splitTextAndTables(text: string): MessageSegment[] {
+  const normalized = text.replace(/\r\n?/g, '\n');
+  const lines = normalized.split('\n');
+  const out: MessageSegment[] = [];
+  const textBuf: string[] = [];
+
+  const flushText = () => {
+    const joined = textBuf.join('\n').replace(/^\n+|\n+$/g, '');
+    textBuf.length = 0;
+    if (joined.trim().length > 0) {
+      out.push({ kind: 'text', text: joined });
+    }
+  };
+
+  let i = 0;
+  while (i < lines.length) {
+    if (i + 1 < lines.length) {
+      const headers = splitTableRow(lines[i]);
+      const alignments = headers ? parseTableSeparator(lines[i + 1]) : null;
+      if (headers && alignments && headers.length === alignments.length) {
+        flushText();
+        const colCount = headers.length;
+        const rows: string[][] = [];
+        let j = i + 2;
+        while (j < lines.length) {
+          const line = lines[j];
+          if (!line.trim()) break;
+          const cells = splitTableRow(line);
+          if (!cells) break;
+          const normalizedRow =
+            cells.length === colCount
+              ? cells
+              : cells.length < colCount
+                ? [...cells, ...Array<string>(colCount - cells.length).fill('')]
+                : cells.slice(0, colCount);
+          rows.push(normalizedRow);
+          j += 1;
+        }
+        out.push({ kind: 'table', headers, alignments, rows });
+        i = j;
+        continue;
+      }
+    }
+    textBuf.push(lines[i]);
+    i += 1;
+  }
+
+  flushText();
+  return out;
+}
+
+/** Split message text into plain text, GFM tables, and fenced code blocks (```lang ... ```). */
 export function parseMessageSegments(text: string): MessageSegment[] {
   if (!text) return [];
   const out: MessageSegment[] = [];
@@ -406,7 +563,7 @@ export function parseMessageSegments(text: string): MessageSegment[] {
     if (match.index > lastIndex) {
       const plain = text.slice(lastIndex, match.index);
       if (plain.trim().length > 0) {
-        out.push({ kind: 'text', text: plain.replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, '') });
+        out.push(...splitTextAndTables(plain.replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, '')));
       }
     }
     const lang = (match[1] || '').trim();
@@ -417,7 +574,13 @@ export function parseMessageSegments(text: string): MessageSegment[] {
   if (lastIndex < text.length) {
     const tail = text.slice(lastIndex);
     if (tail.trim().length > 0 || out.length === 0) {
-      out.push({ kind: 'text', text: tail.replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, '') });
+      const trimmedTail = tail.replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, '');
+      const parsed = splitTextAndTables(trimmedTail);
+      if (parsed.length > 0) {
+        out.push(...parsed);
+      } else if (out.length === 0) {
+        out.push({ kind: 'text', text: trimmedTail });
+      }
     }
   }
   return out;

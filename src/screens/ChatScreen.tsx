@@ -92,6 +92,7 @@ import {
   makeClientId,
   mergeChatMessages,
   normalizeMarkdownForDisplay,
+  parseInlineTokens,
   parseMessageSegments,
   prependOlderMessages,
   replySenderLabel,
@@ -100,6 +101,7 @@ import {
   shouldPollChat,
   SWIPE_REPLY_RESET_THRESHOLD,
   SWIPE_REPLY_THRESHOLD,
+  TableAlignment,
 } from '../lib/chatLogic';
 import { radius, screenPad, space, Theme, useTheme } from '../theme';
 import { setHasActiveDraft } from '../lib/otaTriggerLogic';
@@ -647,6 +649,189 @@ function CodeBlockCard({
   );
 }
 
+function cellDisplayLength(raw: string): number {
+  let total = 0;
+  for (const tok of parseInlineTokens(raw)) {
+    if (tok.kind === 'code') total += tok.code.length;
+    else if (tok.kind === 'link') total += tok.label.length;
+    else total += tok.text.length;
+  }
+  return total;
+}
+
+function TableCellText({
+  text,
+  align,
+  isHeader,
+  isUser,
+}: {
+  text: string;
+  align: TableAlignment;
+  isHeader: boolean;
+  isUser: boolean;
+}) {
+  const t = useTheme();
+  const tokens = useMemo(() => parseInlineTokens(text), [text]);
+  const codeBg = isUser ? t.card : t.cardAlt;
+
+  return (
+    <Text
+      style={[
+        isHeader ? st.tableHeaderText : st.tableCellText,
+        {
+          color: t.text,
+          textAlign: align,
+        },
+      ]}
+    >
+      {tokens.length === 0
+        ? ' '
+        : tokens.map((tok, idx) => {
+            if (tok.kind === 'bold') {
+              return (
+                <Text key={idx} style={st.tableBoldText}>
+                  {tok.text}
+                </Text>
+              );
+            }
+            if (tok.kind === 'code') {
+              return (
+                <Text
+                  key={idx}
+                  style={[
+                    st.tableInlineCode,
+                    { fontFamily: t.mono, backgroundColor: codeBg, color: t.text },
+                  ]}
+                >
+                  {` ${tok.code} `}
+                </Text>
+              );
+            }
+            if (tok.kind === 'link') {
+              const targetUrl = resolveChatLinkUrl(tok.url);
+              return (
+                <Text
+                  key={idx}
+                  onPress={targetUrl ? () => openExternalUrl(targetUrl) : undefined}
+                  style={[st.tableLinkText, { color: t.accent }]}
+                >
+                  {tok.label}
+                </Text>
+              );
+            }
+            return <React.Fragment key={idx}>{tok.text}</React.Fragment>;
+          })}
+    </Text>
+  );
+}
+
+function MarkdownTableCard({
+  headers,
+  alignments,
+  rows,
+  isUser,
+  onLongPress,
+}: {
+  headers: string[];
+  alignments: TableAlignment[];
+  rows: string[][];
+  isUser: boolean;
+  onLongPress?: () => void;
+}) {
+  const t = useTheme();
+  const colWidths = useMemo(
+    () =>
+      headers.map((header, colIdx) => {
+        let maxLen = cellDisplayLength(header);
+        for (const row of rows) {
+          const len = cellDisplayLength(row[colIdx] ?? '');
+          if (len > maxLen) maxLen = len;
+        }
+        return Math.min(220, Math.max(68, Math.ceil(maxLen * 7.8) + 24));
+      }),
+    [headers, rows],
+  );
+
+  const surfaceBg = isUser ? t.bg : t.card;
+  const headerBg = isUser ? t.card : t.cardAlt;
+
+  return (
+    <View style={[st.tableCard, { backgroundColor: surfaceBg, borderColor: t.border }]}>
+      <ScrollView
+        horizontal
+        nestedScrollEnabled
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={st.tableScrollContent}
+      >
+        <Pressable onLongPress={onLongPress} style={st.tableInner}>
+          <View
+            style={[
+              st.tableRow,
+              {
+                backgroundColor: headerBg,
+                borderBottomColor: t.border,
+                borderBottomWidth: rows.length > 0 ? StyleSheet.hairlineWidth : 0,
+              },
+            ]}
+          >
+            {headers.map((cell, colIdx) => {
+              const align = alignments[colIdx] ?? 'left';
+              return (
+                <View
+                  key={colIdx}
+                  style={[
+                    st.tableCell,
+                    {
+                      width: colWidths[colIdx],
+                      flexGrow: colWidths[colIdx],
+                      borderRightColor: t.border,
+                      borderRightWidth: colIdx < headers.length - 1 ? StyleSheet.hairlineWidth : 0,
+                    },
+                  ]}
+                >
+                  <TableCellText text={cell} align={align} isHeader isUser={isUser} />
+                </View>
+              );
+            })}
+          </View>
+          {rows.map((row, rowIdx) => (
+            <View
+              key={rowIdx}
+              style={[
+                st.tableRow,
+                {
+                  borderBottomColor: t.border,
+                  borderBottomWidth: rowIdx < rows.length - 1 ? StyleSheet.hairlineWidth : 0,
+                },
+              ]}
+            >
+              {headers.map((_, colIdx) => {
+                const align = alignments[colIdx] ?? 'left';
+                return (
+                  <View
+                    key={colIdx}
+                    style={[
+                      st.tableCell,
+                      {
+                        width: colWidths[colIdx],
+                        flexGrow: colWidths[colIdx],
+                        borderRightColor: t.border,
+                        borderRightWidth: colIdx < headers.length - 1 ? StyleSheet.hairlineWidth : 0,
+                      },
+                    ]}
+                  >
+                    <TableCellText text={row[colIdx] ?? ''} align={align} isHeader={false} isUser={isUser} />
+                  </View>
+                );
+              })}
+            </View>
+          ))}
+        </Pressable>
+      </ScrollView>
+    </View>
+  );
+}
+
 function MessageBody({
   text,
   isUser,
@@ -673,6 +858,18 @@ function MessageBody({
               code={seg.code}
               isUser={isUser}
               onCopyCode={onCopyCode}
+              onLongPress={onLongPress}
+            />
+          );
+        }
+        if (seg.kind === 'table') {
+          return (
+            <MarkdownTableCard
+              key={idx}
+              headers={seg.headers}
+              alignments={seg.alignments}
+              rows={seg.rows}
+              isUser={isUser}
               onLongPress={onLongPress}
             />
           );
@@ -2579,7 +2776,7 @@ export default function ChatScreen() {
             >
               <Icon name="plus" size={20} color={t.text} />
             </Pressable>
-            <View ref={inputWrapRef} style={st.inputWrap} onLayout={ensureImagePasteAttached}>
+            <View ref={inputWrapRef} collapsable={false} style={st.inputWrap} onLayout={ensureImagePasteAttached}>
               <EnrichedMarkdownTextInput
                 ref={inputRef}
                 onLayout={ensureImagePasteAttached}
@@ -3102,6 +3299,48 @@ const st = StyleSheet.create({
     paddingVertical: space(2),
   },
   codeText: { fontSize: 12.5, lineHeight: 18 },
+  tableCard: {
+    borderRadius: radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  tableScrollContent: {
+    flexGrow: 1,
+  },
+  tableInner: {
+    flexGrow: 1,
+  },
+  tableRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+  },
+  tableCell: {
+    paddingHorizontal: space(2.5),
+    paddingVertical: space(2),
+    justifyContent: 'center',
+  },
+  tableHeaderText: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  tableCellText: {
+    fontSize: 13.5,
+    lineHeight: 19,
+    fontWeight: '400',
+    fontVariant: ['tabular-nums'],
+  },
+  tableBoldText: {
+    fontWeight: '600',
+  },
+  tableInlineCode: {
+    fontSize: 12,
+    borderRadius: 4,
+  },
+  tableLinkText: {
+    textDecorationLine: 'underline',
+  },
   copyToastWrap: {
     position: 'absolute',
     left: 0,

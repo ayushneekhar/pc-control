@@ -129,4 +129,16 @@ class ServiceHelpersTest {
             ServiceHelpers.sortedTemperatures(temps),
         )
     }
+
+    @Test
+    fun `computeCpuSparklineMax auto-scales idle and peak telemetry`() {
+        assertEquals(20.0, computeCpuSparklineMax(emptyList()), 0.001)
+        assertEquals(20.0, computeCpuSparklineMax(listOf(3.0, 5.2, 4.8)), 0.001)
+        assertEquals(20.0, computeCpuSparklineMax(listOf(null, Double.NaN, -5.0, 10.0)), 0.001)
+        assertEquals(60.0, computeCpuSparklineMax(listOf(12.0, 50.0, 22.0)), 0.001)
+
+        // Only considers the last maxPoints samples
+        val history = listOf(95.0) + List(60) { 6.0 }
+        assertEquals(20.0, computeCpuSparklineMax(history, maxPoints = 60), 0.001)
+    }
 }

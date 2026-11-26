@@ -1,24 +1,28 @@
 package com.neekhar.pccontrol.feature.system
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -32,6 +36,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -45,13 +52,9 @@ import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
 import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
-import com.neekhar.pccontrol.core.ui.PcSegmentOption
-import com.neekhar.pccontrol.core.ui.PcSegmentedControl
 import com.neekhar.pccontrol.core.ui.PcStatusDot
 import com.neekhar.pccontrol.core.ui.PcTone
 import com.neekhar.pccontrol.feature.home.PcFormatters
-import kotlin.math.max
-import kotlin.math.roundToInt
 
 @Immutable
 data class ServicesUiState(
@@ -75,6 +78,7 @@ data class ServicesUiState(
         get() = health?.takeIf { it.ts > 0L }?.let { "Checked ${PcFormatters.formatClock(it.ts)}" }
 }
 
+@Suppress("UNUSED_PARAMETER")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ServicesTab(
@@ -82,7 +86,7 @@ fun ServicesTab(
     onRefresh: () -> Unit,
     onSelectFilter: (ServiceGroup) -> Unit,
     onOpenServiceDetail: (String) -> Unit,
-    onOpenDownloads: () -> Unit,
+    onOpenDownloads: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
@@ -100,14 +104,14 @@ fun ServicesTab(
         ServiceHelpers.sortAndFilter(allUnits, effectiveFilter, state.catCamEnabled)
     }
 
-    val filterOptions = remember(state.catCamEnabled) {
+    val filterGroups = remember(state.catCamEnabled) {
         buildList {
-            add(PcSegmentOption(ServiceGroup.ALL, ServiceGroup.ALL.label))
-            add(PcSegmentOption(ServiceGroup.MEDIA, ServiceGroup.MEDIA.label))
+            add(ServiceGroup.ALL)
+            add(ServiceGroup.MEDIA)
             if (state.catCamEnabled) {
-                add(PcSegmentOption(ServiceGroup.CAMS, ServiceGroup.CAMS.label))
+                add(ServiceGroup.CAMS)
             }
-            add(PcSegmentOption(ServiceGroup.AGENTS, ServiceGroup.AGENTS.label))
+            add(ServiceGroup.AGENTS)
         }
     }
 
@@ -136,7 +140,7 @@ fun ServicesTab(
                 top = 4.dp,
                 bottom = PcDimens.Space8,
             ),
-            verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
+            verticalArrangement = Arrangement.spacedBy(PcDimens.Space6),
         ) {
             if (state.error != null && h == null) {
                 item(key = "error") {
@@ -261,75 +265,103 @@ fun ServicesTab(
                 }
             }
 
-            // 2. Services Segmented Filter + List
-            if (h.services.available && allUnits.isNotEmpty()) {
-                item(key = "services_filter") {
-                    PcSegmentedControl(
-                        options = filterOptions,
-                        selected = effectiveFilter,
-                        onSelect = onSelectFilter,
-                    )
-                }
-            }
+            // 2. Services Filter Chips + List
+            item(key = "services_section") {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (h.services.available && allUnits.isNotEmpty()) {
+                        ServiceFilterChipRow(
+                            groups = filterGroups,
+                            selected = effectiveFilter,
+                            onSelect = onSelectFilter,
+                        )
+                    }
 
-            item(key = "services_list") {
-                if (!h.services.available) {
-                    UnavailableCard(label = "Services", error = h.services.error)
-                } else {
-                    PcListCard {
-                        if (shownUnits.isEmpty()) {
-                            Text(
-                                text = "No services in this group.",
-                                color = colors.textFaint,
-                                fontSize = 13.sp,
-                                modifier = Modifier.padding(PcDimens.Space4),
-                            )
-                        } else {
-                            shownUnits.forEachIndexed { idx, svc ->
-                                val tone = when (ServiceHelpers.tone(svc)) {
-                                    ServiceTone.OK -> PcTone.Ok
-                                    ServiceTone.BAD -> PcTone.Bad
-                                    ServiceTone.WARN -> PcTone.Warn
-                                    ServiceTone.DIM -> PcTone.Faint
-                                }
-                                val trailing = if (svc.active == "active") {
-                                    PcFormatters.formatServiceSince(svc.since)
-                                } else {
-                                    ServiceHelpers.statusLabel(svc)
-                                }
-                                PcListRow(
-                                    title = ServiceHelpers.friendlyName(svc.unit),
-                                    subtitle = svc.description.takeIf { it.isNotBlank() },
-                                    leading = { PcStatusDot(tone = tone) },
-                                    trailing = trailing.takeIf { it.isNotBlank() },
-                                    showChevron = true,
-                                    showDivider = idx < shownUnits.lastIndex,
-                                    onClick = { onOpenServiceDetail(svc.unit) },
+                    if (!h.services.available) {
+                        UnavailableCard(label = "Services", error = h.services.error)
+                    } else {
+                        PcListCard {
+                            if (shownUnits.isEmpty()) {
+                                Text(
+                                    text = "No services in this group.",
+                                    color = colors.textFaint,
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.padding(PcDimens.Space4),
                                 )
+                            } else {
+                                shownUnits.forEachIndexed { idx, svc ->
+                                    val tone = when (ServiceHelpers.tone(svc)) {
+                                        ServiceTone.OK -> PcTone.Ok
+                                        ServiceTone.BAD -> PcTone.Bad
+                                        ServiceTone.WARN -> PcTone.Warn
+                                        ServiceTone.DIM -> PcTone.Faint
+                                    }
+                                    val trailing = if (svc.active == "active") {
+                                        PcFormatters.formatServiceSince(svc.since)
+                                    } else {
+                                        ServiceHelpers.statusLabel(svc)
+                                    }
+                                    PcListRow(
+                                        title = ServiceHelpers.friendlyName(svc.unit),
+                                        subtitle = svc.description.takeIf { it.isNotBlank() },
+                                        leading = { PcStatusDot(tone = tone) },
+                                        trailing = trailing.takeIf { it.isNotBlank() },
+                                        showChevron = true,
+                                        showDivider = idx < shownUnits.lastIndex,
+                                        onClick = { onOpenServiceDetail(svc.unit) },
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // 3. Downloads Snapshot
-            item(key = "downloads_snapshot") {
-                DownloadsHealthSection(
-                    downloads = h.downloads,
-                    radarr = h.radarr,
-                    sonarr = h.sonarr,
-                    onOpenDownloads = onOpenDownloads,
-                )
-            }
-
-            // 4. Jellyfin Active Streams
+            // 3. Jellyfin Active Streams
             item(key = "jellyfin_streams") {
                 JellyfinHealthSection(jellyfin = h.jellyfin)
             }
+        }
+    }
+}
 
-            // 5. Disks Health
-            item(key = "disks_health") {
-                DisksHealthSection(disks = h.disks)
+@Composable
+private fun ServiceFilterChipRow(
+    groups: List<ServiceGroup>,
+    selected: ServiceGroup,
+    onSelect: (ServiceGroup) -> Unit,
+) {
+    val colors = LocalPcColors.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        groups.forEach { group ->
+            val isSelected = group == selected
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minHeight = 36.dp)
+                    .clip(CircleShape)
+                    .background(if (isSelected) colors.accentSoft else colors.surface)
+                    .border(
+                        width = if (isSelected) 1.dp else 0.5.dp,
+                        color = if (isSelected) colors.accent else colors.hairline,
+                        shape = CircleShape,
+                    )
+                    .semantics { this.selected = isSelected }
+                    .clickable(role = Role.Tab) { onSelect(group) }
+                    .padding(horizontal = 14.dp, vertical = 7.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = group.label,
+                    color = if (isSelected) colors.accent else colors.textDim,
+                    fontSize = 13.sp,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                    maxLines = 1,
+                )
             }
         }
     }
@@ -367,241 +399,9 @@ private fun UnavailableCard(label: String, error: String?) {
 }
 
 @Composable
-private fun DownloadsHealthSection(
-    downloads: HealthDownloads,
-    radarr: ArrQueue,
-    sonarr: ArrQueue,
-    onOpenDownloads: () -> Unit,
-) {
-    val colors = LocalPcColors.current
-    Column(verticalArrangement = Arrangement.spacedBy(PcDimens.Space2)) {
-        Spacer(modifier = Modifier.height(4.dp))
-        PcSectionLabel(
-            label = "Downloads",
-            trailing = {
-                Text(
-                    text = "All ›",
-                    color = colors.accent,
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable(onClick = onOpenDownloads)
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                )
-            },
-        )
-        if (!downloads.available) {
-            UnavailableCard(label = "Downloads", error = downloads.error)
-        } else {
-            PcCard(onClick = onOpenDownloads) {
-                if (!downloads.qbt.isNullOrBlank() && downloads.qbt != "ok") {
-                    Text(
-                        text = if (downloads.qbt == "auth") "qBittorrent sign-in failed" else "qBittorrent is not answering",
-                        color = colors.warn,
-                        fontSize = 13.sp,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-
-                val total = downloads.total
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(text = "Active", color = colors.textFaint, fontSize = 11.5.sp)
-                        Text(
-                            text = "${total?.count ?: 0}",
-                            color = colors.text,
-                            style = TabularNumStyle.copy(fontSize = 20.sp, fontWeight = FontWeight.Medium),
-                        )
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(text = "Down", color = colors.textFaint, fontSize = 11.5.sp)
-                        Text(
-                            text = PcFormatters.formatRate(total?.speed ?: 0.0),
-                            color = colors.text,
-                            style = TabularNumStyle.copy(fontSize = 16.sp, fontWeight = FontWeight.Medium),
-                        )
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(text = "Up", color = colors.textFaint, fontSize = 11.5.sp)
-                        Text(
-                            text = PcFormatters.formatRate(total?.upspeed ?: 0.0),
-                            color = colors.textDim,
-                            style = TabularNumStyle.copy(fontSize = 16.sp, fontWeight = FontWeight.Medium),
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                if (downloads.items.isEmpty()) {
-                    Text(text = "Nothing downloading.", color = colors.textFaint, fontSize = 13.sp)
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        downloads.items.take(4).forEach { item ->
-                            val stalled = item.state == "stalled"
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    Text(
-                                        text = item.name,
-                                        color = colors.text,
-                                        fontSize = 13.5.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    Text(
-                                        text = "${(item.progress * 100.0).roundToInt()}%",
-                                        color = if (stalled) colors.warn else colors.textDim,
-                                        style = TabularNumStyle.copy(fontSize = 12.5.sp, fontWeight = FontWeight.Medium),
-                                    )
-                                }
-                                VitalsProgressBar(
-                                    percent = item.progress * 100.0,
-                                    trackColor = colors.surfaceRaised,
-                                    fillColor = if (stalled) colors.warn else colors.text,
-                                    height = 4.dp,
-                                )
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                ) {
-                                    Text(
-                                        text = buildString {
-                                            append(if (stalled) "stalled" else item.state)
-                                            if (item.state == "downloading" && item.eta != null && item.eta > 0L) {
-                                                append(" · ${PcFormatters.formatDuration(item.eta)} left")
-                                            }
-                                        },
-                                        color = if (stalled) colors.warn else colors.textFaint,
-                                        fontSize = 11.5.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                    Text(
-                                        text = buildString {
-                                            append(PcFormatters.formatRate(item.speed))
-                                            if (item.upspeed > 0.0) append(" · ↑ ${PcFormatters.formatRate(item.upspeed)}")
-                                        },
-                                        color = colors.textFaint,
-                                        style = TabularNumStyle.copy(fontSize = 11.5.sp),
-                                    )
-                                }
-                            }
-                        }
-                        val totalCount = total?.count ?: downloads.items.size
-                        if (totalCount > 4) {
-                            Text(
-                                text = "+${totalCount - 4} more",
-                                color = colors.accent,
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Medium,
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-                HorizontalDivider(thickness = 0.5.dp, color = colors.hairline)
-                Spacer(modifier = Modifier.height(6.dp))
-                ArrQueueSummaryRow(label = "Radarr", queue = radarr, showDivider = true)
-                ArrQueueSummaryRow(label = "Sonarr", queue = sonarr, showDivider = false)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ArrQueueSummaryRow(label: String, queue: ArrQueue, showDivider: Boolean) {
-    val colors = LocalPcColors.current
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = label,
-                color = colors.text,
-                fontSize = 13.5.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.weight(1f),
-            )
-            if (queue.available) {
-                Text(
-                    text = "${queue.queue} queued",
-                    color = colors.textDim,
-                    style = TabularNumStyle.copy(fontSize = 12.5.sp),
-                )
-                PcPill(
-                    label = when {
-                        queue.needsAction > 0 -> "${queue.needsAction} action"
-                        queue.queue > 0 -> "waiting"
-                        else -> "clear"
-                    },
-                    tone = when {
-                        queue.needsAction > 0 -> PcTone.Bad
-                        queue.queue > 0 -> PcTone.Ok
-                        else -> PcTone.Dim
-                    },
-                )
-            } else {
-                PcPill(label = "unavailable", tone = PcTone.Warn)
-            }
-        }
-        if (queue.needsAction > 0) {
-            queue.items.take(3).forEach { item ->
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.Top,
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Warning,
-                        contentDescription = null,
-                        tint = colors.bad,
-                        modifier = Modifier
-                            .padding(top = 2.dp)
-                            .size(14.dp),
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = item.title,
-                            color = colors.text,
-                            fontSize = 12.5.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        if (item.reason.isNotBlank()) {
-                            Text(
-                                text = item.reason,
-                                color = colors.textFaint,
-                                fontSize = 11.5.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        if (showDivider) {
-            HorizontalDivider(thickness = 0.5.dp, color = colors.hairline)
-        }
-    }
-}
-
-@Composable
 private fun JellyfinHealthSection(jellyfin: HealthJellyfin) {
     val colors = LocalPcColors.current
     Column(verticalArrangement = Arrangement.spacedBy(PcDimens.Space2)) {
-        Spacer(modifier = Modifier.height(4.dp))
         PcSectionLabel(label = "Jellyfin")
         when {
             !jellyfin.available -> UnavailableCard(label = "Jellyfin", error = jellyfin.error)
@@ -670,76 +470,6 @@ private fun JellyfinHealthSection(jellyfin: HealthJellyfin) {
                                 fillColor = colors.textFaint,
                                 height = 4.dp,
                             )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DisksHealthSection(disks: HealthDisks) {
-    val colors = LocalPcColors.current
-    Column(verticalArrangement = Arrangement.spacedBy(PcDimens.Space2)) {
-        Spacer(modifier = Modifier.height(4.dp))
-        PcSectionLabel(label = "Disks")
-        if (!disks.available) {
-            UnavailableCard(label = "Disks", error = disks.error)
-        } else {
-            PcCard {
-                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    disks.disks.forEach { disk ->
-                        val free = max(0L, disk.total - disk.used)
-                        val freePct = if (disk.total > 0L) (free.toDouble() / disk.total.toDouble()) * 100.0 else 0.0
-                        val barColor = when {
-                            freePct < 10.0 -> colors.bad
-                            freePct < 20.0 -> colors.warn
-                            else -> colors.text
-                        }
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Text(
-                                    text = "${disk.kind} · ${disk.mount}",
-                                    color = colors.text,
-                                    fontSize = 13.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "${freePct.roundToInt()}% free",
-                                    color = barColor,
-                                    style = TabularNumStyle.copy(fontSize = 12.5.sp, fontWeight = FontWeight.Medium),
-                                )
-                            }
-                            VitalsProgressBar(
-                                percent = disk.pct,
-                                trackColor = colors.surfaceRaised,
-                                fillColor = barColor,
-                                height = 4.dp,
-                            )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Text(
-                                    text = "${PcFormatters.formatBytes(disk.used, 0)} / ${PcFormatters.formatBytes(disk.total, 0)}",
-                                    color = colors.textFaint,
-                                    style = TabularNumStyle.copy(fontSize = 11.5.sp),
-                                )
-                                Text(
-                                    text = "${PcFormatters.formatBytes(free, 0)} free",
-                                    color = colors.textFaint,
-                                    style = TabularNumStyle.copy(fontSize = 11.5.sp),
-                                )
-                            }
                         }
                     }
                 }

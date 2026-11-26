@@ -5,13 +5,14 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,21 +21,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.LiveTv
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VideocamOff
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -55,6 +55,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -79,7 +80,6 @@ import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
 import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcProgressBar
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcStatItem
 import com.neekhar.pccontrol.core.ui.PcStatStrip
@@ -153,7 +153,15 @@ fun HomeScreenContent(
     val context = LocalContext.current
     val pullState = rememberPullToRefreshState()
 
-    val headerStatusText = if (state.isOffline) "Offline" else null
+    val homeTitle = remember(state.info?.host) { formatHomeTitle(state.info?.host) }
+    val uptimeSubtitle = remember(state.vitals?.uptime) { formatHomeUptimeSubtitle(state.vitals?.uptime) }
+    val attention = remember(state.keyring, state.health) {
+        buildHomeAttentionSummary(
+            keyring = state.keyring,
+            vpn = state.health?.vpn,
+            problems = state.health?.problems.orEmpty(),
+        )
+    }
     val transfers = state.transfersSummary
 
     Column(
@@ -180,15 +188,14 @@ fun HomeScreenContent(
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = PcDimens.Space8),
-                verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
+                verticalArrangement = Arrangement.spacedBy(PcDimens.Space6),
             ) {
-                // Header
+                // Header: hostname with quiet uptime subtitle underneath
                 item(key = "header") {
-                    PcScreenHeader(
-                        title = "Home",
-                        statusText = headerStatusText,
-                        statusTone = PcTone.Bad,
-                        showStatusDot = headerStatusText != null,
+                    HomeHeader(
+                        title = homeTitle,
+                        uptimeSubtitle = uptimeSubtitle,
+                        isOffline = state.isOffline,
                     )
                 }
 
@@ -202,22 +209,6 @@ fun HomeScreenContent(
                             icon = Icons.Filled.WifiOff,
                             actionLabel = "Open Settings",
                             onAction = onOpenSettings,
-                            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
-                        )
-                    }
-                }
-
-                // Keyring locked banner
-                if (state.keyring?.locked == true) {
-                    item(key = "keyring_banner") {
-                        val rdpSuffix = state.keyring.rdp.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
-                        PcErrorBanner(
-                            title = "Keyring locked · RDP unavailable",
-                            message = "Unlock the laptop's login keyring to restart remote desktop$rdpSuffix.",
-                            tone = PcTone.Warn,
-                            icon = Icons.Filled.Lock,
-                            actionLabel = "Unlock",
-                            onAction = onUnlockKeyring,
                             modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
                         )
                     }
@@ -270,54 +261,20 @@ fun HomeScreenContent(
                     }
                 }
 
-                // Inline Quick Status Pills (VPN, Keyring, Service health issues)
-                val vpn = state.health?.vpn
-                val hasStatusPills = vpn != null || state.keyring != null || state.problemCount > 0
-                if (hasStatusPills) {
-                    item(key = "status_pills") {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = PcDimens.ScreenPad),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            if (state.problemCount > 0) {
-                                val hasBad = state.health?.problems?.any { it.severity == "bad" } == true
-                                PcPill(
-                                    label = "${state.problemCount} issue${if (state.problemCount == 1) "" else "s"}",
-                                    tone = if (hasBad) PcTone.Bad else PcTone.Warn,
-                                    showDot = true,
-                                    onClick = onOpenServices,
-                                )
-                            }
-                            if (vpn != null) {
-                                val vpnTone = when {
-                                    vpn.enabled && vpn.tunnelUp -> PcTone.Ok
-                                    vpn.enabled && !vpn.tunnelUp -> PcTone.Warn
-                                    else -> PcTone.Dim
+                // Exception-only Needs Attention row (hidden when everything is healthy)
+                if (!state.isOffline && attention != null) {
+                    item(key = "needs_attention") {
+                        NeedsAttentionRow(
+                            summary = attention,
+                            onClick = {
+                                when (attention.primaryAction) {
+                                    HomeAttentionAction.UNLOCK_KEYRING -> onUnlockKeyring()
+                                    HomeAttentionAction.OPEN_SERVICES -> onOpenServices()
+                                    HomeAttentionAction.OPEN_SETTINGS -> onOpenSettings()
                                 }
-                                val vpnLabel = when {
-                                    vpn.enabled && vpn.tunnelUp -> "Proton VPN · On"
-                                    vpn.enabled && !vpn.tunnelUp -> "Proton VPN · Reconnecting"
-                                    else -> "Proton VPN · Off"
-                                }
-                                PcPill(
-                                    label = vpnLabel,
-                                    tone = vpnTone,
-                                    icon = Icons.Filled.Shield,
-                                )
-                            }
-                            if (state.keyring != null) {
-                                val locked = state.keyring.locked
-                                PcPill(
-                                    label = if (locked) "Keyring · Locked" else "Keyring · Unlocked",
-                                    tone = if (locked) PcTone.Warn else PcTone.Ok,
-                                    icon = if (locked) Icons.Filled.Lock else Icons.Filled.LockOpen,
-                                    onClick = if (locked) onUnlockKeyring else null,
-                                )
-                            }
-                        }
+                            },
+                            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                        )
                     }
                 }
 
@@ -325,7 +282,7 @@ fun HomeScreenContent(
                 item(key = "cameras") {
                     Column(
                         modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
-                        verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+                        verticalArrangement = Arrangement.spacedBy(if (state.catCamEnabled) 2.dp else PcDimens.Space2),
                     ) {
                         if (state.catCamEnabled) {
                             PcSectionLabel(
@@ -333,29 +290,38 @@ fun HomeScreenContent(
                                 trailing = {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                                     ) {
-                                        Text(
-                                            text = "Replay",
-                                            color = colors.textFaint,
-                                            fontSize = 12.5.sp,
-                                            fontWeight = FontWeight.Medium,
+                                        Box(
                                             modifier = Modifier
-                                                .clip(RoundedCornerShape(6.dp))
-                                                .clickable { onOpenCams("replay") }
-                                                .padding(horizontal = 4.dp, vertical = 2.dp),
-                                        )
-                                        Text(text = "·", color = colors.textFaint, fontSize = 12.5.sp)
-                                        Text(
-                                            text = "Music",
-                                            color = colors.textFaint,
-                                            fontSize = 12.5.sp,
-                                            fontWeight = FontWeight.Medium,
+                                                .defaultMinSize(minWidth = 48.dp, minHeight = 44.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable(role = Role.Button) { onOpenCams("replay") }
+                                                .padding(horizontal = 10.dp),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Text(
+                                                text = "Replay",
+                                                color = colors.textDim,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Medium,
+                                            )
+                                        }
+                                        Box(
                                             modifier = Modifier
-                                                .clip(RoundedCornerShape(6.dp))
-                                                .clickable { onOpenCams("music") }
-                                                .padding(horizontal = 4.dp, vertical = 2.dp),
-                                        )
+                                                .defaultMinSize(minWidth = 48.dp, minHeight = 44.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable(role = Role.Button) { onOpenCams("music") }
+                                                .padding(horizontal = 10.dp),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Text(
+                                                text = "Music",
+                                                color = colors.textDim,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Medium,
+                                            )
+                                        }
                                     }
                                 },
                             )
@@ -410,6 +376,134 @@ fun HomeScreenContent(
 }
 
 @Composable
+private fun HomeHeader(
+    title: String,
+    uptimeSubtitle: String?,
+    isOffline: Boolean,
+) {
+    val colors = LocalPcColors.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(
+                start = PcDimens.ScreenPad,
+                end = PcDimens.ScreenPad,
+                top = PcDimens.Space4,
+            ),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = title,
+            color = colors.text,
+            fontSize = 30.sp,
+            lineHeight = 35.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = (-0.5).sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        when {
+            isOffline -> {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    PcStatusDot(tone = PcTone.Bad, size = 7.dp)
+                    Text(
+                        text = "Offline",
+                        color = colors.bad,
+                        style = TabularNumStyle.copy(
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Medium,
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            uptimeSubtitle != null -> {
+                Text(
+                    text = uptimeSubtitle,
+                    color = colors.textFaint,
+                    style = TabularNumStyle.copy(
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Normal,
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NeedsAttentionRow(
+    summary: HomeAttentionSummary,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalPcColors.current
+    val isBad = summary.tone == HomeAttentionTone.BAD
+    val fg = if (isBad) colors.bad else colors.warn
+    val bg = if (isBad) colors.badSoft else colors.warnSoft
+
+    PcCard(
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+        onClick = onClick,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(bg),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = fg,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
+            ) {
+                Text(
+                    text = "Needs attention",
+                    color = colors.text,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = summary.summaryText,
+                    color = fg,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = colors.textFaint,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
+}
+
+@Composable
 private fun CamerasMosaicCard(
     baseUrl: String,
     tick: Long,
@@ -428,7 +522,7 @@ private fun CamerasMosaicCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(184.dp)
+                .aspectRatio(16f / 9f)
                 .background(colors.media),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
@@ -776,7 +870,6 @@ private fun OpenRoutesSection(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
     ) {
-        Spacer(modifier = Modifier.height(4.dp))
         PcSectionLabel(label = "Open")
         PcListCard {
             // 1. Primary everyday media & storage apps (curated priority order)

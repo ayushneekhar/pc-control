@@ -294,7 +294,7 @@ private fun WindowDetailCard(detail: AccountWindowDetail) {
                 state = detail.state,
                 remainingPct = detail.remainingPct,
                 expectedRemainingPct = detail.expectedRemainingPct,
-                height = 6.dp,
+                height = 10.dp,
             )
 
             if (detail.state == AccountWindowRowState.OK) {

@@ -15,6 +15,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -53,11 +54,7 @@ class PcApiClient(
     private val prefs: AppPrefs,
     okHttpClient: OkHttpClient? = null,
 ) {
-    val json: Json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-        encodeDefaults = true
-    }
+    val json: Json = DefaultJson
 
     val okHttpClient: OkHttpClient = okHttpClient ?: OkHttpClient.Builder()
         .dispatcher(
@@ -560,6 +557,14 @@ class PcApiClient(
     }
 
     companion object {
+        @OptIn(ExperimentalSerializationApi::class)
+        val DefaultJson: Json = Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+            encodeDefaults = true
+            explicitNulls = false
+        }
+
         const val DEFAULT_TIMEOUT_MS = 12_000L
         const val DEFAULT_POST_TIMEOUT_MS = 15_000L
         const val DEFAULT_BYTES_TIMEOUT_MS = 20_000L

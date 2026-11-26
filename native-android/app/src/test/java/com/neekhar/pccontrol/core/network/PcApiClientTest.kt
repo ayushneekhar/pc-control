@@ -1,6 +1,12 @@
 package com.neekhar.pccontrol.core.network
 
 import com.neekhar.pccontrol.core.storage.AppPrefs
+import com.neekhar.pccontrol.feature.chat.ChatAgentSettingsPatch
+import com.neekhar.pccontrol.feature.chat.GeminiSettingsPatch
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -79,5 +85,26 @@ class PcApiClientTest {
         assertTrue(err.isError)
         assertNull(err.getOrNull())
         assertEquals(502, err.errorOrNull()?.statusCode)
+    }
+
+    @Test
+    fun geminiSettingsPatchOmitsNullFieldsWhenSerialized() {
+        val patch = GeminiSettingsPatch(model = "gemini-4-carbon")
+        val raw = PcApiClient.DefaultJson.encodeToString(patch)
+        val obj = PcApiClient.DefaultJson.parseToJsonElement(raw).jsonObject
+
+        assertEquals("gemini-4-carbon", obj["model"]?.jsonPrimitive?.content)
+        assertFalse("instance_id must be omitted when null", obj.containsKey("instance_id"))
+        assertFalse("thought_level must be omitted when null", obj.containsKey("thought_level"))
+
+        val wrapped = ChatAgentSettingsPatch(gemini = patch)
+        val wrappedRaw = PcApiClient.DefaultJson.encodeToString(wrapped)
+        val wrappedObj: JsonObject = PcApiClient.DefaultJson.parseToJsonElement(wrappedRaw).jsonObject
+
+        assertFalse("claude must be omitted when null", wrappedObj.containsKey("claude"))
+        val geminiObj = wrappedObj["gemini"]!!.jsonObject
+        assertEquals("gemini-4-carbon", geminiObj["model"]?.jsonPrimitive?.content)
+        assertFalse(geminiObj.containsKey("instance_id"))
+        assertFalse(geminiObj.containsKey("thought_level"))
     }
 }

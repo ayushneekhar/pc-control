@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
@@ -27,9 +26,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -115,14 +117,15 @@ fun ProviderUsageIcon(
 }
 
 /**
- * Sleek thin progress bar (4.dp default) with a vertical pace tick mark.
+ * Readable usage progress bar (8.dp default) with a high-contrast rounded track,
+ * clipped quota fill, and an overlaid pace tick mark aligned to 0–100% bounds.
  */
 @Composable
 fun UsageProgressBar(
     state: AccountWindowRowState,
     remainingPct: Double?,
     expectedRemainingPct: Double?,
-    height: Dp = 4.dp,
+    height: Dp = 8.dp,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
@@ -132,9 +135,9 @@ fun UsageProgressBar(
     } else {
         0f
     }
-    val trackBg = colors.surfaceRaised
-    val tickColor = colors.text
-    val canvasHeight = (height + 6.dp).coerceAtLeast(10.dp)
+    val trackBg = if (colors.isDark) Color(0xFF2C2C2C) else colors.hairline
+    val tickColor = if (colors.isDark) Color.White else colors.text
+    val canvasHeight = height + 2.dp
 
     Canvas(
         modifier = modifier
@@ -145,7 +148,8 @@ fun UsageProgressBar(
         val totalH = size.height
         val barH = height.toPx().coerceAtMost(totalH)
         val barTop = (totalH - barH) / 2f
-        val radius = CornerRadius(barH / 2f, barH / 2f)
+        val radiusPx = 4.dp.toPx().coerceAtMost(barH / 2f)
+        val radius = CornerRadius(radiusPx, radiusPx)
 
         drawRoundRect(
             color = trackBg,
@@ -154,23 +158,39 @@ fun UsageProgressBar(
             cornerRadius = radius,
         )
 
-        val fillWidth = (w * fillFraction).coerceAtLeast(0f)
+        val fillWidth = (w * fillFraction).coerceIn(0f, w)
         if (fillWidth > 0f) {
-            drawRoundRect(
-                color = palette.fill,
-                topLeft = Offset(0f, barTop),
-                size = Size(fillWidth.coerceAtLeast(barH.coerceAtMost(w)), barH),
-                cornerRadius = radius,
-            )
+            val trackPath = Path().apply {
+                addRoundRect(
+                    RoundRect(
+                        left = 0f,
+                        top = barTop,
+                        right = w,
+                        bottom = barTop + barH,
+                        cornerRadius = radius,
+                    ),
+                )
+            }
+            clipPath(trackPath) {
+                drawRoundRect(
+                    color = palette.fill,
+                    topLeft = Offset(0f, barTop),
+                    size = Size(fillWidth, barH),
+                    cornerRadius = radius,
+                )
+            }
         }
 
-        if (expectedRemainingPct != null) {
-            val tickX = w * (expectedRemainingPct / 100.0).toFloat().coerceIn(0.02f, 0.98f)
+        if (expectedRemainingPct != null && w > 0f) {
+            val strokePx = 2.dp.toPx()
+            val halfStroke = strokePx / 2f
+            val rawX = w * (expectedRemainingPct / 100.0).toFloat().coerceIn(0f, 1f)
+            val tickX = rawX.coerceIn(halfStroke, (w - halfStroke).coerceAtLeast(halfStroke))
             drawLine(
                 color = tickColor,
-                start = Offset(tickX, 0f),
-                end = Offset(tickX, totalH),
-                strokeWidth = 1.5.dp.toPx(),
+                start = Offset(tickX, halfStroke),
+                end = Offset(tickX, (totalH - halfStroke).coerceAtLeast(halfStroke)),
+                strokeWidth = strokePx,
                 cap = StrokeCap.Round,
             )
         }
@@ -241,7 +261,7 @@ fun GroupedUsageSection(
 /**
  * Clean single-account usage card (e.g. Claude):
  * Combines 5-hour and Weekly windows into one PcListCard, each with a single
- * "98% left · resets 1h 9m" header over a sleek 4.dp progress bar with a pace tick.
+ * "98% left · resets 1h 9m" header over a readable 8.dp progress bar with a pace tick.
  */
 @Composable
 private fun SingleAccountUsageCard(
@@ -331,7 +351,7 @@ private fun SingleAccountUsageCard(
                     state = row.state,
                     remainingPct = row.remainingPct,
                     expectedRemainingPct = row.expectedRemainingPct,
-                    height = 4.dp,
+                    height = 8.dp,
                 )
             }
         }
@@ -430,7 +450,7 @@ private fun MultiAccountWindowCard(
                             state = row.state,
                             remainingPct = row.remainingPct,
                             expectedRemainingPct = row.expectedRemainingPct,
-                            height = 5.dp,
+                            height = 9.dp,
                         )
                     }
                 }
@@ -653,9 +673,9 @@ fun UsageSkeletonCard(segments: Int = 4) {
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .height(5.dp)
-                            .clip(CircleShape)
-                            .background(colors.surfaceRaised),
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(if (colors.isDark) Color(0xFF2C2C2C) else colors.hairline),
                     )
                 }
             }

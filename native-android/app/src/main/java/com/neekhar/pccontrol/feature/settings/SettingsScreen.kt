@@ -39,8 +39,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -67,6 +65,7 @@ import com.neekhar.pccontrol.core.theme.TabularNumStyle
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
+import com.neekhar.pccontrol.core.ui.PcCompactTextField
 import com.neekhar.pccontrol.core.ui.PcConfirmDialog
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
@@ -198,21 +197,11 @@ fun SettingsScreen(
                 PcSectionLabel(label = "Appearance")
             }
             item(key = "card_appearance") {
-                PcCard {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            text = "Theme",
-                            color = colors.text,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium,
-                        )
-                        PcSegmentedControl(
-                            options = ThemeMode.entries.map { it.label },
-                            selectedIndex = ThemeMode.entries.indexOf(state.themeMode),
-                            onSelect = { idx -> viewModel.setThemeMode(ThemeMode.entries[idx]) },
-                        )
-                    }
-                }
+                PcSegmentedControl(
+                    options = ThemeMode.entries.map { it.label },
+                    selectedIndex = ThemeMode.entries.indexOf(state.themeMode),
+                    onSelect = { idx -> viewModel.setThemeMode(ThemeMode.entries[idx]) },
+                )
             }
 
             // ---- Connection ----
@@ -855,58 +844,37 @@ private fun ConnectionCard(
     onTest: () -> Unit,
 ) {
     val colors = LocalPcColors.current
-    val fieldColors = OutlinedTextFieldDefaults.colors(
-        focusedTextColor = colors.text,
-        unfocusedTextColor = colors.text,
-        focusedContainerColor = colors.surfaceRaised,
-        unfocusedContainerColor = colors.surfaceRaised,
-        focusedBorderColor = colors.accent,
-        unfocusedBorderColor = colors.hairline,
-        cursorColor = colors.accent,
-    )
 
     PcCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(text = "Laptop server URL (tailnet)", color = colors.textDim, fontSize = 12.5.sp)
-                OutlinedTextField(
+                PcCompactTextField(
                     value = serverUrl,
                     onValueChange = onServerUrlChange,
-                    singleLine = true,
-                    textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
+                    mono = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = fieldColors,
-                    modifier = Modifier.fillMaxWidth(),
                 )
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(text = "Chat API URL", color = colors.textDim, fontSize = 12.5.sp)
-                OutlinedTextField(
+                PcCompactTextField(
                     value = chatBaseUrl,
                     onValueChange = onChatBaseUrlChange,
-                    singleLine = true,
-                    textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
+                    mono = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = fieldColors,
-                    modifier = Modifier.fillMaxWidth(),
                 )
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(text = "Chat token", color = colors.textDim, fontSize = 12.5.sp)
-                OutlinedTextField(
+                PcCompactTextField(
                     value = chatToken,
                     onValueChange = onChatTokenChange,
-                    singleLine = true,
+                    mono = true,
                     visualTransformation = PasswordVisualTransformation(),
-                    textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = fieldColors,
-                    modifier = Modifier.fillMaxWidth(),
                 )
             }
 

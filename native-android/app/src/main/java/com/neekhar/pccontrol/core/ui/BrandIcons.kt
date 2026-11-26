@@ -1,72 +1,42 @@
 package com.neekhar.pccontrol.core.ui
 
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import com.neekhar.pccontrol.R
 
 /**
- * Custom vector brand icons used across provider pickers, chat composer, and agent settings.
+ * Renders the official monochrome Anthropic/Claude or Gemini brand mark from drawable resources.
+ */
+@Composable
+fun ProviderBrandIcon(
+    isClaude: Boolean,
+    modifier: Modifier = Modifier,
+    tint: Color = LocalContentColor.current,
+    contentDescription: String? = null,
+) {
+    Icon(
+        painter = painterResource(
+            id = if (isClaude) R.drawable.ic_brand_anthropic else R.drawable.ic_brand_gemini,
+        ),
+        contentDescription = contentDescription,
+        tint = tint,
+        modifier = modifier,
+    )
+}
+
+/**
+ * Custom vector icons used across feature screens.
  */
 object PcBrandIcons {
-
-    /**
-     * Anthropic / Claude starburst icon (12-ray organic sunburst on a 24×24 viewport).
-     * Renders cleanly at 15dp–24dp and supports Material [androidx.compose.material3.Icon] tinting.
-     */
-    val Claude: ImageVector by lazy {
-        ImageVector.Builder(
-            name = "PcBrandIcons.Claude",
-            defaultWidth = 24.dp,
-            defaultHeight = 24.dp,
-            viewportWidth = 24f,
-            viewportHeight = 24f,
-        ).apply {
-            // Solid center core linking the starburst rays cleanly
-            path(fill = SolidColor(Color.Black)) {
-                moveTo(12f, 9.1f)
-                arcTo(2.9f, 2.9f, 0f, isMoreThanHalf = true, isPositiveArc = true, 12f, 14.9f)
-                arcTo(2.9f, 2.9f, 0f, isMoreThanHalf = true, isPositiveArc = true, 12f, 9.1f)
-                close()
-            }
-            // 12 radiating starburst spokes (alternating slightly organic lengths like Claude's mark)
-            path(
-                stroke = SolidColor(Color.Black),
-                strokeLineWidth = 1.95f,
-                strokeLineCap = StrokeCap.Round,
-                strokeLineJoin = StrokeJoin.Round,
-            ) {
-                // 0° (right)
-                moveTo(12f, 12f); lineTo(21.4f, 12.2f)
-                // ~30°
-                moveTo(12f, 12f); lineTo(19.3f, 16.5f)
-                // ~60°
-                moveTo(12f, 12f); lineTo(16.6f, 20.1f)
-                // ~90° (bottom)
-                moveTo(12f, 12f); lineTo(11.8f, 21.4f)
-                // ~120°
-                moveTo(12f, 12f); lineTo(7.4f, 19.6f)
-                // ~150°
-                moveTo(12f, 12f); lineTo(3.8f, 16.4f)
-                // ~180° (left)
-                moveTo(12f, 12f); lineTo(2.6f, 11.8f)
-                // ~210°
-                moveTo(12f, 12f); lineTo(4.7f, 7.5f)
-                // ~240°
-                moveTo(12f, 12f); lineTo(7.5f, 3.9f)
-                // ~270° (top)
-                moveTo(12f, 12f); lineTo(12.2f, 2.6f)
-                // ~300°
-                moveTo(12f, 12f); lineTo(16.7f, 4.4f)
-                // ~330°
-                moveTo(12f, 12f); lineTo(20.2f, 7.6f)
-            }
-        }.build()
-    }
 
     /**
      * Minimalist cat face silhouette (MaterialCommunityIcons `cat`, 24×24 viewport)

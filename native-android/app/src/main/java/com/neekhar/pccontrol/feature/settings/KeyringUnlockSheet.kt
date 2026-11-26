@@ -18,8 +18,6 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -41,6 +39,7 @@ import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
+import com.neekhar.pccontrol.core.ui.PcCompactTextField
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 
@@ -128,12 +127,11 @@ fun KeyringUnlockSheet(
                 lineHeight = 19.sp,
             )
 
-            OutlinedTextField(
+            PcCompactTextField(
                 value = password,
                 onValueChange = { password = it },
                 enabled = !busy,
-                singleLine = true,
-                placeholder = { Text("Keyring password", color = colors.textFaint) },
+                placeholder = "Keyring password",
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Password,
@@ -141,17 +139,6 @@ fun KeyringUnlockSheet(
                     imeAction = ImeAction.Done,
                 ),
                 keyboardActions = KeyboardActions(onDone = { if (!busy && password.isNotEmpty()) submit() }),
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = colors.text,
-                    unfocusedTextColor = colors.text,
-                    focusedContainerColor = colors.surfaceRaised,
-                    unfocusedContainerColor = colors.surfaceRaised,
-                    focusedBorderColor = colors.accent,
-                    unfocusedBorderColor = colors.hairline,
-                    cursorColor = colors.accent,
-                ),
-                modifier = Modifier.fillMaxWidth(),
             )
 
             if (mode == KeyringSheetMode.UNLOCK && canSaveWithBiometrics) {

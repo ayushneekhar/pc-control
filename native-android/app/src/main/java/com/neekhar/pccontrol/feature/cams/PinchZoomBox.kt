@@ -1,7 +1,12 @@
 package com.neekhar.pccontrol.feature.cams
 
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.runtime.Composable
@@ -16,12 +21,17 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
+import kotlin.math.abs
 
 /**
  * Native Compose pinch-to-zoom and double-tap zoom container (1× to 5×, double-tap toggles 2.5×).
  * Ported from `src/components/PinchZoom.tsx`.
+ *
+ * When at 1× (`scale <= 1.01f`) and only a single pointer is down, drag events are NOT consumed so
+ * parent scrollable containers (e.g. Cams camera wall) scroll smoothly.
  */
 @Composable
 fun PinchZoomBox(
@@ -53,23 +63,64 @@ fun PinchZoomBox(
     val gestureModifier = if (enabled) {
         Modifier
             .pointerInput(enabled, resetKey) {
-                detectTransformGestures { centroid, pan, zoom, _ ->
-                    val oldScale = scale
-                    val newScale = (oldScale * zoom).coerceIn(1f, 5f)
-                    if (newScale <= 1.01f) {
-                        scale = 1f
-                        offset = Offset.Zero
-                    } else {
-                        val center = Offset(boxSize.width / 2f, boxSize.height / 2f)
-                        val focalFromCenter = centroid - center
-                        val ratio = newScale / oldScale
-                        val nextOffset = Offset(
-                            x = (offset.x - focalFromCenter.x) * ratio + focalFromCenter.x + pan.x,
-                            y = (offset.y - focalFromCenter.y) * ratio + focalFromCenter.y + pan.y,
-                        )
-                        scale = newScale
-                        offset = clampOffset(newScale, nextOffset)
-                    }
+                awaitEachGesture {
+                    var zoom = 1f
+                    var pan = Offset.Zero
+                    var pastTouchSlop = false
+                    val touchSlop = viewConfiguration.touchSlop
+
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val canceled = event.changes.any { it.isConsumed }
+                        if (!canceled) {
+                            val activePointers = event.changes.count { it.pressed }
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+
+                            if (!pastTouchSlop) {
+                                zoom *= zoomChange
+                                pan += panChange
+                                val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                                val zoomMotion = abs(1f - zoom) * centroidSize
+                                val panMotion = pan.getDistance()
+
+                                if (activePointers >= 2 ||
+                                    zoomMotion > touchSlop ||
+                                    (scale > 1.01f && panMotion > touchSlop)
+                                ) {
+                                    pastTouchSlop = true
+                                }
+                            }
+
+                            if (pastTouchSlop && (activePointers >= 2 || scale > 1.01f)) {
+                                val centroid = event.calculateCentroid(useCurrent = false)
+                                if (zoomChange != 1f || panChange != Offset.Zero) {
+                                    val oldScale = scale
+                                    val newScale = (oldScale * zoomChange).coerceIn(1f, 5f)
+                                    if (newScale <= 1.01f) {
+                                        scale = 1f
+                                        offset = Offset.Zero
+                                    } else {
+                                        val center = Offset(boxSize.width / 2f, boxSize.height / 2f)
+                                        val focalFromCenter = centroid - center
+                                        val ratio = newScale / oldScale
+                                        val nextOffset = Offset(
+                                            x = (offset.x - focalFromCenter.x) * ratio + focalFromCenter.x + panChange.x,
+                                            y = (offset.y - focalFromCenter.y) * ratio + focalFromCenter.y + panChange.y,
+                                        )
+                                        scale = newScale
+                                        offset = clampOffset(newScale, nextOffset)
+                                    }
+                                }
+                                event.changes.forEach { change ->
+                                    if (change.positionChanged()) {
+                                        change.consume()
+                                    }
+                                }
+                            }
+                        }
+                    } while (!canceled && event.changes.any { it.pressed })
                 }
             }
             .pointerInput(enabled, resetKey, onTap) {

@@ -44,6 +44,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -262,6 +263,7 @@ fun PcAppShell(
     // In-memory seeds for instant Seerr detail & person headers
     val seerrItemSeeds = remember { mutableStateMapOf<String, SeerrItem>() }
     val seerrPersonSeeds = remember { mutableStateMapOf<Int, Pair<String, String?>>() }
+    val latestInPip = rememberUpdatedState(isInPictureInPictureMode)
 
     val screens = remember(
         container,
@@ -368,6 +370,7 @@ fun PcAppShell(
                     sharedYoutubeUrl = route.sharedYoutubeUrl,
                     initialReplayCam = route.replayCam,
                     initialReplayTsMs = route.replayTsMs,
+                    isInPictureInPictureMode = latestInPip.value,
                     onBack = { nav.popBackStack() },
                 )
             },

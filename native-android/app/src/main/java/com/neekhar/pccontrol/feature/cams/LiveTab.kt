@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -27,24 +28,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.ControlCamera
-import androidx.compose.material.icons.filled.Fullscreen
-import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Hd
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.OpenInFull
-import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
+import androidx.compose.material.icons.rounded.Fullscreen
+import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -57,15 +53,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
+import coil3.request.CachePolicy
+import coil3.request.ImageRequest
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.MonoTextStyle
 import com.neekhar.pccontrol.core.theme.PcDimens
@@ -83,13 +88,14 @@ data class LiveCamFeed(
 )
 
 /**
- * Live tab: pure-Kotlin WebRTC camera wall (`cat`, `cat2`, `cat3`/`cat3hd`), camera selector
- * pills, HD toggle, cat alerts toggle, pinch-to-zoom video cards, snapshot save, fullscreen
- * landscape, Picture-in-Picture, and native `cat3` PTZ control pad + saved presets.
+ * Live tab: pure-Kotlin WebRTC camera wall (`cat`, `cat2`, `cat3`/`cat3hd`), cat alerts toggle,
+ * pinch-to-zoom video cards with instant JPEG frame placeholders, fullscreen landscape, and
+ * native `cat3` PTZ control pad + saved presets.
  */
 @Composable
 fun LiveTab(
     feeds: Map<CamId, LiveCamFeed>,
+    snapshotBaseUrl: String,
     focusedCam: CamId?,
     cat3Hd: Boolean,
     hardwareCaps: CamsHardwareCapabilities,
@@ -97,7 +103,6 @@ fun LiveTab(
     ptzOpen: Boolean,
     ptzPresets: List<PtzPreset>,
     activePresetId: String?,
-    snapBusyCam: CamId?,
     detectorState: DetectorState?,
     detectorLoaded: Boolean,
     detectorBusy: Boolean,
@@ -109,68 +114,16 @@ fun LiveTab(
     onPtzStart: (String) -> Unit,
     onPtzStop: () -> Unit,
     onRunPtzPreset: (PtzPreset) -> Unit,
-    onSnapshot: (CamId) -> Unit,
     onEnterFullscreen: (CamId) -> Unit,
-    onEnterPip: (CamId) -> Unit,
     onToggleDetector: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
-    val cat3Mode = if (cat3Hd) "HD·WebRTC" else "SD·WebRTC"
 
     Column(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
     ) {
-        // Camera selector pills + HD toggle
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            CameraSelectorPill(
-                label = "All",
-                selected = focusedCam == null,
-                live = feeds.values.any { it.state.fps > 0 },
-                onClick = { onSelectFocus(null) },
-            )
-            CamsConfig.CAMS.forEach { cam ->
-                val feed = feeds[cam]
-                CameraSelectorPill(
-                    label = cam.displayName,
-                    selected = focusedCam == cam,
-                    live = (feed?.state?.fps ?: 0) > 0,
-                    onClick = { onSelectFocus(if (focusedCam == cam) null else cam) },
-                )
-            }
-            // cat3 HD toggle pill
-            Row(
-                modifier = Modifier
-                    .height(34.dp)
-                    .clip(CircleShape)
-                    .background(if (cat3Hd) colors.accentSoft else colors.surface)
-                    .clickable(onClick = onToggleCat3Hd)
-                    .padding(horizontal = 11.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Hd,
-                    contentDescription = "Food bowl HD",
-                    tint = if (cat3Hd) colors.accent else colors.textDim,
-                    modifier = Modifier.size(16.dp),
-                )
-                Text(
-                    text = if (cat3Hd) "HD" else "SD",
-                    color = if (cat3Hd) colors.accent else colors.textDim,
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
-        }
-
         // Cat alerts toggle row
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -231,19 +184,15 @@ fun LiveTab(
             val mainFeed = feeds[focusedCam] ?: LiveCamFeed(focusedCam, LinkState(), null)
             LiveCamCard(
                 feed = mainFeed,
-                modeBadge = if (focusedCam == CamId.CAT3) cat3Mode else null,
+                snapshotBaseUrl = snapshotBaseUrl,
                 focused = true,
                 fullscreen = false,
                 compact = false,
                 camMicOn = camMicOn,
                 cat3Hd = cat3Hd,
                 ptzOpen = ptzOpen,
-                snapBusy = snapBusyCam == focusedCam,
                 onTapCard = { onSelectFocus(null) },
-                onToggleFocus = { onSelectFocus(null) },
-                onSnapshot = { onSnapshot(focusedCam) },
                 onFullscreen = { onEnterFullscreen(focusedCam) },
-                onPip = { onEnterPip(focusedCam) },
                 onToggleCamMic = onToggleCamMic,
                 onToggleCat3Hd = onToggleCat3Hd,
                 onTogglePtz = onTogglePtzOpen,
@@ -275,19 +224,15 @@ fun LiveTab(
                     val feed = feeds[cam] ?: LiveCamFeed(cam, LinkState(), null)
                     LiveCamCard(
                         feed = feed,
-                        modeBadge = null,
+                        snapshotBaseUrl = snapshotBaseUrl,
                         focused = false,
                         fullscreen = false,
                         compact = true,
                         camMicOn = false,
                         cat3Hd = cat3Hd,
                         ptzOpen = false,
-                        snapBusy = false,
                         onTapCard = { onSelectFocus(cam) },
-                        onToggleFocus = { onSelectFocus(cam) },
-                        onSnapshot = {},
                         onFullscreen = {},
-                        onPip = {},
                         onToggleCamMic = {},
                         onToggleCat3Hd = {},
                         onTogglePtz = {},
@@ -302,19 +247,15 @@ fun LiveTab(
                 val feed = feeds[cam] ?: LiveCamFeed(cam, LinkState(), null)
                 LiveCamCard(
                     feed = feed,
-                    modeBadge = if (cam == CamId.CAT3) cat3Mode else null,
+                    snapshotBaseUrl = snapshotBaseUrl,
                     focused = false,
                     fullscreen = false,
                     compact = false,
                     camMicOn = camMicOn,
                     cat3Hd = cat3Hd,
                     ptzOpen = ptzOpen,
-                    snapBusy = snapBusyCam == cam,
                     onTapCard = { onSelectFocus(cam) },
-                    onToggleFocus = { onSelectFocus(cam) },
-                    onSnapshot = { onSnapshot(cam) },
                     onFullscreen = { onEnterFullscreen(cam) },
-                    onPip = { onEnterPip(cam) },
                     onToggleCamMic = onToggleCamMic,
                     onToggleCat3Hd = onToggleCat3Hd,
                     onTogglePtz = onTogglePtzOpen,
@@ -333,16 +274,6 @@ fun LiveTab(
                 )
             }
         }
-
-        if (!hardwareCaps.liveHdSupported && !hardwareCaps.hdReason.isNullOrBlank()) {
-            Text(
-                text = "Food bowl HD unavailable: ${hardwareCaps.hdReason}.",
-                color = colors.textFaint,
-                fontSize = 12.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
     }
 }
 
@@ -350,13 +281,11 @@ fun LiveTab(
 @Composable
 fun LiveFullscreenOverlay(
     feed: LiveCamFeed,
+    snapshotBaseUrl: String,
     cat3Hd: Boolean,
     camMicOn: Boolean,
     ptzOpen: Boolean,
-    snapBusy: Boolean,
     onExitFullscreen: () -> Unit,
-    onSnapshot: () -> Unit,
-    onPip: () -> Unit,
     onToggleCamMic: () -> Unit,
     onToggleCat3Hd: () -> Unit,
     onTogglePtz: () -> Unit,
@@ -371,19 +300,15 @@ fun LiveFullscreenOverlay(
     ) {
         LiveCamCard(
             feed = feed,
-            modeBadge = if (feed.camId == CamId.CAT3) (if (cat3Hd) "HD·WebRTC" else "SD·WebRTC") else null,
+            snapshotBaseUrl = snapshotBaseUrl,
             focused = true,
             fullscreen = true,
             compact = false,
             camMicOn = camMicOn,
             cat3Hd = cat3Hd,
             ptzOpen = ptzOpen,
-            snapBusy = snapBusy,
             onTapCard = {},
-            onToggleFocus = {},
-            onSnapshot = onSnapshot,
             onFullscreen = onExitFullscreen,
-            onPip = onPip,
             onToggleCamMic = onToggleCamMic,
             onToggleCat3Hd = onToggleCat3Hd,
             onTogglePtz = onTogglePtz,
@@ -398,53 +323,17 @@ fun LiveFullscreenOverlay(
 }
 
 @Composable
-private fun CameraSelectorPill(
-    label: String,
-    selected: Boolean,
-    live: Boolean,
-    onClick: () -> Unit,
-) {
-    val colors = LocalPcColors.current
-    Row(
-        modifier = Modifier
-            .height(34.dp)
-            .clip(CircleShape)
-            .background(if (selected) colors.accentSoft else colors.surface)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        PcStatusDot(
-            tone = if (live) PcTone.Ok else PcTone.Faint,
-            size = 6.dp,
-        )
-        Text(
-            text = label,
-            color = if (selected) colors.accent else colors.textDim,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-        )
-    }
-}
-
-@Composable
 private fun LiveCamCard(
     feed: LiveCamFeed,
-    modeBadge: String?,
+    snapshotBaseUrl: String,
     focused: Boolean,
     fullscreen: Boolean,
     compact: Boolean,
     camMicOn: Boolean,
     cat3Hd: Boolean,
     ptzOpen: Boolean,
-    snapBusy: Boolean,
     onTapCard: () -> Unit,
-    onToggleFocus: () -> Unit,
-    onSnapshot: () -> Unit,
     onFullscreen: () -> Unit,
-    onPip: () -> Unit,
     onToggleCamMic: () -> Unit,
     onToggleCat3Hd: () -> Unit,
     onTogglePtz: () -> Unit,
@@ -453,12 +342,25 @@ private fun LiveCamCard(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val context = LocalContext.current
     val state = feed.state
-    val showStatusCenter = feed.videoTrack == null || state.fps == 0
+    var firstFrameRendered by remember(feed.camId, feed.videoTrack) { mutableStateOf(false) }
+    var snapshotReady by remember(feed.camId, snapshotBaseUrl) { mutableStateOf(false) }
+    val videoLive = feed.videoTrack != null && (firstFrameRendered || state.fps > 0)
+    val showStatusCenter = !videoLive && (!snapshotReady || state.phase == LinkPhase.ERROR || state.phase == LinkPhase.RETRYING || state.phase == LinkPhase.STALLED)
     val corner = when {
         fullscreen -> 0.dp
         compact -> PcDimens.RadiusSm
         else -> PcDimens.RadiusLg
+    }
+
+    val snapshotRequest = remember(snapshotBaseUrl, feed.camId) {
+        val url = "${snapshotBaseUrl.trimEnd('/')}/api/frame.jpeg?src=${feed.camId.id}"
+        ImageRequest.Builder(context)
+            .data(url)
+            .memoryCachePolicy(CachePolicy.DISABLED)
+            .diskCachePolicy(CachePolicy.DISABLED)
+            .build()
     }
 
     val cardModifier = if (fullscreen) {
@@ -484,6 +386,7 @@ private fun LiveCamCard(
                     WebRtcLivePlayer(
                         videoTrack = feed.videoTrack,
                         zoomable = false,
+                        onFirstFrameRendered = { firstFrameRendered = true },
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -497,6 +400,7 @@ private fun LiveCamCard(
                     WebRtcLivePlayer(
                         videoTrack = feed.videoTrack,
                         zoomable = true,
+                        onFirstFrameRendered = { firstFrameRendered = true },
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -509,7 +413,18 @@ private fun LiveCamCard(
             )
         }
 
-        // Center connecting / error state
+        // Instant JPEG snapshot placeholder while WebRTC negotiates & decodes its first frame
+        if (!videoLive && snapshotBaseUrl.isNotBlank()) {
+            AsyncImage(
+                model = snapshotRequest,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                onSuccess = { snapshotReady = true },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        // Center connecting / error state (hidden once snapshot or live frame is visible)
         if (showStatusCenter && !compact) {
             Column(
                 modifier = Modifier
@@ -546,66 +461,47 @@ private fun LiveCamCard(
             }
         }
 
-        // Top-left camera name + live badge
+        // Minimal top-left camera label (compact status dot + shadowed name, no noisy fps/codec clutter)
         Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(if (compact) 6.dp else 10.dp),
+                .padding(horizontal = if (compact) 8.dp else 12.dp, vertical = if (compact) 6.dp else 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Box(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(colors.mediaChip)
-                    .padding(horizontal = 8.dp, vertical = 3.dp),
-            ) {
-                Text(
-                    text = feed.camId.displayName,
-                    color = colors.onMedia,
+            val dotTone = when {
+                videoLive -> PcTone.Ok
+                state.phase == LinkPhase.ERROR -> PcTone.Bad
+                else -> PcTone.Warn
+            }
+            PcStatusDot(tone = dotTone, size = 6.dp)
+            Text(
+                text = feed.camId.displayName,
+                color = Color.White,
+                style = TextStyle(
                     fontSize = if (compact) 11.5.sp else 13.5.sp,
                     fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (!compact) {
-                LiveStatusBadge(state = state, modeBadge = modeBadge)
-            }
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.75f),
+                        offset = Offset(0f, 1f),
+                        blurRadius = 4f,
+                    ),
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
 
-        // Top-right overlay actions (Snapshot, PiP, Fullscreen, Focus)
+        // Top-right single borderless Fullscreen icon (no dark square backdrop)
         if (!compact) {
-            Row(
+            BorderlessOverlayIconButton(
+                icon = if (fullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                contentDescription = if (fullscreen) "Exit fullscreen" else "Fullscreen",
+                onClick = onFullscreen,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(6.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                OverlayIconButton(
-                    icon = Icons.Filled.CameraAlt,
-                    contentDescription = "Save snapshot",
-                    busy = snapBusy,
-                    onClick = onSnapshot,
-                )
-                OverlayIconButton(
-                    icon = Icons.Filled.PictureInPictureAlt,
-                    contentDescription = "Picture-in-Picture",
-                    onClick = onPip,
-                )
-                OverlayIconButton(
-                    icon = if (fullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                    contentDescription = if (fullscreen) "Exit fullscreen" else "Fullscreen",
-                    onClick = onFullscreen,
-                )
-                if (!fullscreen) {
-                    OverlayIconButton(
-                        icon = if (focused) Icons.Filled.CloseFullscreen else Icons.Filled.OpenInFull,
-                        contentDescription = if (focused) "Back to all cameras" else "Focus camera",
-                        onClick = onToggleFocus,
-                    )
-                }
-            }
+                    .padding(4.dp),
+            )
         }
 
         // cat3 bottom-left control chips (Cam mic, HD, PTZ) + bottom-right PTZ D-pad
@@ -652,72 +548,33 @@ private fun LiveCamCard(
 }
 
 @Composable
-private fun LiveStatusBadge(
-    state: LinkState,
-    modeBadge: String?,
-) {
-    val colors = LocalPcColors.current
-    val tone = when {
-        state.fps >= 4 -> PcTone.Ok
-        state.fps > 0 -> PcTone.Warn
-        else -> PcTone.Bad
-    }
-    val text = when {
-        state.fps > 0 -> "${state.fps} fps${if (modeBadge != null) " · $modeBadge" else ""}"
-        state.phase == LinkPhase.RETRYING -> "retry in ${state.retryIn ?: 1}s"
-        state.phase == LinkPhase.ERROR -> "offline"
-        state.phase == LinkPhase.STALLED -> "stalled"
-        else -> "connecting"
-    }
-    Row(
-        modifier = Modifier
-            .height(22.dp)
-            .clip(CircleShape)
-            .background(colors.mediaChip)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        PcStatusDot(tone = tone, size = 6.dp)
-        Text(
-            text = text,
-            color = colors.onMediaDim,
-            style = TabularNumStyle.copy(fontSize = 11.sp),
-            maxLines = 1,
-        )
-    }
-}
-
-@Composable
-private fun OverlayIconButton(
+private fun BorderlessOverlayIconButton(
     icon: ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
-    busy: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
-    val colors = LocalPcColors.current
     Box(
-        modifier = Modifier
-            .size(38.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(colors.mediaChip)
-            .clickable(enabled = !busy, onClick = onClick),
+        modifier = modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        if (busy) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(16.dp),
-                strokeWidth = 2.dp,
-                color = colors.onMedia,
-            )
-        } else {
-            Icon(
-                imageVector = icon,
-                contentDescription = contentDescription,
-                tint = colors.onMedia,
-                modifier = Modifier.size(20.dp),
-            )
-        }
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = Color.Black.copy(alpha = 0.55f),
+            modifier = Modifier
+                .offset(x = 0.5.dp, y = 1.dp)
+                .size(22.dp),
+        )
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = Color.White,
+            modifier = Modifier.size(22.dp),
+        )
     }
 }
 

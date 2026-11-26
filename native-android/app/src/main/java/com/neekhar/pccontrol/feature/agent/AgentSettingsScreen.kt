@@ -17,7 +17,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Check
@@ -48,7 +47,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
-import com.neekhar.pccontrol.core.ui.PcBrandIcons
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -61,6 +59,7 @@ import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
 import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
+import com.neekhar.pccontrol.core.ui.ProviderBrandIcon
 
 private val FIVE_HOUR_THRESHOLDS = listOf(10, 15, 20, 25, 30, 40, 50)
 private val WEEKLY_THRESHOLDS = listOf(5, 10, 15, 20, 25, 30)
@@ -127,34 +126,33 @@ fun AgentSettingsScreen(
     }
     val selectedHarnessIdx = harnessOptions.indexOfFirst { it.id == state.selectedEngine }.coerceAtLeast(0)
 
-    PullToRefreshBox(
-        isRefreshing = state.isRefreshing,
-        onRefresh = { viewModel.refreshAll(forceUsage = true) },
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(colors.bg),
     ) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item(key = "header") {
-                PcScreenHeader(
-                    title = "Agent settings",
-                    statusText = statusText,
-                    statusColor = statusColor,
-                    onBack = onBack,
-                )
-            }
+        PcScreenHeader(
+            title = "Agent settings",
+            statusText = statusText,
+            statusColor = statusColor,
+            onBack = onBack,
+        )
 
-            // ---- Harness Switcher ----
-            item(key = "sec_harness") {
-                PcSectionLabel(label = "Harness")
-            }
-            item(key = "card_harness") {
-                PcCard {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        PullToRefreshBox(
+            isRefreshing = state.isRefreshing,
+            onRefresh = { viewModel.refreshAll(forceUsage = true) },
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+        ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                // ---- Harness Switcher (direct compact segmented control, no outer card or redundant label) ----
+                item(key = "harness_switcher") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         PcSegmentedControl(
                             options = harnessOptions.map { it.label },
                             selectedIndex = selectedHarnessIdx,
@@ -168,377 +166,380 @@ fun AgentSettingsScreen(
                                 text = "Agent switch not installed",
                                 color = colors.textFaint,
                                 fontSize = 12.5.sp,
+                                modifier = Modifier.padding(horizontal = 2.dp),
                             )
                         } else if (!state.agentError.isNullOrBlank()) {
                             PcErrorBanner(message = state.agentError!!)
                         }
                     }
                 }
-            }
 
-            // ---- AI Usage ----
-            item(key = "sec_usage") {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    PcSectionLabel(
-                        label = "AI usage",
-                        modifier = Modifier.weight(1f),
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        if (state.usage?.stale == true) {
-                            Text(
-                                text = "updating…",
-                                color = colors.textFaint,
-                                fontSize = 11.5.sp,
-                                maxLines = 1,
-                                softWrap = false,
+                // ---- AI Usage ----
+                item(key = "usage_section") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            PcSectionLabel(
+                                label = "AI usage",
+                                modifier = Modifier.weight(1f),
                             )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                if (state.usage?.stale == true) {
+                                    Text(
+                                        text = "updating…",
+                                        color = colors.textFaint,
+                                        fontSize = 11.5.sp,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                    )
+                                }
+                                if (state.usageLoading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = colors.accent,
+                                    )
+                                } else {
+                                    Text(
+                                        text = "Refresh",
+                                        color = colors.accent,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable { viewModel.loadUsage(force = true) }
+                                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                                    )
+                                }
+                            }
                         }
-                        if (state.usageLoading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp,
-                                color = colors.accent,
+
+                        if (!state.usageError.isNullOrBlank()) {
+                            PcErrorBanner(message = state.usageError!!)
+                        }
+
+                        val usage = state.usage
+                        when {
+                            usage == null && state.usageLoading -> {
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    UsageSkeletonCard(segments = 1)
+                                    UsageSkeletonCard(segments = 4)
+                                }
+                            }
+                            !usage?.accounts.isNullOrEmpty() -> {
+                                GroupedUsageSection(
+                                    accounts = usage!!.accounts,
+                                    onSelectAccount = { acc, winKey -> onOpenAccountDetail(acc.id, winKey) },
+                                )
+                            }
+                            state.usageError == null -> {
+                                PcCard {
+                                    Text(text = "No accounts reported.", color = colors.textFaint, fontSize = 13.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!state.settingsError.isNullOrBlank()) {
+                    item(key = "settings_err") {
+                        PcErrorBanner(message = state.settingsError!!)
+                    }
+                }
+
+                // ---- Claude defaults ----
+                item(key = "section_claude") {
+                    val showClaudeRestart = state.agentState?.engine == "claude"
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PcSectionLabel(label = "Claude")
+                        PcListCard {
+                            PcListRow(
+                                leading = {
+                                    ProviderBrandIcon(
+                                        isClaude = true,
+                                        tint = colors.textDim,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                },
+                                title = "Account",
+                                trailing = claude?.account?.ifBlank { "—" } ?: "—",
+                                showChevron = false,
+                                showDivider = true,
                             )
-                        } else {
-                            Text(
-                                text = "Refresh",
-                                color = colors.accent,
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                softWrap = false,
+                            PcListRow(
+                                icon = Icons.Filled.Tune,
+                                title = "Model",
+                                trailing = claudeModelLabel,
+                                showDivider = true,
+                                onClick = if (claude != null && !state.saving) {
+                                    {
+                                        activePicker = PickerRequest(
+                                            title = "Claude model",
+                                            selectedId = claude.model,
+                                            options = claude.models.map { PickerOption(it.id, it.label, it.id) },
+                                            onSelect = { id ->
+                                                viewModel.updateSettings(AgentSettingsPatch(claude = ClaudePatch(model = id)))
+                                            },
+                                        )
+                                    }
+                                } else null,
+                            )
+                            PcListRow(
+                                icon = Icons.Filled.Speed,
+                                title = "Effort",
+                                trailing = claude?.let { formatEffort(it.effort) } ?: "—",
+                                showDivider = showClaudeRestart,
+                                onClick = if (claude != null && !state.saving) {
+                                    {
+                                        activePicker = PickerRequest(
+                                            title = "Claude effort",
+                                            selectedId = claude.effort,
+                                            options = claude.efforts.map { PickerOption(it, formatEffort(it)) },
+                                            onSelect = { id ->
+                                                viewModel.updateSettings(AgentSettingsPatch(claude = ClaudePatch(effort = id)))
+                                            },
+                                        )
+                                    }
+                                } else null,
+                            )
+                            if (showClaudeRestart) {
+                                Column(modifier = Modifier.padding(14.dp)) {
+                                    PcButton(
+                                        label = "Restart agent now",
+                                        variant = PcButtonVariant.Subtle,
+                                        busy = state.restartingClaude,
+                                        onClick = { showRestartConfirm = true },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---- Gemini defaults ----
+                item(key = "section_gemini") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PcSectionLabel(label = "Gemini")
+                        PcListCard {
+                            PcListRow(
+                                leading = {
+                                    ProviderBrandIcon(
+                                        isClaude = false,
+                                        tint = colors.textDim,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                },
+                                title = "Account",
+                                subtitle = geminiInst?.email ?: if (geminiInst?.signedIn == false) "Not signed in" else null,
+                                trailing = geminiInst?.label ?: gemini?.instanceId?.ifBlank { "—" } ?: "—",
+                                showDivider = true,
+                                onClick = if (gemini != null && !state.saving) {
+                                    {
+                                        activePicker = PickerRequest(
+                                            title = "Gemini account",
+                                            selectedId = gemini.instanceId,
+                                            options = gemini.instances.map { inst ->
+                                                PickerOption(
+                                                    id = inst.id,
+                                                    label = inst.label,
+                                                    subtitle = inst.email ?: if (inst.signedIn) inst.id else "Not signed in",
+                                                    disabled = !inst.signedIn,
+                                                )
+                                            },
+                                            onSelect = { id ->
+                                                viewModel.updateSettings(AgentSettingsPatch(gemini = GeminiPatch(instanceId = id)))
+                                            },
+                                        )
+                                    }
+                                } else null,
+                            )
+                            Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable { viewModel.loadUsage(force = true) }
-                                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Autorenew,
+                                    contentDescription = null,
+                                    tint = colors.textDim,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                                Text(
+                                    text = "Auto-rotate on usage limit",
+                                    color = colors.text,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Switch(
+                                    checked = gemini?.autoRotate == true,
+                                    enabled = gemini != null && !state.saving,
+                                    onCheckedChange = { v ->
+                                        viewModel.updateSettings(AgentSettingsPatch(gemini = GeminiPatch(autoRotate = v)))
+                                    },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = colors.bg,
+                                        checkedTrackColor = colors.accent,
+                                        uncheckedThumbColor = colors.textFaint,
+                                        uncheckedTrackColor = colors.surfaceRaised,
+                                    ),
+                                )
+                            }
+                            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                            PcListRow(
+                                icon = Icons.Filled.Tune,
+                                title = "Model",
+                                trailing = geminiModelLabel,
+                                showDivider = true,
+                                onClick = if (gemini != null && !state.saving) {
+                                    {
+                                        activePicker = PickerRequest(
+                                            title = "Gemini model",
+                                            selectedId = gemini.model,
+                                            options = gemini.models.map { PickerOption(it.id, it.label, it.id) },
+                                            onSelect = { id ->
+                                                viewModel.updateSettings(AgentSettingsPatch(gemini = GeminiPatch(model = id)))
+                                            },
+                                        )
+                                    }
+                                } else null,
+                            )
+                            PcListRow(
+                                icon = Icons.Filled.Speed,
+                                title = "Effort",
+                                trailing = gemini?.let { formatEffort(it.thoughtLevel) } ?: "—",
+                                showDivider = false,
+                                onClick = if (gemini != null && !state.saving) {
+                                    {
+                                        activePicker = PickerRequest(
+                                            title = "Gemini effort",
+                                            selectedId = gemini.thoughtLevel,
+                                            options = gemini.efforts.map { PickerOption(it, formatEffort(it)) },
+                                            onSelect = { id ->
+                                                viewModel.updateSettings(AgentSettingsPatch(gemini = GeminiPatch(thoughtLevel = id)))
+                                            },
+                                        )
+                                    }
+                                } else null,
                             )
                         }
                     }
                 }
-            }
 
-            if (!state.usageError.isNullOrBlank()) {
-                item(key = "usage_err") {
-                    PcErrorBanner(message = state.usageError!!)
-                }
-            }
-
-            item(key = "usage_body") {
-                val usage = state.usage
-                when {
-                    usage == null && state.usageLoading -> {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            UsageSkeletonCard(segments = 1)
-                            UsageSkeletonCard(segments = 4)
+                // ---- Usage Alerts ----
+                item(key = "section_alerts") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PcSectionLabel(label = "Usage alerts")
+                        PcListCard {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.NotificationsActive,
+                                    contentDescription = null,
+                                    tint = colors.textDim,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                                Text(
+                                    text = "Usage alerts",
+                                    color = colors.text,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Switch(
+                                    checked = alerts?.enabled ?: true,
+                                    enabled = state.settings != null && !state.saving,
+                                    onCheckedChange = { v ->
+                                        viewModel.updateSettings(AgentSettingsPatch(usageAlerts = UsageAlertsPatch(enabled = v)))
+                                    },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = colors.bg,
+                                        checkedTrackColor = colors.accent,
+                                        uncheckedThumbColor = colors.textFaint,
+                                        uncheckedTrackColor = colors.surfaceRaised,
+                                    ),
+                                )
+                            }
+                            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                            PcListRow(
+                                icon = Icons.Filled.HourglassBottom,
+                                title = "5-hour threshold",
+                                trailing = alerts?.let { "${it.fiveHourPct}% left" } ?: "—",
+                                showDivider = true,
+                                onClick = if (alerts != null && !state.saving) {
+                                    {
+                                        activePicker = PickerRequest(
+                                            title = "5-hour alert threshold",
+                                            selectedId = alerts.fiveHourPct.toString(),
+                                            options = FIVE_HOUR_THRESHOLDS.map { pct ->
+                                                PickerOption(pct.toString(), "$pct% left", "Alert at ${100 - pct}% used")
+                                            },
+                                            onSelect = { id ->
+                                                id.toIntOrNull()?.let { pct ->
+                                                    viewModel.updateSettings(AgentSettingsPatch(usageAlerts = UsageAlertsPatch(fiveHourPct = pct)))
+                                                }
+                                            },
+                                        )
+                                    }
+                                } else null,
+                            )
+                            PcListRow(
+                                icon = Icons.Filled.CalendarMonth,
+                                title = "Weekly threshold",
+                                trailing = alerts?.let { "${it.weeklyPct}% left" } ?: "—",
+                                showDivider = false,
+                                onClick = if (alerts != null && !state.saving) {
+                                    {
+                                        activePicker = PickerRequest(
+                                            title = "Weekly alert threshold",
+                                            selectedId = alerts.weeklyPct.toString(),
+                                            options = WEEKLY_THRESHOLDS.map { pct ->
+                                                PickerOption(pct.toString(), "$pct% left", "Alert at ${100 - pct}% used")
+                                            },
+                                            onSelect = { id ->
+                                                id.toIntOrNull()?.let { pct ->
+                                                    viewModel.updateSettings(AgentSettingsPatch(usageAlerts = UsageAlertsPatch(weeklyPct = pct)))
+                                                }
+                                            },
+                                        )
+                                    }
+                                } else null,
+                            )
                         }
                     }
-                    !usage?.accounts.isNullOrEmpty() -> {
-                        GroupedUsageSection(
-                            accounts = usage!!.accounts,
-                            onSelectAccount = { acc, winKey -> onOpenAccountDetail(acc.id, winKey) },
-                        )
-                    }
-                    state.usageError == null -> {
+                }
+
+                // ---- Conversation reset ----
+                item(key = "section_convo") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PcSectionLabel(label = "Conversation")
                         PcCard {
-                            Text(text = "No accounts reported.", color = colors.textFaint, fontSize = 13.sp)
-                        }
-                    }
-                }
-            }
-
-            if (!state.settingsError.isNullOrBlank()) {
-                item(key = "settings_err") {
-                    PcErrorBanner(message = state.settingsError!!)
-                }
-            }
-
-            // ---- Claude defaults ----
-            item(key = "sec_claude") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "Claude")
-            }
-            item(key = "card_claude") {
-                val showClaudeRestart = state.agentState?.engine == "claude"
-                PcListCard {
-                    PcListRow(
-                        icon = PcBrandIcons.Claude,
-                        title = "Account",
-                        trailing = claude?.account?.ifBlank { "—" } ?: "—",
-                        showChevron = false,
-                        showDivider = true,
-                    )
-                    PcListRow(
-                        icon = Icons.Filled.Tune,
-                        title = "Model",
-                        trailing = claudeModelLabel,
-                        showDivider = true,
-                        onClick = if (claude != null && !state.saving) {
-                            {
-                                activePicker = PickerRequest(
-                                    title = "Claude model",
-                                    selectedId = claude.model,
-                                    options = claude.models.map { PickerOption(it.id, it.label, it.id) },
-                                    onSelect = { id ->
-                                        viewModel.updateSettings(AgentSettingsPatch(claude = ClaudePatch(model = id)))
-                                    },
-                                )
-                            }
-                        } else null,
-                    )
-                    PcListRow(
-                        icon = Icons.Filled.Speed,
-                        title = "Effort",
-                        trailing = claude?.let { formatEffort(it.effort) } ?: "—",
-                        showDivider = showClaudeRestart,
-                        onClick = if (claude != null && !state.saving) {
-                            {
-                                activePicker = PickerRequest(
-                                    title = "Claude effort",
-                                    selectedId = claude.effort,
-                                    options = claude.efforts.map { PickerOption(it, formatEffort(it)) },
-                                    onSelect = { id ->
-                                        viewModel.updateSettings(AgentSettingsPatch(claude = ClaudePatch(effort = id)))
-                                    },
-                                )
-                            }
-                        } else null,
-                    )
-                    if (showClaudeRestart) {
-                        Column(modifier = Modifier.padding(14.dp)) {
                             PcButton(
-                                label = "Restart agent now",
+                                label = "Start fresh",
                                 variant = PcButtonVariant.Subtle,
-                                busy = state.restartingClaude,
-                                onClick = { showRestartConfirm = true },
+                                busy = state.resetting,
+                                onClick = { showResetConfirm = true },
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }
                     }
                 }
-            }
-
-            // ---- Gemini defaults ----
-            item(key = "sec_gemini") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "Gemini")
-            }
-            item(key = "card_gemini") {
-                PcListCard {
-                    PcListRow(
-                        icon = Icons.Filled.AutoAwesome,
-                        title = "Account",
-                        subtitle = geminiInst?.email ?: if (geminiInst?.signedIn == false) "Not signed in" else null,
-                        trailing = geminiInst?.label ?: gemini?.instanceId?.ifBlank { "—" } ?: "—",
-                        showDivider = true,
-                        onClick = if (gemini != null && !state.saving) {
-                            {
-                                activePicker = PickerRequest(
-                                    title = "Gemini account",
-                                    selectedId = gemini.instanceId,
-                                    options = gemini.instances.map { inst ->
-                                        PickerOption(
-                                            id = inst.id,
-                                            label = inst.label,
-                                            subtitle = inst.email ?: if (inst.signedIn) inst.id else "Not signed in",
-                                            disabled = !inst.signedIn,
-                                        )
-                                    },
-                                    onSelect = { id ->
-                                        viewModel.updateSettings(AgentSettingsPatch(gemini = GeminiPatch(instanceId = id)))
-                                    },
-                                )
-                            }
-                        } else null,
-                    )
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Autorenew,
-                            contentDescription = null,
-                            tint = colors.textDim,
-                            modifier = Modifier.size(20.dp),
-                        )
-                        Text(
-                            text = "Auto-rotate on usage limit",
-                            color = colors.text,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Switch(
-                            checked = gemini?.autoRotate == true,
-                            enabled = gemini != null && !state.saving,
-                            onCheckedChange = { v ->
-                                viewModel.updateSettings(AgentSettingsPatch(gemini = GeminiPatch(autoRotate = v)))
-                            },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = colors.bg,
-                                checkedTrackColor = colors.accent,
-                                uncheckedThumbColor = colors.textFaint,
-                                uncheckedTrackColor = colors.surfaceRaised,
-                            ),
-                        )
-                    }
-                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
-                    PcListRow(
-                        icon = Icons.Filled.Tune,
-                        title = "Model",
-                        trailing = geminiModelLabel,
-                        showDivider = true,
-                        onClick = if (gemini != null && !state.saving) {
-                            {
-                                activePicker = PickerRequest(
-                                    title = "Gemini model",
-                                    selectedId = gemini.model,
-                                    options = gemini.models.map { PickerOption(it.id, it.label, it.id) },
-                                    onSelect = { id ->
-                                        viewModel.updateSettings(AgentSettingsPatch(gemini = GeminiPatch(model = id)))
-                                    },
-                                )
-                            }
-                        } else null,
-                    )
-                    PcListRow(
-                        icon = Icons.Filled.Speed,
-                        title = "Effort",
-                        trailing = gemini?.let { formatEffort(it.thoughtLevel) } ?: "—",
-                        showDivider = false,
-                        onClick = if (gemini != null && !state.saving) {
-                            {
-                                activePicker = PickerRequest(
-                                    title = "Gemini effort",
-                                    selectedId = gemini.thoughtLevel,
-                                    options = gemini.efforts.map { PickerOption(it, formatEffort(it)) },
-                                    onSelect = { id ->
-                                        viewModel.updateSettings(AgentSettingsPatch(gemini = GeminiPatch(thoughtLevel = id)))
-                                    },
-                                )
-                            }
-                        } else null,
-                    )
-                }
-            }
-
-            // ---- Usage Alerts ----
-            item(key = "sec_alerts") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "Usage alerts")
-            }
-            item(key = "card_alerts") {
-                PcListCard {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.NotificationsActive,
-                            contentDescription = null,
-                            tint = colors.textDim,
-                            modifier = Modifier.size(20.dp),
-                        )
-                        Text(
-                            text = "Usage alerts",
-                            color = colors.text,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Switch(
-                            checked = alerts?.enabled ?: true,
-                            enabled = state.settings != null && !state.saving,
-                            onCheckedChange = { v ->
-                                viewModel.updateSettings(AgentSettingsPatch(usageAlerts = UsageAlertsPatch(enabled = v)))
-                            },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = colors.bg,
-                                checkedTrackColor = colors.accent,
-                                uncheckedThumbColor = colors.textFaint,
-                                uncheckedTrackColor = colors.surfaceRaised,
-                            ),
-                        )
-                    }
-                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
-                    PcListRow(
-                        icon = Icons.Filled.HourglassBottom,
-                        title = "5-hour threshold",
-                        trailing = alerts?.let { "${it.fiveHourPct}% left" } ?: "—",
-                        showDivider = true,
-                        onClick = if (alerts != null && !state.saving) {
-                            {
-                                activePicker = PickerRequest(
-                                    title = "5-hour alert threshold",
-                                    selectedId = alerts.fiveHourPct.toString(),
-                                    options = FIVE_HOUR_THRESHOLDS.map { pct ->
-                                        PickerOption(pct.toString(), "$pct% left", "Alert at ${100 - pct}% used")
-                                    },
-                                    onSelect = { id ->
-                                        id.toIntOrNull()?.let { pct ->
-                                            viewModel.updateSettings(AgentSettingsPatch(usageAlerts = UsageAlertsPatch(fiveHourPct = pct)))
-                                        }
-                                    },
-                                )
-                            }
-                        } else null,
-                    )
-                    PcListRow(
-                        icon = Icons.Filled.CalendarMonth,
-                        title = "Weekly threshold",
-                        trailing = alerts?.let { "${it.weeklyPct}% left" } ?: "—",
-                        showDivider = false,
-                        onClick = if (alerts != null && !state.saving) {
-                            {
-                                activePicker = PickerRequest(
-                                    title = "Weekly alert threshold",
-                                    selectedId = alerts.weeklyPct.toString(),
-                                    options = WEEKLY_THRESHOLDS.map { pct ->
-                                        PickerOption(pct.toString(), "$pct% left", "Alert at ${100 - pct}% used")
-                                    },
-                                    onSelect = { id ->
-                                        id.toIntOrNull()?.let { pct ->
-                                            viewModel.updateSettings(AgentSettingsPatch(usageAlerts = UsageAlertsPatch(weeklyPct = pct)))
-                                        }
-                                    },
-                                )
-                            }
-                        } else null,
-                    )
-                }
-            }
-
-            // ---- Conversation reset ----
-            item(key = "sec_convo") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "Conversation")
-            }
-            item(key = "card_convo") {
-                PcCard {
-                    PcButton(
-                        label = "Start fresh",
-                        variant = PcButtonVariant.Subtle,
-                        busy = state.resetting,
-                        onClick = { showResetConfirm = true },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            }
-
-            item(key = "bottom_pad") {
-                Spacer(modifier = Modifier.height(24.dp))
             }
         }
     }

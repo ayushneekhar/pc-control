@@ -110,6 +110,22 @@ object WebRtcRuntime {
     @Volatile
     private var audioDeviceModule: JavaAudioDeviceModule? = null
 
+    private val prewarmScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Pre-warms [PeerConnectionFactory] asynchronously on [Dispatchers.IO] so opening Cat Cams
+     * has zero cold-init stall. Skips pre-warming if safe mode is enabled.
+     */
+    fun prewarmAsync(context: Context) {
+        if (peerConnectionFactory != null) return
+        val appCtx = context.applicationContext
+        if (isSafeMode(appCtx)) return
+        prewarmScope.launch {
+            runCatching { ensureFactory(appCtx) }
+                .onFailure { Log.w(TAG, "WebRTC prewarm failed", it) }
+        }
+    }
+
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
 
@@ -306,13 +322,15 @@ private class SafeVideoDecoderFactory(
 }
 
 /**
- * Wraps [DefaultVideoEncoderFactory] and strips H.265/HEVC codecs when unsupported by libwebrtc.
+ * Lazily wraps [DefaultVideoEncoderFactory] and strips H.265/HEVC codecs when unsupported.
+ * Because Cams only receives video (never encodes video), deferring [DefaultVideoEncoderFactory]
+ * avoids enumerating all hardware video encoders during cold [PeerConnectionFactory] startup.
  */
 private class SafeVideoEncoderFactory(
-    eglContext: EglBase.Context,
+    private val eglContext: EglBase.Context,
     private val allowH265: Boolean,
 ) : VideoEncoderFactory {
-    private val delegate = DefaultVideoEncoderFactory(eglContext, true, true)
+    private val delegate by lazy { DefaultVideoEncoderFactory(eglContext, true, true) }
 
     private fun isDisallowed(name: String?): Boolean =
         !allowH265 && (name.equals("H265", ignoreCase = true) || name.equals("HEVC", ignoreCase = true))
@@ -370,6 +388,8 @@ class WebRtcCamLink(
 
     private var peerConnection: PeerConnection? = null
     private var webSocket: WebSocket? = null
+    private var wsOpened = false
+    private var localOfferSdp: String? = null
     private var answerSdp: String? = null
     private var offerSent = false
     private val candidateOutbox = mutableListOf<String>()
@@ -427,6 +447,8 @@ class WebRtcCamLink(
         webSocket = null
         runCatching { ws?.close(1000, "closed") }
 
+        wsOpened = false
+        localOfferSdp = null
         offerSent = false
         answerSdp = null
         candidateOutbox.clear()
@@ -509,6 +531,7 @@ class WebRtcCamLink(
         val rtcConfig = PeerConnection.RTCConfiguration(emptyList()).apply {
             bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_ONCE
         }
 
         val pc = factory.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
@@ -641,8 +664,45 @@ class WebRtcCamLink(
             return
         }
 
+        // Run SDP offer creation + local ICE gathering in parallel with WebSocket handshake.
         openSignalingWebSocket(pc, currentGen)
+        startLocalOffer(pc, currentGen)
         startStatsPolling(pc, currentGen)
+    }
+
+    private fun startLocalOffer(pc: PeerConnection, currentGen: Int) {
+        pc.createOffer(
+            simpleSdpObserver(
+                onCreated = { sdp ->
+                    if (currentGen != gen.get()) return@simpleSdpObserver
+                    pc.setLocalDescription(
+                        simpleSdpObserver(
+                            onSet = {
+                                if (currentGen != gen.get()) return@simpleSdpObserver
+                                synchronized(this@WebRtcCamLink) {
+                                    localOfferSdp = sdp.description
+                                    maybeFlushOfferLocked()
+                                }
+                            },
+                            onFailed = { err -> scheduleRetry("offer: $err", currentGen) },
+                        ),
+                        sdp,
+                    )
+                },
+                onFailed = { err -> scheduleRetry("offer: $err", currentGen) },
+            ),
+            MediaConstraints(),
+        )
+    }
+
+    private fun maybeFlushOfferLocked() {
+        if (!wsOpened || offerSent) return
+        val offer = localOfferSdp ?: return
+        sendWsMessage("webrtc/offer", offer)
+        offerSent = true
+        val queued = candidateOutbox.toList()
+        candidateOutbox.clear()
+        queued.forEach { sendWsMessage("webrtc/candidate", it) }
     }
 
     private fun openSignalingWebSocket(pc: PeerConnection, currentGen: Int) {
@@ -654,31 +714,10 @@ class WebRtcCamLink(
                     ws.close(1000, "stale")
                     return
                 }
-                pc.createOffer(
-                    simpleSdpObserver(
-                        onCreated = { sdp ->
-                            if (currentGen != gen.get()) return@simpleSdpObserver
-                            pc.setLocalDescription(
-                                simpleSdpObserver(
-                                    onSet = {
-                                        if (currentGen != gen.get()) return@simpleSdpObserver
-                                        synchronized(this@WebRtcCamLink) {
-                                            sendWsMessage("webrtc/offer", sdp.description)
-                                            offerSent = true
-                                            val queued = candidateOutbox.toList()
-                                            candidateOutbox.clear()
-                                            queued.forEach { sendWsMessage("webrtc/candidate", it) }
-                                        }
-                                    },
-                                    onFailed = { err -> scheduleRetry("offer: $err", currentGen) },
-                                ),
-                                sdp,
-                            )
-                        },
-                        onFailed = { err -> scheduleRetry("offer: $err", currentGen) },
-                    ),
-                    MediaConstraints(),
-                )
+                synchronized(this@WebRtcCamLink) {
+                    wsOpened = true
+                    maybeFlushOfferLocked()
+                }
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
@@ -756,8 +795,10 @@ class WebRtcCamLink(
     private fun startStatsPolling(pc: PeerConnection, currentGen: Int) {
         statsJob?.cancel()
         statsJob = scope.launch {
+            var firstPoll = true
             while (isActive && currentGen == gen.get()) {
-                delay(1000L)
+                delay(if (firstPoll) 400L else 1000L)
+                firstPoll = false
                 if (currentGen != gen.get() || peerConnection !== pc) break
                 runCatching {
                     pc.getStats { report ->
@@ -812,7 +853,11 @@ class WebRtcCamLink(
         }
 
         val frames = (inbound?.get("framesDecoded") as? Number)?.toLong() ?: 0L
-        val fps = if (lastFrames < 0L || frames < lastFrames) 0 else (frames - lastFrames).toInt()
+        val fps = when {
+            lastFrames < 0L -> if (frames > 0L) frames.toInt().coerceAtLeast(1) else 0
+            frames < lastFrames -> 0
+            else -> (frames - lastFrames).toInt()
+        }
         lastFrames = frames
         if (fps > 0) lastFrameAt = now
 

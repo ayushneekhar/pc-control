@@ -145,9 +145,8 @@ fun UsageAccountDetailScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
-                                Icon(
-                                    imageVector = providerIcon(summary.providerKey),
-                                    contentDescription = null,
+                                ProviderUsageIcon(
+                                    key = summary.providerKey,
                                     tint = colors.text,
                                     modifier = Modifier.size(24.dp),
                                 )

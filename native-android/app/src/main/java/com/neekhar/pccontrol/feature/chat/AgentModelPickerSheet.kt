@@ -21,7 +21,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -46,14 +45,13 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
-import com.neekhar.pccontrol.core.ui.PcBrandIcons
 import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
+import com.neekhar.pccontrol.core.ui.ProviderBrandIcon
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -252,7 +250,7 @@ private fun PickerBody(
             val claudeOpen = expanded["claude"] == true
             val claudeActive = draftEngine == ChatEngines.CLAUDE
             ProviderCard(
-                icon = PcBrandIcons.Claude,
+                isClaude = true,
                 title = "Claude",
                 subtitle = settings.claude.account,
                 badgeText = if (claudeActive) "Active" else null,
@@ -286,7 +284,7 @@ private fun PickerBody(
                 val isSelectedProvider = draftEngine == ChatEngines.GEMINI && draftGeminiInstance == inst.id
                 val disabled = !inst.signedIn
                 ProviderCard(
-                    icon = Icons.Rounded.AutoAwesome,
+                    isClaude = false,
                     title = inst.label,
                     subtitle = inst.email ?: if (disabled) "Not signed in" else null,
                     badgeText = when {
@@ -425,7 +423,7 @@ private fun PickerBody(
 
 @Composable
 private fun ProviderCard(
-    icon: ImageVector,
+    isClaude: Boolean,
     title: String,
     subtitle: String?,
     badgeText: String?,
@@ -452,9 +450,8 @@ private fun ProviderCard(
                 .clickable(onClick = onToggle)
                 .padding(horizontal = 14.dp, vertical = 12.dp),
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
+            ProviderBrandIcon(
+                isClaude = isClaude,
                 tint = if (active) colors.accent else colors.textDim,
                 modifier = Modifier.size(18.dp),
             )

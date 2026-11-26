@@ -41,11 +41,9 @@ import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowUpward
-import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.CircularProgressIndicator
@@ -88,8 +86,8 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
-import com.neekhar.pccontrol.core.ui.PcBrandIcons
 import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
+import com.neekhar.pccontrol.core.ui.ProviderBrandIcon
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -353,25 +351,46 @@ fun ChatComposer(
             }
         }
 
-        // Main 2-row composer pill: full-width input above, thumb-reachable controls (+ / Model & effort / Send) below
-        Column(
+        // Single-row composer pill: + on left | expanding multiline input | provider icon | Send/Stop (bottom-aligned)
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(22.dp))
+                .clip(RoundedCornerShape(24.dp))
                 .background(colors.surface)
                 .border(
                     width = if (editingState != null) 1.dp else 0.5.dp,
                     color = if (editingState != null) colors.accent else colors.hairline,
-                    shape = RoundedCornerShape(22.dp),
-                ),
+                    shape = RoundedCornerShape(24.dp),
+                )
+                .padding(horizontal = 6.dp, vertical = 6.dp),
         ) {
+            // Attach button
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(36.dp)
+                    .alpha(if (canAddAttachment) 1f else 0.4f)
+                    .clip(CircleShape)
+                    .background(colors.surfaceRaised)
+                    .clickable(enabled = canAddAttachment) { showAttachSheet = true },
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Add,
+                    contentDescription = "Add photo or file",
+                    tint = colors.text,
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+
             // Auto-expanding multiline input with Gboard image paste (contentReceiver)
             Box(
                 contentAlignment = Alignment.CenterStart,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 38.dp)
-                    .padding(start = 15.dp, end = 15.dp, top = 10.dp, bottom = 4.dp),
+                    .weight(1f)
+                    .heightIn(min = 36.dp)
+                    .padding(horizontal = 4.dp, vertical = 7.dp),
             ) {
                 BasicTextField(
                     state = textFieldState,
@@ -414,114 +433,69 @@ fun ChatComposer(
                 )
             }
 
-            // Bottom control bar: Attach + Model/Effort pill on left, Send/Stop on right
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            // Icon-only official provider button directly left of Send/Stop
+            Box(
+                contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 6.dp, end = 6.dp, top = 2.dp, bottom = 6.dp),
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(colors.surfaceRaised)
+                    .clickable(onClick = onOpenModelPicker),
             ) {
-                // Attach button
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(34.dp)
-                        .alpha(if (canAddAttachment) 1f else 0.4f)
-                        .clip(CircleShape)
-                        .background(colors.surfaceRaised)
-                        .clickable(enabled = canAddAttachment) { showAttachSheet = true },
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Add,
-                        contentDescription = "Add photo or file",
-                        tint = colors.text,
-                        modifier = Modifier.size(19.dp),
-                    )
-                }
+                ProviderBrandIcon(
+                    isClaude = engine != ChatEngines.GEMINI,
+                    tint = colors.accent,
+                    contentDescription = if (modelChipLabel.isNotBlank()) {
+                        "Switch model ($modelChipLabel)"
+                    } else {
+                        "Switch model and effort"
+                    },
+                    modifier = Modifier.size(18.dp),
+                )
+            }
 
-                // Compact Model & effort selector pill
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                    modifier = Modifier
-                        .height(34.dp)
-                        .clip(CircleShape)
-                        .background(colors.surfaceRaised)
-                        .clickable(onClick = onOpenModelPicker)
-                        .padding(horizontal = 10.dp),
-                ) {
-                    Icon(
-                        imageVector = if (engine == ChatEngines.GEMINI) {
-                            Icons.Rounded.AutoAwesome
-                        } else {
-                            PcBrandIcons.Claude
-                        },
-                        contentDescription = null,
-                        tint = colors.accent,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Text(
-                        text = modelChipLabel,
-                        color = colors.text,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Icon(
-                        imageVector = Icons.Rounded.KeyboardArrowDown,
-                        contentDescription = "Switch model and effort",
-                        tint = colors.textFaint,
-                        modifier = Modifier.size(15.dp),
-                    )
-                }
-
-                Spacer(modifier = Modifier.weight(1f))
-
-                // Send / Queue / Stop button
-                when {
-                    showStopAction -> {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(CircleShape)
-                                .background(colors.badSoft)
-                                .clickable(onClick = onStopGeneration),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Stop,
-                                contentDescription = "Stop generation",
-                                tint = colors.bad,
-                                modifier = Modifier.size(17.dp),
-                            )
-                        }
+            // Send / Queue / Stop button
+            when {
+                showStopAction -> {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(colors.badSoft)
+                            .clickable(onClick = onStopGeneration),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Stop,
+                            contentDescription = "Stop generation",
+                            tint = colors.bad,
+                            modifier = Modifier.size(18.dp),
+                        )
                     }
+                }
 
-                    else -> {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(CircleShape)
-                                .background(if (canSend) colors.accent else colors.surfaceRaised)
-                                .clickable(enabled = canSend, onClick = onSend),
-                        ) {
-                            if (sending) {
-                                CircularProgressIndicator(
-                                    color = colors.accent,
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(15.dp),
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Rounded.ArrowUpward,
-                                    contentDescription = if (running) "Queue message" else "Send message",
-                                    tint = if (canSend) onAccent else colors.textFaint,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            }
+                else -> {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(if (canSend) colors.accent else colors.surfaceRaised)
+                            .clickable(enabled = canSend, onClick = onSend),
+                    ) {
+                        if (sending) {
+                            CircularProgressIndicator(
+                                color = colors.accent,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.ArrowUpward,
+                                contentDescription = if (running) "Queue message" else "Send message",
+                                tint = if (canSend) onAccent else colors.textFaint,
+                                modifier = Modifier.size(19.dp),
+                            )
                         }
                     }
                 }
@@ -546,13 +520,6 @@ fun ChatComposer(
                     .navigationBarsPadding()
                     .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 14.dp),
             ) {
-                Text(
-                    text = "Attach",
-                    color = colors.textDim,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(bottom = 4.dp),
-                )
                 AttachSheetRow(
                     icon = Icons.Rounded.PhotoLibrary,
                     title = "Photo",

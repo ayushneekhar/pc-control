@@ -94,6 +94,34 @@ object CamsMediaTools {
         }.getOrDefault(false)
     }
 
+    /** Configure Android 12+ automatic Picture-in-Picture transition when navigating home. */
+    fun setAutoPictureInPicture(
+        activity: Activity,
+        enabled: Boolean,
+        aspectWidth: Int = 16,
+        aspectHeight: Int = 9,
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        if (!activity.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+            return
+        }
+        val w = aspectWidth.coerceAtLeast(1)
+        val h = aspectHeight.coerceAtLeast(1)
+        val ratio = w.toFloat() / h.toFloat()
+        val safeRational = when {
+            ratio > 2.35f -> Rational(235, 100)
+            ratio < 0.42f -> Rational(42, 100)
+            else -> Rational(w, h)
+        }
+        runCatching {
+            val params = PictureInPictureParams.Builder()
+                .setAutoEnterEnabled(enabled)
+                .setAspectRatio(safeRational)
+                .build()
+            activity.setPictureInPictureParams(params)
+        }
+    }
+
     /**
      * Fetch go2rtc's current JPEG frame for [stream] and save to `Pictures/PC Control`.
      * Returns the MediaStore `content://` URI string.

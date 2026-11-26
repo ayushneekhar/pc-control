@@ -120,6 +120,7 @@ class AppContainer(
         appScope.launch(Dispatchers.IO) {
             runCatching { LiveDownloadsController.startIfDownloading(appContext, apiClient.okHttpClient) }
         }
+        WebRtcRuntime.prewarmAsync(appContext)
     }
 
     fun createRootSignerBridge(

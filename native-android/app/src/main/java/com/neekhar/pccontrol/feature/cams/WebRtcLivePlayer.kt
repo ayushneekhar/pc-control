@@ -37,18 +37,21 @@ fun WebRtcLivePlayer(
     videoTrack: VideoTrack?,
     modifier: Modifier = Modifier,
     zoomable: Boolean = true,
+    onFirstFrameRendered: (() -> Unit)? = null,
     onFrameResolution: ((width: Int, height: Int) -> Unit)? = null,
 ) {
     if (zoomable) {
         WebRtcTextureVideoView(
             videoTrack = videoTrack,
             modifier = modifier,
+            onFirstFrameRendered = onFirstFrameRendered,
             onFrameResolution = onFrameResolution,
         )
     } else {
         WebRtcSurfaceVideoView(
             videoTrack = videoTrack,
             modifier = modifier,
+            onFirstFrameRendered = onFirstFrameRendered,
             onFrameResolution = onFrameResolution,
         )
     }
@@ -59,9 +62,11 @@ fun WebRtcLivePlayer(
 fun WebRtcSurfaceVideoView(
     videoTrack: VideoTrack?,
     modifier: Modifier = Modifier,
+    onFirstFrameRendered: (() -> Unit)? = null,
     onFrameResolution: ((width: Int, height: Int) -> Unit)? = null,
 ) {
     var rendererRef by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
+    val latestOnFirstFrame = androidx.compose.runtime.rememberUpdatedState(onFirstFrameRendered)
 
     DisposableEffect(rendererRef, videoTrack) {
         val renderer = rendererRef
@@ -86,7 +91,9 @@ fun WebRtcSurfaceVideoView(
                     init(
                         WebRtcRuntime.getEglBaseContext(),
                         object : RendererCommon.RendererEvents {
-                            override fun onFirstFrameRendered() = Unit
+                            override fun onFirstFrameRendered() {
+                                post { latestOnFirstFrame.value?.invoke() }
+                            }
                             override fun onFrameResolutionChanged(videoWidth: Int, videoHeight: Int, rotation: Int) {
                                 val rotated = rotation == 90 || rotation == 270
                                 val w = if (rotated) videoHeight else videoWidth
@@ -120,6 +127,7 @@ fun WebRtcSurfaceVideoView(
 fun WebRtcTextureVideoView(
     videoTrack: VideoTrack?,
     modifier: Modifier = Modifier,
+    onFirstFrameRendered: (() -> Unit)? = null,
     onFrameResolution: ((width: Int, height: Int) -> Unit)? = null,
 ) {
     var viewRef by remember { mutableStateOf<LiveTextureView?>(null) }
@@ -127,6 +135,7 @@ fun WebRtcTextureVideoView(
     DisposableEffect(viewRef, videoTrack) {
         val view = viewRef
         if (view != null && videoTrack != null) {
+            view.resetFirstFrame()
             runCatching { videoTrack.addSink(view) }
         }
         onDispose {
@@ -139,12 +148,13 @@ fun WebRtcTextureVideoView(
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
-            LiveTextureView(ctx, onFrameResolution).also {
+            LiveTextureView(ctx, onFirstFrameRendered, onFrameResolution).also {
                 it.start()
                 viewRef = it
             }
         },
         update = { view ->
+            view.onFirstFrame = onFirstFrameRendered
             view.onFrameResolution = onFrameResolution
             if (viewRef !== view) viewRef = view
         },
@@ -164,6 +174,7 @@ fun WebRtcTextureVideoView(
  */
 internal class LiveTextureView(
     context: Context,
+    @Volatile var onFirstFrame: (() -> Unit)? = null,
     @Volatile var onFrameResolution: ((width: Int, height: Int) -> Unit)? = null,
 ) : TextureView(context),
     TextureView.SurfaceTextureListener,
@@ -174,10 +185,16 @@ internal class LiveTextureView(
     private var initialized = false
     private var currentSurface: SurfaceTexture? = null
     private var eglSurfaceFor: SurfaceTexture? = null
+    @Volatile
+    private var notifiedFirstFrame = false
 
     init {
         surfaceTextureListener = this
         isOpaque = true
+    }
+
+    fun resetFirstFrame() {
+        notifiedFirstFrame = false
     }
 
     fun start() {
@@ -199,6 +216,7 @@ internal class LiveTextureView(
     fun stop() {
         currentSurface = null
         eglSurfaceFor = null
+        notifiedFirstFrame = false
         if (initialized) {
             initialized = false
             runCatching { eglRenderer.release() }
@@ -222,10 +240,19 @@ internal class LiveTextureView(
     override fun onFrame(frame: VideoFrame) {
         if (initialized) {
             eglRenderer.onFrame(frame)
+            if (!notifiedFirstFrame) {
+                notifiedFirstFrame = true
+                post { onFirstFrame?.invoke() }
+            }
         }
     }
 
-    override fun onFirstFrameRendered() = Unit
+    override fun onFirstFrameRendered() {
+        if (!notifiedFirstFrame) {
+            notifiedFirstFrame = true
+            post { onFirstFrame?.invoke() }
+        }
+    }
 
     override fun onFrameResolutionChanged(videoWidth: Int, videoHeight: Int, rotation: Int) {
         val rotated = rotation == 90 || rotation == 270

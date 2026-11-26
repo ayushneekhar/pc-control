@@ -47,7 +47,6 @@ import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Videocam
@@ -88,6 +87,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.neekhar.pccontrol.MainActivity
 import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.storage.AppPrefs
@@ -135,6 +135,7 @@ fun CamsScreen(
     sharedYoutubeUrl: String? = null,
     initialReplayCam: String? = null,
     initialReplayTsMs: Long? = null,
+    isInPictureInPictureMode: Boolean = false,
     onBack: () -> Unit = {},
 ) {
     val colors = LocalPcColors.current
@@ -145,6 +146,10 @@ fun CamsScreen(
 
     val repository = remember(apiClient, cache) { CamsRepository(apiClient, cache) }
     val hardwareCaps = remember(context) { WebRtcRuntime.inspectHardware(context) }
+
+    LaunchedEffect(Unit) {
+        WebRtcRuntime.prewarmAsync(context)
+    }
 
     // Toast state
     var toast by remember { mutableStateOf<CamsToast?>(null) }
@@ -205,7 +210,7 @@ fun CamsScreen(
     var talkMode by remember { mutableStateOf(TalkMode.OFF) }
     var talkStartedAtMs by remember { mutableLongStateOf(0L) }
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    var snapBusyCam by remember { mutableStateOf<CamId?>(null) }
+    var replayPlaying by remember { mutableStateOf(false) }
 
     // PTZ state & saved presets
     var ptzMoving by remember { mutableStateOf(false) }
@@ -263,13 +268,23 @@ fun CamsScreen(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_RESUME -> isForeground = true
-                Lifecycle.Event.ON_PAUSE,
-                Lifecycle.Event.ON_STOP,
-                -> {
+                Lifecycle.Event.ON_START,
+                Lifecycle.Event.ON_RESUME,
+                -> isForeground = true
+
+                Lifecycle.Event.ON_PAUSE -> {
+                    // Stop interactive mic/PTZ controls immediately, but keep isForeground true so
+                    // Live WebRTC and Replay keep playing smoothly when transitioning into PiP.
+                    talkMode = TalkMode.OFF
+                    ptzOpen = false
+                    stopPtz()
+                }
+
+                Lifecycle.Event.ON_STOP -> {
                     isForeground = false
                     resetInteractiveMedia()
                 }
+
                 else -> Unit
             }
         }
@@ -484,40 +499,44 @@ fun CamsScreen(
             CamId.CAT3 to cat3Feed,
         )
     }
-    val liveCount = feeds.values.count { it.state.fps > 0 }
 
-    fun takeLiveSnapshot(camId: CamId) {
-        if (snapBusyCam != null) return
-        snapBusyCam = camId
-        scope.launch {
-            runCatching {
-                // Always request `cat3` for CP Plus (go2rtc frame.jpeg fails on cat3hd)
-                CamsMediaTools.saveLiveSnapshot(
-                    context = context,
-                    client = apiClient.okHttpClient,
-                    baseUrl = apiClient.baseUrl,
-                    stream = camId.id,
-                    label = camId.displayName,
-                )
-            }.onSuccess { uri ->
-                showToast("Saved to Pictures/PC Control", 4500L, "Share") {
-                    CamsMediaTools.shareImage(context, uri)
-                }
-            }.onFailure { err ->
-                showToast("Snapshot failed: ${err.message ?: "error"}", 4000L)
-            }
-            snapBusyCam = null
-        }
+    // Automatic Picture-in-Picture whenever Live or Replay video is actively playing
+    val activePipCam = fullscreenCam
+        ?: focusedCam
+        ?: feeds.entries.firstOrNull { it.value.state.fps > 0 }?.key
+        ?: CamId.CAT
+    val livePlaying = stackActive && activeTab == CamsTab.LIVE &&
+        feeds.values.any { it.videoTrack != null || it.state.fps > 0 || it.state.phase == LinkPhase.LIVE }
+    val replayActive = stackActive && activeTab == CamsTab.REPLAY && replayPlaying
+    val shouldAutoPip = isForeground && (livePlaying || replayActive)
+    val pipDimensions = if (activeTab == CamsTab.LIVE) {
+        parseVideoDimensions(feeds[activePipCam]?.state?.size)
+    } else {
+        16 to 9
     }
 
-    fun enterPipFor(camId: CamId) {
-        val act = activity ?: return
-        focusedCam = camId
-        val sizeStr = feeds[camId]?.state?.size
-        val (w, h) = parseVideoDimensions(sizeStr)
-        val entered = CamsMediaTools.enterPictureInPicture(act, w, h)
-        if (!entered) {
-            showToast("Picture-in-Picture is not enabled for this activity.", 3200L)
+    DisposableEffect(activity, shouldAutoPip, pipDimensions) {
+        val mainAct = activity as? MainActivity
+        if (mainAct != null) {
+            mainAct.updateAutoPip(
+                enabled = shouldAutoPip,
+                aspectWidth = pipDimensions.first,
+                aspectHeight = pipDimensions.second,
+            )
+        } else if (activity != null) {
+            CamsMediaTools.setAutoPictureInPicture(
+                activity = activity,
+                enabled = shouldAutoPip,
+                aspectWidth = pipDimensions.first,
+                aspectHeight = pipDimensions.second,
+            )
+        }
+        onDispose {
+            if (mainAct != null) {
+                mainAct.updateAutoPip(enabled = false)
+            } else if (activity != null) {
+                CamsMediaTools.setAutoPictureInPicture(activity = activity, enabled = false)
+            }
         }
     }
 
@@ -530,6 +549,50 @@ fun CamsScreen(
         showToast(if (cat3Hd) "Switching to HD (3MP)" else "Back to standard stream", 1800L)
     }
 
+    // ---- Automatic Picture-in-Picture pure full-bleed video mode
+    if (isInPictureInPictureMode && stackActive) {
+        if (activeTab == CamsTab.REPLAY) {
+            ReplayTab(
+                visible = isForeground,
+                hevcOk = hardwareCaps.replayHevcSupported,
+                dataSource = repository,
+                okHttpClient = apiClient.okHttpClient,
+                target = replayTarget,
+                fullscreen = true,
+                isInPip = true,
+                onPlayingChange = { replayPlaying = it },
+                onToggleFullscreen = {},
+                onTargetConsumed = { replayTarget = null },
+                onToast = { _, _, _ -> },
+                modifier = Modifier.fillMaxSize(),
+            )
+            return
+        } else if (activeTab == CamsTab.LIVE) {
+            val pipFeed = feeds[activePipCam] ?: LiveCamFeed(activePipCam, LinkState(), null)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(colors.media),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (pipFeed.videoTrack != null) {
+                    WebRtcLivePlayer(
+                        videoTrack = pipFeed.videoTrack,
+                        zoomable = false,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = colors.onMediaDim,
+                    )
+                }
+            }
+            return
+        }
+    }
+
     // ---- Fullscreen landscape mode
     val fsCam = fullscreenCam
     if (fsCam != null && stackActive) {
@@ -537,16 +600,11 @@ fun CamsScreen(
         Box(modifier = Modifier.fillMaxSize()) {
             LiveFullscreenOverlay(
                 feed = fsFeed,
+                snapshotBaseUrl = apiClient.baseUrl,
                 cat3Hd = cat3Hd,
                 camMicOn = camMicOn,
                 ptzOpen = ptzOpen,
-                snapBusy = snapBusyCam == fsCam,
                 onExitFullscreen = { fullscreenCam = null },
-                onSnapshot = { takeLiveSnapshot(fsCam) },
-                onPip = {
-                    fullscreenCam = null
-                    enterPipFor(fsCam)
-                },
                 onToggleCamMic = { camMicOn = !camMicOn },
                 onToggleCat3Hd = ::toggleCat3Hd,
                 onTogglePtz = { ptzOpen = !ptzOpen },
@@ -688,22 +746,6 @@ fun CamsScreen(
                                 if (!catCamBusy) toggleMasterCatCams(!catCamEnabled)
                             },
                         )
-                        if (stackActive && activeTab == CamsTab.LIVE) {
-                            DropdownMenuItem(
-                                text = { Text("Picture-in-Picture", color = colors.text) },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Filled.PictureInPictureAlt,
-                                        contentDescription = null,
-                                        tint = colors.textDim,
-                                    )
-                                },
-                                onClick = {
-                                    menuExpanded = false
-                                    enterPipFor(focusedCam ?: CamId.CAT)
-                                },
-                            )
-                        }
                         DropdownMenuItem(
                             text = { Text("Open web page", color = colors.text) },
                             leadingIcon = {
@@ -811,7 +853,9 @@ fun CamsScreen(
                         okHttpClient = apiClient.okHttpClient,
                         target = replayTarget,
                         fullscreen = replayFullscreen,
+                        isInPip = false,
                         bottomInset = (if (showAudioBar) 108.dp else 28.dp) + navBottom,
+                        onPlayingChange = { replayPlaying = it },
                         onToggleFullscreen = { replayFullscreen = !replayFullscreen },
                         onTargetConsumed = { replayTarget = null },
                         onToast = { msg, actLabel, act ->
@@ -862,6 +906,7 @@ fun CamsScreen(
                             CamsTab.LIVE -> {
                                 LiveTab(
                                     feeds = feeds,
+                                    snapshotBaseUrl = apiClient.baseUrl,
                                     focusedCam = focusedCam,
                                     cat3Hd = cat3Hd,
                                     hardwareCaps = hardwareCaps,
@@ -869,7 +914,6 @@ fun CamsScreen(
                                     ptzOpen = ptzOpen,
                                     ptzPresets = ptzPresets,
                                     activePresetId = activePresetId,
-                                    snapBusyCam = snapBusyCam,
                                     detectorState = detectorState,
                                     detectorLoaded = detectorLoaded,
                                     detectorBusy = detectorBusy,
@@ -886,9 +930,7 @@ fun CamsScreen(
                                     onPtzStart = ::startPtz,
                                     onPtzStop = ::stopPtz,
                                     onRunPtzPreset = ::runPtzPreset,
-                                    onSnapshot = ::takeLiveSnapshot,
                                     onEnterFullscreen = { fullscreenCam = it },
-                                    onEnterPip = ::enterPipFor,
                                     onToggleDetector = ::toggleDetector,
                                 )
                             }

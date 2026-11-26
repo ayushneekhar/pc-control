@@ -1,6 +1,7 @@
 package com.neekhar.pccontrol
 
 import android.Manifest
+import android.app.PictureInPictureParams
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -8,6 +9,7 @@ import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.util.Rational
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -39,6 +41,12 @@ class MainActivity : FragmentActivity() {
     private val pendingDeepLink = MutableStateFlow<DeepLinkTarget?>(null)
     private val pendingShare = MutableStateFlow<SharePayload?>(null)
     private val inPipMode = MutableStateFlow(false)
+
+    @Volatile
+    private var autoPipEnabled: Boolean = false
+
+    @Volatile
+    private var pipAspectRatio: Rational = Rational(16, 9)
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -103,6 +111,57 @@ class MainActivity : FragmentActivity() {
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         inPipMode.value = isInPictureInPictureMode
+    }
+
+    /**
+     * Configures automatic Picture-in-Picture when leaving the app while a Live or Replay camera
+     * stream is active. Uses `setAutoEnterEnabled` on Android 12+ (API 31+) and falls back to
+     * [onUserLeaveHint] on Android 11 (API 30).
+     */
+    fun updateAutoPip(
+        enabled: Boolean,
+        aspectWidth: Int = 16,
+        aspectHeight: Int = 9,
+    ) {
+        autoPipEnabled = enabled
+        val w = aspectWidth.coerceAtLeast(1)
+        val h = aspectHeight.coerceAtLeast(1)
+        val ratio = w.toFloat() / h.toFloat()
+        val safeRational = when {
+            ratio > 2.35f -> Rational(235, 100)
+            ratio < 0.42f -> Rational(42, 100)
+            else -> Rational(w, h)
+        }
+        pipAspectRatio = safeRational
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+        ) {
+            runCatching {
+                setPictureInPictureParams(
+                    PictureInPictureParams.Builder()
+                        .setAutoEnterEnabled(enabled)
+                        .setAspectRatio(safeRational)
+                        .build(),
+                )
+            }
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (autoPipEnabled &&
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S &&
+            !isInPictureInPictureMode &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+        ) {
+            runCatching {
+                enterPictureInPictureMode(
+                    PictureInPictureParams.Builder()
+                        .setAspectRatio(pipAspectRatio)
+                        .build(),
+                )
+            }
+        }
     }
 
     private fun consumeIntent(intent: Intent?) {

@@ -47,14 +47,12 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Reply
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -70,6 +68,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -88,6 +87,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.neekhar.pccontrol.core.platform.ChatForegroundState
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcConfirmDialog
 import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -377,6 +377,28 @@ fun ChatScreen(
                 }
             }
 
+            // Subtle top fade scrim so scrolling messages dissolve smoothly under the status bar
+            val scrimFadeHeight = 24.dp
+            val totalScrimHeight = statusBarTop + scrimFadeHeight
+            val solidStop = if (totalScrimHeight > 0.dp) {
+                (statusBarTop / totalScrimHeight).coerceIn(0f, 0.95f)
+            } else {
+                0f
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(totalScrimHeight)
+                    .background(
+                        Brush.verticalGradient(
+                            0f to colors.bg,
+                            solidStop to colors.bg,
+                            1f to Color.Transparent,
+                        ),
+                    ),
+            )
+
             // Top floating overlay: offline/reconnecting/error pill (hidden when live) + subtle New chat icon button
             Box(
                 modifier = Modifier
@@ -647,39 +669,16 @@ fun ChatScreen(
 
     // New conversation confirmation dialog
     if (showNewChatDialog) {
-        AlertDialog(
-            onDismissRequest = { showNewChatDialog = false },
-            containerColor = colors.surface,
-            titleContentColor = colors.text,
-            textContentColor = colors.textDim,
-            title = {
-                Text(
-                    text = "New conversation",
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
+        PcConfirmDialog(
+            title = "New conversation",
+            message = "Start a fresh ${ChatLogic.formatEngineLabel(state.engine)} session?",
+            confirmLabel = "New",
+            dismissLabel = "Cancel",
+            onConfirm = {
+                showNewChatDialog = false
+                viewModel.startNewChat()
             },
-            text = {
-                Text(
-                    text = "Start a fresh ${ChatLogic.formatEngineLabel(state.engine)} session?",
-                    fontSize = 14.5.sp,
-                )
-            },
-            dismissButton = {
-                TextButton(onClick = { showNewChatDialog = false }) {
-                    Text("Cancel", color = colors.textDim)
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showNewChatDialog = false
-                        viewModel.startNewChat()
-                    },
-                ) {
-                    Text("New", color = colors.accent, fontWeight = FontWeight.SemiBold)
-                }
-            },
+            onDismiss = { showNewChatDialog = false },
         )
     }
 

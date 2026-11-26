@@ -24,6 +24,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -41,16 +44,23 @@ import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -542,10 +552,11 @@ fun <T> PcSegmentedControl(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(PcDimens.RadiusSm))
+            .clip(RoundedCornerShape(12.dp))
             .background(colors.surface)
             .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         options.forEach { option ->
             val isSelected = option.id == selected
@@ -553,8 +564,8 @@ fun <T> PcSegmentedControl(
             Row(
                 modifier = Modifier
                     .weight(1f)
-                    .height(36.dp)
-                    .clip(RoundedCornerShape(10.dp))
+                    .height(34.dp)
+                    .clip(RoundedCornerShape(9.dp))
                     .background(if (isSelected) colors.surfaceRaised else Color.Transparent)
                     .clickable(
                         role = Role.Tab,
@@ -578,7 +589,7 @@ fun <T> PcSegmentedControl(
                     text = option.label,
                     color = if (isSelected) colors.text else colors.textDim,
                     fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -975,22 +986,22 @@ fun PcConfirmDialog(
                 .clip(RoundedCornerShape(PcDimens.RadiusMd))
                 .background(colors.surface)
                 .border(0.5.dp, colors.hairline, RoundedCornerShape(PcDimens.RadiusMd))
-                .padding(PcDimens.Space4),
-            verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
+                .padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 16.dp),
         ) {
             Text(
                 text = title,
                 color = colors.text,
-                fontSize = 18.sp,
+                fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold,
             )
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = message,
                 color = colors.textDim,
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
             )
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(16.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
@@ -1001,6 +1012,7 @@ fun PcConfirmDialog(
                         onClick = onDismiss,
                         variant = PcButtonVariant.Subtle,
                         enabled = !confirmBusy,
+                        compact = true,
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -1009,6 +1021,7 @@ fun PcConfirmDialog(
                     onClick = onConfirm,
                     variant = confirmVariant,
                     busy = confirmBusy,
+                    compact = true,
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -1091,4 +1104,70 @@ fun PcKeyValueRow(
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+/**
+ * Compact 42.dp single-line text field replacing oversized Material 3 OutlinedTextField.
+ */
+@Composable
+fun PcCompactTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    placeholder: String? = null,
+    enabled: Boolean = true,
+    mono: Boolean = false,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
+) {
+    val colors = PcTheme.colors
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(10.dp)
+
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        enabled = enabled,
+        singleLine = true,
+        textStyle = TextStyle(
+            color = if (enabled) colors.text else colors.textFaint,
+            fontSize = 14.sp,
+            fontFamily = if (mono) FontFamily.Monospace else FontFamily.SansSerif,
+        ),
+        cursorBrush = SolidColor(colors.accent),
+        visualTransformation = visualTransformation,
+        keyboardOptions = keyboardOptions,
+        keyboardActions = keyboardActions,
+        modifier = modifier
+            .fillMaxWidth()
+            .onFocusChanged { focused = it.isFocused },
+        decorationBox = { innerTextField ->
+            Box(
+                contentAlignment = Alignment.CenterStart,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .clip(shape)
+                    .background(colors.surfaceRaised)
+                    .border(
+                        width = if (focused) 1.dp else 0.5.dp,
+                        color = if (focused) colors.accent else colors.hairline,
+                        shape = shape,
+                    )
+                    .padding(horizontal = 12.dp),
+            ) {
+                if (value.isEmpty() && !placeholder.isNullOrEmpty()) {
+                    Text(
+                        text = placeholder,
+                        color = colors.textFaint,
+                        fontSize = 14.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                innerTextField()
+            }
+        },
+    )
 }

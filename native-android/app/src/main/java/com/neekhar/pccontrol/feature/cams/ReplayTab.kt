@@ -106,7 +106,9 @@ fun ReplayTab(
     okHttpClient: OkHttpClient,
     target: SightingTarget?,
     fullscreen: Boolean = false,
+    isInPip: Boolean = false,
     bottomInset: androidx.compose.ui.unit.Dp = 28.dp,
+    onPlayingChange: (Boolean) -> Unit = {},
     onToggleFullscreen: () -> Unit = {},
     onTargetConsumed: () -> Unit,
     onToast: (message: String, actionLabel: String?, action: (() -> Unit)?) -> Unit,
@@ -124,6 +126,13 @@ fun ReplayTab(
         )
     }
     val state by engine.state.collectAsState()
+
+    LaunchedEffect(state.playing, visible) {
+        onPlayingChange(visible && state.playing)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onPlayingChange(false) }
+    }
 
     var snapBusy by remember { mutableStateOf(false) }
     var clipBusy by remember { mutableStateOf(false) }
@@ -189,7 +198,7 @@ fun ReplayTab(
         }
     }
 
-    if (fullscreen) {
+    if (fullscreen || isInPip) {
         Box(
             modifier = modifier
                 .fillMaxSize()
@@ -204,22 +213,28 @@ fun ReplayTab(
                 rate = state.rate,
                 isBig = true,
                 fullscreen = true,
-                clockOverlay = if (wallTime > 0.0) fmtHms(wallTime) else null,
+                hideChrome = isInPip,
+                clockOverlay = if (!isInPip && wallTime > 0.0) fmtHms(wallTime) else null,
                 snapBusy = snapBusy,
                 onHandle = { engine.setHandle(big, it) },
                 onProgress = { engine.onProgress(big, it) },
                 onError = { engine.onPlayerError(big) },
-                onTap = { engine.togglePlay() },
+                onTap = { if (!isInPip) engine.togglePlay() },
                 onSnapshot = ::saveReplaySnapshot,
                 onToggleFullscreen = onToggleFullscreen,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .navigationBarsPadding(),
+                modifier = if (isInPip) {
+                    Modifier.fillMaxSize()
+                } else {
+                    Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding()
+                        .navigationBarsPadding()
+                },
             )
 
-            // Compact bottom transport overlay in landscape fullscreen
-            Row(
+            // Compact bottom transport overlay in landscape fullscreen (hidden in PiP)
+            if (!isInPip) {
+                Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
@@ -286,6 +301,7 @@ fun ReplayTab(
                         style = TabularNumStyle.copy(fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold),
                     )
                 }
+            }
             }
         }
         return
@@ -686,6 +702,7 @@ private fun ReplayVideoTile(
     onTap: () -> Unit,
     onSnapshot: () -> Unit,
     onToggleFullscreen: () -> Unit,
+    hideChrome: Boolean = false,
     clockOverlay: String? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -744,6 +761,7 @@ private fun ReplayVideoTile(
         }
 
         // Camera label chip (+ clock overlay in fullscreen)
+        if (!hideChrome) {
         Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
@@ -785,8 +803,9 @@ private fun ReplayVideoTile(
                 }
             }
         }
+        }
 
-        if (tile.spinning) {
+        if (tile.spinning && !hideChrome) {
             CircularProgressIndicator(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -797,7 +816,7 @@ private fun ReplayVideoTile(
             )
         }
 
-        if (isBig && !globalPlaying && tile.msg == null) {
+        if (isBig && !hideChrome && !globalPlaying && tile.msg == null) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -815,7 +834,7 @@ private fun ReplayVideoTile(
             }
         }
 
-        if (isBig) {
+        if (isBig && !hideChrome) {
             Row(
                 modifier = Modifier
                     .align(Alignment.TopEnd)

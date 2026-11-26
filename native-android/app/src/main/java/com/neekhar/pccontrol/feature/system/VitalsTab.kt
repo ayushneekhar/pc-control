@@ -7,9 +7,11 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -137,7 +139,9 @@ fun VitalsTab(
         item(key = "mem_swap_row") {
             val gib = 1024.0 * 1024.0 * 1024.0
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(IntrinsicSize.Min),
                 horizontalArrangement = Arrangement.spacedBy(PcDimens.Space3),
             ) {
                 MetricTile(
@@ -146,14 +150,18 @@ fun VitalsTab(
                     percent = v.mem.pct,
                     sub = "${v.mem.pct.roundToInt()}% used",
                     sparkValues = state.history.map { it.mem },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
                 )
                 MetricTile(
                     label = "Swap",
                     value = String.format(Locale.US, "%.1f / %.0f GB", v.swap.used / gib, v.swap.total / gib),
                     percent = v.swap.pct,
                     sub = "${v.swap.pct.roundToInt()}% used",
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
                 )
             }
         }
@@ -163,7 +171,9 @@ fun VitalsTab(
             val gpu = v.gpu
             val vramPct = if (gpu != null && gpu.memTotal > 0.0) (gpu.memUsed / gpu.memTotal) * 100.0 else null
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(IntrinsicSize.Min),
                 horizontalArrangement = Arrangement.spacedBy(PcDimens.Space3),
             ) {
                 MetricTile(
@@ -173,7 +183,9 @@ fun VitalsTab(
                     sub = gpu?.let { "${it.temp.roundToInt()}° · ${it.power.roundToInt()} W" } ?: "Not available",
                     sparkValues = if (gpu != null) state.history.map { it.gpu } else null,
                     barColorOverride = colors.textDim,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
                 )
                 MetricTile(
                     label = "VRAM",
@@ -183,7 +195,9 @@ fun VitalsTab(
                     percent = vramPct,
                     sub = vramPct?.let { "${it.roundToInt()}% used" } ?: "Not available",
                     barColorOverride = colors.textDim,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
                 )
             }
         }

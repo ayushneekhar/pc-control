@@ -16,11 +16,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,7 +28,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -38,8 +35,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
-import com.neekhar.pccontrol.core.ui.PcBrandIcons
 import com.neekhar.pccontrol.core.ui.PcCard
+import com.neekhar.pccontrol.core.ui.ProviderBrandIcon
 import kotlin.math.roundToInt
 
 data class UsageSegmentPalette(
@@ -85,10 +82,30 @@ fun usageSegmentColors(
     }
 }
 
-fun providerIcon(key: UsageProviderKey): ImageVector = when (key) {
-    UsageProviderKey.CLAUDE -> PcBrandIcons.Claude
-    UsageProviderKey.GEMINI -> Icons.Filled.AutoAwesome
-    UsageProviderKey.OPENCODE -> Icons.Filled.Code
+@Composable
+fun ProviderUsageIcon(
+    key: UsageProviderKey,
+    tint: Color,
+    modifier: Modifier = Modifier,
+) {
+    when (key) {
+        UsageProviderKey.CLAUDE -> ProviderBrandIcon(
+            isClaude = true,
+            tint = tint,
+            modifier = modifier,
+        )
+        UsageProviderKey.GEMINI -> ProviderBrandIcon(
+            isClaude = false,
+            tint = tint,
+            modifier = modifier,
+        )
+        UsageProviderKey.OPENCODE -> Icon(
+            imageVector = Icons.Filled.Code,
+            contentDescription = null,
+            tint = tint,
+            modifier = modifier,
+        )
+    }
 }
 
 @Composable
@@ -182,9 +199,8 @@ fun GroupedUsageSection(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.padding(horizontal = 2.dp),
                 ) {
-                    Icon(
-                        imageVector = providerIcon(group.key),
-                        contentDescription = null,
+                    ProviderUsageIcon(
+                        key = group.key,
                         tint = colors.textDim,
                         modifier = Modifier.size(17.dp),
                     )

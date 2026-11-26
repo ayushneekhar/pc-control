@@ -682,3 +682,32 @@ export const deleteDriveItems = (items: { rel_path: string }[]) =>
   post<DriveDeleteResponse>('/pc/api/space/drive/delete', { items }, 120000);
 export const cancelSpaceJob = (jobId: string) =>
   post<{ ok: boolean; job: TransferJob }>(`/pc/api/space/jobs/${encodeURIComponent(jobId)}/cancel`, {}, 15000);
+
+// ---------------------------------------------------------------- catdetect snapshots
+
+export type DetectionSnap = {
+  filename: string;
+  cam: string;
+  ts_ms: number;
+  size_bytes: number;
+  url: string;
+};
+
+export type DetectionSnapsResponse = {
+  snaps: DetectionSnap[];
+  total: number;
+  counts: Record<string, number> & {
+    all: number;
+    cat: number;
+    cat2: number;
+    cat3: number;
+  };
+};
+
+export const getCatdetectSnaps = (cam?: string | null, limit = 300) => {
+  const params: string[] = [];
+  if (cam && cam !== 'all') params.push(`cam=${encodeURIComponent(cam)}`);
+  if (limit !== 300) params.push(`limit=${encodeURIComponent(String(limit))}`);
+  const qs = params.length ? `?${params.join('&')}` : '';
+  return get<DetectionSnapsResponse>(`/pc/api/catdetect/snaps${qs}`, 15000);
+};

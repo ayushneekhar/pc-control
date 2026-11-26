@@ -2558,6 +2558,104 @@ class CatCamManager:
 CATCAM = CatCamManager()
 
 
+# ---------------------------------------------------------------- catdetect snapshots (/pc/api/catdetect/snaps*)
+
+CATDETECT_SNAPS_DIR = os.environ.get(
+    "PCAPI_CATDETECT_SNAPS_DIR",
+    os.path.join(HOME, "remote-pc", "snaps", "detections"),
+)
+CATDETECT_SNAP_RE = re.compile(r"^([a-z0-9_-]+)-(\d{8})-(\d{6})\.jpg$")
+CATDETECT_CAM_RE = re.compile(r"^[a-z0-9_-]+$")
+CATDETECT_SNAPS_DEFAULT_LIMIT = 300
+CATDETECT_SNAPS_MAX_LIMIT = 300
+
+
+def _parse_catdetect_snap_ts_ms(date_s, time_s, fallback_mtime):
+    try:
+        dt = datetime.datetime.strptime(f"{date_s}{time_s}", "%Y%m%d%H%M%S")
+        return int(dt.timestamp() * 1000)
+    except (ValueError, OSError):
+        return int(fallback_mtime * 1000)
+
+
+def list_catdetect_snaps(cam=None, limit=CATDETECT_SNAPS_DEFAULT_LIMIT, snaps_dir=None):
+    """Scan saved catdetect detection JPEGs and return newest-first metadata + per-cam counts."""
+    cam_filter = (cam or "").strip()
+    if cam_filter == "all":
+        cam_filter = ""
+    if cam_filter and not CATDETECT_CAM_RE.fullmatch(cam_filter):
+        return 400, {"error": "invalid cam filter"}
+
+    try:
+        lim = int(limit) if limit is not None and str(limit).strip() != "" else CATDETECT_SNAPS_DEFAULT_LIMIT
+    except (TypeError, ValueError):
+        return 400, {"error": "invalid limit"}
+    lim = max(1, min(lim, CATDETECT_SNAPS_MAX_LIMIT))
+
+    base_dir = os.path.expanduser(snaps_dir if snaps_dir is not None else CATDETECT_SNAPS_DIR)
+    counts = {"all": 0, "cat": 0, "cat2": 0, "cat3": 0}
+    items = []
+    if os.path.isdir(base_dir):
+        try:
+            with os.scandir(base_dir) as it:
+                for entry in it:
+                    m = CATDETECT_SNAP_RE.fullmatch(entry.name)
+                    if not m:
+                        continue
+                    try:
+                        if not entry.is_file():
+                            continue
+                        st = entry.stat()
+                    except OSError:
+                        continue
+                    cam_key, date_s, time_s = m.group(1), m.group(2), m.group(3)
+                    counts["all"] += 1
+                    counts[cam_key] = counts.get(cam_key, 0) + 1
+                    if cam_filter and cam_key != cam_filter:
+                        continue
+                    items.append({
+                        "filename": entry.name,
+                        "cam": cam_key,
+                        "ts_ms": _parse_catdetect_snap_ts_ms(date_s, time_s, st.st_mtime),
+                        "size_bytes": st.st_size,
+                        "url": f"/pc/api/catdetect/snaps/{entry.name}",
+                    })
+        except OSError:
+            pass
+
+    items.sort(key=lambda s: (s["ts_ms"], s["filename"]), reverse=True)
+    return 200, {
+        "snaps": items[:lim],
+        "total": len(items),
+        "counts": counts,
+    }
+
+
+def read_catdetect_snap(raw_filename, snaps_dir=None):
+    """Strictly validate a detection snapshot filename and return (code, bytes_or_error_dict)."""
+    if not isinstance(raw_filename, str) or not raw_filename:
+        return 400, {"error": "invalid snapshot filename"}
+    decoded = urllib.parse.unquote(raw_filename)
+    for cand in (raw_filename, decoded):
+        if "/" in cand or "\\" in cand or ".." in cand or "\x00" in cand:
+            return 400, {"error": "invalid snapshot filename"}
+    if not CATDETECT_SNAP_RE.fullmatch(raw_filename) or decoded != raw_filename:
+        return 400, {"error": "invalid snapshot filename"}
+
+    base_dir = os.path.expanduser(snaps_dir if snaps_dir is not None else CATDETECT_SNAPS_DIR)
+    base_real = os.path.realpath(base_dir)
+    full_path = os.path.realpath(os.path.join(base_real, raw_filename))
+    if not full_path.startswith(base_real + os.sep):
+        return 400, {"error": "invalid snapshot filename"}
+    if not os.path.isfile(full_path):
+        return 404, {"error": "snapshot not found"}
+    try:
+        with open(full_path, "rb") as f:
+            return 200, f.read()
+    except OSError:
+        return 404, {"error": "snapshot not found"}
+
+
 # ---------------------------------------------------------------- GNOME keyring unlock (/pc/api/keyring*)
 
 KEYRING_UNLOCK_BIN = os.environ.get("PCAPI_KEYRING_UNLOCK", os.path.join(HOME, "remote-pc", "bin", "keyring-unlock"))
@@ -4331,6 +4429,19 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(200, AGENT_SETTINGS.get())
             if path == "/api/catcam":
                 return self.send_json(200, CATCAM.status())
+            if path == "/api/catdetect/snaps":
+                return self.send_json(
+                    *list_catdetect_snaps(
+                        cam=(qs.get("cam") or [None])[0],
+                        limit=(qs.get("limit") or [None])[0],
+                    )
+                )
+            if path.startswith("/api/catdetect/snaps/"):
+                raw_name = path[len("/api/catdetect/snaps/"):]
+                code, res = read_catdetect_snap(raw_name)
+                if code != 200:
+                    return self.send_json(code, res)
+                return self.send_bytes(res, "image/jpeg", cache_control="public, max-age=86400")
             if path == "/api/keyring":
                 try:
                     return self.send_json(200, KEYRING.status())
@@ -4457,11 +4568,11 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*r4)
         return self.send_json(404, {"error": "not found"})
 
-    def send_bytes(self, data, ctype, extra=()):
+    def send_bytes(self, data, ctype, extra=(), cache_control="no-store"):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         for k, v in extra: self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)

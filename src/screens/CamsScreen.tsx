@@ -36,8 +36,9 @@ import { RTCRtpReceiver, RTCView } from "react-native-webrtc";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { PcNative } from "../../modules/pc-native";
 import { PinchZoom, type PinchZoomHandle } from "../components/PinchZoom";
-import { Banner, Button, Icon } from "../components/ui";
+import { Banner, Button, Card, Icon, StatusDot, Tone } from "../components/ui";
 import { serverUrl } from "../lib/api";
+import { refreshCatCam, toggleCatCam, useCatCam } from "../lib/catcam";
 import { LinkState } from "../lib/cams/link";
 import {
   CAM_MIC_STREAM,
@@ -809,6 +810,7 @@ export default function CamsScreen() {
   const [talkSince, setTalkSince] = useState(0);
   const ptz = usePtz();
   const stopPtz = ptz.stop;
+  const cat = useCatCam();
 
   // background / leaving: everything closes, and audio is off when you come back (everything starts muted)
   const active = useActive(() => {
@@ -820,9 +822,29 @@ export default function CamsScreen() {
     stopPtz();
   });
 
+  useEffect(() => {
+    if (active) void refreshCatCam();
+  }, [active]);
+
+  const stackActive = cat.enabled && !cat.busy;
+  const handleToggleCatCam = useCallback(
+    async (nextEnabled: boolean) => {
+      if (!nextEnabled) {
+        setCamMic(false);
+        setListen(false);
+        setTalk("off");
+        setPadOpen(false);
+        setFull(null);
+        stopPtz();
+      }
+      await toggleCatCam(nextEnabled);
+    },
+    [stopPtz],
+  );
+
   // live video only on the Live tab (frees the decoders and the link for Replay); Listen/Talk keep running
-  const run = active && webrtcOk && tab === "live";
-  const audioRun = active && webrtcOk;
+  const run = active && stackActive && webrtcOk && tab === "live";
+  const audioRun = active && stackActive && webrtcOk;
   const links = {
     cat: useLiveCam(run ? "cat" : null, "video"),
     cat2: useLiveCam(run ? "cat2" : null, "video"),
@@ -864,7 +886,7 @@ export default function CamsScreen() {
       },
     },
   );
-  const det = useDetector(active, toast.show);
+  const det = useDetector(active && stackActive, toast.show);
 
   // crash guard (CamsWebrtc): a marker while live video starts, cleared after 15 s of it or when it stops. If the
   // app dies meanwhile, the next start turns safe mode on (react-native-webrtc's defaults).
@@ -918,10 +940,10 @@ export default function CamsScreen() {
 
   // keep the screen on while watching
   useEffect(() => {
-    if (!active) return;
+    if (!active || !stackActive) return;
     PcNative?.camsKeepAwake(true).catch(() => undefined);
     return () => void PcNative?.camsKeepAwake(false).catch(() => undefined);
-  }, [active]);
+  }, [active, stackActive]);
 
   // fullscreen: landscape + hidden bars; back leaves it
   useEffect(() => {
@@ -1091,7 +1113,7 @@ export default function CamsScreen() {
   );
 
   // ---- fullscreen: one camera, nothing else
-  if (full) {
+  if (full && stackActive) {
     const c = CAMS.find((x) => x.id === full)!;
     return (
       <View style={{ flex: 1, backgroundColor: t.media }}>
@@ -1118,7 +1140,74 @@ export default function CamsScreen() {
   const talkLive = mic.state.phase === "live";
   const big = focus ? links[focus].state : null;
   const thumbW = (win.width - screenPad * 2 - space(2.5)) / 2;
-  const showBar = tab === "live" || listen || talk !== "off";
+  const showBar = stackActive && (tab === "live" || listen || talk !== "off");
+
+  const units = Object.values(cat.data?.units ?? {});
+  const runningUnits = units.filter((u) => u === "active").length;
+  const masterStatus = cat.busy
+    ? cat.enabled
+      ? "Turning on…"
+      : "Turning off…"
+    : !cat.enabled
+      ? "Off"
+      : units.length
+        ? `On · ${runningUnits}/${units.length} running`
+        : "On";
+  const masterDot: Tone = cat.busy
+    ? "warn"
+    : cat.enabled
+      ? units.length && runningUnits === 0
+        ? "warn"
+        : "ok"
+      : "faint";
+
+  const masterCard = (
+    <Card style={{ gap: space(3) }}>
+      <View style={st.masterRow}>
+        <Icon
+          name={cat.enabled ? "cctv" : "cctv-off"}
+          size={22}
+          color={stackActive ? t.accent : t.textDim}
+        />
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={[st.masterTitle, { color: t.text }]}>Cat cams</Text>
+          <View style={st.statusInline}>
+            <StatusDot tone={masterDot} />
+            <Text style={[st.masterStatus, { color: t.textDim }]}>
+              {masterStatus}
+            </Text>
+          </View>
+        </View>
+        {cat.busy ? (
+          <ActivityIndicator size="small" color={t.textDim} />
+        ) : null}
+        <Switch
+          value={cat.enabled}
+          onValueChange={(v) => void handleToggleCatCam(v)}
+          disabled={cat.busy}
+          accessibilityLabel="Cat cams master switch"
+          trackColor={{ true: t.accent, false: t.border }}
+          thumbColor={t.onMedia}
+        />
+      </View>
+      {!stackActive ? (
+        <View style={[st.offNote, { borderTopColor: t.border }]}>
+          <Text style={[st.offBody, { color: t.textDim }]}>
+            {cat.busy
+              ? cat.enabled
+                ? "Starting cameras, recorder, detector, and music…"
+                : "Stopping cameras, recorder, detector, and music…"
+              : "Live cameras, recording, cat detector, and music are stopped. Turn on to reconnect."}
+          </Text>
+        </View>
+      ) : null}
+      {cat.error ? (
+        <Banner tone="bad" title="Cat cams">
+          {cat.error}
+        </Banner>
+      ) : null}
+    </Card>
+  );
 
   return (
     <View style={{ flex: 1, backgroundColor: t.bg }}>
@@ -1137,45 +1226,54 @@ export default function CamsScreen() {
         >
           <Icon name="arrow-left" size={24} color={t.text} />
         </Pressable>
-        <View
-          style={[st.seg, { backgroundColor: t.card }]}
-          accessibilityRole="tablist"
-        >
-          {TABS.map((x) => {
-            const on = tab === x.id;
-            return (
-              <Pressable
-                key={x.id}
-                onPress={() => setTab(x.id)}
-                accessibilityRole="tab"
-                accessibilityState={{ selected: on }}
-                style={[st.segBtn, on && { backgroundColor: t.cardAlt }]}
-              >
-                {x.id === "live" && on ? (
-                  <View
-                    style={[
-                      st.liveDot,
-                      { backgroundColor: liveCount ? t.ok : t.textFaint },
-                    ]}
-                  />
-                ) : null}
-                <Text
-                  style={{
-                    color: on ? t.text : t.textDim,
-                    fontWeight: "500",
-                    fontSize: 12.5,
-                    fontVariant: ["tabular-nums"],
-                  }}
-                  numberOfLines={1}
+        {stackActive ? (
+          <View
+            style={[st.seg, { backgroundColor: t.card }]}
+            accessibilityRole="tablist"
+          >
+            {TABS.map((x) => {
+              const on = tab === x.id;
+              return (
+                <Pressable
+                  key={x.id}
+                  onPress={() => setTab(x.id)}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: on }}
+                  style={[st.segBtn, on && { backgroundColor: t.cardAlt }]}
                 >
-                  {x.id === "live" && on
-                    ? `${x.label} ${liveCount}/${CAMS.length}`
-                    : x.label}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
+                  {x.id === "live" && on ? (
+                    <View
+                      style={[
+                        st.liveDot,
+                        { backgroundColor: liveCount ? t.ok : t.textFaint },
+                      ]}
+                    />
+                  ) : null}
+                  <Text
+                    style={{
+                      color: on ? t.text : t.textDim,
+                      fontWeight: "500",
+                      fontSize: 12.5,
+                      fontVariant: ["tabular-nums"],
+                    }}
+                    numberOfLines={1}
+                  >
+                    {x.id === "live" && on
+                      ? `${x.label} ${liveCount}/${CAMS.length}`
+                      : x.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        ) : (
+          <Text
+            style={[st.headerTitle, { color: t.text }]}
+            numberOfLines={1}
+          >
+            Cat cams
+          </Text>
+        )}
         <Pressable
           onPress={() => setMenu(true)}
           hitSlop={8}
@@ -1186,7 +1284,18 @@ export default function CamsScreen() {
         </Pressable>
       </View>
 
-      {tab === "detections" ? (
+      {!stackActive ? (
+        <ScrollView
+          contentContainerStyle={{
+            paddingHorizontal: screenPad,
+            paddingVertical: space(4),
+            paddingBottom: space(6) + insets.bottom,
+            gap: space(3),
+          }}
+        >
+          {masterCard}
+        </ScrollView>
+      ) : tab === "detections" ? (
         <DetectionsView
           visible={active}
           bottomInset={(showBar ? 110 : 0) + insets.bottom}
@@ -1226,6 +1335,7 @@ export default function CamsScreen() {
                   This build has no WebRTC module. Use the web page from the menu.
                 </Banner>
               ) : null}
+              {masterCard}
               {/* cat alerts */}
               <View style={st.detRow}>
                 <Pressable
@@ -1398,6 +1508,14 @@ export default function CamsScreen() {
           >
             {[
               {
+                icon: cat.enabled ? "cctv-off" : "cctv",
+                label: cat.enabled ? "Turn cat cams off" : "Turn cat cams on",
+                run: () => {
+                  setMenu(false);
+                  if (!cat.busy) void handleToggleCatCam(!cat.enabled);
+                },
+              },
+              {
                 icon: "web",
                 label: "Open the web page",
                 run: () =>
@@ -1492,6 +1610,38 @@ const st = StyleSheet.create({
     paddingHorizontal: space(3),
     paddingBottom: space(2),
     borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  headerTitle: {
+    flex: 1,
+    fontSize: 18,
+    fontWeight: "600",
+    paddingHorizontal: space(1),
+  },
+  masterRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space(3),
+  },
+  masterTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  statusInline: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  masterStatus: {
+    fontSize: 13,
+    fontVariant: ["tabular-nums"],
+  },
+  offNote: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: space(3),
+  },
+  offBody: {
+    fontSize: 13.5,
+    lineHeight: 19,
   },
   hBtn: {
     width: 38,

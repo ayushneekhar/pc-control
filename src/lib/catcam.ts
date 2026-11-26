@@ -39,12 +39,15 @@ export function useCatCam(): StoreState & { enabled: boolean } {
 }
 
 export async function refreshCatCam(): Promise<CatCamState | null> {
+  if (state.busy) return state.data;
   try {
     const next = await getCatCam();
+    if (state.busy) return state.data;
     cacheSet(CACHE_KEY, next);
     emit({ data: next, loaded: true, error: null });
     return next;
   } catch (e) {
+    if (state.busy) return state.data;
     emit({ loaded: true, error: (e as Error).message });
     return null;
   }

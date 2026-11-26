@@ -471,6 +471,22 @@ export default function RoutesScreen() {
 
       <Section label="Open">
         <List>
+          {!catCam.enabled ? (
+            <ListRow
+              icon="cctv-off"
+              title="Cat cams"
+              subtitle={
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 1 }}>
+                  <StatusDot tone={catCam.busy ? 'warn' : 'faint'} />
+                  <Text style={{ color: t.textFaint, fontSize: 12.5 }} numberOfLines={1}>
+                    {catCam.busy ? 'Turning off…' : 'Off'}
+                  </Text>
+                </View>
+              }
+              chevron
+              onPress={() => openCams()}
+            />
+          ) : null}
           {openScreen.map((r) => {
             const view = routeView(r);
             return (

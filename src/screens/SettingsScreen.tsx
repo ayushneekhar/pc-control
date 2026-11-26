@@ -7,7 +7,7 @@ import { KeyringUnlockModal } from '../components/KeyringUnlockModal';
 import { Banner, Button, Card, Icon, KV, List, ListRow, Mono, Pill, Screen, Section, StatusDot } from '../components/ui';
 import { AgentState, ApiError, DEFAULT_SERVER, get, getAgent, getKbdLock, Info, KbdLockState, post, serverUrl, setKbdLock, VpnState } from '../lib/api';
 import { cacheGet, cacheSet } from '../lib/cache';
-import { refreshCatCam, toggleCatCam, useCatCam } from '../lib/catcam';
+import { useCatCam } from '../lib/catcam';
 import {
   clearKeyringFeedback,
   forgetKeyringPassword,
@@ -117,59 +117,6 @@ function AgentRow() {
         onPress={() => nav.navigate('AgentSettings')}
       />
     </List>
-  );
-}
-
-/** Master switch for the cat cam systemd stack (catcam, cam-ptz, camrec, catdetect, cam-music). */
-function CatCamCard() {
-  const t = useTheme();
-  const tick = useAppActiveTick();
-  const cat = useCatCam();
-
-  useFocusEffect(
-    useCallback(() => {
-      void refreshCatCam();
-    }, []),
-  );
-
-  useEffect(() => {
-    if (tick > 0) void refreshCatCam();
-  }, [tick]);
-
-  const units = Object.values(cat.data?.units ?? {});
-  const running = units.filter((u) => u === 'active').length;
-  const enabled = cat.enabled;
-  const status = cat.busy
-    ? enabled
-      ? 'Turning on…'
-      : 'Turning off…'
-    : !enabled
-      ? 'Off'
-      : units.length
-        ? `On · ${running}/${units.length} running`
-        : 'On';
-  const dot = cat.busy ? 'warn' : enabled ? (units.length && running === 0 ? 'warn' : 'ok') : 'faint';
-
-  return (
-    <Card style={{ gap: space(3) }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space(3) }}>
-        <Icon name={enabled ? 'cctv' : 'cctv-off'} size={22} color={enabled ? t.accent : t.textDim} />
-        <View style={{ flex: 1 }}>
-          <Text style={{ color: t.text, fontWeight: '600', fontSize: 16 }}>Cat cam</Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            <StatusDot tone={dot} />
-            <Text style={{ color: t.textDim, fontSize: 13 }}>{status}</Text>
-          </View>
-        </View>
-        <Toggle
-          value={enabled}
-          onValueChange={(v) => void toggleCatCam(v)}
-          disabled={cat.busy}
-          label="Cat cam master switch"
-        />
-      </View>
-      {cat.error ? <Banner tone="bad" title="Cat cam">{cat.error}</Banner> : null}
-    </Card>
   );
 }
 
@@ -1085,9 +1032,6 @@ export default function SettingsScreen() {
     >
       <Section label="Agent">
         <AgentRow />
-      </Section>
-      <Section label="Cameras">
-        <CatCamCard />
       </Section>
       <Section label="Keyboard">
         <KeyboardLockCard />

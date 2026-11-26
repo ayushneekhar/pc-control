@@ -319,7 +319,7 @@ export default function AgentViewScreen() {
         <Banner tone="warn" title="Web UI isn't responding yet">
           <View style={{ gap: space(2.5) }}>
             <Text style={{ color: t.textDim, fontSize: 13.5, lineHeight: 19 }}>
-              Agent view is turned on, but the local web service on port 1991 hasn't answered yet.
+              Agent view is turned on, but the local web service on port 1991 has not answered yet.
             </Text>
             <View style={{ flexDirection: 'row' }}>
               <Button label="Retry" icon="refresh" kind="subtle" compact onPress={() => void load()} />

@@ -14,14 +14,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.HourglassBottom
 import androidx.compose.material.icons.filled.NotificationsActive
-import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,10 +43,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.ui.PcBrandIcons
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -57,6 +60,7 @@ import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
+import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 
 private val FIVE_HOUR_THRESHOLDS = listOf(10, 15, 20, 25, 30, 40, 50)
 private val WEEKLY_THRESHOLDS = listOf(5, 10, 15, 20, 25, 30)
@@ -97,15 +101,15 @@ fun AgentSettingsScreen(
 
     val statusText = when {
         state.isSwitching -> "Switching…"
-        state.agentState == null || state.isUnavailable -> "Unavailable"
-        state.isSelectedActive -> "Running"
-        else -> "Stopped"
+        state.isUnavailable -> "Unavailable"
+        state.agentState != null && !state.isSelectedActive -> "Stopped"
+        else -> null
     }
     val statusColor = when {
         state.isSwitching -> colors.warn
-        state.agentState == null || state.isUnavailable -> colors.textFaint
-        state.isSelectedActive -> colors.ok
-        else -> colors.warn
+        state.isUnavailable -> colors.bad
+        state.agentState != null && !state.isSelectedActive -> colors.warn
+        else -> null
     }
 
     val claude = state.settings?.claude
@@ -176,16 +180,25 @@ fun AgentSettingsScreen(
             item(key = "sec_usage") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    PcSectionLabel(label = "AI usage")
+                    PcSectionLabel(
+                        label = "AI usage",
+                        modifier = Modifier.weight(1f),
+                    )
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         if (state.usage?.stale == true) {
-                            Text(text = "updating…", color = colors.textFaint, fontSize = 11.5.sp)
+                            Text(
+                                text = "updating…",
+                                color = colors.textFaint,
+                                fontSize = 11.5.sp,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
                         }
                         if (state.usageLoading) {
                             CircularProgressIndicator(
@@ -199,7 +212,12 @@ fun AgentSettingsScreen(
                                 color = colors.accent,
                                 fontSize = 12.5.sp,
                                 fontWeight = FontWeight.Medium,
-                                modifier = Modifier.clickable { viewModel.loadUsage(force = true) },
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { viewModel.loadUsage(force = true) }
+                                    .padding(horizontal = 6.dp, vertical = 3.dp),
                             )
                         }
                     }
@@ -247,18 +265,20 @@ fun AgentSettingsScreen(
                 PcSectionLabel(label = "Claude")
             }
             item(key = "card_claude") {
+                val showClaudeRestart = state.agentState?.engine == "claude"
                 PcListCard {
                     PcListRow(
-                        icon = Icons.Filled.SmartToy,
+                        icon = PcBrandIcons.Claude,
                         title = "Account",
                         trailing = claude?.account?.ifBlank { "—" } ?: "—",
                         showChevron = false,
+                        showDivider = true,
                     )
-                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
                     PcListRow(
                         icon = Icons.Filled.Tune,
                         title = "Model",
                         trailing = claudeModelLabel,
+                        showDivider = true,
                         onClick = if (claude != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -272,11 +292,11 @@ fun AgentSettingsScreen(
                             }
                         } else null,
                     )
-                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
                     PcListRow(
                         icon = Icons.Filled.Speed,
                         title = "Effort",
                         trailing = claude?.let { formatEffort(it.effort) } ?: "—",
+                        showDivider = showClaudeRestart,
                         onClick = if (claude != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -290,8 +310,7 @@ fun AgentSettingsScreen(
                             }
                         } else null,
                     )
-                    if (state.agentState?.engine == "claude") {
-                        HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                    if (showClaudeRestart) {
                         Column(modifier = Modifier.padding(14.dp)) {
                             PcButton(
                                 label = "Restart agent now",
@@ -313,10 +332,11 @@ fun AgentSettingsScreen(
             item(key = "card_gemini") {
                 PcListCard {
                     PcListRow(
-                        icon = Icons.Filled.SmartToy,
+                        icon = Icons.Filled.AutoAwesome,
                         title = "Account",
                         subtitle = geminiInst?.email ?: if (geminiInst?.signedIn == false) "Not signed in" else null,
                         trailing = geminiInst?.label ?: gemini?.instanceId?.ifBlank { "—" } ?: "—",
+                        showDivider = true,
                         onClick = if (gemini != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -337,7 +357,6 @@ fun AgentSettingsScreen(
                             }
                         } else null,
                     )
-                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -377,6 +396,7 @@ fun AgentSettingsScreen(
                         icon = Icons.Filled.Tune,
                         title = "Model",
                         trailing = geminiModelLabel,
+                        showDivider = true,
                         onClick = if (gemini != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -390,11 +410,11 @@ fun AgentSettingsScreen(
                             }
                         } else null,
                     )
-                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
                     PcListRow(
                         icon = Icons.Filled.Speed,
                         title = "Effort",
                         trailing = gemini?.let { formatEffort(it.thoughtLevel) } ?: "—",
+                        showDivider = false,
                         onClick = if (gemini != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -457,6 +477,7 @@ fun AgentSettingsScreen(
                         icon = Icons.Filled.HourglassBottom,
                         title = "5-hour threshold",
                         trailing = alerts?.let { "${it.fiveHourPct}% left" } ?: "—",
+                        showDivider = true,
                         onClick = if (alerts != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -474,11 +495,11 @@ fun AgentSettingsScreen(
                             }
                         } else null,
                     )
-                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
                     PcListRow(
                         icon = Icons.Filled.CalendarMonth,
                         title = "Weekly threshold",
                         trailing = alerts?.let { "${it.weeklyPct}% left" } ?: "—",
+                        showDivider = false,
                         onClick = if (alerts != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -530,12 +551,14 @@ fun AgentSettingsScreen(
             sheetState = sheetState,
             containerColor = colors.bg,
             contentColor = colors.text,
+            dragHandle = { PcSheetDragHandle() },
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                    .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(

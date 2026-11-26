@@ -82,18 +82,20 @@ fun WebRtcSurfaceVideoView(
                 setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
                 setEnableHardwareScaler(true)
                 setMirror(false)
-                init(
-                    WebRtcRuntime.getEglBaseContext(),
-                    object : RendererCommon.RendererEvents {
-                        override fun onFirstFrameRendered() = Unit
-                        override fun onFrameResolutionChanged(videoWidth: Int, videoHeight: Int, rotation: Int) {
-                            val rotated = rotation == 90 || rotation == 270
-                            val w = if (rotated) videoHeight else videoWidth
-                            val h = if (rotated) videoWidth else videoHeight
-                            onFrameResolution?.invoke(w, h)
-                        }
-                    },
-                )
+                runCatching {
+                    init(
+                        WebRtcRuntime.getEglBaseContext(),
+                        object : RendererCommon.RendererEvents {
+                            override fun onFirstFrameRendered() = Unit
+                            override fun onFrameResolutionChanged(videoWidth: Int, videoHeight: Int, rotation: Int) {
+                                val rotated = rotation == 90 || rotation == 270
+                                val w = if (rotated) videoHeight else videoWidth
+                                val h = if (rotated) videoWidth else videoHeight
+                                onFrameResolution?.invoke(w, h)
+                            }
+                        },
+                    )
+                }
                 rendererRef = this
             }
         },

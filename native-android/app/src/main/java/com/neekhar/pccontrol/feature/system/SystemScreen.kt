@@ -80,14 +80,14 @@ fun SystemScreen(
         }
     }
 
-    val headerStatusText = when (currentTab) {
-        SystemTab.VITALS -> vitalsState.statusText
-        SystemTab.SERVICES -> servicesState.statusText
-    }
     val headerStatusTone = when (currentTab) {
         SystemTab.VITALS -> vitalsState.statusTone
         SystemTab.SERVICES -> servicesState.summaryTone
     }
+    val headerStatusText = when (currentTab) {
+        SystemTab.VITALS -> vitalsState.statusText
+        SystemTab.SERVICES -> servicesState.statusText
+    }.takeIf { headerStatusTone == PcTone.Bad || headerStatusTone == PcTone.Warn }
 
     val segmentOptions = remember {
         listOf(
@@ -176,11 +176,14 @@ fun VitalsScreen(
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
+        val vitalsWarnText = state.statusText.takeIf {
+            state.statusTone == PcTone.Bad || state.statusTone == PcTone.Warn
+        }
         PcScreenHeader(
             title = "Vitals",
-            statusText = state.statusText,
+            statusText = vitalsWarnText,
             statusTone = state.statusTone,
-            showStatusDot = state.statusText != null,
+            showStatusDot = vitalsWarnText != null,
             onBack = onBack,
         )
         VitalsTab(
@@ -221,11 +224,14 @@ fun ServicesScreen(
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
+        val servicesWarnText = state.statusText.takeIf {
+            state.summaryTone == PcTone.Bad || state.summaryTone == PcTone.Warn
+        }
         PcScreenHeader(
             title = "Services",
-            statusText = state.statusText,
+            statusText = servicesWarnText,
             statusTone = state.summaryTone,
-            showStatusDot = state.statusText != null,
+            showStatusDot = servicesWarnText != null,
             onBack = onBack,
         )
         ServicesTab(

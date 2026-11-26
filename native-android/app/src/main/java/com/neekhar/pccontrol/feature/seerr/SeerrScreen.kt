@@ -9,9 +9,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -77,6 +80,8 @@ fun SeerrScreen(
     val colors = LocalPcColors.current
     val keyboard = LocalSoftwareKeyboardController.current
 
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -85,7 +90,9 @@ fun SeerrScreen(
     ) {
         PcScreenHeader(
             title = "Seerr",
-            statusText = state.counts?.get("all")?.let { "$it total requests" },
+            statusText = if (!state.error.isNullOrBlank()) "Offline" else null,
+            statusTone = PcTone.Bad,
+            showStatusDot = !state.error.isNullOrBlank(),
             onBack = onBack,
         )
 
@@ -100,7 +107,7 @@ fun SeerrScreen(
                     start = 18.dp,
                     end = 18.dp,
                     top = 4.dp,
-                    bottom = 32.dp,
+                    bottom = 32.dp + navBottom,
                 ),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {

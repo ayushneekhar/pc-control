@@ -108,8 +108,8 @@ fun UsageAccountDetailScreen(
             item(key = "header") {
                 PcScreenHeader(
                     title = "Account",
-                    statusText = if (state.usage?.stale == true) "Updating…" else UsageSummary.formatUpdatedAgo(state.usage?.ts, nowMs),
-                    statusColor = if (summary?.account?.error != null) colors.bad else colors.ok,
+                    statusText = if (summary?.account?.error != null) "Error" else null,
+                    statusColor = if (summary?.account?.error != null) colors.bad else null,
                     onBack = onBack,
                 )
             }

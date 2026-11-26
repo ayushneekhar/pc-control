@@ -138,19 +138,7 @@ fun DownloadsScreenContent(
     val visibleDriveJobs = state.visibleDriveJobs
     val activeDriveCount = state.activeDriveJobs.size
 
-    val headerStatus = remember(total, activeDriveCount) {
-        buildList {
-            if (total != null && total.active > 0) {
-                add("${total.active} torrent${if (total.active == 1) "" else "s"}")
-            }
-            if (activeDriveCount > 0) {
-                add("$activeDriveCount Drive")
-            }
-            if (total != null && (total.speed > 0.0 || total.upspeed > 0.0)) {
-                add("↓ ${PcFormatters.formatRate(total.speed)}")
-            }
-        }.joinToString(" · ").takeIf { it.isNotEmpty() }
-    }
+    val headerAlert = if (!state.error.isNullOrBlank()) "Offline" else null
 
     Column(
         modifier = modifier
@@ -161,9 +149,9 @@ fun DownloadsScreenContent(
     ) {
         PcScreenHeader(
             title = "Downloads",
-            statusText = headerStatus,
-            statusTone = if (total != null && total.active > 0 || activeDriveCount > 0) PcTone.Accent else PcTone.Dim,
-            showStatusDot = headerStatus != null,
+            statusText = headerAlert,
+            statusTone = PcTone.Bad,
+            showStatusDot = headerAlert != null,
             onBack = onBack,
         )
 

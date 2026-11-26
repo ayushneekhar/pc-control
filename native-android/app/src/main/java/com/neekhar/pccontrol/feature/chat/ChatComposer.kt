@@ -41,12 +41,13 @@ import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Stop
-import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -87,6 +88,8 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcBrandIcons
+import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -97,23 +100,22 @@ import java.io.ByteArrayOutputStream
 fun ChatComposer(
     draft: String,
     engine: String,
+    modelChipLabel: String,
     running: Boolean,
     sending: Boolean,
     canSend: Boolean,
-    pendingAttachments: List<ChatAttachment>,
+    pendingAttachmentsCount: Int,
     uploadingCount: Int,
     replyTo: ChatReplyRef?,
     editingState: EditingMessageState?,
     focusTrigger: Int,
-    resolveAttachmentSource: (String) -> ChatAttachmentSource,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
     onStopGeneration: () -> Unit,
+    onOpenModelPicker: () -> Unit,
     onPickFiles: (List<PickedLocalFile>) -> Unit,
-    onRemoveAttachment: (String) -> Unit,
     onCancelReply: () -> Unit,
     onCancelEdit: () -> Unit,
-    onPressImage: (PreviewImageItem) -> Unit,
     onError: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -230,76 +232,16 @@ fun ChatComposer(
         }
     }
 
-    val canAddAttachment = !sending && (pendingAttachments.size + uploadingCount) < MAX_ATTACHMENTS
-    val showStopAction = running && draft.isBlank() && pendingAttachments.isEmpty() && !sending
+    val canAddAttachment = !sending && (pendingAttachmentsCount + uploadingCount) < MAX_ATTACHMENTS
+    val showStopAction = running && draft.isBlank() && pendingAttachmentsCount == 0 && !sending
 
     Column(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = modifier
             .fillMaxWidth()
             .background(colors.bg)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 14.dp, vertical = 8.dp),
     ) {
-        // Pending attachment chips strip
-        if (pendingAttachments.isNotEmpty() || uploadingCount > 0) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-            ) {
-                for (att in pendingAttachments) {
-                    if (att.isImage) {
-                        val src = remember(att.url) { resolveAttachmentSource(att.url) }
-                        PendingImageChip(
-                            attachment = att,
-                            source = src,
-                            onPress = {
-                                onPressImage(
-                                    PreviewImageItem(
-                                        url = att.url,
-                                        name = att.name,
-                                        mimeType = att.mimeType,
-                                    )
-                                )
-                            },
-                            onRemove = { onRemoveAttachment(att.id) },
-                        )
-                    } else {
-                        PendingFileChip(
-                            attachment = att,
-                            onRemove = { onRemoveAttachment(att.id) },
-                        )
-                    }
-                }
-
-                if (uploadingCount > 0) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier
-                            .height(48.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(colors.surface)
-                            .border(0.5.dp, colors.hairline, RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp),
-                    ) {
-                        CircularProgressIndicator(
-                            color = colors.accent,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Text(
-                            text = if (uploadingCount > 1) "Uploading $uploadingCount…" else "Uploading…",
-                            color = colors.textDim,
-                            fontSize = 12.5.sp,
-                        )
-                    }
-                }
-            }
-        }
-
         // Reply-to quote bar
         if (replyTo != null) {
             Row(
@@ -411,46 +353,25 @@ fun ChatComposer(
             }
         }
 
-        // Main composer pill
-        Row(
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        // Main 2-row composer pill: full-width input above, thumb-reachable controls (+ / Model & effort / Send) below
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
+                .clip(RoundedCornerShape(22.dp))
                 .background(colors.surface)
                 .border(
                     width = if (editingState != null) 1.dp else 0.5.dp,
                     color = if (editingState != null) colors.accent else colors.hairline,
-                    shape = RoundedCornerShape(24.dp),
-                )
-                .padding(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                    shape = RoundedCornerShape(22.dp),
+                ),
         ) {
-            // Attach button
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(36.dp)
-                    .alpha(if (canAddAttachment) 1f else 0.4f)
-                    .clip(CircleShape)
-                    .background(colors.surfaceRaised)
-                    .clickable(enabled = canAddAttachment) { showAttachSheet = true },
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Add,
-                    contentDescription = "Add photo or file",
-                    tint = colors.text,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-
             // Auto-expanding multiline input with Gboard image paste (contentReceiver)
             Box(
                 contentAlignment = Alignment.CenterStart,
                 modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 36.dp)
-                    .padding(vertical = 6.dp),
+                    .fillMaxWidth()
+                    .heightIn(min = 38.dp)
+                    .padding(start = 15.dp, end = 15.dp, top = 10.dp, bottom = 4.dp),
             ) {
                 BasicTextField(
                     state = textFieldState,
@@ -493,48 +414,114 @@ fun ChatComposer(
                 )
             }
 
-            // Send / Queue / Stop button
-            when {
-                showStopAction -> {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(colors.badSoft)
-                            .clickable(onClick = onStopGeneration),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Stop,
-                            contentDescription = "Stop generation",
-                            tint = colors.bad,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
+            // Bottom control bar: Attach + Model/Effort pill on left, Send/Stop on right
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 6.dp, end = 6.dp, top = 2.dp, bottom = 6.dp),
+            ) {
+                // Attach button
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .alpha(if (canAddAttachment) 1f else 0.4f)
+                        .clip(CircleShape)
+                        .background(colors.surfaceRaised)
+                        .clickable(enabled = canAddAttachment) { showAttachSheet = true },
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = "Add photo or file",
+                        tint = colors.text,
+                        modifier = Modifier.size(19.dp),
+                    )
                 }
 
-                else -> {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(if (canSend) colors.accent else colors.surfaceRaised)
-                            .clickable(enabled = canSend, onClick = onSend),
-                    ) {
-                        if (sending) {
-                            CircularProgressIndicator(
-                                color = colors.accent,
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(16.dp),
-                            )
+                // Compact Model & effort selector pill
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    modifier = Modifier
+                        .height(34.dp)
+                        .clip(CircleShape)
+                        .background(colors.surfaceRaised)
+                        .clickable(onClick = onOpenModelPicker)
+                        .padding(horizontal = 10.dp),
+                ) {
+                    Icon(
+                        imageVector = if (engine == ChatEngines.GEMINI) {
+                            Icons.Rounded.AutoAwesome
                         } else {
+                            PcBrandIcons.Claude
+                        },
+                        contentDescription = null,
+                        tint = colors.accent,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(
+                        text = modelChipLabel,
+                        color = colors.text,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Icon(
+                        imageVector = Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = "Switch model and effort",
+                        tint = colors.textFaint,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                // Send / Queue / Stop button
+                when {
+                    showStopAction -> {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(colors.badSoft)
+                                .clickable(onClick = onStopGeneration),
+                        ) {
                             Icon(
-                                imageVector = Icons.Rounded.ArrowUpward,
-                                contentDescription = if (running) "Queue message" else "Send message",
-                                tint = if (canSend) onAccent else colors.textFaint,
-                                modifier = Modifier.size(19.dp),
+                                imageVector = Icons.Rounded.Stop,
+                                contentDescription = "Stop generation",
+                                tint = colors.bad,
+                                modifier = Modifier.size(17.dp),
                             )
+                        }
+                    }
+
+                    else -> {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(if (canSend) colors.accent else colors.surfaceRaised)
+                                .clickable(enabled = canSend, onClick = onSend),
+                        ) {
+                            if (sending) {
+                                CircularProgressIndicator(
+                                    color = colors.accent,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.ArrowUpward,
+                                    contentDescription = if (running) "Queue message" else "Send message",
+                                    tint = if (canSend) onAccent else colors.textFaint,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
                         }
                     }
                 }
@@ -549,7 +536,7 @@ fun ChatComposer(
             sheetState = sheetState,
             containerColor = colors.surface,
             contentColor = colors.text,
-            dragHandle = { BottomSheetDefaults.DragHandle(color = colors.hairline) },
+            dragHandle = { PcSheetDragHandle() },
             shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         ) {
             Column(
@@ -557,15 +544,14 @@ fun ChatComposer(
                 modifier = Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(horizontal = 18.dp, vertical = 8.dp)
-                    .padding(bottom = 14.dp),
+                    .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 14.dp),
             ) {
                 Text(
                     text = "Attach",
                     color = colors.textDim,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(bottom = 6.dp),
+                    modifier = Modifier.padding(bottom = 4.dp),
                 )
                 AttachSheetRow(
                     icon = Icons.Rounded.PhotoLibrary,
@@ -586,6 +572,79 @@ fun ChatComposer(
                         showAttachSheet = false
                         filePickerLauncher.launch("*/*")
                     },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Floating transparent attachment preview strip rendered above the composer over the chat list,
+ * keeping chat messages visible behind the empty space beside rounded thumbnail cards.
+ */
+@Composable
+fun PendingAttachmentsOverlay(
+    pendingAttachments: List<ChatAttachment>,
+    uploadingCount: Int,
+    resolveAttachmentSource: (String) -> ChatAttachmentSource,
+    onPressImage: (PreviewImageItem) -> Unit,
+    onRemoveAttachment: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (pendingAttachments.isEmpty() && uploadingCount <= 0) return
+    val colors = LocalPcColors.current
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .background(Color.Transparent)
+            .horizontalScroll(rememberScrollState()),
+    ) {
+        for (att in pendingAttachments) {
+            if (att.isImage) {
+                val src = remember(att.url) { resolveAttachmentSource(att.url) }
+                PendingImageChip(
+                    attachment = att,
+                    source = src,
+                    onPress = {
+                        onPressImage(
+                            PreviewImageItem(
+                                url = att.url,
+                                name = att.name,
+                                mimeType = att.mimeType,
+                            )
+                        )
+                    },
+                    onRemove = { onRemoveAttachment(att.id) },
+                )
+            } else {
+                PendingFileChip(
+                    attachment = att,
+                    onRemove = { onRemoveAttachment(att.id) },
+                )
+            }
+        }
+
+        if (uploadingCount > 0) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(colors.surface)
+                    .border(0.5.dp, colors.hairline, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp),
+            ) {
+                CircularProgressIndicator(
+                    color = colors.accent,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    text = if (uploadingCount > 1) "Uploading $uploadingCount…" else "Uploading…",
+                    color = colors.textDim,
+                    fontSize = 12.5.sp,
                 )
             }
         }

@@ -47,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -124,10 +125,15 @@ fun AgentViewScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item(key = "header") {
+                val headerStatus = when {
+                    state.error != null -> "Offline"
+                    master != null && master.enabled && !master.webReachable -> "Web UI offline"
+                    else -> null
+                }
                 PcScreenHeader(
                     title = "Agent view",
-                    statusText = statusText,
-                    statusColor = dotColor,
+                    statusText = headerStatus,
+                    statusColor = if (state.error != null) colors.bad else colors.warn,
                     onBack = onBack,
                 )
             }
@@ -373,7 +379,9 @@ fun AgentViewScreen(
                                             Row(
                                                 modifier = Modifier
                                                     .weight(1f)
-                                                    .clickable { onOpenRule(null, rule.id) },
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .clickable { onOpenRule(null, rule.id) }
+                                                    .padding(vertical = 2.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                                             ) {

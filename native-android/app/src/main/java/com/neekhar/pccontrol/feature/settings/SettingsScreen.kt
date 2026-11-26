@@ -75,6 +75,7 @@ import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
+import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.PcStatusDot
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -101,11 +102,7 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item(key = "header") {
-                PcScreenHeader(
-                    title = "Settings",
-                    statusText = "v${state.currentVersionName} (${state.currentVersionCode})",
-                    statusColor = colors.ok,
-                )
+                PcScreenHeader(title = "Settings")
             }
 
             // ---- Agent links ----
@@ -128,13 +125,14 @@ fun SettingsScreen(
                         icon = Icons.Filled.SmartToy,
                         title = "Agent settings",
                         subtitle = agentSub,
+                        showDivider = true,
                         onClick = onOpenAgentSettings,
                     )
-                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
                     PcListRow(
                         icon = Icons.Filled.Visibility,
                         title = "Agent view",
                         subtitle = "Capture proxy & website rewrite rules",
+                        showDivider = false,
                         onClick = onOpenAgentView,
                     )
                 }
@@ -314,6 +312,8 @@ fun SettingsScreen(
             sheetState = sheetState,
             containerColor = colors.bg,
             contentColor = colors.text,
+            dragHandle = { PcSheetDragHandle() },
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         ) {
             CrashReportsSheetContent(
                 reports = state.crashReports,
@@ -580,8 +580,10 @@ private fun KeyringCard(
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.Medium,
                         modifier = Modifier
+                            .padding(start = 6.dp)
+                            .clip(RoundedCornerShape(6.dp))
                             .clickable(onClick = onDismissNotice)
-                            .padding(start = 10.dp),
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
                     )
                 }
             }
@@ -638,7 +640,9 @@ private fun NotificationsCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onToggleExpand),
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(onClick = onToggleExpand)
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
@@ -1122,6 +1126,7 @@ private fun DiagnosticsCard(
             icon = Icons.Filled.BugReport,
             title = "Crash reports",
             subtitle = if (crashCount == 0) "No crash reports recorded" else "$crashCount recorded crash report${if (crashCount == 1) "" else "s"}",
+            showDivider = false,
             onClick = onOpenCrashViewer,
         )
     }
@@ -1138,7 +1143,7 @@ private fun CrashReportsSheetContent(
         modifier = Modifier
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 18.dp, vertical = 12.dp),
+            .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(

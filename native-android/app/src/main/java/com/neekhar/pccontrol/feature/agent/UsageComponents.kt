@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcBrandIcons
 import com.neekhar.pccontrol.core.ui.PcCard
 import kotlin.math.roundToInt
 
@@ -85,7 +86,7 @@ fun usageSegmentColors(
 }
 
 fun providerIcon(key: UsageProviderKey): ImageVector = when (key) {
-    UsageProviderKey.CLAUDE -> Icons.Filled.SmartToy
+    UsageProviderKey.CLAUDE -> PcBrandIcons.Claude
     UsageProviderKey.GEMINI -> Icons.Filled.AutoAwesome
     UsageProviderKey.OPENCODE -> Icons.Filled.Code
 }

@@ -556,25 +556,31 @@ fun MusicTab(
                 label = "Up next (${queue.size})",
                 icon = Icons.AutoMirrored.Filled.QueueMusic,
                 trailing = {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
                             text = "Play next",
                             color = colors.accent,
                             fontSize = 12.5.sp,
                             fontWeight = FontWeight.Medium,
-                            modifier = Modifier.clickable {
-                                if (queue.isNotEmpty()) {
-                                    val next = queue.removeAt(0)
-                                    playLink(next.url)
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable {
+                                    if (queue.isNotEmpty()) {
+                                        val next = queue.removeAt(0)
+                                        playLink(next.url)
+                                    }
                                 }
-                            },
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
                         )
                         Text(
                             text = "Clear",
                             color = colors.textDim,
                             fontSize = 12.5.sp,
                             fontWeight = FontWeight.Medium,
-                            modifier = Modifier.clickable { queue.clear() },
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { queue.clear() }
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
                         )
                     }
                 },

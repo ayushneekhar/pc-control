@@ -6,6 +6,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.os.Build
 import android.util.Log
+import com.neekhar.pccontrol.core.platform.CrashReporter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -14,7 +15,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -44,6 +44,11 @@ import org.webrtc.RtpReceiver
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
+import org.webrtc.VideoCodecInfo
+import org.webrtc.VideoDecoder
+import org.webrtc.VideoDecoderFactory
+import org.webrtc.VideoEncoder
+import org.webrtc.VideoEncoderFactory
 import org.webrtc.VideoTrack
 import org.webrtc.audio.JavaAudioDeviceModule
 import java.net.URLEncoder
@@ -82,7 +87,16 @@ object WebRtcRuntime {
     private const val PREFS_FILE = "pc_cams"
     private const val KEY_SAFE_MODE = "safeMode"
     private const val KEY_OPENING = "opening"
+    private const val KEY_SAFE_SINCE = "safeSince"
     const val LOW_LATENCY_FIELD_TRIALS = "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/"
+
+    /**
+     * Whether the bundled `libjingle_peerconnection_so.so` was built with `rtc_use_h265`
+     * (H.265 RTP depacketizer). `io.getstream:stream-webrtc-android:1.3.8` has NO H.265
+     * depacketizer; advertising H.265 in SDP causes go2rtc to send H.265 packets and
+     * crashes `worker_thread` with `SIGSEGV` at `0x0`.
+     */
+    const val LIBWEBRTC_H265 = false
 
     @Volatile
     private var initialized = false
@@ -98,6 +112,29 @@ object WebRtcRuntime {
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+
+    /**
+     * Called from `Application.onCreate()`. Checks if the previous run died natively while
+     * opening Cat cams and switches safe mode on automatically. SharedPreferences +
+     * ApplicationExitInfo only — never loads WebRTC native code.
+     */
+    fun onAppStart(context: Context) {
+        try {
+            val p = prefs(context)
+            val marker = p.getLong(KEY_OPENING, 0L)
+            if (marker == 0L) return
+            p.edit().remove(KEY_OPENING).commit()
+            val exitTs = CrashReporter.lastExitWasCrash(context)
+            if (exitTs < marker) return
+            p.edit()
+                .putBoolean(KEY_SAFE_MODE, true)
+                .putLong(KEY_SAFE_SINCE, exitTs)
+                .commit()
+            Log.w(TAG, "Previous run crashed while Cat cams was opening; safe mode enabled")
+        } catch (t: Throwable) {
+            Log.w(TAG, "Crash marker check failed", t)
+        }
+    }
 
     fun isSafeMode(context: Context): Boolean = prefs(context).getBoolean(KEY_SAFE_MODE, false)
 
@@ -119,6 +156,10 @@ object WebRtcRuntime {
 
     fun getEglBaseContext(): EglBase.Context = getEglBase().eglBaseContext
 
+    /**
+     * Lazily initializes the process-wide [PeerConnectionFactory]. Call from a background/IO
+     * thread only (never from UI composition).
+     */
     @Synchronized
     fun ensureFactory(context: Context): PeerConnectionFactory {
         peerConnectionFactory?.let { return it }
@@ -136,6 +177,7 @@ object WebRtcRuntime {
 
         val eglContext = getEglBaseContext()
         val adm = JavaAudioDeviceModule.builder(appCtx)
+            .setEnableVolumeLogger(false)
             .apply {
                 if (!safeMode) {
                     setAudioAttributes(
@@ -144,15 +186,19 @@ object WebRtcRuntime {
                             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                             .build(),
                     )
-                    setUseHardwareAcousticEchoCanceler(true)
-                    setUseHardwareNoiseSuppressor(true)
+                    if (JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported()) {
+                        setUseHardwareAcousticEchoCanceler(true)
+                    }
+                    if (JavaAudioDeviceModule.isBuiltInNoiseSuppressorSupported()) {
+                        setUseHardwareNoiseSuppressor(true)
+                    }
                 }
             }
             .createAudioDeviceModule()
             .also { audioDeviceModule = it }
 
-        val decoderFactory = DefaultVideoDecoderFactory(eglContext)
-        val encoderFactory = DefaultVideoEncoderFactory(eglContext, true, true)
+        val decoderFactory = SafeVideoDecoderFactory(eglContext, allowH265 = LIBWEBRTC_H265)
+        val encoderFactory = SafeVideoEncoderFactory(eglContext, allowH265 = LIBWEBRTC_H265)
 
         return PeerConnectionFactory.builder()
             .setAudioDeviceModule(adm)
@@ -162,16 +208,14 @@ object WebRtcRuntime {
             .also { peerConnectionFactory = it }
     }
 
-    /** Inspect Android MediaCodec hardware decoders + WebRTC H.265 codec support. */
-    fun inspectHardware(context: Context): CamsHardwareCapabilities {
+    /**
+     * Inspect Android MediaCodec hardware decoders purely via [MediaCodecList] without touching
+     * native WebRTC or EGL on the UI thread.
+     */
+    fun inspectHardware(@Suppress("UNUSED_PARAMETER") context: Context): CamsHardwareCapabilities {
         val h264 = findHwDecoder("video/avc")
         val h265 = findHwDecoder("video/hevc")
-
-        val webrtcHasH265 = runCatching {
-            ensureFactory(context)
-            val decoderFactory = DefaultVideoDecoderFactory(getEglBaseContext())
-            decoderFactory.supportedCodecs.any { it.name.equals("H265", ignoreCase = true) }
-        }.getOrDefault(false)
+        val webrtcHasH265 = LIBWEBRTC_H265
 
         val reason = when {
             h265 == null -> "This phone has no hardware H.265 decoder"
@@ -238,6 +282,60 @@ object WebRtcRuntime {
 }
 
 /**
+ * Wraps [DefaultVideoDecoderFactory] and strips H.265/HEVC codecs when the bundled
+ * `libjingle_peerconnection_so.so` lacks an H.265 RTP depacketizer (preventing native SIGSEGV).
+ */
+private class SafeVideoDecoderFactory(
+    eglContext: EglBase.Context,
+    private val allowH265: Boolean,
+) : VideoDecoderFactory {
+    private val delegate = DefaultVideoDecoderFactory(eglContext)
+
+    private fun isDisallowed(name: String?): Boolean =
+        !allowH265 && (name.equals("H265", ignoreCase = true) || name.equals("HEVC", ignoreCase = true))
+
+    override fun createDecoder(codecType: VideoCodecInfo): VideoDecoder? {
+        if (isDisallowed(codecType.name)) return null
+        return delegate.createDecoder(codecType)
+    }
+
+    override fun getSupportedCodecs(): Array<VideoCodecInfo> {
+        val all = delegate.supportedCodecs
+        return if (allowH265) all else all.filterNot { isDisallowed(it.name) }.toTypedArray()
+    }
+}
+
+/**
+ * Wraps [DefaultVideoEncoderFactory] and strips H.265/HEVC codecs when unsupported by libwebrtc.
+ */
+private class SafeVideoEncoderFactory(
+    eglContext: EglBase.Context,
+    private val allowH265: Boolean,
+) : VideoEncoderFactory {
+    private val delegate = DefaultVideoEncoderFactory(eglContext, true, true)
+
+    private fun isDisallowed(name: String?): Boolean =
+        !allowH265 && (name.equals("H265", ignoreCase = true) || name.equals("HEVC", ignoreCase = true))
+
+    override fun createEncoder(info: VideoCodecInfo): VideoEncoder? {
+        if (isDisallowed(info.name)) return null
+        return delegate.createEncoder(info)
+    }
+
+    override fun getSupportedCodecs(): Array<VideoCodecInfo> {
+        val all = delegate.supportedCodecs
+        return if (allowH265) all else all.filterNot { isDisallowed(it.name) }.toTypedArray()
+    }
+
+    override fun getImplementations(): Array<VideoCodecInfo> {
+        val all = delegate.implementations
+        return if (allowH265) all else all.filterNot { isDisallowed(it.name) }.toTypedArray()
+    }
+
+    override fun getEncoderSelector(): VideoEncoderFactory.VideoEncoderSelector? = delegate.encoderSelector
+}
+
+/**
  * One pure-Kotlin WebRTC connection to a go2rtc stream (`/api/ws?src=<stream>`).
  * Ported from `src/lib/cams/link.ts` and `src/lib/cams/signal.ts`:
  * - Video links are recvonly video (no audio piggybacking, avoiding ~400 ms lip-sync delay).
@@ -254,7 +352,8 @@ class WebRtcCamLink(
     private val maxAttempts: Int? = null,
     private val onStateCallback: ((LinkState) -> Unit)? = null,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val rtcDispatcher = Dispatchers.IO.limitedParallelism(1)
+    private val scope = CoroutineScope(SupervisorJob() + rtcDispatcher)
     private val json = Json { ignoreUnknownKeys = true }
 
     private val _state = MutableStateFlow(LinkState())
@@ -283,19 +382,30 @@ class WebRtcCamLink(
     private var disconnectGraceJob: Job? = null
 
     fun start() {
-        fails = 0
-        connect()
+        val currentGen = gen.incrementAndGet()
+        scope.launch {
+            if (currentGen != gen.get()) return@launch
+            fails = 0
+            connect(currentGen)
+        }
     }
 
     fun restart() {
-        fails = 0
-        connect()
+        val currentGen = gen.incrementAndGet()
+        scope.launch {
+            if (currentGen != gen.get()) return@launch
+            fails = 0
+            connect(currentGen)
+        }
     }
 
     fun stop() {
         gen.incrementAndGet()
-        teardown()
+        _videoTrack.value = null
         updateState { it.copy(phase = LinkPhase.STOPPED, fps = 0, retryIn = null) }
+        scope.launch {
+            teardown()
+        }
     }
 
     private fun updateState(transform: (LinkState) -> LinkState) {
@@ -342,34 +452,37 @@ class WebRtcCamLink(
     }
 
     private fun scheduleRetry(reason: String, forGen: Int) {
-        if (forGen != gen.get()) return
-        teardown()
-        fails++
-        if (maxAttempts != null && fails >= maxAttempts) {
-            updateState { it.copy(phase = LinkPhase.ERROR, error = reason, fps = 0, retryIn = null) }
-            return
-        }
-        val backoffMs = BACKOFF_MS[minOf(fails - 1, BACKOFF_MS.lastIndex)]
-        val nextGen = gen.incrementAndGet()
-        updateState {
-            it.copy(
-                phase = LinkPhase.RETRYING,
-                error = reason,
-                fps = 0,
-                retryIn = ceil(backoffMs / 1000.0).toInt(),
-            )
-        }
-        retryJob = scope.launch {
-            delay(backoffMs)
-            if (nextGen == gen.get()) {
-                connect()
+        scope.launch {
+            if (forGen != gen.get()) return@launch
+            teardown()
+            fails++
+            if (maxAttempts != null && fails >= maxAttempts) {
+                updateState { it.copy(phase = LinkPhase.ERROR, error = reason, fps = 0, retryIn = null) }
+                return@launch
+            }
+            val backoffMs = BACKOFF_MS[minOf(fails - 1, BACKOFF_MS.lastIndex)]
+            val nextGen = gen.incrementAndGet()
+            updateState {
+                it.copy(
+                    phase = LinkPhase.RETRYING,
+                    error = reason,
+                    fps = 0,
+                    retryIn = ceil(backoffMs / 1000.0).toInt(),
+                )
+            }
+            retryJob = scope.launch {
+                delay(backoffMs)
+                if (nextGen == gen.get()) {
+                    connect(nextGen)
+                }
             }
         }
     }
 
-    private fun connect() {
-        val currentGen = gen.incrementAndGet()
+    private fun connect(currentGen: Int) {
+        if (currentGen != gen.get()) return
         teardown()
+        if (currentGen != gen.get()) return
         lastFrames = -1L
         lastFrameAt = 0L
         startedAt = System.currentTimeMillis()
@@ -391,6 +504,7 @@ class WebRtcCamLink(
             updateState { it.copy(phase = LinkPhase.ERROR, error = t.message ?: "WebRTC unavailable", retryIn = null) }
             return
         }
+        if (currentGen != gen.get()) return
 
         val rtcConfig = PeerConnection.RTCConfiguration(emptyList()).apply {
             bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
@@ -644,10 +758,12 @@ class WebRtcCamLink(
         statsJob = scope.launch {
             while (isActive && currentGen == gen.get()) {
                 delay(1000L)
-                if (currentGen != gen.get()) break
-                pc.getStats { report ->
-                    if (currentGen != gen.get()) return@getStats
-                    processStats(report.statsMap.values, currentGen)
+                if (currentGen != gen.get() || peerConnection !== pc) break
+                runCatching {
+                    pc.getStats { report ->
+                        if (currentGen != gen.get() || peerConnection !== pc) return@getStats
+                        processStats(report.statsMap.values, currentGen)
+                    }
                 }
             }
         }
@@ -750,19 +866,22 @@ class WebRtcCamLink(
 
             now - startedAt > (firstFrameMs ?: FIRST_FRAME_MS) -> {
                 if (firstFrameMs != null) {
-                    teardown()
-                    updateState {
-                        it.copy(
-                            phase = LinkPhase.ERROR,
-                            fps = 0,
-                            codec = codec,
-                            decoder = decoder,
-                            size = size,
-                            bufferMs = bufferMs,
-                            rttMs = rttMs,
-                            error = "No picture",
-                            retryIn = null,
-                        )
+                    scope.launch {
+                        if (currentGen != gen.get()) return@launch
+                        teardown()
+                        updateState {
+                            it.copy(
+                                phase = LinkPhase.ERROR,
+                                fps = 0,
+                                codec = codec,
+                                decoder = decoder,
+                                size = size,
+                                bufferMs = bufferMs,
+                                rttMs = rttMs,
+                                error = "No picture",
+                                retryIn = null,
+                            )
+                        }
                     }
                 } else {
                     scheduleRetry("No picture", currentGen)

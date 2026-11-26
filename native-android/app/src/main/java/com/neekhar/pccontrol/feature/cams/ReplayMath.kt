@@ -96,7 +96,7 @@ object ReplayMath {
     const val SEEK_LEAD = 5.0
 
     val ZOOMS: List<Double> = listOf(DAY, 6 * 3600.0, 3600.0, 600.0)
-    val SPEEDS: List<Float> = listOf(1f, 2f, 4f)
+    val SPEEDS: List<Float> = listOf(1f, 2f, 4f, 8f, 16f)
     private val TICK_STEPS: List<Double> = listOf(
         10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0, 10800.0, 21600.0,
     )

@@ -1,7 +1,11 @@
 package com.neekhar.pccontrol.core.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material.ripple.RippleAlpha
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RippleConfiguration
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -310,6 +314,7 @@ private fun PcColors.toMaterialColorScheme() = if (isDark) {
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PcControlTheme(
     themeMode: ThemeMode = ThemeMode.System,
@@ -321,12 +326,25 @@ fun PcControlTheme(
         ThemeMode.System -> isSystemInDarkTheme()
     }
     val colors = if (isDark) DarkPcColors else LightPcColors
+    val rippleConfig = RippleConfiguration(
+        color = colors.text,
+        rippleAlpha = RippleAlpha(
+            draggedAlpha = 0.06f,
+            focusedAlpha = 0.06f,
+            hoveredAlpha = 0.04f,
+            pressedAlpha = 0.07f,
+        ),
+    )
 
     CompositionLocalProvider(LocalPcColors provides colors) {
         MaterialTheme(
             colorScheme = colors.toMaterialColorScheme(),
             typography = PcTypography,
-            content = content,
-        )
+        ) {
+            CompositionLocalProvider(
+                LocalRippleConfiguration provides rippleConfig,
+                content = content,
+            )
+        }
     }
 }

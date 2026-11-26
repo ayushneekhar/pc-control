@@ -410,6 +410,7 @@ fun ChatMessageItem(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier
                         .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
                         .combinedClickable(
                             onClick = {},
                             onLongClick = triggerLongPress,
@@ -471,7 +472,6 @@ fun ChatMessageItem(
                             msgId = msg.id,
                             text = msg.text,
                             onCopy = onCopy,
-                            onReply = { onReply(msg) },
                         )
                     }
                 }
@@ -1809,7 +1809,6 @@ private fun AssistantFooterActions(
     msgId: String,
     text: String,
     onCopy: (String) -> Unit,
-    onReply: () -> Unit,
 ) {
     val colors = LocalPcColors.current
     var justCopied by remember(msgId) { mutableStateOf(false) }
@@ -1841,20 +1840,6 @@ private fun AssistantFooterActions(
                 contentDescription = if (justCopied) "Copied message" else "Copy message",
                 tint = if (justCopied) colors.accent else colors.textFaint,
                 modifier = Modifier.size(15.dp),
-            )
-        }
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .size(28.dp)
-                .clip(CircleShape)
-                .clickable(onClick = onReply),
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Reply,
-                contentDescription = "Reply to message",
-                tint = colors.textFaint,
-                modifier = Modifier.size(16.dp),
             )
         }
     }

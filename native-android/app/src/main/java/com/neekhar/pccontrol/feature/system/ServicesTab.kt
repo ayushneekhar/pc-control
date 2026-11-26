@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Person
@@ -30,6 +31,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -224,6 +226,7 @@ fun ServicesTab(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
                                         .let { m ->
                                             val targetUnit = prob.unit
                                             if (!targetUnit.isNullOrBlank()) {
@@ -231,7 +234,8 @@ fun ServicesTab(
                                             } else {
                                                 m
                                             }
-                                        },
+                                        }
+                                        .padding(horizontal = 4.dp, vertical = 2.dp),
                                     verticalArrangement = Arrangement.spacedBy(2.dp),
                                 ) {
                                     Text(
@@ -380,7 +384,10 @@ private fun DownloadsHealthSection(
                     color = colors.accent,
                     fontSize = 12.5.sp,
                     fontWeight = FontWeight.Medium,
-                    modifier = Modifier.clickable(onClick = onOpenDownloads),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(onClick = onOpenDownloads)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
                 )
             },
         )

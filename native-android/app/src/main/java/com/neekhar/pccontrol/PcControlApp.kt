@@ -31,6 +31,7 @@ import com.neekhar.pccontrol.core.platform.RootSignOutcome
 import com.neekhar.pccontrol.core.storage.AppPrefs
 import com.neekhar.pccontrol.core.storage.LocalCache
 import com.neekhar.pccontrol.feature.cams.CamsRepository
+import com.neekhar.pccontrol.feature.cams.WebRtcRuntime
 import com.neekhar.pccontrol.feature.chat.ChatRepository
 import com.neekhar.pccontrol.feature.root.Decision
 import com.neekhar.pccontrol.feature.root.RootRequest
@@ -303,6 +304,7 @@ class PcControlApp : Application(), SingletonImageLoader.Factory {
         super.onCreate()
         instance = this
         CrashReporter.install(this)
+        WebRtcRuntime.onAppStart(this)
         container = AppContainer(this)
         container.startBackgroundTasks()
     }

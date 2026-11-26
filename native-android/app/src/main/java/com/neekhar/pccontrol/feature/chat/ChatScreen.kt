@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,6 +28,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -34,7 +37,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
@@ -43,11 +45,9 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Reply
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -88,6 +88,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.neekhar.pccontrol.core.platform.ChatForegroundState
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -253,78 +254,16 @@ fun ChatScreen(
         }
     }
 
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val hasFloatingAttachments = state.pendingAttachments.isNotEmpty() || state.uploadingCount > 0
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(colors.bg)
-            .statusBarsPadding()
             .imePadding(),
     ) {
-        // Header: Status line + Title | Model/effort quick pill + New chat button
-        ChatHeader(
-            engine = state.engine,
-            modelChipLabel = state.modelChipLabel,
-            running = state.running,
-            sseConnected = state.sseConnected,
-            resetting = state.resetting,
-            onOpenModelPicker = {
-                keyboard?.hide()
-                viewModel.clearApplyModelError()
-                showModelPicker = true
-                if (state.agentSettings == null) {
-                    viewModel.refreshAgentSettings()
-                }
-            },
-            onNewChat = { showNewChatDialog = true },
-        )
-
-        // Error banner
-        AnimatedVisibility(visible = !state.error.isNullOrBlank()) {
-            state.error?.let { errMsg ->
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 6.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(colors.badSoft)
-                        .padding(horizontal = 12.dp, vertical = 9.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.ErrorOutline,
-                        contentDescription = null,
-                        tint = colors.bad,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Text(
-                        text = errMsg,
-                        color = colors.bad,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clip(CircleShape)
-                            .clickable { viewModel.dismissError() },
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Close,
-                            contentDescription = "Dismiss error",
-                            tint = colors.bad,
-                            modifier = Modifier.size(15.dp),
-                        )
-                    }
-                }
-            }
-        }
-
-        // Main messages viewport + floating pills
+        // Main messages viewport extending cleanly up to the top safe area + floating overlays
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -332,11 +271,16 @@ fun ChatScreen(
         ) {
             when {
                 state.loadingInitial && listItems.isEmpty() -> {
-                    ChatSkeletonPlaceholder()
+                    ChatSkeletonPlaceholder(
+                        modifier = Modifier.padding(top = statusBarTop),
+                    )
                 }
 
                 listItems.isEmpty() -> {
-                    ChatEmptyState(engine = state.engine)
+                    ChatEmptyState(
+                        engine = state.engine,
+                        modifier = Modifier.padding(top = statusBarTop),
+                    )
                 }
 
                 else -> {
@@ -345,8 +289,8 @@ fun ChatScreen(
                         contentPadding = PaddingValues(
                             start = 18.dp,
                             end = 18.dp,
-                            top = 8.dp,
-                            bottom = 14.dp,
+                            top = statusBarTop + 12.dp,
+                            bottom = if (hasFloatingAttachments) 86.dp else 14.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                         modifier = Modifier.fillMaxSize(),
@@ -433,6 +377,138 @@ fun ChatScreen(
                 }
             }
 
+            // Top floating overlay: offline/reconnecting/error pill (hidden when live) + subtle New chat icon button
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+            ) {
+                val errMsg = state.error?.takeIf { it.isNotBlank() }
+                val showOfflinePill = errMsg == null && !state.sseConnected && !state.loadingInitial
+
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = errMsg != null || showOfflinePill,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(end = 42.dp),
+                ) {
+                    if (errMsg != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(colors.badSoft)
+                                .border(0.5.dp, colors.bad.copy(alpha = 0.4f), RoundedCornerShape(999.dp))
+                                .padding(start = 12.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ErrorOutline,
+                                contentDescription = null,
+                                tint = colors.bad,
+                                modifier = Modifier.size(15.dp),
+                            )
+                            Text(
+                                text = errMsg,
+                                color = colors.bad,
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clip(CircleShape)
+                                    .clickable { viewModel.dismissError() },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "Dismiss error",
+                                    tint = colors.bad,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                            }
+                        }
+                    } else if (showOfflinePill) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(colors.surfaceRaised.copy(alpha = 0.92f))
+                                .border(0.5.dp, colors.hairline, RoundedCornerShape(999.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(colors.warn),
+                            )
+                            Text(
+                                text = "Reconnecting…",
+                                color = colors.textDim,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
+                }
+
+                // Subtle floating New chat button in top-right (zero header bar overhead)
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(34.dp)
+                        .alpha(if (state.resetting) 0.5f else 1f)
+                        .clip(CircleShape)
+                        .background(colors.surfaceRaised.copy(alpha = 0.88f))
+                        .border(0.5.dp, colors.hairline, CircleShape)
+                        .clickable(enabled = !state.resetting) { showNewChatDialog = true },
+                ) {
+                    if (state.resetting) {
+                        CircularProgressIndicator(
+                            color = colors.text,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Rounded.EditNote,
+                            contentDescription = "New conversation",
+                            tint = colors.textDim,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+            }
+
+            // Floating transparent attachment preview strip above composer
+            if (hasFloatingAttachments) {
+                PendingAttachmentsOverlay(
+                    pendingAttachments = state.pendingAttachments,
+                    uploadingCount = state.uploadingCount,
+                    resolveAttachmentSource = viewModel::resolveAttachmentSource,
+                    onPressImage = { img ->
+                        keyboard?.hide()
+                        previewImage = img
+                    },
+                    onRemoveAttachment = viewModel::removeAttachment,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .padding(start = 14.dp, end = 14.dp, bottom = 8.dp),
+                )
+            }
+
             // Floating jump-to-bottom pill with unread badge
             val showJumpPill = !isNearBottom && listItems.isNotEmpty()
             androidx.compose.animation.AnimatedVisibility(
@@ -441,7 +517,7 @@ fun ChatScreen(
                 exit = fadeOut() + scaleOut(targetScale = 0.85f),
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 12.dp),
+                    .padding(end = 16.dp, bottom = if (hasFloatingAttachments) 82.dp else 12.dp),
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -493,7 +569,7 @@ fun ChatScreen(
                 exit = fadeOut(),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 12.dp),
+                    .padding(bottom = if (hasFloatingAttachments) 82.dp else 12.dp),
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -526,26 +602,29 @@ fun ChatScreen(
         ChatComposer(
             draft = state.draft,
             engine = state.engine,
+            modelChipLabel = state.modelChipLabel,
             running = state.running,
             sending = state.sending,
             canSend = state.canSend,
-            pendingAttachments = state.pendingAttachments,
+            pendingAttachmentsCount = state.pendingAttachments.size,
             uploadingCount = state.uploadingCount,
             replyTo = state.replyTo,
             editingState = state.editingState,
             focusTrigger = focusTrigger,
-            resolveAttachmentSource = viewModel::resolveAttachmentSource,
             onDraftChange = viewModel::onDraftChanged,
             onSend = viewModel::sendCurrentDraft,
             onStopGeneration = viewModel::stopGeneration,
+            onOpenModelPicker = {
+                keyboard?.hide()
+                viewModel.clearApplyModelError()
+                showModelPicker = true
+                if (state.agentSettings == null) {
+                    viewModel.refreshAgentSettings()
+                }
+            },
             onPickFiles = viewModel::uploadFiles,
-            onRemoveAttachment = viewModel::removeAttachment,
             onCancelReply = viewModel::cancelReply,
             onCancelEdit = viewModel::cancelEdit,
-            onPressImage = { img ->
-                keyboard?.hide()
-                previewImage = img
-            },
             onError = { msg -> viewModel.notifyCopied(msg) },
         )
     }
@@ -630,7 +709,7 @@ fun ChatScreen(
             sheetState = sheetState,
             containerColor = colors.surface,
             contentColor = colors.text,
-            dragHandle = { BottomSheetDefaults.DragHandle(color = colors.hairline) },
+            dragHandle = { PcSheetDragHandle() },
             shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         ) {
             Column(
@@ -638,8 +717,7 @@ fun ChatScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(horizontal = 18.dp, vertical = 6.dp)
-                    .padding(bottom = 14.dp),
+                    .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 14.dp),
             ) {
                 // Message preview header
                 Column(
@@ -749,133 +827,15 @@ fun ChatScreen(
 }
 
 @Composable
-private fun ChatHeader(
+private fun ChatEmptyState(
     engine: String,
-    modelChipLabel: String,
-    running: Boolean,
-    sseConnected: Boolean,
-    resetting: Boolean,
-    onOpenModelPicker: () -> Unit,
-    onNewChat: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val colors = LocalPcColors.current
-    val statusDotColor = when {
-        running -> colors.accent
-        sseConnected -> colors.ok
-        else -> colors.textFaint
-    }
-    val statusLabel = when {
-        running -> "${ChatLogic.formatEngineLabel(engine)} · working"
-        sseConnected -> "Live"
-        else -> "Syncing…"
-    }
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 10.dp),
-    ) {
-        Column(
-            verticalArrangement = Arrangement.spacedBy(1.dp),
-            modifier = Modifier.weight(1f),
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(statusDotColor),
-                )
-                Text(
-                    text = statusLabel,
-                    color = colors.textDim,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Normal,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Text(
-                text = "Chat",
-                color = colors.text,
-                fontSize = 26.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = (-0.5).sp,
-            )
-        }
-
-        // Quick model & effort pill
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            modifier = Modifier
-                .clip(RoundedCornerShape(999.dp))
-                .background(colors.surfaceRaised)
-                .clickable(onClick = onOpenModelPicker)
-                .padding(horizontal = 11.dp, vertical = 7.dp),
-        ) {
-            Icon(
-                imageVector = if (engine == ChatEngines.GEMINI) Icons.Rounded.AutoAwesome else Icons.Rounded.Psychology,
-                contentDescription = null,
-                tint = colors.accent,
-                modifier = Modifier.size(15.dp),
-            )
-            Text(
-                text = modelChipLabel,
-                color = colors.text,
-                fontSize = 12.5.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Icon(
-                imageVector = Icons.Rounded.KeyboardArrowDown,
-                contentDescription = "Switch model and effort",
-                tint = colors.textFaint,
-                modifier = Modifier.size(15.dp),
-            )
-        }
-
-        // New conversation button
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .size(34.dp)
-                .alpha(if (resetting) 0.5f else 1f)
-                .clip(CircleShape)
-                .background(colors.surfaceRaised)
-                .clickable(enabled = !resetting, onClick = onNewChat),
-        ) {
-            if (resetting) {
-                CircularProgressIndicator(
-                    color = colors.text,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.size(15.dp),
-                )
-            } else {
-                Icon(
-                    imageVector = Icons.Rounded.EditNote,
-                    contentDescription = "New conversation",
-                    tint = colors.text,
-                    modifier = Modifier.size(19.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChatEmptyState(engine: String) {
     val colors = LocalPcColors.current
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 32.dp),
     ) {
@@ -910,11 +870,13 @@ private fun ChatEmptyState(engine: String) {
 }
 
 @Composable
-private fun ChatSkeletonPlaceholder() {
+private fun ChatSkeletonPlaceholder(
+    modifier: Modifier = Modifier,
+) {
     val colors = LocalPcColors.current
     Column(
         verticalArrangement = Arrangement.spacedBy(18.dp),
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 18.dp, vertical = 20.dp),
     ) {

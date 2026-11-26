@@ -51,6 +51,7 @@ import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcPill
+import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.PcTone
 
 enum class SeerrPosterSize(
@@ -270,15 +271,8 @@ fun SeerrCollectionSheet(
         sheetState = sheetState,
         containerColor = colors.bg,
         contentColor = colors.text,
-        dragHandle = {
-            Box(
-                modifier = Modifier
-                    .padding(top = 10.dp, bottom = 6.dp)
-                    .size(width = 38.dp, height = 4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(colors.hairline),
-            )
-        },
+        dragHandle = { PcSheetDragHandle() },
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
     ) {
         Column(
             modifier = Modifier

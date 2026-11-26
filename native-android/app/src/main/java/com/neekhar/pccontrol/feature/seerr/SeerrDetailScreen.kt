@@ -13,10 +13,13 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -80,6 +83,7 @@ import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
 import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
+import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.PcTone
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -120,6 +124,8 @@ fun SeerrDetailScreen(
         buildDetailKvRows(item, state.isTv, runtimeStr)
     }
 
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
     PullToRefreshBox(
         isRefreshing = state.refreshing,
         onRefresh = { viewModel.refresh() },
@@ -129,7 +135,7 @@ fun SeerrDetailScreen(
     ) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 40.dp),
+            contentPadding = PaddingValues(bottom = 40.dp + navBottom),
         ) {
             // Top backdrop or plain top bar
             item(key = "header") {
@@ -462,7 +468,10 @@ fun SeerrDetailScreen(
                                         color = colors.accent,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Medium,
-                                        modifier = Modifier.clickable(onClick = viewModel::toggleOverviewExpanded),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable(onClick = viewModel::toggleOverviewExpanded)
+                                            .padding(horizontal = 4.dp, vertical = 2.dp),
                                     )
                                 }
                             }
@@ -489,7 +498,10 @@ fun SeerrDetailScreen(
                                         color = colors.accent,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Medium,
-                                        modifier = Modifier.clickable(onClick = viewModel::toggleAllSeasons),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable(onClick = viewModel::toggleAllSeasons)
+                                            .padding(horizontal = 4.dp, vertical = 2.dp),
                                     )
                                 }
                             } else {
@@ -684,7 +696,10 @@ fun SeerrDetailScreen(
                                                 color = colors.accent,
                                                 fontSize = 13.sp,
                                                 fontFamily = FontFamily.Monospace,
-                                                modifier = Modifier.clickable { openExternalUrl(row.url) },
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .clickable { openExternalUrl(row.url) }
+                                                    .padding(horizontal = 4.dp, vertical = 2.dp),
                                             )
                                         } else {
                                             Text(
@@ -1136,15 +1151,8 @@ private fun SeerrSeasonPickerSheet(
         sheetState = sheetState,
         containerColor = colors.bg,
         contentColor = colors.text,
-        dragHandle = {
-            Box(
-                modifier = Modifier
-                    .padding(top = 10.dp, bottom = 6.dp)
-                    .size(width = 38.dp, height = 4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(colors.hairline),
-            )
-        },
+        dragHandle = { PcSheetDragHandle() },
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
     ) {
         Column(
             modifier = Modifier
@@ -1180,7 +1188,10 @@ private fun SeerrSeasonPickerSheet(
                         color = colors.accent,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,
-                        modifier = Modifier.clickable(onClick = onToggleAll),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(onClick = onToggleAll)
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
                     )
                 }
             }

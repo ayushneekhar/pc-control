@@ -11,14 +11,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
@@ -100,21 +104,12 @@ fun SpaceScreen(
     }
 
     val hdd = state.localData?.hdd
-    val (statusText, statusTone) = remember(hdd, state.sseConnected, state.activeJobs.size) {
+    val (statusText, statusTone) = remember(hdd, state.error) {
         when {
+            !state.error.isNullOrBlank() -> "Offline" to PcTone.Bad
             hdd != null && !hdd.mounted -> "HDD not mounted" to PcTone.Warn
-            state.activeJobs.isNotEmpty() -> {
-                val n = state.activeJobs.size
-                val suffix = if (state.sseConnected) "live" else "polling"
-                "$n transfer${if (n == 1) "" else "s"} · $suffix" to PcTone.Accent
-            }
-            hdd?.freeBytes != null -> {
-                val low = hdd.freeBytes < hdd.thresholdBytes
-                val label = "${formatBytes(hdd.freeBytes)} free"
-                label to if (low) PcTone.Warn else PcTone.Ok
-            }
-            state.sseConnected -> "Live" to PcTone.Ok
-            else -> "Storage manager" to PcTone.Faint
+            hdd?.freeBytes != null && hdd.freeBytes < hdd.thresholdBytes -> "Low disk space" to PcTone.Warn
+            else -> null to PcTone.Faint
         }
     }
 
@@ -126,17 +121,23 @@ fun SpaceScreen(
         )
     }
 
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(colors.bg),
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding(),
+        ) {
             PcScreenHeader(
                 title = "Space",
                 statusText = statusText,
                 statusTone = statusTone,
-                showStatusDot = true,
+                showStatusDot = statusText != null,
                 onBack = onBack,
             )
 
@@ -153,7 +154,7 @@ fun SpaceScreen(
                         start = 18.dp,
                         end = 18.dp,
                         top = 4.dp,
-                        bottom = if (state.hasSelection) 136.dp else 28.dp,
+                        bottom = (if (state.hasSelection) 136.dp else 28.dp) + navBottom,
                     ),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {

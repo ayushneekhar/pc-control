@@ -44,9 +44,19 @@
 # WebRTC (org.webrtc / Stream WebRTC)
 # ------------------------------------------------------------------
 -keep class org.webrtc.** { *; }
--keep class io.getstream.webrtc.** { *; }
+-keepclassmembers class org.webrtc.** { *; }
+-keep class io.getstream.** { *; }
+-keepclassmembers class io.getstream.** { *; }
+-keepclasseswithmembernames,includedescriptorclasses class * {
+    native <methods>;
+}
+-keep @org.webrtc.CalledByNative class * { *; }
+-keepclassmembers class * {
+    @org.webrtc.CalledByNative <methods>;
+    @org.webrtc.CalledByNative <fields>;
+}
 -dontwarn org.webrtc.**
--dontwarn io.getstream.webrtc.**
+-dontwarn io.getstream.**
 
 # ------------------------------------------------------------------
 # Media3 / ExoPlayer

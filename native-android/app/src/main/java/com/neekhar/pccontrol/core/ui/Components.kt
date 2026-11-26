@@ -120,7 +120,7 @@ fun PcCard(
         val interactionSource = remember { MutableInteractionSource() }
         baseModifier.combinedClickable(
             interactionSource = interactionSource,
-            indication = ripple(color = colors.ripple),
+            indication = ripple(),
             onClick = { onClick?.invoke() },
             onLongClick = onLongClick,
         )
@@ -179,7 +179,7 @@ fun PcListRow(
         val interactionSource = remember { MutableInteractionSource() }
         Modifier.combinedClickable(
             interactionSource = interactionSource,
-            indication = ripple(color = colors.ripple),
+            indication = ripple(),
             onClick = { onClick?.invoke() },
             onLongClick = onLongClick,
         )
@@ -293,7 +293,7 @@ fun PcStatStrip(
                 val interactionSource = remember { MutableInteractionSource() }
                 m.clickable(
                     interactionSource = interactionSource,
-                    indication = ripple(color = colors.ripple),
+                    indication = ripple(),
                     onClick = onClick,
                 )
             } else {
@@ -372,6 +372,7 @@ fun PcPill(
     tone: PcTone = PcTone.Dim,
     icon: ImageVector? = null,
     showDot: Boolean = false,
+    onClick: (() -> Unit)? = null,
 ) {
     val colors = PcTheme.colors
     val fg = colors.toneForeground(tone)
@@ -381,6 +382,18 @@ fun PcPill(
         modifier = modifier
             .clip(CircleShape)
             .background(bg)
+            .let { m ->
+                if (onClick != null) {
+                    val interactionSource = remember { MutableInteractionSource() }
+                    m.clickable(
+                        interactionSource = interactionSource,
+                        indication = ripple(),
+                        onClick = onClick,
+                    )
+                } else {
+                    m
+                }
+            }
             .padding(horizontal = 9.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -477,7 +490,7 @@ fun PcButton(
                 enabled = isEnabled,
                 role = Role.Button,
                 interactionSource = interactionSource,
-                indication = ripple(color = colors.ripple),
+                indication = ripple(),
                 onClick = onClick,
             )
             .padding(horizontal = if (compact) PcDimens.Space3 else PcDimens.Space4),
@@ -546,7 +559,7 @@ fun <T> PcSegmentedControl(
                     .clickable(
                         role = Role.Tab,
                         interactionSource = interactionSource,
-                        indication = ripple(color = colors.ripple),
+                        indication = ripple(),
                         onClick = { onSelect(option.id) },
                     )
                     .padding(horizontal = 6.dp),
@@ -758,7 +771,7 @@ fun PcSectionLabel(
     val colors = PcTheme.colors
     Row(
         modifier = modifier
-            .fillMaxWidth()
+            .then(if (trailing != null) Modifier.fillMaxWidth() else Modifier)
             .padding(horizontal = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -778,11 +791,32 @@ fun PcSectionLabel(
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
+            modifier = if (trailing != null) Modifier.weight(1f) else Modifier,
         )
         if (trailing != null) {
             trailing()
         }
+    }
+}
+
+/**
+ * Compact drag handle for Material 3 ModalBottomSheets (replaces default 44dp vertical padding).
+ */
+@Composable
+fun PcSheetDragHandle(modifier: Modifier = Modifier) {
+    val colors = PcTheme.colors
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp, bottom = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(width = 36.dp, height = 4.dp)
+                .clip(CircleShape)
+                .background(colors.hairline),
+        )
     }
 }
 

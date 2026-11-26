@@ -26,14 +26,11 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -55,6 +52,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.ui.PcBrandIcons
+import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -78,13 +77,7 @@ fun AgentModelPickerSheet(
         sheetState = sheetState,
         containerColor = colors.bg,
         contentColor = colors.text,
-        dragHandle = {
-            BottomSheetDefaults.DragHandle(
-                color = colors.hairline,
-                width = 38.dp,
-                height = 4.dp,
-            )
-        },
+        dragHandle = { PcSheetDragHandle() },
         shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
     ) {
         Column(
@@ -98,7 +91,7 @@ fun AgentModelPickerSheet(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 6.dp),
+                    .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 6.dp),
             ) {
                 Text(
                     text = "Model & effort",
@@ -107,40 +100,49 @@ fun AgentModelPickerSheet(
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
-                if (onOpenAgentSettings != null) {
-                    IconButton(
-                        onClick = {
-                            onDismiss()
-                            onOpenAgentSettings()
-                        },
-                        modifier = Modifier.size(34.dp),
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (onOpenAgentSettings != null) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(colors.surfaceRaised)
+                                .clickable {
+                                    onDismiss()
+                                    onOpenAgentSettings()
+                                },
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Settings,
+                                contentDescription = "Agent settings",
+                                tint = colors.textDim,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(colors.surfaceRaised)
+                            .clickable(onClick = onDismiss),
                     ) {
                         Icon(
-                            imageVector = Icons.Rounded.Settings,
-                            contentDescription = "Agent settings",
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Close",
                             tint = colors.textDim,
-                            modifier = Modifier.size(19.dp),
+                            modifier = Modifier.size(18.dp),
                         )
                     }
-                    Spacer(Modifier.width(4.dp))
-                }
-                IconButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .background(colors.surface),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = "Close",
-                        tint = colors.textDim,
-                        modifier = Modifier.size(18.dp),
-                    )
                 }
             }
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
 
             when {
                 settings == null && loading -> {
@@ -250,7 +252,7 @@ private fun PickerBody(
             val claudeOpen = expanded["claude"] == true
             val claudeActive = draftEngine == ChatEngines.CLAUDE
             ProviderCard(
-                icon = Icons.Rounded.Psychology,
+                icon = PcBrandIcons.Claude,
                 title = "Claude",
                 subtitle = settings.claude.account,
                 badgeText = if (claudeActive) "Active" else null,

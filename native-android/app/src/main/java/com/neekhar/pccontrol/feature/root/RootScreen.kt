@@ -70,6 +70,7 @@ import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
+import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.PcStatusDot
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
@@ -95,15 +96,14 @@ fun RootScreen(
     }
 
     val statusDotColor = when (state.rootdState) {
-        RootdState.OK -> if (state.isLive) colors.ok else colors.warn
         RootdState.DOWN -> colors.bad
-        RootdState.NOT_INSTALLED, RootdState.UNKNOWN -> colors.textFaint
+        RootdState.NOT_INSTALLED -> colors.warn
+        else -> null
     }
     val statusLabel = when (state.rootdState) {
-        RootdState.OK -> if (state.isLive) "rootd live" else "rootd polling"
         RootdState.NOT_INSTALLED -> "rootd not installed"
         RootdState.DOWN -> "rootd not running"
-        RootdState.UNKNOWN -> "Connecting…"
+        else -> null
     }
 
     PullToRefreshBox(
@@ -285,6 +285,8 @@ fun RootScreen(
             sheetState = sheetState,
             containerColor = colors.bg,
             contentColor = colors.text,
+            dragHandle = { PcSheetDragHandle() },
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         ) {
             RootDetailSheetContent(
                 req = state.detailRequest,

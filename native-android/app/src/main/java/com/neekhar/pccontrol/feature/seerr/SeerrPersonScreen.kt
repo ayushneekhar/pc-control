@@ -10,8 +10,11 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -79,6 +82,8 @@ fun SeerrPersonScreen(
     val deathStr = remember(person?.deathday) { SeerrHelpers.formatDate(person?.deathday) }
     val bio = person?.biography?.trim().orEmpty()
 
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -87,7 +92,6 @@ fun SeerrPersonScreen(
     ) {
         PcScreenHeader(
             title = state.displayName,
-            statusText = state.displayDepartment,
             onBack = onBack,
         )
 
@@ -102,7 +106,7 @@ fun SeerrPersonScreen(
                     start = 18.dp,
                     end = 18.dp,
                     top = 4.dp,
-                    bottom = 36.dp,
+                    bottom = 36.dp + navBottom,
                 ),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
@@ -229,7 +233,10 @@ fun SeerrPersonScreen(
                                             color = colors.accent,
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.Medium,
-                                            modifier = Modifier.clickable(onClick = viewModel::toggleBioExpanded),
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .clickable(onClick = viewModel::toggleBioExpanded)
+                                                .padding(horizontal = 4.dp, vertical = 2.dp),
                                         )
                                     }
                                 }

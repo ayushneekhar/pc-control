@@ -298,12 +298,16 @@ class ReplayEngineTest {
         assertTrue(initial.sources[RecCam.CAT3HD]!!.url.endsWith("&v=avc"))
         assertEquals(2, initial.visits.size)
 
-        // Cycle playback speeds: 1x -> 2x -> 4x -> 1x
+        // Cycle playback speeds: 1x -> 2x -> 4x -> 8x -> 16x -> 1x
         assertEquals(1f, engine.state.value.rate, 1e-6f)
         engine.cycleRate()
         assertEquals(2f, engine.state.value.rate, 1e-6f)
         engine.cycleRate()
         assertEquals(4f, engine.state.value.rate, 1e-6f)
+        engine.cycleRate()
+        assertEquals(8f, engine.state.value.rate, 1e-6f)
+        engine.cycleRate()
+        assertEquals(16f, engine.state.value.rate, 1e-6f)
         engine.cycleRate()
         assertEquals(1f, engine.state.value.rate, 1e-6f)
 

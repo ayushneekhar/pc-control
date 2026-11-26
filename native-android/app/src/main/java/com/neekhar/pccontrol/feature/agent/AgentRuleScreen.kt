@@ -107,8 +107,6 @@ fun AgentRuleScreen(
         item(key = "header") {
             PcScreenHeader(
                 title = title,
-                statusText = subtitle,
-                statusColor = colors.accent,
                 onBack = onBack,
             )
         }
@@ -150,13 +148,11 @@ fun AgentRuleScreen(
             item(key = "action_list") {
                 PcListCard {
                     ACTION_CHOICES.forEachIndexed { idx, (actionId, icon, label) ->
-                        if (idx > 0) {
-                            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
-                        }
                         PcListRow(
                             icon = icon,
                             title = label,
                             trailing = if (state.busyAction == actionId) "Creating…" else null,
+                            showDivider = idx < ACTION_CHOICES.lastIndex,
                             onClick = if (state.busyAction == null) {
                                 { viewModel.chooseActionForNewRule(actionId) }
                             } else null,

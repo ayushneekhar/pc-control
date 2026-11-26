@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,6 +42,7 @@ import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
+import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 
 /**
  * Clean ModalBottomSheet for unlocking the laptop's GNOME login keyring or enrolling
@@ -87,11 +89,14 @@ fun KeyringUnlockSheet(
         sheetState = sheetState,
         containerColor = colors.surface,
         contentColor = colors.text,
+        dragHandle = { PcSheetDragHandle() },
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 8.dp),
+                .navigationBarsPadding()
+                .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 14.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(

@@ -19,18 +19,22 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.Pets
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material3.CircularProgressIndicator
@@ -70,6 +74,7 @@ import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.MonoTextStyle
 import com.neekhar.pccontrol.core.theme.PcDimens
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcBrandIcons
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcTone
@@ -100,6 +105,9 @@ fun ReplayTab(
     dataSource: ReplayDataSource,
     okHttpClient: OkHttpClient,
     target: SightingTarget?,
+    fullscreen: Boolean = false,
+    bottomInset: androidx.compose.ui.unit.Dp = 28.dp,
+    onToggleFullscreen: () -> Unit = {},
     onTargetConsumed: () -> Unit,
     onToast: (message: String, actionLabel: String?, action: (() -> Unit)?) -> Unit,
     modifier: Modifier = Modifier,
@@ -181,8 +189,118 @@ fun ReplayTab(
         }
     }
 
+    if (fullscreen) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(colors.media),
+        ) {
+            ReplayVideoTile(
+                cam = big,
+                tile = state.tiles[big] ?: ReplayTileState(label = big.displayName),
+                source = state.sources[big],
+                playing = state.playPerCam[big] == true,
+                globalPlaying = state.playing,
+                rate = state.rate,
+                isBig = true,
+                fullscreen = true,
+                clockOverlay = if (wallTime > 0.0) fmtHms(wallTime) else null,
+                snapBusy = snapBusy,
+                onHandle = { engine.setHandle(big, it) },
+                onProgress = { engine.onProgress(big, it) },
+                onError = { engine.onPlayerError(big) },
+                onTap = { engine.togglePlay() },
+                onSnapshot = ::saveReplaySnapshot,
+                onToggleFullscreen = onToggleFullscreen,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding(),
+            )
+
+            // Compact bottom transport overlay in landscape fullscreen
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 14.dp)
+                    .clip(CircleShape)
+                    .background(colors.mediaChip)
+                    .border(0.5.dp, colors.mediaChipBorder, CircleShape)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .clickable { engine.skip(-10.0) }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "−10s",
+                        color = colors.onMedia,
+                        style = TabularNumStyle.copy(fontSize = 12.5.sp, fontWeight = FontWeight.Medium),
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(colors.accent)
+                        .clickable { engine.togglePlay() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        contentDescription = if (state.playing) "Pause" else "Play",
+                        tint = colors.onAccent,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .clickable { engine.skip(10.0) }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "+10s",
+                        color = colors.onMedia,
+                        style = TabularNumStyle.copy(fontSize = 12.5.sp, fontWeight = FontWeight.Medium),
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(if (state.rate > 1f) colors.accentSoft else Color.Transparent)
+                        .clickable { engine.cycleRate() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = fmtRate(state.rate),
+                        color = if (state.rate > 1f) colors.accent else colors.onMedia,
+                        style = TabularNumStyle.copy(fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold),
+                    )
+                }
+            }
+        }
+        return
+    }
+
     Column(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(
+                start = PcDimens.ScreenPad,
+                end = PcDimens.ScreenPad,
+                top = PcDimens.Space3,
+                bottom = bottomInset,
+            ),
         verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
     ) {
         if (state.error.isNotEmpty()) {
@@ -237,12 +355,14 @@ fun ReplayTab(
             globalPlaying = state.playing,
             rate = state.rate,
             isBig = true,
+            fullscreen = false,
             snapBusy = snapBusy,
             onHandle = { engine.setHandle(big, it) },
             onProgress = { engine.onProgress(big, it) },
             onError = { engine.onPlayerError(big) },
             onTap = { engine.togglePlay() },
             onSnapshot = ::saveReplaySnapshot,
+            onToggleFullscreen = onToggleFullscreen,
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f),
@@ -262,12 +382,14 @@ fun ReplayTab(
                     globalPlaying = state.playing,
                     rate = state.rate,
                     isBig = false,
+                    fullscreen = false,
                     snapBusy = false,
                     onHandle = { engine.setHandle(cam, it) },
                     onProgress = { engine.onProgress(cam, it) },
                     onError = { engine.onPlayerError(cam) },
                     onTap = { engine.setBig(cam) },
                     onSnapshot = {},
+                    onToggleFullscreen = {},
                     modifier = Modifier
                         .weight(1f)
                         .aspectRatio(16f / 9f),
@@ -380,7 +502,7 @@ fun ReplayTab(
             TransportChip(label = "+1m", onClick = { engine.skip(60.0) })
         }
 
-        // Playback speed selector (1x / 2x / 4x) + Clip Share button
+        // Playback speed selector (1x / 2x / 4x / 8x / 16x) + Clip Share button
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -409,9 +531,11 @@ fun ReplayTab(
                             text = fmtRate(spd),
                             color = if (on) colors.accent else colors.textDim,
                             style = TabularNumStyle.copy(
-                                fontSize = 13.sp,
+                                fontSize = 12.5.sp,
                                 fontWeight = FontWeight.Medium,
                             ),
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 }
@@ -476,10 +600,10 @@ fun ReplayTab(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Icon(
-                    imageVector = Icons.Filled.Pets,
+                    imageVector = PcBrandIcons.Cat,
                     contentDescription = null,
                     tint = if (lastSighting != null) colors.warn else colors.textDim,
-                    modifier = Modifier.size(17.dp),
+                    modifier = Modifier.size(18.dp),
                 )
                 Text(
                     text = when {
@@ -554,16 +678,23 @@ private fun ReplayVideoTile(
     globalPlaying: Boolean,
     rate: Float,
     isBig: Boolean,
+    fullscreen: Boolean,
     snapBusy: Boolean,
     onHandle: (ReplayPlayerHandle?) -> Unit,
     onProgress: (ReplayProgress) -> Unit,
     onError: (String) -> Unit,
     onTap: () -> Unit,
     onSnapshot: () -> Unit,
+    onToggleFullscreen: () -> Unit,
+    clockOverlay: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
-    val corner = if (isBig) PcDimens.RadiusLg else PcDimens.RadiusSm
+    val corner = when {
+        fullscreen -> 0.dp
+        isBig -> PcDimens.RadiusLg
+        else -> PcDimens.RadiusSm
+    }
 
     Box(
         modifier = modifier
@@ -573,7 +704,7 @@ private fun ReplayVideoTile(
         if (source != null) {
             PinchZoomBox(
                 enabled = isBig,
-                resetKey = "${cam.id}:${isBig}",
+                resetKey = "${cam.id}:${isBig}:${fullscreen}",
                 onTap = onTap,
                 modifier = Modifier.fillMaxSize(),
             ) {
@@ -612,30 +743,54 @@ private fun ReplayVideoTile(
             }
         }
 
-        // Camera label chip
-        Box(
+        // Camera label chip (+ clock overlay in fullscreen)
+        Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(if (isBig) 10.dp else 6.dp)
-                .clip(CircleShape)
-                .background(colors.mediaChip)
-                .padding(horizontal = 8.dp, vertical = 3.dp),
+                .padding(if (isBig) 10.dp else 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text(
-                text = tile.label,
-                color = colors.onMedia,
-                fontSize = if (isBig) 13.sp else 11.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(colors.mediaChip)
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            ) {
+                Text(
+                    text = tile.label,
+                    color = colors.onMedia,
+                    fontSize = if (isBig) 13.sp else 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (!clockOverlay.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(colors.mediaChip)
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                ) {
+                    Text(
+                        text = clockOverlay,
+                        color = colors.onMediaDim,
+                        style = MonoTextStyle.copy(
+                            fontSize = 12.sp,
+                            fontFeatureSettings = "tnum",
+                        ),
+                        maxLines = 1,
+                    )
+                }
+            }
         }
 
         if (tile.spinning) {
             CircularProgressIndicator(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 10.dp, end = if (isBig) 52.dp else 10.dp)
+                    .padding(top = 12.dp, end = if (isBig) 94.dp else 10.dp)
                     .size(18.dp),
                 strokeWidth = 2.dp,
                 color = colors.onMedia,
@@ -661,26 +816,46 @@ private fun ReplayVideoTile(
         }
 
         if (isBig) {
-            IconButton(
-                onClick = onSnapshot,
-                enabled = !snapBusy,
+            Row(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(4.dp)
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(colors.mediaChip),
+                    .padding(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                if (snapBusy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                        color = colors.onMedia,
-                    )
-                } else {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(colors.mediaChip)
+                        .clickable(enabled = !snapBusy, onClick = onSnapshot),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (snapBusy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = colors.onMedia,
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Filled.CameraAlt,
+                            contentDescription = "Save frame",
+                            tint = colors.onMedia,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(colors.mediaChip)
+                        .clickable(onClick = onToggleFullscreen),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Icon(
-                        imageVector = Icons.Filled.CameraAlt,
-                        contentDescription = "Save frame",
+                        imageVector = if (fullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                        contentDescription = if (fullscreen) "Exit fullscreen" else "Fullscreen",
                         tint = colors.onMedia,
                         modifier = Modifier.size(20.dp),
                     )

@@ -153,23 +153,7 @@ fun HomeScreenContent(
     val context = LocalContext.current
     val pullState = rememberPullToRefreshState()
 
-    val statusTone = when {
-        state.isOffline -> PcTone.Bad
-        state.problemCount > 0 -> PcTone.Warn
-        state.info != null -> PcTone.Ok
-        else -> PcTone.Faint
-    }
-
-    val statusText = when {
-        state.isOffline -> "Can't reach the laptop"
-        state.info != null -> {
-            val host = PcFormatters.formatShortHost(state.info.host)
-            val up = state.vitals?.let { " · up ${PcFormatters.formatUptimeShort(it.uptime)}" }.orEmpty()
-            "$host$up"
-        }
-        else -> "Connecting to the laptop…"
-    }
-
+    val headerStatusText = if (state.isOffline) "Offline" else null
     val transfers = state.transfersSummary
 
     Column(
@@ -202,9 +186,9 @@ fun HomeScreenContent(
                 item(key = "header") {
                     PcScreenHeader(
                         title = "Home",
-                        statusText = statusText,
-                        statusTone = statusTone,
-                        showStatusDot = true,
+                        statusText = headerStatusText,
+                        statusTone = PcTone.Bad,
+                        showStatusDot = headerStatusText != null,
                     )
                 }
 
@@ -304,7 +288,7 @@ fun HomeScreenContent(
                                     label = "${state.problemCount} issue${if (state.problemCount == 1) "" else "s"}",
                                     tone = if (hasBad) PcTone.Bad else PcTone.Warn,
                                     showDot = true,
-                                    modifier = Modifier.clickable(onClick = onOpenServices),
+                                    onClick = onOpenServices,
                                 )
                             }
                             if (vpn != null) {
@@ -330,7 +314,7 @@ fun HomeScreenContent(
                                     label = if (locked) "Keyring · Locked" else "Keyring · Unlocked",
                                     tone = if (locked) PcTone.Warn else PcTone.Ok,
                                     icon = if (locked) Icons.Filled.Lock else Icons.Filled.LockOpen,
-                                    modifier = if (locked) Modifier.clickable(onClick = onUnlockKeyring) else Modifier,
+                                    onClick = if (locked) onUnlockKeyring else null,
                                 )
                             }
                         }
@@ -356,7 +340,10 @@ fun HomeScreenContent(
                                             color = colors.textFaint,
                                             fontSize = 12.5.sp,
                                             fontWeight = FontWeight.Medium,
-                                            modifier = Modifier.clickable { onOpenCams("replay") },
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .clickable { onOpenCams("replay") }
+                                                .padding(horizontal = 4.dp, vertical = 2.dp),
                                         )
                                         Text(text = "·", color = colors.textFaint, fontSize = 12.5.sp)
                                         Text(
@@ -364,7 +351,10 @@ fun HomeScreenContent(
                                             color = colors.textFaint,
                                             fontSize = 12.5.sp,
                                             fontWeight = FontWeight.Medium,
-                                            modifier = Modifier.clickable { onOpenCams("music") },
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .clickable { onOpenCams("music") }
+                                                .padding(horizontal = 4.dp, vertical = 2.dp),
                                         )
                                     }
                                 },
@@ -752,15 +742,26 @@ private fun OpenRoutesSection(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
-    val externalRoutes = remember(state.routes) {
-        state.routes.filter { r ->
-            r.path != "/cams/" &&
-                !r.name.equals("Cat cams", ignoreCase = true) &&
-                r.path != "/agentview"
+    val jellyfinRoute = remember(state.routes) {
+        state.routes.firstOrNull {
+            it.name.contains("jellyfin", ignoreCase = true) || it.port == 8096
         }
     }
-    val hasJellyfinRoute = remember(externalRoutes) {
-        externalRoutes.any { it.name.contains("jellyfin", ignoreCase = true) || it.port == 8096 }
+    val remainingExternalRoutes = remember(state.routes, jellyfinRoute) {
+        state.routes
+            .filter { r ->
+                r.id != jellyfinRoute?.id &&
+                    r.path != "/cams/" &&
+                    !r.name.equals("Cat cams", ignoreCase = true) &&
+                    r.path != "/agentview" &&
+                    !r.name.equals("Agent view", ignoreCase = true) &&
+                    !r.name.equals("Seerr", ignoreCase = true) &&
+                    !r.name.equals("Jellyseerr", ignoreCase = true) &&
+                    !r.name.equals("Downloads", ignoreCase = true) &&
+                    !r.name.equals("Space", ignoreCase = true) &&
+                    !r.name.equals("Space Manager", ignoreCase = true)
+            }
+            .sortedBy { it.name.lowercase() }
     }
 
     val transfersTrailingColor = when (transfers.trailingTone) {
@@ -778,6 +779,23 @@ private fun OpenRoutesSection(
         Spacer(modifier = Modifier.height(4.dp))
         PcSectionLabel(label = "Open")
         PcListCard {
+            // 1. Primary everyday media & storage apps (curated priority order)
+            PcListRow(
+                title = "Jellyfin",
+                subtitle = jellyfinRoute?.subtitle?.takeIf { it.isNotBlank() } ?: "Media server",
+                icon = Icons.Filled.LiveTv,
+                showChevron = true,
+                showDivider = true,
+                onClick = {
+                    val target = jellyfinRoute ?: RouteItem(
+                        id = "jellyfin",
+                        name = "Jellyfin",
+                        url = "${state.baseUrl.trimEnd('/')}:8096/",
+                        app = "org.jellyfin.mobile",
+                    )
+                    launchExternalRoute(context, target)
+                },
+            )
             PcListRow(
                 title = "Seerr",
                 subtitle = "Search & request movies or TV",
@@ -785,23 +803,6 @@ private fun OpenRoutesSection(
                 showChevron = true,
                 showDivider = true,
                 onClick = onOpenSeerr,
-            )
-            PcListRow(
-                title = "Space Manager",
-                subtitle = "Media storage & Google Drive offload",
-                icon = Icons.Filled.Storage,
-                trailingContent = hddFree?.let { freeBytes ->
-                    {
-                        Text(
-                            text = "${PcFormatters.formatBytes(freeBytes, digits = 0)} free",
-                            color = if (hddWarn) colors.warn else colors.textDim,
-                            style = TabularNumStyle.copy(fontSize = 12.5.sp),
-                        )
-                    }
-                },
-                showChevron = true,
-                showDivider = true,
-                onClick = onOpenSpace,
             )
             PcListRow(
                 title = "Downloads",
@@ -823,43 +824,27 @@ private fun OpenRoutesSection(
                 showDivider = true,
                 onClick = onOpenDownloads,
             )
-
-            // Dynamic server routes (including Jellyfin when reported by /pc/api/routes)
-            externalRoutes.forEach { route ->
-                PcListRow(
-                    title = route.name,
-                    subtitle = route.subtitle.takeIf { it.isNotBlank() },
-                    icon = RouteIcons.forName(route.icon),
-                    showChevron = true,
-                    showDivider = true,
-                    onClick = { launchExternalRoute(context, route) },
-                )
-            }
-
-            if (!hasJellyfinRoute) {
-                PcListRow(
-                    title = "Jellyfin",
-                    subtitle = "Media server",
-                    icon = Icons.Filled.LiveTv,
-                    showChevron = true,
-                    showDivider = true,
-                    onClick = {
-                        val fallbackUrl = "${state.baseUrl.trimEnd('/')}:8096/"
-                        launchExternalRoute(
-                            context,
-                            RouteItem(
-                                id = "jellyfin",
-                                name = "Jellyfin",
-                                url = fallbackUrl,
-                                app = "org.jellyfin.mobile",
-                            ),
-                        )
-                    },
-                )
-            }
-
             PcListRow(
-                title = "Agent Settings",
+                title = "Space",
+                subtitle = "Media storage & Google Drive offload",
+                icon = Icons.Filled.Storage,
+                trailingContent = hddFree?.let { freeBytes ->
+                    {
+                        Text(
+                            text = "${PcFormatters.formatBytes(freeBytes, digits = 0)} free",
+                            color = if (hddWarn) colors.warn else colors.textDim,
+                            style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                        )
+                    }
+                },
+                showChevron = true,
+                showDivider = true,
+                onClick = onOpenSpace,
+            )
+
+            // 2. Agent tools
+            PcListRow(
+                title = "Agent settings",
                 subtitle = "Models, quotas & usage alerts",
                 icon = Icons.Filled.Tune,
                 showChevron = true,
@@ -867,13 +852,25 @@ private fun OpenRoutesSection(
                 onClick = onOpenAgentSettings,
             )
             PcListRow(
-                title = "Agent View",
+                title = "Agent view",
                 subtitle = "Watcher rules & live activity",
                 icon = Icons.Filled.SmartToy,
                 showChevron = true,
-                showDivider = false,
+                showDivider = remainingExternalRoutes.isNotEmpty(),
                 onClick = onOpenAgentView,
             )
+
+            // 3. Remaining dynamic server routes sorted alphabetically
+            remainingExternalRoutes.forEachIndexed { idx, route ->
+                PcListRow(
+                    title = route.name,
+                    subtitle = route.subtitle.takeIf { it.isNotBlank() },
+                    icon = RouteIcons.forName(route.icon),
+                    showChevron = true,
+                    showDivider = idx < remainingExternalRoutes.lastIndex,
+                    onClick = { launchExternalRoute(context, route) },
+                )
+            }
         }
     }
 }

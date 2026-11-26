@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -639,7 +640,8 @@ fun PcAppShell(
             screens = screens,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
+                .padding(innerPadding)
+                .consumeWindowInsets(innerPadding),
         )
     }
 
@@ -789,7 +791,7 @@ fun PcBottomNavBar(
                                 .background(if (selected) colors.accentSoft else Color.Transparent)
                                 .indication(
                                     interactionSource = interactionSource,
-                                    indication = ripple(color = colors.ripple),
+                                    indication = ripple(),
                                 ),
                             contentAlignment = Alignment.Center,
                         ) {

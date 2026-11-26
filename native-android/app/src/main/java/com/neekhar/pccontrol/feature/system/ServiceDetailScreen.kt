@@ -136,11 +136,16 @@ fun ServiceDetailScreenContent(
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
+        val headerAlert = if (state.unit.isNotBlank() && (statusTone == PcTone.Bad || statusTone == PcTone.Warn)) {
+            statusText
+        } else {
+            null
+        }
         PcScreenHeader(
             title = if (state.unit.isBlank()) "Service" else state.displayName,
-            statusText = if (state.unit.isBlank()) null else statusText,
+            statusText = headerAlert,
             statusTone = statusTone,
-            showStatusDot = state.unit.isNotBlank(),
+            showStatusDot = headerAlert != null,
             onBack = onBack,
         )
 

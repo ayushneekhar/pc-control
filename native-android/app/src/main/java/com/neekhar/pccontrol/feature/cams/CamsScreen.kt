@@ -24,9 +24,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -193,6 +196,7 @@ fun CamsScreen(
     var cat3Hd by remember { mutableStateOf(hardwareCaps.liveHdSupported) }
     var focusedCam by remember { mutableStateOf<CamId?>(null) }
     var fullscreenCam by remember { mutableStateOf<CamId?>(null) }
+    var replayFullscreen by remember { mutableStateOf(false) }
     var ptzOpen by remember { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
     var safeMode by remember { mutableStateOf(WebRtcRuntime.isSafeMode(context)) }
@@ -252,6 +256,7 @@ fun CamsScreen(
         talkMode = TalkMode.OFF
         ptzOpen = false
         fullscreenCam = null
+        replayFullscreen = false
         stopPtz()
     }
 
@@ -361,17 +366,20 @@ fun CamsScreen(
         }
     }
 
-    // Fullscreen immersive landscape + hardware back
-    DisposableEffect(fullscreenCam, activity) {
-        if (activity != null && fullscreenCam != null) {
+    // Fullscreen immersive landscape + hardware back (Live or Replay)
+    val inReplayFullscreen = stackActive && activeTab == CamsTab.REPLAY && replayFullscreen
+    val isAnyFullscreen = stackActive && (fullscreenCam != null || inReplayFullscreen)
+    DisposableEffect(isAnyFullscreen, activity) {
+        if (activity != null && isAnyFullscreen) {
             CamsMediaTools.setFullscreen(activity, true)
         }
         onDispose {
             if (activity != null) CamsMediaTools.setFullscreen(activity, false)
         }
     }
-    BackHandler(enabled = fullscreenCam != null) {
+    BackHandler(enabled = isAnyFullscreen) {
         fullscreenCam = null
+        replayFullscreen = false
     }
 
     // WebRTC live connections (video runs only on Live tab; audio runs across tabs while active)
@@ -555,14 +563,15 @@ fun CamsScreen(
         return
     }
 
-    val showAudioBar = stackActive && (activeTab == CamsTab.LIVE || listenOn || talkMode != TalkMode.OFF)
+    val showAudioBar = !inReplayFullscreen && stackActive && (activeTab == CamsTab.LIVE || listenOn || talkMode != TalkMode.OFF)
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val units = catCamState?.units?.values.orEmpty()
     val runningUnits = units.count { it == "active" }
     val masterStatusText = when {
         catCamBusy -> if (catCamEnabled) "Turning on…" else "Turning off…"
         !catCamEnabled -> "Off"
-        units.isNotEmpty() -> "On · $runningUnits/${units.size} running"
-        else -> "On"
+        units.isNotEmpty() && runningUnits == 0 -> "0/${units.size} running"
+        else -> null
     }
     val masterDotTone = when {
         catCamBusy -> PcTone.Warn
@@ -580,7 +589,8 @@ fun CamsScreen(
             .background(colors.bg),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top bar with Back + title + Cat Cams master power switch + overflow menu
+            // Top bar with Back + title + Cat Cams master power switch + overflow menu (hidden in Replay fullscreen)
+            if (!inReplayFullscreen) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -606,22 +616,20 @@ fun CamsScreen(
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                     )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                    ) {
-                        PcStatusDot(tone = masterDotTone, size = 6.dp)
-                        Text(
-                            text = if (stackActive && activeTab == CamsTab.LIVE) {
-                                "$masterStatusText · $liveCount/${CamsConfig.CAMS.size} live"
-                            } else {
-                                masterStatusText
-                            },
-                            color = colors.textDim,
-                            style = TabularNumStyle.copy(fontSize = 12.sp),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                    if (!masterStatusText.isNullOrBlank()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            PcStatusDot(tone = masterDotTone, size = 6.dp)
+                            Text(
+                                text = masterStatusText,
+                                color = colors.textDim,
+                                style = TabularNumStyle.copy(fontSize = 12.sp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
 
@@ -749,13 +757,16 @@ fun CamsScreen(
             if (stackActive) {
                 PcSegmentedControl(
                     options = listOf(
-                        PcSegmentOption(CamsTab.LIVE, if (activeTab == CamsTab.LIVE) "Live $liveCount/3" else "Live"),
+                        PcSegmentOption(CamsTab.LIVE, "Live"),
                         PcSegmentOption(CamsTab.REPLAY, "Replay"),
                         PcSegmentOption(CamsTab.DETECTIONS, "Detections"),
                         PcSegmentOption(CamsTab.MUSIC, "Music"),
                     ),
                     selected = activeTab,
-                    onSelect = { activeTab = it },
+                    onSelect = {
+                        if (it != CamsTab.REPLAY) replayFullscreen = false
+                        activeTab = it
+                    },
                     modifier = Modifier.padding(
                         start = PcDimens.ScreenPad,
                         end = PcDimens.ScreenPad,
@@ -764,6 +775,7 @@ fun CamsScreen(
                 )
             }
             HorizontalDivider(thickness = 0.5.dp, color = colors.hairline)
+            } // end !inReplayFullscreen
 
             // Main body
             when {
@@ -772,13 +784,18 @@ fun CamsScreen(
                         modifier = Modifier
                             .weight(1f)
                             .verticalScroll(rememberScrollState())
-                            .padding(horizontal = PcDimens.ScreenPad, vertical = PcDimens.Space4),
+                            .padding(
+                                start = PcDimens.ScreenPad,
+                                end = PcDimens.ScreenPad,
+                                top = PcDimens.Space4,
+                                bottom = PcDimens.Space4 + navBottom,
+                            ),
                         verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
                     ) {
                         MasterPowerOffCard(
                             enabled = catCamEnabled,
                             busy = catCamBusy,
-                            statusText = masterStatusText,
+                            statusText = masterStatusText ?: "Off",
                             dotTone = masterDotTone,
                             error = catCamError,
                             onToggle = { toggleMasterCatCams(it) },
@@ -786,11 +803,29 @@ fun CamsScreen(
                     }
                 }
 
+                activeTab == CamsTab.REPLAY -> {
+                    ReplayTab(
+                        visible = isForeground,
+                        hevcOk = hardwareCaps.replayHevcSupported,
+                        dataSource = repository,
+                        okHttpClient = apiClient.okHttpClient,
+                        target = replayTarget,
+                        fullscreen = replayFullscreen,
+                        bottomInset = (if (showAudioBar) 108.dp else 28.dp) + navBottom,
+                        onToggleFullscreen = { replayFullscreen = !replayFullscreen },
+                        onTargetConsumed = { replayTarget = null },
+                        onToast = { msg, actLabel, act ->
+                            showToast(msg, if (act != null) 4500L else 2800L, actLabel, act)
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+
                 activeTab == CamsTab.DETECTIONS -> {
                     DetectionsTab(
                         visible = isForeground,
                         repository = repository,
-                        bottomInset = if (showAudioBar) 96.dp else 16.dp,
+                        bottomInset = (if (showAudioBar) 96.dp else 16.dp) + navBottom,
                         onJumpToReplay = { cam, tsMs ->
                             val parsed = ReplayMath.parseSightingTarget(cam, tsMs)
                             if (parsed != null) {
@@ -811,7 +846,7 @@ fun CamsScreen(
                                 start = PcDimens.ScreenPad,
                                 end = PcDimens.ScreenPad,
                                 top = PcDimens.Space3,
-                                bottom = if (showAudioBar) 108.dp else 28.dp,
+                                bottom = (if (showAudioBar) 108.dp else 28.dp) + navBottom,
                             ),
                         verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
                     ) {
@@ -858,20 +893,6 @@ fun CamsScreen(
                                 )
                             }
 
-                            CamsTab.REPLAY -> {
-                                ReplayTab(
-                                    visible = isForeground,
-                                    hevcOk = hardwareCaps.replayHevcSupported,
-                                    dataSource = repository,
-                                    okHttpClient = apiClient.okHttpClient,
-                                    target = replayTarget,
-                                    onTargetConsumed = { replayTarget = null },
-                                    onToast = { msg, actLabel, act ->
-                                        showToast(msg, if (act != null) 4500L else 2800L, actLabel, act)
-                                    },
-                                )
-                            }
-
                             CamsTab.MUSIC -> {
                                 MusicTab(
                                     visible = isForeground,
@@ -882,7 +903,9 @@ fun CamsScreen(
                                 )
                             }
 
-                            CamsTab.DETECTIONS -> Unit
+                            CamsTab.REPLAY,
+                            CamsTab.DETECTIONS,
+                            -> Unit
                         }
                     }
                 }
@@ -1060,9 +1083,8 @@ private fun ListenTalkBar(
                     earState.phase == LinkPhase.ERROR -> earState.error ?: "Failed"
                     else -> "Connecting…"
                 },
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable(onClick = onToggleListen),
+                onClick = onToggleListen,
+                modifier = Modifier.weight(1f),
             )
 
             // Talk button (hold to talk, or quick tap <400ms to latch)
@@ -1119,6 +1141,7 @@ private fun AudioActionTile(
     icon: ImageVector,
     title: String,
     subtitle: String?,
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
@@ -1156,6 +1179,7 @@ private fun AudioActionTile(
             .clip(RoundedCornerShape(PcDimens.RadiusSm))
             .background(bg)
             .border(0.5.dp, borderColor, RoundedCornerShape(PcDimens.RadiusSm))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),

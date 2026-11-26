@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Pets
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -63,6 +62,7 @@ import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.PcDimens
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcBrandIcons
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcEmptyState
@@ -259,7 +259,7 @@ fun DetectionsTab(
                 ) {
                     if (snaps.isEmpty()) {
                         PcEmptyState(
-                            icon = Icons.Filled.Pets,
+                            icon = PcBrandIcons.Cat,
                             title = if (camFilter == "all") {
                                 "No saved detections yet"
                             } else {

@@ -47,6 +47,8 @@ export type ChatMessage = {
   attachments?: ChatAttachment[];
   progress?: ChatProgress | null;
   optimistic?: boolean;
+  queued?: boolean;
+  steered?: boolean;
 };
 
 export type ChatMessagesResponse = {
@@ -54,6 +56,7 @@ export type ChatMessagesResponse = {
   engine: ChatEngine;
   running: boolean;
   progress?: ChatProgress | null;
+  queued_ids?: string[];
   has_more: boolean;
   ts: number;
 };
@@ -66,6 +69,54 @@ export type ChatSendResponse = {
   engine: ChatEngine;
   running: boolean;
 };
+
+export type ChatSteerStatus =
+  | 'steered'
+  | 'dispatched'
+  | 'steering'
+  | 'already_running'
+  | 'already_steered'
+  | 'already_completed';
+
+export type ChatSteerResponse = {
+  ok: boolean;
+  status: ChatSteerStatus;
+  steered: boolean;
+  user_message: ChatMessage;
+  running: boolean;
+};
+
+export type ChatSseEvent =
+  | {
+      event: 'snapshot';
+      data: {
+        engine: ChatEngine;
+        running: boolean;
+        progress?: ChatProgress | null;
+        queued_ids?: string[];
+        ts: number;
+      };
+    }
+  | {
+      event: 'message';
+      data: {
+        message: ChatMessage;
+        running: boolean;
+        engine?: ChatEngine;
+        progress?: ChatProgress | null;
+        steered?: boolean;
+        removed_message_id?: string;
+        ts: number;
+      };
+    }
+  | {
+      event: 'progress';
+      data: {
+        running: boolean;
+        progress: ChatProgress | null;
+        ts: number;
+      };
+    };
 
 export type ChatNewResponse = {
   ok: boolean;
@@ -295,7 +346,130 @@ export function shouldPollChat(
 ): boolean {
   if (!isFocused || !appActive) return false;
   if (running) return true;
-  return messages.some((m) => m.status === 'pending');
+  return messages.some((m) => m.status === 'pending' || m.queued === true);
+}
+
+/** Returns true when a user message should show the clickable "Send now" steering action. */
+export function canSteerQueuedMessage(msg: ChatMessage, running: boolean): boolean {
+  return Boolean(running && msg.role === 'user' && msg.queued === true && !msg.optimistic);
+}
+
+/** Apply a single incoming server message (new or updated) to the local chat list, removing any superseded placeholder. */
+export function upsertChatMessage(
+  current: ChatMessage[],
+  incoming: ChatMessage,
+  removedId?: string,
+): ChatMessage[] {
+  const normalized: ChatMessage = { ...incoming, optimistic: false };
+  let replaced = false;
+  const next: ChatMessage[] = [];
+  for (const m of current) {
+    if (removedId && m.id === removedId) continue;
+    const sameId = m.id === normalized.id;
+    const sameClientId =
+      Boolean(normalized.client_id) &&
+      m.role === 'user' &&
+      normalized.role === 'user' &&
+      m.client_id === normalized.client_id;
+    if (sameId || sameClientId) {
+      if (!replaced) {
+        next.push(normalized);
+        replaced = true;
+      }
+      continue;
+    }
+    next.push(m);
+  }
+  if (!replaced) {
+    next.push(normalized);
+  }
+  next.sort((a, b) => a.created_at - b.created_at);
+  return next;
+}
+
+/** Reconcile local queued flags with the authoritative server queued_ids list from an SSE snapshot. */
+export function reconcileQueuedMessages(
+  current: ChatMessage[],
+  queuedIds: readonly string[],
+  running: boolean,
+): ChatMessage[] {
+  const queuedSet = running ? new Set(queuedIds) : new Set<string>();
+  let changed = false;
+  const next = current.map((m) => {
+    if (m.role !== 'user' || m.optimistic) return m;
+    const shouldBeQueued = queuedSet.has(m.id);
+    if (Boolean(m.queued) === shouldBeQueued) return m;
+    changed = true;
+    return { ...m, queued: shouldBeQueued };
+  });
+  return changed ? next : current;
+}
+
+/** Parse complete SSE event blocks from a raw text buffer for `/pc/api/chat/events`. */
+export function parseChatSseBlocks(buf: string): { events: ChatSseEvent[]; rest: string } {
+  const events: ChatSseEvent[] = [];
+  let rem = buf.replace(/\r\n/g, '\n');
+  let idx: number;
+  while ((idx = rem.indexOf('\n\n')) >= 0) {
+    const block = rem.slice(0, idx);
+    rem = rem.slice(idx + 2);
+    let eventName = 'message';
+    const dataLines: string[] = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith(':')) continue;
+      if (line.startsWith('event:')) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).replace(/^ /, ''));
+      }
+    }
+    if (dataLines.length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(dataLines.join('\n'));
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object') continue;
+    const obj = parsed as Record<string, unknown>;
+    if (eventName === 'snapshot') {
+      events.push({
+        event: 'snapshot',
+        data: {
+          engine: obj.engine === 'gemini' ? 'gemini' : 'claude',
+          running: Boolean(obj.running),
+          progress: (obj.progress as ChatProgress | null | undefined) ?? null,
+          queued_ids: Array.isArray(obj.queued_ids)
+            ? obj.queued_ids.filter((x): x is string => typeof x === 'string')
+            : [],
+          ts: typeof obj.ts === 'number' ? obj.ts : 0,
+        },
+      });
+    } else if (eventName === 'message' && obj.message && typeof obj.message === 'object') {
+      events.push({
+        event: 'message',
+        data: {
+          message: obj.message as ChatMessage,
+          running: Boolean(obj.running),
+          engine: obj.engine === 'gemini' ? 'gemini' : obj.engine === 'claude' ? 'claude' : undefined,
+          progress: obj.progress !== undefined ? ((obj.progress as ChatProgress | null) ?? null) : undefined,
+          steered: typeof obj.steered === 'boolean' ? obj.steered : undefined,
+          removed_message_id: typeof obj.removed_message_id === 'string' ? obj.removed_message_id : undefined,
+          ts: typeof obj.ts === 'number' ? obj.ts : 0,
+        },
+      });
+    } else if (eventName === 'progress') {
+      events.push({
+        event: 'progress',
+        data: {
+          running: Boolean(obj.running),
+          progress: (obj.progress as ChatProgress | null | undefined) ?? null,
+          ts: typeof obj.ts === 'number' ? obj.ts : 0,
+        },
+      });
+    }
+  }
+  return { events, rest: rem };
 }
 
 export type TableAlignment = 'left' | 'center' | 'right';

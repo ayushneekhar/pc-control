@@ -1817,5 +1817,622 @@ class T3ClaudeAndActivityProgressTests(unittest.TestCase):
                 )
 
 
+class ChatSteeringAndSseTests(unittest.TestCase):
+    """Tests for queued message tracking, immediate steering (local + T3 queue), races, and SSE events."""
+
+    def _drain_events(self, q):
+        events = []
+        while True:
+            try:
+                events.append(q.get_nowait())
+            except Exception:
+                break
+        return events
+
+    def test_queue_two_messages_and_steer_second_via_t3_mode_steer_for_both_engines(self):
+        for engine, adapter_cls in (("gemini", chat_mod.T3GeminiAdapter), ("claude", chat_mod.T3ClaudeAdapter)):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as tmp:
+                tf = os.path.join(tmp, f"{engine}-thread.json")
+                with open(tf, "w", encoding="utf-8") as f:
+                    json.dump({"thread_id": f"thr-{engine}", "project_id": "proj-1"}, f)
+
+                first_running = threading.Event()
+                release_first = threading.Event()
+                send_calls = []
+
+                class FakeT3SteerClient:
+                    def call_tool(self, name, args=None):
+                        args = args or {}
+                        if name == "t3_thread_read" and args.get("limit") == 1:
+                            return {"thread": {"latestRunId": "run-prev"}, "items": [{"position": 5}]}
+                        if name == "t3_thread_send":
+                            send_calls.append(dict(args))
+                            if args.get("mode") == "steer":
+                                return {"ok": True, "steered": True, "runId": "run-1"}
+                            return {"runId": "run-1", "status": "running"}
+                        if name == "t3_thread_wait":
+                            first_running.set()
+                            if not release_first.is_set():
+                                release_first.wait(timeout=3.0)
+                            return {"status": "completed", "runId": "run-1"}
+                        if name == "t3_thread_read":
+                            return {
+                                "items": [
+                                    {
+                                        "itemId": "asst-1",
+                                        "type": "assistant_message",
+                                        "runId": "run-1",
+                                        "text": f"{engine} combined steered reply",
+                                        "textTruncated": False,
+                                    }
+                                ],
+                                "hasMore": False,
+                            }
+                        return {}
+
+                adapter = adapter_cls(
+                    client=FakeT3SteerClient(),
+                    thread_file=tf,
+                    settings_file=os.path.join(tmp, "none.json"),
+                    poll_wait_ms=50,
+                    retry_delay=0.0,
+                )
+                store = chat_mod.ChatHistoryStore(os.path.join(tmp, "hist.jsonl"))
+                mgr = chat_mod.ChatManager(
+                    store=store,
+                    engine_fn=lambda e=engine: e,
+                    gemini_adapter=adapter if engine == "gemini" else None,
+                    claude_adapter=adapter if engine == "claude" else None,
+                    last_channel_file=os.path.join(tmp, "last-channel.json"),
+                )
+                sub = mgr.subscribe()
+                try:
+                    # 1. Send first message -> actively running, not queued.
+                    c1, r1 = mgr.handle_send({"text": "first prompt", "client_id": f"{engine}-1"})
+                    self.assertEqual(c1, 202)
+                    self.assertFalse(r1["user_message"]["queued"])
+                    self.assertTrue(first_running.wait(timeout=3.0))
+
+                    # 2. Send second message while first is running -> queued=True.
+                    c2, r2 = mgr.handle_send({"text": "actually do B instead", "client_id": f"{engine}-2"})
+                    self.assertEqual(c2, 202)
+                    msg2_id = r2["user_message"]["id"]
+                    self.assertTrue(r2["user_message"]["queued"])
+
+                    _, mid = mgr.handle_get_messages({})
+                    self.assertTrue(mid["running"])
+                    self.assertEqual(mid["queued_ids"], [msg2_id])
+                    by_id = {m["id"]: m for m in mid["messages"]}
+                    self.assertFalse(by_id[r1["user_message"]["id"]]["queued"])
+                    self.assertTrue(by_id[msg2_id]["queued"])
+
+                    # 3. Steer second message immediately.
+                    cs, rs = mgr.handle_steer({"message_id": msg2_id})
+                    self.assertEqual(cs, 200)
+                    self.assertTrue(rs["ok"])
+                    self.assertEqual(rs["status"], "steered")
+                    self.assertTrue(rs["steered"])
+                    self.assertFalse(rs["user_message"]["queued"])
+                    self.assertTrue(rs["user_message"]["steered"])
+                    self.assertTrue(rs["running"])
+
+                    # Verify mode="steer" was called on the active T3 thread.
+                    steer_sends = [c for c in send_calls if c.get("mode") == "steer"]
+                    self.assertEqual(len(steer_sends), 1)
+                    self.assertEqual(steer_sends[0]["threadId"], f"thr-{engine}")
+                    self.assertEqual(steer_sends[0]["message"], "actually do B instead")
+
+                    # 4. Release first turn and wait until idle.
+                    release_first.set()
+                    self.assertTrue(mgr.wait_idle(timeout=3.0))
+
+                    # Crucial: msg 2 must NOT have been re-executed after msg 1 finished!
+                    queue_sends = [c for c in send_calls if c.get("mode") == "queue"]
+                    self.assertEqual(len(queue_sends), 1)
+                    self.assertEqual(queue_sends[0]["message"], "first prompt")
+
+                    _, final = mgr.handle_get_messages({})
+                    self.assertFalse(final["running"])
+                    self.assertEqual(final["queued_ids"], [])
+                    # Exactly 2 user messages + 1 combined assistant reply (no duplicate second turn).
+                    self.assertEqual(
+                        [(m["role"], m["text"]) for m in final["messages"]],
+                        [
+                            ("user", "first prompt"),
+                            ("user", "actually do B instead"),
+                            ("assistant", f"{engine} combined steered reply"),
+                        ],
+                    )
+                    self.assertFalse(final["messages"][1]["queued"])
+                    self.assertTrue(final["messages"][1]["steered"])
+
+                    # Check SSE transitions: queued=True -> steered/queued=False -> assistant done (running=False).
+                    events = self._drain_events(sub)
+                    msg_events = [payload for ev, payload in events if ev == "message"]
+                    msg2_events = [p for p in msg_events if p["message"]["id"] == msg2_id]
+                    self.assertGreaterEqual(len(msg2_events), 2)
+                    self.assertTrue(msg2_events[0]["message"]["queued"])
+                    self.assertFalse(msg2_events[-1]["message"]["queued"])
+                    self.assertTrue(msg2_events[-1]["message"]["steered"])
+                    asst_events = [p for p in msg_events if p["message"]["role"] == "assistant"]
+                    self.assertEqual(len(asst_events), 1)
+                    self.assertFalse(asst_events[0]["running"])
+                finally:
+                    mgr.unsubscribe(sub)
+
+    def test_steer_with_attachments_includes_paths_and_clears_paired_pending_placeholder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tf = os.path.join(tmp, "t3-thread.json")
+            with open(tf, "w", encoding="utf-8") as f:
+                json.dump({"thread_id": "thr-att", "project_id": "proj-1"}, f)
+
+            first_running = threading.Event()
+            release_first = threading.Event()
+            steer_messages = []
+
+            class FakeT3AttSteer:
+                def call_tool(self, name, args=None):
+                    args = args or {}
+                    if name == "t3_thread_read" and args.get("limit") == 1:
+                        return {"thread": {"latestRunId": "run-0"}, "items": [{"position": 1}]}
+                    if name == "t3_thread_send":
+                        if args.get("mode") == "steer":
+                            steer_messages.append(args.get("message"))
+                            return {"ok": True}
+                        return {"runId": "run-1"}
+                    if name == "t3_thread_wait":
+                        first_running.set()
+                        release_first.wait(timeout=3.0)
+                        return {"status": "completed", "runId": "run-1"}
+                    if name == "t3_thread_read":
+                        return {
+                            "items": [
+                                {"itemId": "a1", "type": "assistant_message", "runId": "run-1", "text": "saw image"}
+                            ],
+                            "hasMore": False,
+                        }
+                    return {}
+
+            adapter = chat_mod.T3GeminiAdapter(
+                client=FakeT3AttSteer(),
+                thread_file=tf,
+                settings_file=os.path.join(tmp, "none.json"),
+                poll_wait_ms=50,
+                retry_delay=0.0,
+            )
+            store = chat_mod.ChatHistoryStore(os.path.join(tmp, "hist.jsonl"))
+            mgr = chat_mod.ChatManager(
+                store=store,
+                engine_fn=lambda: "gemini",
+                gemini_adapter=adapter,
+                uploads_dir=os.path.join(tmp, "uploads"),
+                last_channel_file=os.path.join(tmp, "last-channel.json"),
+            )
+            sub = mgr.subscribe()
+            try:
+                up_code, up = mgr.handle_upload(
+                    {
+                        "name": "shot.png",
+                        "mime_type": "image/png",
+                        "data_base64": base64.b64encode(b"\x89PNG\r\n\x1a\n1234").decode("ascii"),
+                    }
+                )
+                self.assertEqual(up_code, 200)
+
+                mgr.handle_send({"text": "first"})
+                self.assertTrue(first_running.wait(timeout=3.0))
+
+                c2, r2 = mgr.handle_send({"text": "look at this", "attachments": [up["id"]]})
+                self.assertEqual(c2, 202)
+                msg2_id = r2["user_message"]["id"]
+
+                # Simulate a legacy paired pending assistant placeholder for msg2 to verify cleanup.
+                store.append(
+                    {
+                        "id": "pend-placeholder-2",
+                        "role": "assistant",
+                        "engine": "gemini",
+                        "text": "",
+                        "created_at": time.time(),
+                        "status": "pending",
+                        "reply_to": msg2_id,
+                    }
+                )
+
+                cs, rs = mgr.handle_steer({"message_id": msg2_id})
+                self.assertEqual(cs, 200)
+                self.assertTrue(rs["steered"])
+                self.assertEqual(len(steer_messages), 1)
+                self.assertIn("look at this", steer_messages[0])
+                self.assertIn("[attachment: ", steer_messages[0])
+                self.assertIn("shot.png]", steer_messages[0])
+
+                # Paired pending placeholder must be removed cleanly (not left behind as a stuck shimmer).
+                self.assertIsNone(store.get_by_id("pend-placeholder-2"))
+                events = self._drain_events(sub)
+                steer_ev = [p for ev, p in events if ev == "message" and p.get("steered")]
+                self.assertEqual(steer_ev[-1].get("removed_message_id"), "pend-placeholder-2")
+
+                release_first.set()
+                self.assertTrue(mgr.wait_idle(timeout=3.0))
+            finally:
+                mgr.unsubscribe(sub)
+
+    def test_steer_t3_queued_run_via_t3_queue_promote_to_steer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tf = os.path.join(tmp, "t3-thread.json")
+            with open(tf, "w", encoding="utf-8") as f:
+                json.dump({"thread_id": "thr-q", "project_id": "proj-1"}, f)
+
+            t3_queued_seen = threading.Event()
+            promoted = threading.Event()
+            queue_calls = []
+            wait_run_ids = []
+
+            class FakeT3QueuedClient:
+                def call_tool(self, name, args=None):
+                    args = args or {}
+                    if name == "t3_thread_read" and args.get("limit") == 1:
+                        return {
+                            "thread": {"latestRunId": "run-ext-1", "activeRunId": "run-ext-1", "status": "running"},
+                            "items": [{"position": 12}],
+                        }
+                    if name == "t3_thread_send":
+                        return {"queuedRunId": "run-q-2", "status": "queued", "activeRunId": "run-ext-1"}
+                    if name == "t3_queue":
+                        queue_calls.append(dict(args))
+                        promoted.set()
+                        return {"ok": True, "targetRunId": "run-ext-1"}
+                    if name == "t3_thread_wait":
+                        rid = args.get("runId")
+                        wait_run_ids.append(rid)
+                        if rid == "run-q-2":
+                            t3_queued_seen.set()
+                            promoted.wait(timeout=3.0)
+                            # Old queued run is cancelled when promoted to steer run-ext-1
+                            return {"status": "cancelled", "runId": "run-q-2"}
+                        if rid == "run-ext-1":
+                            return {"status": "completed", "runId": "run-ext-1"}
+                        return {"timedOut": True}
+                    if name == "t3_thread_read":
+                        return {
+                            "items": [
+                                {
+                                    "itemId": "it-ext-1",
+                                    "type": "assistant_message",
+                                    "runId": "run-ext-1",
+                                    "text": "Promoted steer handled in run-ext-1",
+                                    "textTruncated": False,
+                                }
+                            ],
+                            "hasMore": False,
+                        }
+                    return {}
+
+            adapter = chat_mod.T3GeminiAdapter(
+                client=FakeT3QueuedClient(),
+                thread_file=tf,
+                settings_file=os.path.join(tmp, "none.json"),
+                poll_wait_ms=50,
+                retry_delay=0.0,
+            )
+            store = chat_mod.ChatHistoryStore(os.path.join(tmp, "hist.jsonl"))
+            mgr = chat_mod.ChatManager(
+                store=store,
+                engine_fn=lambda: "gemini",
+                gemini_adapter=adapter,
+                last_channel_file=os.path.join(tmp, "last-channel.json"),
+            )
+            sub = mgr.subscribe()
+            try:
+                c1, r1 = mgr.handle_send({"text": "steer external run"})
+                self.assertEqual(c1, 202)
+                msg_id = r1["user_message"]["id"]
+                self.assertTrue(t3_queued_seen.wait(timeout=3.0))
+
+                # Because T3 reported queuedRunId behind run-ext-1, message is now marked queued=True.
+                _, mid = mgr.handle_get_messages({})
+                self.assertTrue(mid["messages"][0]["queued"])
+                self.assertEqual(mid["queued_ids"], [msg_id])
+
+                cs, rs = mgr.handle_steer({"message_id": msg_id})
+                self.assertEqual(cs, 200)
+                self.assertEqual(rs["status"], "steered")
+                self.assertTrue(rs["steered"])
+                self.assertFalse(rs["user_message"]["queued"])
+                self.assertTrue(rs["user_message"]["steered"])
+
+                self.assertEqual(len(queue_calls), 1)
+                self.assertEqual(
+                    queue_calls[0],
+                    {
+                        "action": "promote_to_steer",
+                        "threadId": "thr-q",
+                        "queuedRunId": "run-q-2",
+                        "targetRunId": "run-ext-1",
+                    },
+                )
+
+                self.assertTrue(mgr.wait_idle(timeout=3.0))
+                self.assertIn("run-ext-1", wait_run_ids)
+
+                _, after = mgr.handle_get_messages({})
+                self.assertFalse(after["running"])
+                self.assertEqual(after["messages"][-1]["status"], "done")
+                self.assertEqual(after["messages"][-1]["text"], "Promoted steer handled in run-ext-1")
+            finally:
+                mgr.unsubscribe(sub)
+
+    def test_steer_race_when_active_turn_finishes_first_does_not_lose_or_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first_started = threading.Event()
+            release_first = threading.Event()
+            send_calls = []
+
+            class RaceAdapter:
+                def send(self, text, *, fresh=False, attachments=None):
+                    send_calls.append(text)
+                    if text == "turn 1":
+                        first_started.set()
+                        release_first.wait(timeout=3.0)
+                        return "reply 1"
+                    return f"reply for {text}"
+
+                def steer(self, text, *, attachments=None, thread_id=None):
+                    # Simulate race: active turn finished in T3 milliseconds before steer reached T3!
+                    release_first.set()
+                    raise RuntimeError("T3 tool error on t3_thread_send: thread is idle (no active run)")
+
+            store = chat_mod.ChatHistoryStore(os.path.join(tmp, "hist.jsonl"))
+            mgr = chat_mod.ChatManager(
+                store=store,
+                engine_fn=lambda: "gemini",
+                gemini_adapter=RaceAdapter(),
+                last_channel_file=os.path.join(tmp, "last-channel.json"),
+            )
+
+            mgr.handle_send({"text": "turn 1"})
+            self.assertTrue(first_started.wait(timeout=3.0))
+
+            c2, r2 = mgr.handle_send({"text": "turn 2"})
+            self.assertEqual(c2, 202)
+            msg2_id = r2["user_message"]["id"]
+            self.assertTrue(r2["user_message"]["queued"])
+
+            # Steer hits the race error -> falls back to executing turn 2 normally without losing it.
+            cs, rs = mgr.handle_steer({"message_id": msg2_id})
+            self.assertEqual(cs, 200)
+            self.assertTrue(rs["ok"])
+            self.assertEqual(rs["status"], "dispatched")
+            self.assertFalse(rs["steered"])
+
+            self.assertTrue(mgr.wait_idle(timeout=3.0))
+            self.assertEqual(send_calls, ["turn 1", "turn 2"])
+
+            _, final = mgr.handle_get_messages({})
+            self.assertFalse(final["running"])
+            self.assertEqual(
+                [(m["role"], m["text"]) for m in final["messages"]],
+                [
+                    ("user", "turn 1"),
+                    ("user", "turn 2"),
+                    ("assistant", "reply 1"),
+                    ("assistant", "reply for turn 2"),
+                ],
+            )
+            self.assertFalse(final["messages"][1]["queued"])
+
+            # Steering an already-completed message is idempotent 200 already_completed.
+            c_again, r_again = mgr.handle_steer({"message_id": msg2_id})
+            self.assertEqual(c_again, 200)
+            self.assertEqual(r_again["status"], "already_completed")
+
+    def test_unsteered_queued_message_transitions_over_sse_and_store_recovers_stale_queued(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hist_path = os.path.join(tmp, "hist.jsonl")
+            first_started = threading.Event()
+            release_first = threading.Event()
+            second_started = threading.Event()
+            release_second = threading.Event()
+
+            class TwoStepAdapter:
+                def send(self, text, *, fresh=False, attachments=None):
+                    if text == "msg A":
+                        first_started.set()
+                        release_first.wait(timeout=3.0)
+                        return "reply A"
+                    second_started.set()
+                    release_second.wait(timeout=3.0)
+                    return "reply B"
+
+            store = chat_mod.ChatHistoryStore(hist_path)
+            mgr = chat_mod.ChatManager(
+                store=store,
+                engine_fn=lambda: "claude",
+                claude_adapter=TwoStepAdapter(),
+                last_channel_file=os.path.join(tmp, "last-channel.json"),
+            )
+            sub = mgr.subscribe()
+            try:
+                mgr.handle_send({"text": "msg A"})
+                self.assertTrue(first_started.wait(timeout=3.0))
+                _, r2 = mgr.handle_send({"text": "msg B"})
+                msg2_id = r2["user_message"]["id"]
+                self.assertTrue(r2["user_message"]["queued"])
+
+                # Release msg A -> msg B should immediately transition queued=False when worker starts it.
+                release_first.set()
+                self.assertTrue(second_started.wait(timeout=3.0))
+                _, mid = mgr.handle_get_messages({})
+                msg_b = next(m for m in mid["messages"] if m["id"] == msg2_id)
+                self.assertFalse(msg_b["queued"])
+                self.assertTrue(mid["running"])
+
+                # Steering msg B while it is already actively executing returns already_running.
+                c_run, r_run = mgr.handle_steer({"message_id": msg2_id})
+                self.assertEqual(c_run, 200)
+                self.assertEqual(r_run["status"], "already_running")
+
+                release_second.set()
+                self.assertTrue(mgr.wait_idle(timeout=3.0))
+
+                events = self._drain_events(sub)
+                msg_b_transitions = [
+                    p["message"]["queued"]
+                    for ev, p in events
+                    if ev == "message" and p["message"]["id"] == msg2_id
+                ]
+                self.assertEqual(msg_b_transitions, [True, False])
+            finally:
+                mgr.unsubscribe(sub)
+
+            # Startup recovery clears any stale queued=True user message after a crash/restart.
+            store.append(
+                {
+                    "id": "stale-queued-user",
+                    "role": "user",
+                    "engine": "claude",
+                    "text": "interrupted queued msg",
+                    "created_at": time.time(),
+                    "status": "done",
+                    "queued": True,
+                }
+            )
+            reloaded = chat_mod.ChatHistoryStore(hist_path)
+            rec = reloaded.get_by_id("stale-queued-user")
+            self.assertIsNotNone(rec)
+            self.assertFalse(rec["queued"])
+
+    def test_http_steer_and_sse_events_accept_chat_token_and_tailnet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            token_path = os.path.join(tmp, "chat-token")
+            secret = "steer-secret-token-xyz"
+            with open(token_path, "w", encoding="utf-8") as f:
+                f.write(secret + "\n")
+
+            first_started = threading.Event()
+            release_first = threading.Event()
+            steered_texts = []
+
+            class FakeHttpSteerAdapter:
+                def send(self, text, *, fresh=False, attachments=None):
+                    first_started.set()
+                    release_first.wait(timeout=3.0)
+                    return "done with steer"
+
+                def steer(self, text, *, attachments=None, thread_id=None):
+                    steered_texts.append(text)
+                    return {"ok": True}
+
+            mgr = chat_mod.ChatManager(
+                store=chat_mod.ChatHistoryStore(os.path.join(tmp, "hist.jsonl")),
+                engine_fn=lambda: "gemini",
+                gemini_adapter=FakeHttpSteerAdapter(),
+                last_channel_file=os.path.join(tmp, "last-channel.json"),
+            )
+
+            patches = [
+                mock.patch.object(pcapi, "CHAT", mgr),
+                mock.patch.object(pcapi, "ALLOWED_LOGINS", {"ayush@example.com"}),
+                mock.patch.object(chat_mod, "CHAT_TOKEN_FILE", token_path),
+            ]
+            for p in patches:
+                p.start()
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), pcapi.H)
+            port = srv.server_address[1]
+            t = threading.Thread(target=srv.serve_forever, daemon=True)
+            t.start()
+            base = f"http://127.0.0.1:{port}"
+            cf_headers = {"X-Forwarded-For": "203.0.113.10", "Authorization": f"Bearer {secret}"}
+            unauth_headers = {"X-Forwarded-For": "203.0.113.10"}
+
+            try:
+                def req(method, path, body=None, headers=None):
+                    h = dict(headers or {})
+                    data = None
+                    if body is not None:
+                        data = json.dumps(body).encode("utf-8")
+                        h["Content-Type"] = "application/json"
+                    r = urllib.request.Request(base + path, data=data, headers=h, method=method)
+                    try:
+                        with urllib.request.urlopen(r, timeout=5) as resp:
+                            return resp.status, json.loads(resp.read().decode("utf-8"))
+                    except urllib.error.HTTPError as e:
+                        raw = e.read().decode("utf-8", errors="replace")
+                        e.close()
+                        return e.code, json.loads(raw)
+
+                # Unauthorized requests rejected on both /steer and /events
+                code_unauth, _ = req("POST", "/pc/api/chat/steer", {"message_id": "x"}, headers=unauth_headers)
+                self.assertEqual(code_unauth, 403)
+                try:
+                    urllib.request.urlopen(
+                        urllib.request.Request(base + "/pc/api/chat/events", headers=unauth_headers), timeout=3
+                    )
+                    self.fail("Expected 403 for unauthenticated SSE")
+                except urllib.error.HTTPError as e:
+                    self.assertEqual(e.code, 403)
+                    e.close()
+
+                # Validation: 400 on missing message_id, 404 on unknown message_id
+                c400, _ = req("POST", "/pc/api/chat/steer", {}, headers=cf_headers)
+                self.assertEqual(c400, 400)
+                c404, _ = req("POST", "/pc/api/chat/steer", {"message_id": "nope"}, headers=cf_headers)
+                self.assertEqual(c404, 404)
+
+                # Open SSE stream using chat bearer token and read initial snapshot + live steer event
+                sse_events = []
+                sse_ready = threading.Event()
+                sse_done = threading.Event()
+
+                def read_sse():
+                    r = urllib.request.Request(base + "/pc/api/chat/events", headers=cf_headers)
+                    with urllib.request.urlopen(r, timeout=5) as resp:
+                        ev_name = None
+                        for raw_line in resp:
+                            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                            if line.startswith("event: "):
+                                ev_name = line[7:].strip()
+                            elif line.startswith("data: "):
+                                payload = json.loads(line[6:])
+                                sse_events.append((ev_name, payload))
+                                if ev_name == "snapshot":
+                                    sse_ready.set()
+                                if ev_name == "message" and payload.get("steered"):
+                                    sse_done.set()
+                                    break
+
+                sse_thread = threading.Thread(target=read_sse, daemon=True)
+                sse_thread.start()
+                self.assertTrue(sse_ready.wait(timeout=3.0))
+
+                c1, _ = req("POST", "/pc/api/chat/send", {"text": "first"}, headers=cf_headers)
+                self.assertEqual(c1, 202)
+                self.assertTrue(first_started.wait(timeout=3.0))
+
+                c2, r2 = req("POST", "/pc/api/chat/send", {"text": "steer me"}, headers=cf_headers)
+                self.assertEqual(c2, 202)
+                self.assertTrue(r2["user_message"]["queued"])
+
+                cs, rs = req("POST", "/pc/api/chat/steer", {"message_id": r2["user_message"]["id"]}, headers=cf_headers)
+                self.assertEqual(cs, 200)
+                self.assertTrue(rs["steered"])
+                self.assertEqual(steered_texts, ["steer me"])
+
+                self.assertTrue(sse_done.wait(timeout=3.0))
+                sse_thread.join(timeout=2.0)
+                self.assertEqual(sse_events[0][0], "snapshot")
+                self.assertTrue(any(ev == "message" and p.get("steered") for ev, p in sse_events))
+
+                release_first.set()
+                self.assertTrue(mgr.wait_idle(timeout=3.0))
+            finally:
+                release_first.set()
+                srv.shutdown()
+                srv.server_close()
+                for p in reversed(patches):
+                    p.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

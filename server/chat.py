@@ -13,6 +13,7 @@ Provides:
 from __future__ import annotations
 
 import base64
+import collections
 import inspect
 import json
 import mimetypes
@@ -322,6 +323,11 @@ class ChatHistoryStore:
                     mid = rec.get("id")
                     if not isinstance(mid, str) or not mid:
                         continue
+                    if rec.get("_deleted"):
+                        if mid in by_id:
+                            del by_id[mid]
+                            ordered_ids = [oid for oid in ordered_ids if oid != mid]
+                        continue
                     if mid not in by_id:
                         ordered_ids.append(mid)
                         by_id[mid] = rec
@@ -341,12 +347,15 @@ class ChatHistoryStore:
                 self._by_client_id[cid] = m["id"]
         self._line_count = line_count
 
-        # Recover any leftover pending assistant messages from an earlier crash/restart.
+        # Recover any leftover pending assistant messages or queued user messages from an earlier crash/restart.
         recovered: list[dict[str, Any]] = []
         for m in self._messages:
             if m.get("role") == "assistant" and m.get("status") == "pending":
                 m["status"] = "error"
                 m["error"] = "Interrupted by server restart"
+                recovered.append(dict(m))
+            elif m.get("role") == "user" and m.get("queued"):
+                m["queued"] = False
                 recovered.append(dict(m))
         if recovered:
             for rec in recovered:
@@ -465,6 +474,29 @@ class ChatHistoryStore:
     def has_pending(self) -> bool:
         with self._lock:
             return any(m.get("status") == "pending" for m in self._messages)
+
+    def remove_pending_assistant_for(self, user_id: str) -> str | None:
+        """Remove a paired pending assistant placeholder for a steered user message, if any."""
+        if not user_id:
+            return None
+        with self._lock:
+            idx = next(
+                (
+                    i
+                    for i in range(len(self._messages) - 1, -1, -1)
+                    if self._messages[i].get("role") == "assistant"
+                    and self._messages[i].get("status") == "pending"
+                    and self._messages[i].get("reply_to") == user_id
+                ),
+                None,
+            )
+            if idx is None:
+                return None
+            removed = self._messages.pop(idx)
+            aid = str(removed["id"])
+            self._by_id.pop(aid, None)
+            self._append_raw_locked({"id": aid, "_deleted": True})
+            return aid
 
 
 # ---------------------------------------------------------------- Gemini (T3 Code MCP) adapter
@@ -875,6 +907,29 @@ def _is_thread_missing_error(exc: Exception) -> bool:
     )
 
 
+def _is_not_running_steer_error(exc: Exception) -> bool:
+    """Return True if a T3 steer/promote call failed because the target run is no longer active/queued."""
+    msg = str(exc).lower()
+    return any(
+        phrase in msg
+        for phrase in (
+            "not running",
+            "no active run",
+            "no running",
+            "thread is idle",
+            "is idle",
+            "not active",
+            "no longer queued",
+            "not queued",
+            "already completed",
+            "already finished",
+            "already running",
+            "cannot steer",
+            "nothing to steer",
+        )
+    )
+
+
 def _callback_accepts_step_id(cb: Callable[..., None] | None) -> tuple[bool, bool]:
     """Return (accepts_step_id_kwarg, accepts_3rd_positional)."""
     if cb is None:
@@ -1250,6 +1305,76 @@ class T3ThreadAdapter:
                 fallback_paths.append(path)
         return t3_atts, fallback_paths
 
+    def steer(
+        self,
+        text: str,
+        *,
+        attachments: list[dict[str, Any]] | None = None,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Deliver a mid-turn steering update to the active persistent T3 thread."""
+        tid = (thread_id or "").strip()
+        if not tid:
+            state = self._read_thread_state()
+            raw_tid = state.get("thread_id")
+            tid = raw_tid.strip() if isinstance(raw_tid, str) else ""
+        if not tid:
+            raise RuntimeError(f"No active {self.engine_label} thread to steer")
+
+        all_paths = [
+            str(a["path"])
+            for a in (attachments or [])
+            if isinstance(a, dict) and isinstance(a.get("path"), str) and a["path"]
+        ]
+        steer_text = _append_attachment_paths(text, all_paths)
+        if not steer_text.strip():
+            raise RuntimeError("Cannot steer with empty message")
+
+        res = self.client.call_tool(
+            "t3_thread_send",
+            {
+                "threadId": tid,
+                "message": steer_text,
+                "mode": "steer",
+            },
+        )
+        return res if isinstance(res, dict) else {}
+
+    def promote_queued_run(
+        self,
+        *,
+        thread_id: str,
+        queued_run_id: str,
+        target_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Promote an already-submitted T3 queued run to steer the currently active run."""
+        tid = thread_id.strip()
+        qrid = queued_run_id.strip()
+        trid = (target_run_id or "").strip()
+        if not tid or not qrid:
+            raise RuntimeError("thread_id and queued_run_id are required")
+        if not trid:
+            try:
+                head = self.client.call_tool(
+                    "t3_thread_read",
+                    {"threadId": tid, "view": "activity", "limit": 1},
+                )
+                head_thread = head.get("thread") if isinstance(head.get("thread"), dict) else {}
+                cand = head_thread.get("activeRunId") or head_thread.get("latestRunId")
+                if isinstance(cand, str) and cand.strip() and cand.strip() != qrid:
+                    trid = cand.strip()
+            except Exception:
+                pass
+        args: dict[str, Any] = {
+            "action": "promote_to_steer",
+            "threadId": tid,
+            "queuedRunId": qrid,
+        }
+        if trid:
+            args["targetRunId"] = trid
+        res = self.client.call_tool("t3_queue", args)
+        return res if isinstance(res, dict) else {}
+
     def send(
         self,
         text: str,
@@ -1257,12 +1382,33 @@ class T3ThreadAdapter:
         fresh: bool = False,
         attachments: list[dict[str, Any]] | None = None,
         on_step: Callable[..., None] | None = None,
+        on_t3_state: Callable[[dict[str, Any]], None] | None = None,
+        get_promoted_run_id: Callable[[], str | None] | None = None,
     ) -> str:
         state = self._read_thread_state()
         thread_id = state.get("thread_id") if isinstance(state.get("thread_id"), str) else None
         start_pos: int | None = None
         prev_latest_run_id: str | None = None
         run_id: str | None = None
+        queued_run_id: str | None = None
+        active_run_id: str | None = None
+        is_t3_queued = False
+
+        def _notify_t3_state() -> None:
+            if on_t3_state is None or not thread_id:
+                return
+            try:
+                on_t3_state(
+                    {
+                        "thread_id": thread_id,
+                        "run_id": run_id,
+                        "queued_run_id": queued_run_id if is_t3_queued else None,
+                        "active_run_id": active_run_id or (run_id if not is_t3_queued else None),
+                        "queued": is_t3_queued,
+                    }
+                )
+            except Exception:
+                pass
 
         all_paths = [
             str(a["path"])
@@ -1281,6 +1427,11 @@ class T3ThreadAdapter:
                 head_thread = head.get("thread") if isinstance(head.get("thread"), dict) else {}
                 prev_rid = head_thread.get("latestRunId")
                 prev_latest_run_id = str(prev_rid).strip() if isinstance(prev_rid, str) and prev_rid.strip() else None
+                head_active = head_thread.get("activeRunId")
+                head_active_run_id = (
+                    str(head_active).strip() if isinstance(head_active, str) and head_active.strip() else None
+                )
+                head_status = str(head_thread.get("status") or "").strip().lower()
                 items = head.get("items") if isinstance(head.get("items"), list) else []
                 if items and isinstance(items[0], dict) and isinstance(items[0].get("position"), int):
                     start_pos = int(items[0]["position"])
@@ -1321,14 +1472,40 @@ class T3ThreadAdapter:
                     sent = self.client.call_tool("t3_thread_send", send_args)
 
                 run_obj = sent.get("run") if isinstance(sent.get("run"), dict) else {}
-                rid = sent.get("runId") or sent.get("queuedRunId") or run_obj.get("runId")
-                run_id = str(rid) if rid else None
+                raw_qrid = sent.get("queuedRunId")
+                sent_queued_run_id = str(raw_qrid).strip() if isinstance(raw_qrid, str) and raw_qrid.strip() else None
+                raw_rid = sent.get("runId") or run_obj.get("runId")
+                sent_run_id = str(raw_rid).strip() if isinstance(raw_rid, str) and raw_rid.strip() else None
+                run_id = sent_run_id or sent_queued_run_id
+                sent_status = str(sent.get("status") or run_obj.get("status") or "").strip().lower()
+                cand_active = sent.get("activeRunId") or sent.get("targetRunId") or head_active_run_id
+                active_run_id = (
+                    str(cand_active).strip() if isinstance(cand_active, str) and cand_active.strip() else None
+                )
+                if (
+                    not active_run_id
+                    and head_status in _T3_IN_PROGRESS_STATUSES
+                    and prev_latest_run_id
+                    and prev_latest_run_id != run_id
+                ):
+                    active_run_id = prev_latest_run_id
+                if sent_queued_run_id and (
+                    sent_status == "queued"
+                    or bool(sent.get("queued"))
+                    or (active_run_id is not None and active_run_id != sent_queued_run_id)
+                ):
+                    queued_run_id = sent_queued_run_id
+                    is_t3_queued = True
+                _notify_t3_state()
             except RuntimeError as exc:
                 if _is_thread_missing_error(exc):
                     thread_id = None
                     start_pos = None
                     prev_latest_run_id = None
                     run_id = None
+                    queued_run_id = None
+                    active_run_id = None
+                    is_t3_queued = False
                 else:
                     raise
 
@@ -1364,6 +1541,7 @@ class T3ThreadAdapter:
                 or thread_obj.get("latestRunId")
             )
             run_id = str(rid) if rid else None
+            active_run_id = run_id
             start_pos = -1
             prev_latest_run_id = None
             state.update(
@@ -1378,6 +1556,7 @@ class T3ThreadAdapter:
                 self._write_thread_state(state)
             except OSError:
                 pass
+            _notify_t3_state()
 
         accepts_kw, accepts_pos3 = _callback_accepts_step_id(on_step)
         activity_pos = start_pos if start_pos is not None else -1
@@ -1385,6 +1564,16 @@ class T3ThreadAdapter:
 
         deadline = time.monotonic() + self.timeout
         while True:
+            promoted_id = get_promoted_run_id() if get_promoted_run_id is not None else None
+            if promoted_id and promoted_id != run_id:
+                run_id = promoted_id
+                queued_run_id = None
+                active_run_id = promoted_id
+                is_t3_queued = False
+                if prev_latest_run_id == run_id:
+                    prev_latest_run_id = None
+                _notify_t3_state()
+
             remaining_ms = int((deadline - time.monotonic()) * 1000)
             if remaining_ms <= 0:
                 raise RuntimeError(f"Timed out waiting for {self.engine_label} reply")
@@ -1395,9 +1584,51 @@ class T3ThreadAdapter:
             if run_id:
                 wait_args["runId"] = run_id
             waited = self.client.call_tool("t3_thread_wait", wait_args)
+
+            # Check again in case promote_to_steer redirected us while t3_thread_wait was blocking.
+            promoted_after = get_promoted_run_id() if get_promoted_run_id is not None else None
+            if promoted_after and promoted_after != run_id:
+                run_id = promoted_after
+                queued_run_id = None
+                active_run_id = promoted_after
+                is_t3_queued = False
+                if prev_latest_run_id == run_id:
+                    prev_latest_run_id = None
+                _notify_t3_state()
+                continue
+
+            waited_thread = waited.get("thread") if isinstance(waited.get("thread"), dict) else {}
+            waited_run = waited.get("run") if isinstance(waited.get("run"), dict) else {}
+            waited_active_rid = waited_thread.get("activeRunId")
+            if isinstance(waited_active_rid, str) and waited_active_rid.strip():
+                waited_active_str = waited_active_rid.strip()
+                if waited_active_str != run_id:
+                    active_run_id = waited_active_str
+                elif is_t3_queued:
+                    is_t3_queued = False
+                    queued_run_id = None
+                    active_run_id = run_id
+                    _notify_t3_state()
+
             run_id, status, timed_out, err_detail, is_stale = self._extract_wait_state(
                 waited, run_id, prev_latest_run_id
             )
+            waited_run_status = str(waited_run.get("status") or waited.get("status") or "").strip().lower()
+            if waited_run_status == "queued" and run_id:
+                if not is_t3_queued or queued_run_id != run_id:
+                    is_t3_queued = True
+                    queued_run_id = run_id
+                    _notify_t3_state()
+            elif is_t3_queued and (
+                waited_run_status in ("running", "starting", "in_progress")
+                or status in _T3_TERMINAL_STATUSES
+                or status == "idle"
+            ):
+                is_t3_queued = False
+                queued_run_id = None
+                active_run_id = run_id
+                _notify_t3_state()
+
             if on_step is not None and not is_stale:
                 activity_pos = self._poll_activity(
                     thread_id,
@@ -1865,12 +2096,79 @@ class ChatManager:
         self.last_channel_file = last_channel_file
         self.progress_min_interval = max(0.0, float(progress_min_interval))
         self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
         self._fresh_next: dict[str, bool] = {"claude": False, "gemini": False}
         self._in_flight = 0
+        self._active_job: dict[str, Any] | None = None
+        self._steering_ids: set[str] = set()
         self._active_progress: dict[str, Any] | None = None
-        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._queue: collections.deque[dict[str, Any]] = collections.deque()
+        self._stop = False
+        self._subscribers: set[queue.Queue[tuple[str, dict[str, Any]] | None]] = set()
         self._worker = threading.Thread(target=self._worker_loop, name="pcapi-chat-worker", daemon=True)
         self._worker.start()
+
+    # ---- SSE pub/sub
+
+    def subscribe(self) -> queue.Queue[tuple[str, dict[str, Any]] | None]:
+        q: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue(maxsize=128)
+        with self._lock:
+            self._subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue[tuple[str, dict[str, Any]] | None]) -> None:
+        with self._lock:
+            self._subscribers.discard(q)
+
+    def _emit(self, event: str, payload: dict[str, Any]) -> None:
+        with self._lock:
+            subs = list(self._subscribers)
+        if not subs:
+            return
+        item = (event, payload)
+        for q in subs:
+            try:
+                q.put_nowait(item)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(item)
+                except Exception:
+                    pass
+
+    def _queued_message_ids_locked(self) -> list[str]:
+        ids = [str(j["user_id"]) for j in self._queue if isinstance(j.get("user_id"), str)]
+        if (
+            self._active_job is not None
+            and self._active_job.get("t3_queued_run_id")
+            and isinstance(self._active_job.get("user_id"), str)
+        ):
+            aid = str(self._active_job["user_id"])
+            if aid not in ids:
+                ids.insert(0, aid)
+        return ids
+
+    def snapshot_state(self) -> dict[str, Any]:
+        with self._lock:
+            running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+            queued_ids = self._queued_message_ids_locked()
+            p = self._active_progress
+            prog = (
+                {
+                    "engine": p["engine"],
+                    "started": p["started"],
+                    "steps": [dict(s) for s in p["steps"]],
+                }
+                if p is not None
+                else None
+            )
+        return {
+            "engine": self._current_engine(),
+            "running": running,
+            "progress": prog,
+            "queued_ids": queued_ids,
+            "ts": int(self.clock()),
+        }
 
     def _record_last_channel(self, ts: float) -> None:
         path = self.last_channel_file or os.environ.get("PCAPI_LAST_CHANNEL_FILE") or LAST_CHANNEL_FILE
@@ -1906,34 +2204,71 @@ class ChatManager:
 
     def is_running(self) -> bool:
         with self._lock:
-            return self._in_flight > 0 or self.store.has_pending()
+            return self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
 
     def _new_id(self) -> str:
         return secrets.token_hex(8)
 
     def _worker_loop(self) -> None:
         while True:
-            job = self._queue.get()
-            if job is None:
-                self._queue.task_done()
-                return
+            with self._lock:
+                while not self._queue and not self._stop:
+                    self._cond.wait()
+                if self._stop:
+                    return
+                job = self._queue.popleft()
+                self._active_job = job
+                was_queued = bool(job.get("queued"))
+                job["queued"] = False
+
+            if was_queued:
+                updated = self.store.update(job["user_id"], queued=False)
+                if updated is not None:
+                    self._emit(
+                        "message",
+                        {
+                            "message": _public_message(updated),
+                            "running": True,
+                            "engine": job["engine"],
+                            "ts": int(self.clock()),
+                        },
+                    )
+
+            msg_rec: dict[str, Any] | None = None
             try:
-                self._execute_job(job)
+                msg_rec = self._execute_job(job)
             finally:
                 with self._lock:
+                    if self._active_job is job:
+                        self._active_job = None
                     self._in_flight = max(0, self._in_flight - 1)
-                self._queue.task_done()
+                    still_running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+                if msg_rec is not None:
+                    self._emit(
+                        "message",
+                        {
+                            "message": _public_message(msg_rec),
+                            "running": still_running,
+                            "engine": job["engine"],
+                            "progress": None if not still_running else self._snapshot_active_progress(),
+                            "ts": int(self.clock()),
+                        },
+                    )
 
     @staticmethod
-    def _adapter_accepts_on_step(adapter: Any) -> bool:
+    def _callable_accepts_param(fn: Any, param_name: str) -> bool:
         try:
-            sig = inspect.signature(adapter.send)
+            sig = inspect.signature(fn)
         except (TypeError, ValueError):
             return False
         for param in sig.parameters.values():
-            if param.kind == inspect.Parameter.VAR_KEYWORD or param.name == "on_step":
+            if param.kind == inspect.Parameter.VAR_KEYWORD or param.name == param_name:
                 return True
         return False
+
+    @classmethod
+    def _adapter_accepts_on_step(cls, adapter: Any) -> bool:
+        return cls._callable_accepts_param(getattr(adapter, "send", None), "on_step")
 
     def _snapshot_active_progress(self) -> dict[str, Any] | None:
         with self._lock:
@@ -1946,7 +2281,7 @@ class ChatManager:
                 "steps": [dict(s) for s in p["steps"]],
             }
 
-    def _execute_job(self, job: dict[str, Any]) -> None:
+    def _execute_job(self, job: dict[str, Any]) -> dict[str, Any] | None:
         engine = job["engine"]
         user_id = job["user_id"]
         text = job["text"]
@@ -1968,13 +2303,28 @@ class ChatManager:
                 return
             with progress_lock:
                 snap_steps = [{"t": s["t"], "text": s["text"]} for s in raw_steps[-MAX_PROGRESS_STEPS:]]
+            snap: dict[str, Any] | None = None
             with self._lock:
                 if not job_finished.is_set():
-                    self._active_progress = {
+                    snap = {
                         "engine": engine,
                         "started": started_ts,
                         "steps": snap_steps,
                     }
+                    self._active_progress = snap
+            if snap is not None:
+                self._emit(
+                    "progress",
+                    {
+                        "running": True,
+                        "progress": {
+                            "engine": snap["engine"],
+                            "started": snap["started"],
+                            "steps": [dict(s) for s in snap["steps"]],
+                        },
+                        "ts": int(self.clock()),
+                    },
+                )
 
         def on_step(step_text: str, kind: str = "tool", step_id: str | None = None) -> None:
             nonlocal last_publish
@@ -2021,6 +2371,42 @@ class ChatManager:
             if should_publish:
                 _publish_progress()
 
+        def on_t3_state(t3_state: dict[str, Any]) -> None:
+            if job_finished.is_set() or not isinstance(t3_state, dict):
+                return
+            new_queued = bool(t3_state.get("queued"))
+            changed_msg: dict[str, Any] | None = None
+            with self._lock:
+                if self._active_job is not job:
+                    return
+                if t3_state.get("thread_id"):
+                    job["t3_thread_id"] = str(t3_state["thread_id"])
+                if t3_state.get("run_id"):
+                    job["t3_run_id"] = str(t3_state["run_id"])
+                job["t3_queued_run_id"] = (
+                    str(t3_state["queued_run_id"]) if t3_state.get("queued_run_id") else None
+                )
+                if t3_state.get("active_run_id"):
+                    job["t3_active_run_id"] = str(t3_state["active_run_id"])
+                cur_msg = self.store.get_by_id(user_id)
+                if cur_msg is not None and bool(cur_msg.get("queued")) != new_queued:
+                    changed_msg = self.store.update(user_id, queued=new_queued)
+            if changed_msg is not None:
+                self._emit(
+                    "message",
+                    {
+                        "message": _public_message(changed_msg),
+                        "running": True,
+                        "engine": engine,
+                        "ts": int(self.clock()),
+                    },
+                )
+
+        def get_promoted_run_id() -> str | None:
+            with self._lock:
+                val = job.get("t3_promoted_target_run_id")
+                return str(val) if isinstance(val, str) and val else None
+
         with self._lock:
             self._active_progress = {
                 "engine": engine,
@@ -2044,16 +2430,21 @@ class ChatManager:
                 "steps": [{"t": s["t"], "text": s["text"]} for s in steps_copy[-MAX_PROGRESS_STEPS:]],
             }
 
+        msg_rec: dict[str, Any] | None = None
         try:
             send_kwargs: dict[str, Any] = {"fresh": fresh}
             if attachments:
                 send_kwargs["attachments"] = attachments
             if self._adapter_accepts_on_step(adapter):
                 send_kwargs["on_step"] = on_step
+            if self._callable_accepts_param(getattr(adapter, "send", None), "on_t3_state"):
+                send_kwargs["on_t3_state"] = on_t3_state
+            if self._callable_accepts_param(getattr(adapter, "send", None), "get_promoted_run_id"):
+                send_kwargs["get_promoted_run_id"] = get_promoted_run_id
             raw_reply = adapter.send(text, **send_kwargs)
             reply = str(raw_reply or "").strip() or "(no response)"
             final_progress = _build_final_progress()
-            msg_rec: dict[str, Any] = {
+            msg_rec = {
                 "id": self._new_id(),
                 "role": "assistant",
                 "engine": engine,
@@ -2090,8 +2481,24 @@ class ChatManager:
                 if flush_timer[0] is not None:
                     flush_timer[0].cancel()
                     flush_timer[0] = None
+            cleared_user: dict[str, Any] | None = None
             with self._lock:
                 self._active_progress = None
+                job["t3_queued_run_id"] = None
+                cur_u = self.store.get_by_id(user_id)
+                if cur_u is not None and cur_u.get("queued"):
+                    cleared_user = self.store.update(user_id, queued=False)
+            if cleared_user is not None:
+                self._emit(
+                    "message",
+                    {
+                        "message": _public_message(cleared_user),
+                        "running": self.is_running(),
+                        "engine": engine,
+                        "ts": int(self.clock()),
+                    },
+                )
+        return msg_rec
 
     def _push_reply(self, title: str, body: str, *, is_error: bool = False) -> bool:
         if self.notify is None:
@@ -2111,11 +2518,20 @@ class ChatManager:
     def wait_idle(self, timeout: float = 5.0) -> bool:
         """Test helper: wait until queued jobs finish."""
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not self.is_running() and self._queue.empty():
+        while True:
+            with self._lock:
+                idle = (
+                    self._in_flight == 0
+                    and not self._queue
+                    and self._active_job is None
+                    and not self._steering_ids
+                    and not self.store.has_pending()
+                )
+            if idle:
                 return True
+            if time.monotonic() >= deadline:
+                return False
             time.sleep(0.02)
-        return not self.is_running() and self._queue.empty()
 
     # ---- attachment storage
 
@@ -2206,11 +2622,25 @@ class ChatManager:
         except ValueError:
             return 400, {"error": "limit must be an integer"}
         messages, has_more = self.store.get_messages(before=before, limit=limit)
+        with self._lock:
+            queued_ids = self._queued_message_ids_locked()
+            running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+            p = self._active_progress
+            prog = (
+                {
+                    "engine": p["engine"],
+                    "started": p["started"],
+                    "steps": [dict(s) for s in p["steps"]],
+                }
+                if p is not None
+                else None
+            )
         return 200, {
             "messages": [_public_message(m) for m in messages],
             "engine": self._current_engine(),
-            "running": self.is_running(),
-            "progress": self._snapshot_active_progress(),
+            "running": running,
+            "progress": prog,
+            "queued_ids": queued_ids,
             "has_more": has_more,
             "ts": int(self.clock()),
         }
@@ -2305,6 +2735,7 @@ class ChatManager:
             reply_target = self.store.get_by_id(reply_to_id) if reply_to_id else None
             reply_to_obj = _build_reply_to(reply_target) if reply_target is not None else None
             dispatch_text = _prepend_reply_context(reply_target, text) if reply_target is not None else text
+            is_queued = self._in_flight > 0
 
             user_msg = self.store.append(
                 {
@@ -2315,6 +2746,7 @@ class ChatManager:
                     "created_at": now,
                     "status": "done",
                     "error": None,
+                    "queued": is_queued,
                     **({"client_id": client_id} if client_id else {}),
                     **({"attachments": resolved_atts} if resolved_atts else {}),
                     **({"reply_to": reply_to_obj} if reply_to_obj is not None else {}),
@@ -2324,25 +2756,328 @@ class ChatManager:
             if fresh:
                 self._fresh_next[engine] = False
             self._in_flight += 1
-            self._queue.put(
+            self._queue.append(
                 {
                     "engine": engine,
                     "text": dispatch_text,
                     "user_id": user_id,
                     "fresh": fresh,
+                    "queued": is_queued,
                     **({"attachments": resolved_atts} if resolved_atts else {}),
                 }
             )
+            self._cond.notify()
 
         self._record_last_channel(now)
+        pub_user = _public_message(user_msg)
+        self._emit(
+            "message",
+            {
+                "message": pub_user,
+                "running": True,
+                "engine": engine,
+                "ts": int(now),
+            },
+        )
 
         return 202, {
             "ok": True,
             "deduped": False,
-            "user_message": _public_message(user_msg),
+            "user_message": pub_user,
             "assistant_message": None,
             "engine": engine,
             "running": True,
+        }
+
+    def handle_steer(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Promote a queued user message to steer the currently active turn immediately."""
+        raw_id = body.get("message_id")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            return 400, {"error": "message_id is required"}
+        msg_id = raw_id.strip()
+
+        msg = self.store.get_by_id(msg_id)
+        if msg is None or msg.get("role") != "user":
+            return 404, {"error": "message not found"}
+
+        mode = ""
+        job: dict[str, Any] | None = None
+        active_job: dict[str, Any] | None = None
+        t3_thread_id: str | None = None
+        t3_queued_run_id: str | None = None
+        t3_active_run_id: str | None = None
+        updated_msg: dict[str, Any] | None = None
+        emit_stale_clear = False
+
+        with self._lock:
+            if msg_id in self._steering_ids:
+                cur = self.store.get_by_id(msg_id) or msg
+                return 200, {
+                    "ok": True,
+                    "status": "steering",
+                    "steered": False,
+                    "user_message": _public_message(cur),
+                    "running": self._in_flight > 0 or bool(self._queue) or self.store.has_pending(),
+                }
+
+            queued_idx = next(
+                (i for i, j in enumerate(self._queue) if j.get("user_id") == msg_id),
+                None,
+            )
+            if queued_idx is not None:
+                job = self._queue[queued_idx]
+                active_job = self._active_job
+                if active_job is None:
+                    # Race: active turn just completed before steer ran; promote to front of local queue.
+                    del self._queue[queued_idx]
+                    job["queued"] = False
+                    self._queue.appendleft(job)
+                    self._cond.notify()
+                    updated_msg = self.store.update(msg_id, queued=False) or msg
+                    mode = "dispatched"
+                else:
+                    engine = job["engine"]
+                    adapter = self.gemini_adapter if engine == "gemini" else self.claude_adapter
+                    if job.get("fresh") or engine != active_job.get("engine") or not hasattr(adapter, "steer"):
+                        return 409, {"error": "Cannot steer this message into the active turn"}
+                    del self._queue[queued_idx]
+                    self._steering_ids.add(msg_id)
+                    t3_thread_id = active_job.get("t3_thread_id")
+                    mode = "local_steer"
+            elif self._active_job is not None and self._active_job.get("user_id") == msg_id:
+                active_job = self._active_job
+                t3_queued_run_id = active_job.get("t3_queued_run_id")
+                t3_thread_id = active_job.get("t3_thread_id")
+                t3_active_run_id = active_job.get("t3_active_run_id")
+                engine = active_job["engine"]
+                adapter = self.gemini_adapter if engine == "gemini" else self.claude_adapter
+                if t3_queued_run_id and t3_thread_id and hasattr(adapter, "promote_queued_run"):
+                    self._steering_ids.add(msg_id)
+                    mode = "t3_promote"
+                else:
+                    cur = self.store.get_by_id(msg_id) or msg
+                    if cur.get("queued"):
+                        updated_msg = self.store.update(msg_id, queued=False) or cur
+                        emit_stale_clear = True
+                    else:
+                        updated_msg = cur
+                    mode = "already_running"
+            else:
+                cur = self.store.get_by_id(msg_id) or msg
+                if cur.get("queued"):
+                    updated_msg = self.store.update(msg_id, queued=False) or cur
+                    emit_stale_clear = True
+                else:
+                    updated_msg = cur
+                mode = "already_steered" if updated_msg.get("steered") else "already_completed"
+
+        if mode == "dispatched":
+            assert updated_msg is not None
+            pub = _public_message(updated_msg)
+            running = self.is_running()
+            self._emit(
+                "message",
+                {
+                    "message": pub,
+                    "running": running,
+                    "engine": updated_msg.get("engine") or self._current_engine(),
+                    "ts": int(self.clock()),
+                },
+            )
+            return 200, {
+                "ok": True,
+                "status": "dispatched",
+                "steered": False,
+                "user_message": pub,
+                "running": running,
+            }
+
+        if mode in ("already_running", "already_steered", "already_completed"):
+            assert updated_msg is not None
+            pub = _public_message(updated_msg)
+            running = self.is_running()
+            if emit_stale_clear:
+                self._emit(
+                    "message",
+                    {
+                        "message": pub,
+                        "running": running,
+                        "engine": updated_msg.get("engine") or self._current_engine(),
+                        "ts": int(self.clock()),
+                    },
+                )
+            return 200, {
+                "ok": True,
+                "status": mode,
+                "steered": mode == "already_steered",
+                "user_message": pub,
+                "running": running,
+            }
+
+        if mode == "local_steer":
+            assert job is not None
+            engine = job["engine"]
+            adapter = self.gemini_adapter if engine == "gemini" else self.claude_adapter
+            try:
+                steer_kwargs: dict[str, Any] = {}
+                if job.get("attachments") and self._callable_accepts_param(adapter.steer, "attachments"):
+                    steer_kwargs["attachments"] = job["attachments"]
+                if t3_thread_id and self._callable_accepts_param(adapter.steer, "thread_id"):
+                    steer_kwargs["thread_id"] = t3_thread_id
+                adapter.steer(job["text"], **steer_kwargs)
+            except Exception as exc:
+                is_race = _is_not_running_steer_error(exc)
+                with self._lock:
+                    self._steering_ids.discard(msg_id)
+                    active_gone = self._active_job is None
+                    if is_race or active_gone:
+                        # Active turn finished before steer reached T3: put back at front so worker executes it next.
+                        job["queued"] = False if active_gone else True
+                        self._queue.appendleft(job)
+                        self._cond.notify()
+                        updated = self.store.update(msg_id, queued=job["queued"]) or msg
+                    else:
+                        # Genuine failure while active turn is still running: preserve message in queue.
+                        job["queued"] = True
+                        self._queue.appendleft(job)
+                        self._cond.notify()
+                        updated = self.store.get_by_id(msg_id) or msg
+                    running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+                pub = _public_message(updated)
+                if is_race or active_gone:
+                    self._emit(
+                        "message",
+                        {
+                            "message": pub,
+                            "running": running,
+                            "engine": engine,
+                            "ts": int(self.clock()),
+                        },
+                    )
+                    return 200, {
+                        "ok": True,
+                        "status": "dispatched",
+                        "steered": False,
+                        "user_message": pub,
+                        "running": running,
+                    }
+                return 502, {
+                    "error": _clip(str(exc) or "Failed to steer message", 240),
+                    "user_message": pub,
+                    "running": running,
+                }
+
+            removed_pending_id: str | None = None
+            with self._lock:
+                self._steering_ids.discard(msg_id)
+                self._in_flight = max(0, self._in_flight - 1)
+                if active_job is not None:
+                    active_job.setdefault("steered_user_ids", []).append(msg_id)
+                updated = self.store.update(msg_id, queued=False, steered=True) or msg
+                removed_pending_id = self.store.remove_pending_assistant_for(msg_id)
+                still_running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+            pub = _public_message(updated)
+            self._emit(
+                "message",
+                {
+                    "message": pub,
+                    "running": still_running,
+                    "engine": engine,
+                    "steered": True,
+                    **({"removed_message_id": removed_pending_id} if removed_pending_id else {}),
+                    "ts": int(self.clock()),
+                },
+            )
+            return 200, {
+                "ok": True,
+                "status": "steered",
+                "steered": True,
+                "user_message": pub,
+                "running": still_running,
+            }
+
+        # mode == "t3_promote"
+        assert active_job is not None and t3_thread_id and t3_queued_run_id
+        engine = active_job["engine"]
+        adapter = self.gemini_adapter if engine == "gemini" else self.claude_adapter
+        try:
+            promote_res = adapter.promote_queued_run(
+                thread_id=t3_thread_id,
+                queued_run_id=t3_queued_run_id,
+                target_run_id=t3_active_run_id,
+            )
+        except Exception as exc:
+            is_race = _is_not_running_steer_error(exc)
+            with self._lock:
+                self._steering_ids.discard(msg_id)
+                if is_race:
+                    if self._active_job is active_job:
+                        active_job["t3_queued_run_id"] = None
+                    updated = self.store.update(msg_id, queued=False) or msg
+                else:
+                    updated = self.store.get_by_id(msg_id) or msg
+                still_running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+            pub = _public_message(updated)
+            if is_race:
+                self._emit(
+                    "message",
+                    {
+                        "message": pub,
+                        "running": still_running,
+                        "engine": engine,
+                        "ts": int(self.clock()),
+                    },
+                )
+                return 200, {
+                    "ok": True,
+                    "status": "already_running",
+                    "steered": False,
+                    "user_message": pub,
+                    "running": still_running,
+                }
+            return 502, {
+                "error": _clip(str(exc) or "Failed to promote queued run", 240),
+                "user_message": pub,
+                "running": still_running,
+            }
+
+        promoted_target = (
+            str(
+                (promote_res.get("targetRunId") if isinstance(promote_res, dict) else None)
+                or (promote_res.get("runId") if isinstance(promote_res, dict) else None)
+                or t3_active_run_id
+                or ""
+            ).strip()
+            or None
+        )
+        removed_pending_id = None
+        with self._lock:
+            self._steering_ids.discard(msg_id)
+            if self._active_job is active_job:
+                active_job["t3_queued_run_id"] = None
+                if promoted_target:
+                    active_job["t3_promoted_target_run_id"] = promoted_target
+            updated = self.store.update(msg_id, queued=False, steered=True) or msg
+            removed_pending_id = self.store.remove_pending_assistant_for(msg_id)
+            still_running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+        pub = _public_message(updated)
+        self._emit(
+            "message",
+            {
+                "message": pub,
+                "running": still_running,
+                "engine": engine,
+                "steered": True,
+                **({"removed_message_id": removed_pending_id} if removed_pending_id else {}),
+                "ts": int(self.clock()),
+            },
+        )
+        return 200, {
+            "ok": True,
+            "status": "steered",
+            "steered": True,
+            "user_message": pub,
+            "running": still_running,
         }
 
     def handle_push(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -2363,27 +3098,39 @@ class ChatManager:
         else:
             return 400, {"error": "engine must be claude or gemini"}
 
+        now = float(self.clock())
         msg = self.store.append(
             {
                 "id": self._new_id(),
                 "role": "assistant",
                 "engine": engine,
                 "text": text,
-                "created_at": float(self.clock()),
+                "created_at": now,
                 "status": "done",
                 "error": None,
             }
+        )
+        pub = _public_message(msg)
+        self._emit(
+            "message",
+            {
+                "message": pub,
+                "running": self.is_running(),
+                "engine": engine,
+                "ts": int(now),
+            },
         )
         label = "Gemini" if engine == "gemini" else "Claude"
         pushed = self._push_reply(label, text, is_error=False)
         return 200, {
             "ok": True,
-            "message": _public_message(msg),
+            "message": pub,
             "pushed": pushed,
         }
 
     def handle_new(self, _body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
         engine = self._current_engine()
+        now = float(self.clock())
         with self._lock:
             self._fresh_next[engine] = True
             boundary = self.store.append(
@@ -2393,12 +3140,21 @@ class ChatManager:
                     "kind": "session_break",
                     "engine": engine,
                     "text": "New conversation",
-                    "created_at": float(self.clock()),
+                    "created_at": now,
                     "status": "done",
                     "error": None,
                 }
             )
-            running = self._in_flight > 0 or self.store.has_pending()
+            running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+        self._emit(
+            "message",
+            {
+                "message": _public_message(boundary),
+                "running": running,
+                "engine": engine,
+                "ts": int(now),
+            },
+        )
         return 200, {
             "ok": True,
             "engine": engine,

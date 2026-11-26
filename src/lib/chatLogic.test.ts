@@ -8,6 +8,7 @@ import {
   buildChatAttachmentSource,
   buildChatListItems,
   buildReplyRef,
+  canSteerQueuedMessage,
   chatAttachmentRequiresFetch,
   ChatMessage,
   computeAndroidKeyboardOffset,
@@ -33,9 +34,11 @@ import {
   mergeChatMessages,
   normalizeChatUrl,
   normalizeMarkdownForDisplay,
+  parseChatSseBlocks,
   parseInlineTokens,
   parseMessageSegments,
   prependOlderMessages,
+  reconcileQueuedMessages,
   replySenderLabel,
   resolveChatLinkUrl,
   resolveChatTarget,
@@ -49,6 +52,7 @@ import {
   SWIPE_REPLY_MAX_DRAG,
   SWIPE_REPLY_THRESHOLD,
   THINKING_INDICATOR_ID,
+  upsertChatMessage,
 } from './chatLogic';
 
 function memBackend(): CacheBackend {
@@ -1244,4 +1248,95 @@ test('isRenderableImageUrl and deriveImageDisplayName handle URLs and alt text c
   assert.equal(deriveImageDisplayName('Dark Wallpaper', 'https://example.com/x.png'), 'Dark Wallpaper');
   assert.equal(deriveImageDisplayName('', 'https://example.com/walls/amoled%20night.png?w=1080'), 'amoled night.png');
   assert.equal(deriveImageDisplayName('', 'data:image/png;base64,AQID'), 'Image');
+});
+
+test('canSteerQueuedMessage, upsertChatMessage, reconcileQueuedMessages, and parseChatSseBlocks handle steering lifecycle', () => {
+  const runningUser: ChatMessage = {
+    id: 'u1',
+    role: 'user',
+    engine: 'gemini',
+    text: 'first',
+    created_at: 10,
+    status: 'done',
+    queued: false,
+  };
+  const queuedUser: ChatMessage = {
+    id: 'u2',
+    role: 'user',
+    engine: 'gemini',
+    text: 'second',
+    created_at: 11,
+    status: 'done',
+    client_id: 'c2',
+    queued: true,
+  };
+  const optQueued: ChatMessage = { ...queuedUser, id: 'opt-u-c2', optimistic: true };
+
+  assert.equal(canSteerQueuedMessage(queuedUser, true), true);
+  assert.equal(canSteerQueuedMessage(queuedUser, false), false);
+  assert.equal(canSteerQueuedMessage(optQueued, true), false);
+  assert.equal(canSteerQueuedMessage(runningUser, true), false);
+
+  // shouldPollChat stays true if any message is queued
+  assert.equal(shouldPollChat([runningUser, queuedUser], false, true, true), true);
+
+  // upsertChatMessage confirms optimistic bubble by client_id and clears paired placeholder
+  const pendingPlaceholder: ChatMessage = {
+    id: 'a-pend',
+    role: 'assistant',
+    engine: 'gemini',
+    text: '',
+    created_at: 12,
+    status: 'pending',
+    reply_to: 'u2',
+  };
+  const confirmed = upsertChatMessage([runningUser, optQueued, pendingPlaceholder], queuedUser);
+  assert.deepEqual(
+    confirmed.map((m) => [m.id, m.queued, m.optimistic]),
+    [
+      ['u1', false, undefined],
+      ['u2', true, false],
+      ['a-pend', undefined, undefined],
+    ],
+  );
+
+  const steered = upsertChatMessage(confirmed, { ...queuedUser, queued: false, steered: true }, 'a-pend');
+  assert.deepEqual(
+    steered.map((m) => [m.id, m.queued, m.steered]),
+    [
+      ['u1', false, undefined],
+      ['u2', false, true],
+    ],
+  );
+
+  // reconcileQueuedMessages clears stale queued flags based on server snapshot
+  const reconciled = reconcileQueuedMessages([runningUser, queuedUser], [], true);
+  assert.equal(reconciled[1].queued, false);
+  const kept = reconcileQueuedMessages([runningUser, queuedUser], ['u2'], true);
+  assert.equal(kept, kept);
+  assert.equal(kept[1].queued, true);
+  const idleCleared = reconcileQueuedMessages([runningUser, queuedUser], ['u2'], false);
+  assert.equal(idleCleared[1].queued, false);
+
+  // parseChatSseBlocks parses snapshot, message, progress, ignores comments and preserves incomplete tail
+  const raw =
+    ': ping\n\n' +
+    'event: snapshot\ndata: {"engine":"gemini","running":true,"queued_ids":["u2"],"ts":100}\n\n' +
+    'event: message\ndata: {"message":{"id":"u2","role":"user","engine":"gemini","text":"second","created_at":11,"status":"done","queued":false,"steered":true},"running":true,"steered":true,"ts":101}\n\n' +
+    'event: progress\ndata: {"running":true,"progress":{"engine":"gemini","started":10,"steps":[{"t":11,"text":"reading file"}]},"ts":102}\n\n' +
+    'event: message\ndata: {"partial":true';
+  const parsed = parseChatSseBlocks(raw);
+  assert.equal(parsed.events.length, 3);
+  assert.equal(parsed.events[0].event, 'snapshot');
+  if (parsed.events[0].event === 'snapshot') {
+    assert.deepEqual(parsed.events[0].data.queued_ids, ['u2']);
+    assert.equal(parsed.events[0].data.running, true);
+  }
+  assert.equal(parsed.events[1].event, 'message');
+  if (parsed.events[1].event === 'message') {
+    assert.equal(parsed.events[1].data.steered, true);
+    assert.equal(parsed.events[1].data.message.queued, false);
+  }
+  assert.equal(parsed.events[2].event, 'progress');
+  assert.equal(parsed.rest, 'event: message\ndata: {"partial":true');
 });

@@ -4345,6 +4345,8 @@ class H(BaseHTTPRequestHandler):
                     return self.send_ota_file(ota_name, refresh=refresh)
             if path == "/api/chat/messages":
                 return self.send_json(*_chat_manager().handle_get_messages(qs))
+            if path == "/api/chat/events":
+                return self.sse_chat()
             if path == "/api/chat/agent":
                 return self.send_json(200, AGENT_SETTINGS.get())
             if path == "/api/chat/link-preview":
@@ -4440,6 +4442,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*_chat_manager().handle_upload(b))
             if path == "/api/chat/send":
                 return self.send_json(*_chat_manager().handle_send(b))
+            if path == "/api/chat/steer":
+                return self.send_json(*_chat_manager().handle_steer(b))
             if path == "/api/chat/push":
                 return self.send_json(*_chat_manager().handle_push(b))
             if path == "/api/chat/new":
@@ -4569,6 +4573,35 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.close_connection = True
             self.write_event("snapshot", {"jobs": mgr.snapshot_jobs(), "ts": int(time.time())})
+            self.wfile.write(b"retry: 3000\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    msg = q.get(timeout=20)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                if msg is None:
+                    break
+                self.write_event(*msg)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            mgr.unsubscribe(q)
+
+    def sse_chat(self):
+        mgr = _chat_manager()
+        q = mgr.subscribe()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            self.close_connection = True
+            self.write_event("snapshot", mgr.snapshot_state())
             self.wfile.write(b"retry: 3000\n\n")
             self.wfile.flush()
             while True:

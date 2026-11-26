@@ -62,6 +62,8 @@ import {
   resolveChatAttachmentSource,
   sendChatMessage,
   startNewChat,
+  steerChatMessage,
+  subscribeChatEvents,
   switchChatAgent,
   syncNativeChatConfig,
   updateChatAgentSettings,
@@ -71,6 +73,7 @@ import {
   attachmentImageCacheKey,
   buildChatListItems,
   buildReplyRef,
+  canSteerQueuedMessage,
   CHAT_STATE_CACHE_KEY,
   ChatAttachment,
   chatAttachmentRequiresFetch,
@@ -105,6 +108,7 @@ import {
   parseInlineTokens,
   parseMessageSegments,
   prependOlderMessages,
+  reconcileQueuedMessages,
   replySenderLabel,
   resolveChatLinkUrl,
   shouldCaptureSwipeReply,
@@ -112,6 +116,7 @@ import {
   SWIPE_REPLY_RESET_THRESHOLD,
   SWIPE_REPLY_THRESHOLD,
   TableAlignment,
+  upsertChatMessage,
 } from '../lib/chatLogic';
 import { radius, screenPad, space, Theme, useTheme } from '../theme';
 import { setHasActiveDraft } from '../lib/otaTriggerLogic';
@@ -121,6 +126,8 @@ const GEMINI_ICON = require('../../assets/brand-gemini.png');
 const CACHE_AGENT_SETTINGS = 'agent:settings';
 const CACHE_AGENT_STATE = 'agent:state';
 const POLL_INTERVAL_MS = 1000;
+const SSE_FALLBACK_POLL_INTERVAL_MS = 3000;
+const STEER_HIT_SLOP = { top: 10, bottom: 10, left: 10, right: 8 };
 const KEYBOARD_BREATHING_ROOM = 12;
 const MAX_ATTACHMENTS = 4;
 const COPY_TOAST_DURATION_MS = 1500;
@@ -1586,10 +1593,14 @@ function CopyIconButton({
 type MessageBubbleProps = {
   msg: ChatMessage;
   canRetry: boolean;
+  isQueued: boolean;
+  canSteer: boolean;
+  isSteering: boolean;
   onLongPress: (msg: ChatMessage) => void;
   onReply: (msg: ChatMessage) => void;
   onCopy: (text: string) => void;
   onRetry: (msg: ChatMessage) => void;
+  onSteer: (msg: ChatMessage) => void;
   onPressReplyQuote: (replyId: string) => void;
   onCopyCode: (code: string) => void;
   onPressImage: (img: PreviewImageItem) => void;
@@ -1598,10 +1609,14 @@ type MessageBubbleProps = {
 const MessageBubble = React.memo(function MessageBubble({
   msg,
   canRetry,
+  isQueued,
+  canSteer,
+  isSteering,
   onLongPress,
   onReply,
   onCopy,
   onRetry,
+  onSteer,
   onPressReplyQuote,
   onCopyCode,
   onPressImage,
@@ -1729,19 +1744,47 @@ const MessageBubble = React.memo(function MessageBubble({
   if (isUser) {
     return (
       <SwipeableMessageRow msg={msg} enabled={canSwipeReply} onSwipeReply={onReply}>
-        <View style={[st.bubbleRow, st.bubbleRowUser]}>
-          <Pressable
-            onLongPress={handleLongPress}
-            delayLongPress={260}
-            style={({ pressed }) => [
-              st.bubble,
-              st.bubbleUser,
-              { backgroundColor: t.cardAlt },
-              pressed && canOpenActions && { opacity: 0.84 },
-            ]}
-          >
-            {messageContent}
-          </Pressable>
+        <View style={st.userGroup}>
+          <View style={[st.bubbleRow, st.bubbleRowUser]}>
+            <Pressable
+              onLongPress={handleLongPress}
+              delayLongPress={260}
+              style={({ pressed }) => [
+                st.bubble,
+                st.bubbleUser,
+                { backgroundColor: t.cardAlt },
+                pressed && canOpenActions && { opacity: 0.84 },
+              ]}
+            >
+              {messageContent}
+            </Pressable>
+          </View>
+          {isQueued ? (
+            <View style={st.userQueuedRow}>
+              <Text style={[st.queuedLabel, { color: t.textFaint }]}>Queued</Text>
+              {canSteer ? (
+                <>
+                  <Text style={[st.queuedSep, { color: t.textFaint }]}>·</Text>
+                  <Pressable
+                    onPress={() => onSteer(msg)}
+                    disabled={isSteering}
+                    hitSlop={STEER_HIT_SLOP}
+                    accessibilityRole="button"
+                    accessibilityLabel={isSteering ? 'Sending queued message now' : 'Send queued message now'}
+                    style={({ pressed }) => [
+                      st.sendNowBtn,
+                      { opacity: isSteering ? 0.55 : pressed ? 0.65 : 1 },
+                    ]}
+                  >
+                    {isSteering ? <ActivityIndicator size={11} color={t.accent} /> : null}
+                    <Text style={[st.sendNowText, { color: t.accent }]}>
+                      {isSteering ? 'Sending…' : 'Send now'}
+                    </Text>
+                  </Pressable>
+                </>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       </SwipeableMessageRow>
     );
@@ -1816,6 +1859,8 @@ export default function ChatScreen() {
   const [hasMore, setHasMore] = useState<boolean>(() => cached?.has_more ?? false);
   const [running, setRunning] = useState(false);
   const [activeProgress, setActiveProgress] = useState<ChatProgress | null>(null);
+  const [steeringIds, setSteeringIds] = useState<Set<string>>(() => new Set());
+  const [sseConnected, setSseConnected] = useState(false);
   const [loadingInitial, setLoadingInitial] = useState(() => !cached);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [sending, setSending] = useState(false);
@@ -1873,6 +1918,10 @@ export default function ChatScreen() {
   const messagesRef = useRef<ChatMessage[]>(messages);
   const listDataCountRef = useRef(listData.length);
   const sendingRef = useRef(sending);
+  const runningRef = useRef(running);
+  const engineRef = useRef<ChatEngine>(engine);
+  const hasMoreRef = useRef(hasMore);
+  const steeringIdsRef = useRef<Set<string>>(steeringIds);
   const nearBottomRef = useRef(true);
   const atBottomRef = useRef(true);
   const userDraggingRef = useRef(false);
@@ -1916,6 +1965,22 @@ export default function ChatScreen() {
   useEffect(() => {
     sendingRef.current = sending;
   }, [sending]);
+
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
+
+  useEffect(() => {
+    engineRef.current = engine;
+  }, [engine]);
+
+  useEffect(() => {
+    hasMoreRef.current = hasMore;
+  }, [hasMore]);
+
+  useEffect(() => {
+    steeringIdsRef.current = steeringIds;
+  }, [steeringIds]);
 
   useEffect(() => {
     pendingAttachmentsRef.current = pendingAttachments;
@@ -2174,16 +2239,73 @@ export default function ChatScreen() {
     loadMessagesRef.current = loadMessages;
   }, [loadMessages]);
 
-  // Safety-net polling ONLY while a reply is actively in flight.
+  // Live SSE updates (/pc/api/chat/events) while the Chat tab is in the foreground.
+  useEffect(() => {
+    if (!isForeground) return;
+    let hasConnectedOnce = false;
+    const unsubscribe = subscribeChatEvents(
+      (ev) => {
+        if (!mountedRef.current) return;
+        if (ev.event === 'snapshot') {
+          setEngine(ev.data.engine);
+          setRunning(ev.data.running);
+          setActiveProgress(ev.data.running ? (ev.data.progress ?? null) : null);
+          const qids = ev.data.queued_ids ?? [];
+          setMessages((prev) => {
+            const next = reconcileQueuedMessages(prev, qids, ev.data.running);
+            if (next !== prev) {
+              persistCache(next, ev.data.engine, hasMoreRef.current);
+            }
+            return next;
+          });
+          return;
+        }
+        if (ev.event === 'message') {
+          const nextEngine = ev.data.engine ?? engineRef.current;
+          if (ev.data.engine) setEngine(ev.data.engine);
+          setRunning(ev.data.running);
+          if (!ev.data.running) {
+            setActiveProgress(null);
+          } else if (ev.data.progress !== undefined) {
+            setActiveProgress(ev.data.progress);
+          }
+          setMessages((prev) => {
+            const next = upsertChatMessage(prev, ev.data.message, ev.data.removed_message_id);
+            persistCache(next, nextEngine, hasMoreRef.current);
+            return next;
+          });
+          return;
+        }
+        if (ev.event === 'progress') {
+          setRunning(ev.data.running);
+          setActiveProgress(ev.data.running ? (ev.data.progress ?? null) : null);
+        }
+      },
+      (connected) => {
+        if (!mountedRef.current) return;
+        setSseConnected(connected);
+        if (connected) {
+          if (hasConnectedOnce) {
+            void loadMessagesRef.current({ silent: true });
+          }
+          hasConnectedOnce = true;
+        }
+      },
+    );
+    return unsubscribe;
+  }, [isForeground, persistCache]);
+
+  // Safety-net polling while a reply is actively in flight (relaxed when SSE is connected).
   const polling = shouldPollChat(messages, running, isFocused, appActive);
 
   useEffect(() => {
     if (!polling) return;
+    const intervalMs = sseConnected ? SSE_FALLBACK_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
     const id = setInterval(() => {
       void loadMessages({ silent: true });
-    }, POLL_INTERVAL_MS);
+    }, intervalMs);
     return () => clearInterval(id);
-  }, [polling, loadMessages]);
+  }, [polling, sseConnected, loadMessages]);
 
   const onLoadOlder = useCallback(async () => {
     const current = messagesRef.current;
@@ -2449,6 +2571,7 @@ export default function ChatScreen() {
       if ((!trimmed && attachments.length === 0) || sendingRef.current) return;
       const clientId = makeClientId();
       const nowSec = Date.now() / 1000;
+      const wasRunning = runningRef.current;
       const optUser: ChatMessage = {
         id: `opt-u-${clientId}`,
         role: 'user',
@@ -2460,6 +2583,7 @@ export default function ChatScreen() {
         reply_to: opts?.replyTo ?? undefined,
         attachments: attachments.length > 0 ? attachments : undefined,
         optimistic: true,
+        queued: wasRunning,
       };
 
       if (opts?.clearComposer) {
@@ -2472,7 +2596,9 @@ export default function ChatScreen() {
       sendingRef.current = true;
       setSending(true);
       setRunning(true);
-      setActiveProgress({ engine, started: nowSec, steps: [] });
+      if (!wasRunning) {
+        setActiveProgress({ engine, started: nowSec, steps: [] });
+      }
       nearBottomRef.current = true;
       setShowScrollDown(false);
       setMessages((prev) => [...prev, optUser]);
@@ -2503,8 +2629,10 @@ export default function ChatScreen() {
             setReplyTo(opts.restoreReplyOnError);
           }
         }
-        setRunning(false);
-        setActiveProgress(null);
+        if (!wasRunning) {
+          setRunning(false);
+          setActiveProgress(null);
+        }
         setErr((e as Error).message || 'Failed to send message');
       } finally {
         sendingRef.current = false;
@@ -2512,6 +2640,46 @@ export default function ChatScreen() {
       }
     },
     [engine, hasMore, persistCache, setDraftValue],
+  );
+
+  const onSteerMessage = useCallback(
+    async (msg: ChatMessage) => {
+      if (!msg.id || msg.optimistic || steeringIdsRef.current.has(msg.id)) return;
+      triggerHaptic('tick');
+      setErr(null);
+      setSteeringIds((prev) => {
+        const next = new Set(prev);
+        next.add(msg.id);
+        return next;
+      });
+      try {
+        const res = await steerChatMessage(msg.id);
+        if (!mountedRef.current) return;
+        setRunning(res.running);
+        if (!res.running) {
+          setActiveProgress(null);
+        }
+        setMessages((prev) => {
+          const next = upsertChatMessage(prev, res.user_message);
+          persistCache(next, engineRef.current, hasMoreRef.current);
+          return next;
+        });
+      } catch (e) {
+        if (!mountedRef.current) return;
+        setErr((e as Error).message || 'Failed to send message now');
+        void loadMessages({ silent: true });
+      } finally {
+        if (mountedRef.current) {
+          setSteeringIds((prev) => {
+            if (!prev.has(msg.id)) return prev;
+            const next = new Set(prev);
+            next.delete(msg.id);
+            return next;
+          });
+        }
+      }
+    },
+    [loadMessages, persistCache],
   );
 
   const onSend = useCallback(() => {
@@ -2784,20 +2952,27 @@ export default function ChatScreen() {
           item.status === 'error' &&
           findPrecedingUserMessage(data, index) !== null
         }
+        isQueued={Boolean(running && item.role === 'user' && item.queued)}
+        canSteer={canSteerQueuedMessage(item, running)}
+        isSteering={steeringIds.has(item.id)}
         onLongPress={onOpenMessageActions}
         onReply={onStartReplyMessage}
         onCopy={onCopy}
         onRetry={onRetryAssistantError}
+        onSteer={onSteerMessage}
         onPressReplyQuote={onPressReplyQuote}
         onCopyCode={onCopyCode}
         onPressImage={onPressImage}
       />
     ),
     [
+      running,
+      steeringIds,
       onOpenMessageActions,
       onStartReplyMessage,
       onCopy,
       onRetryAssistantError,
+      onSteerMessage,
       onPressReplyQuote,
       onCopyCode,
       onPressImage,
@@ -3541,6 +3716,36 @@ const st = StyleSheet.create({
     width: '100%',
     alignSelf: 'flex-start',
     gap: 4,
+  },
+  userGroup: {
+    width: '100%',
+    alignItems: 'flex-end',
+  },
+  userQueuedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 6,
+    marginTop: 4,
+    paddingRight: 4,
+  },
+  queuedLabel: {
+    fontSize: 12,
+    fontWeight: '400',
+  },
+  queuedSep: {
+    fontSize: 12,
+    fontWeight: '400',
+  },
+  sendNowBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingVertical: 1,
+  },
+  sendNowText: {
+    fontSize: 12,
+    fontWeight: '500',
   },
   bubbleRow: { flexDirection: 'row', width: '100%' },
   bubbleRowUser: { justifyContent: 'flex-end' },

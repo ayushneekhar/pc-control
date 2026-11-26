@@ -17,8 +17,11 @@ import {
   ChatMessagesResponse,
   ChatNewResponse,
   ChatSendResponse,
+  ChatSseEvent,
+  ChatSteerResponse,
   getChatEndpoint,
   LinkPreview,
+  parseChatSseBlocks,
   resolveChatTarget,
 } from './chatLogic';
 
@@ -100,6 +103,120 @@ export function sendChatMessage(
     payload.reply_to_id = replyToId;
   }
   return chatRequest<ChatSendResponse>('POST', '/pc/api/chat/send', payload);
+}
+
+export function steerChatMessage(messageId: string): Promise<ChatSteerResponse> {
+  return chatRequest<ChatSteerResponse>('POST', '/pc/api/chat/steer', { message_id: messageId });
+}
+
+/**
+ * Subscribe to live chat SSE updates (`/pc/api/chat/events`), supporting both Tailscale
+ * and custom chat-token endpoints. Uses XHR `onprogress` streaming (matching `events.ts`).
+ */
+export function subscribeChatEvents(
+  onEvent: (ev: ChatSseEvent) => void,
+  onState?: (connected: boolean) => void,
+): () => void {
+  let stopped = false;
+  let xhr: XMLHttpRequest | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let watchdog: ReturnType<typeof setInterval> | null = null;
+  let retryDelay = 1500;
+  let seen = 0;
+  let buf = '';
+  let lastData = 0;
+  let connected = false;
+
+  const setConnected = (next: boolean) => {
+    if (next !== connected) {
+      connected = next;
+      onState?.(next);
+    }
+  };
+
+  const closeXhr = () => {
+    const cur = xhr;
+    xhr = null;
+    if (cur) {
+      cur.onprogress = cur.onerror = cur.onload = cur.onreadystatechange = null;
+      try {
+        cur.abort();
+      } catch {}
+    }
+  };
+
+  const scheduleReconnect = (delay: number) => {
+    closeXhr();
+    setConnected(false);
+    if (stopped) return;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = setTimeout(connect, delay);
+  };
+
+  const connect = () => {
+    if (stopped) return;
+    retryTimer = null;
+    seen = 0;
+    buf = '';
+    lastData = Date.now();
+    const target = resolveChatTarget(serverUrl(), getChatEndpoint());
+    const x = new XMLHttpRequest();
+    xhr = x;
+    x.open('GET', target.baseUrl + '/pc/api/chat/events');
+    x.setRequestHeader('Accept', 'text/event-stream');
+    x.setRequestHeader('Cache-Control', 'no-cache');
+    for (const [k, v] of Object.entries(target.headers)) {
+      x.setRequestHeader(k, v);
+    }
+
+    const consume = () => {
+      if (xhr !== x) return;
+      const text = x.responseText || '';
+      if (text.length <= seen) return;
+      lastData = Date.now();
+      buf += text.slice(seen);
+      seen = text.length;
+      const { events, rest } = parseChatSseBlocks(buf);
+      buf = rest;
+      for (const ev of events) {
+        retryDelay = 1500;
+        setConnected(true);
+        onEvent(ev);
+      }
+    };
+
+    const fail = () => {
+      if (xhr !== x) return;
+      const d = retryDelay;
+      retryDelay = Math.min(retryDelay * 2, 15000);
+      scheduleReconnect(d);
+    };
+
+    x.onprogress = consume;
+    x.onreadystatechange = () => {
+      if (x.readyState === 3 || x.readyState === 4) consume();
+    };
+    x.onerror = fail;
+    x.onload = fail;
+    x.send();
+  };
+
+  connect();
+  watchdog = setInterval(() => {
+    if (xhr && (Date.now() - lastData > 65000 || seen > 2_000_000)) {
+      scheduleReconnect(0);
+    }
+  }, 10000);
+
+  return () => {
+    stopped = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    if (watchdog) clearInterval(watchdog);
+    retryTimer = null;
+    watchdog = null;
+    closeXhr();
+    setConnected(false);
+  };
 }
 
 export function uploadChatAttachment(file: {

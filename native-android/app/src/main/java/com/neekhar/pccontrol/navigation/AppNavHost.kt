@@ -40,12 +40,10 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Security
@@ -102,8 +100,6 @@ import com.neekhar.pccontrol.core.theme.PcTheme
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcConfirmDialog
-import com.neekhar.pccontrol.core.ui.PcEmptyState
-import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.feature.agent.AgentRuleScreen
 import com.neekhar.pccontrol.feature.agent.AgentSettingsScreen
 import com.neekhar.pccontrol.feature.agent.AgentSettingsViewModel
@@ -126,6 +122,7 @@ import com.neekhar.pccontrol.feature.seerr.SeerrPersonScreen
 import com.neekhar.pccontrol.feature.seerr.SeerrPersonViewModel
 import com.neekhar.pccontrol.feature.seerr.SeerrScreen
 import com.neekhar.pccontrol.feature.seerr.SeerrViewModel
+import com.neekhar.pccontrol.feature.settings.ConnectionSettingsScreen
 import com.neekhar.pccontrol.feature.settings.SettingsScreen
 import com.neekhar.pccontrol.feature.settings.SettingsViewModel
 import com.neekhar.pccontrol.feature.space.SpaceScreen
@@ -179,9 +176,7 @@ class PcScreenRegistry(
     val usageAccountDetail: @Composable (NavHostController, PcRoute.UsageAccountDetail) -> Unit,
     val agentView: @Composable (NavHostController) -> Unit,
     val agentRule: @Composable (NavHostController, PcRoute.AgentRule) -> Unit,
-    val connectionSettings: @Composable (NavHostController) -> Unit = { nav ->
-        ConnectionSettingsStubScreen(onBack = { nav.popBackStack() })
-    },
+    val connectionSettings: @Composable (NavHostController) -> Unit,
 )
 
 @Serializable
@@ -359,32 +354,19 @@ fun PcAppShell(
                 )
             },
             root = { nav, route ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PcTheme.colors.bg)
-                        .statusBarsPadding(),
-                ) {
-                    RootScreen(
-                        viewModel = rootViewModel,
-                        initialRequestId = route.requestId,
-                        onOpenSettings = { nav.navigateToTopTab(PcRoute.Settings) },
-                    )
-                }
+                RootScreen(
+                    viewModel = rootViewModel,
+                    initialRequestId = route.requestId,
+                    onOpenSettings = { nav.navigateToTopTab(PcRoute.Settings) },
+                )
             },
             settings = { nav ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PcTheme.colors.bg)
-                        .statusBarsPadding(),
-                ) {
-                    SettingsScreen(
-                        viewModel = settingsViewModel,
-                        onOpenAgentSettings = { nav.navigate(PcRoute.AgentSettings) { launchSingleTop = true } },
-                        onOpenAgentView = { nav.navigate(PcRoute.AgentView) { launchSingleTop = true } },
-                    )
-                }
+                SettingsScreen(
+                    viewModel = settingsViewModel,
+                    onOpenAgentSettings = { nav.navigate(PcRoute.AgentSettings) { launchSingleTop = true } },
+                    onOpenAgentView = { nav.navigate(PcRoute.AgentView) { launchSingleTop = true } },
+                    onOpenConnectionSettings = { nav.navigate(PcRoute.ConnectionSettings) { launchSingleTop = true } },
+                )
             },
             cams = { nav, route ->
                 CamsScreen(
@@ -471,78 +453,49 @@ fun PcAppShell(
                 )
             },
             agentSettings = { nav ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PcTheme.colors.bg)
-                        .statusBarsPadding()
-                        .navigationBarsPadding(),
-                ) {
-                    AgentSettingsScreen(
-                        viewModel = agentSettingsViewModel,
-                        onBack = { nav.popBackStack() },
-                        onOpenAccountDetail = { accountId, initialWindow ->
-                            nav.navigate(
-                                PcRoute.UsageAccountDetail(
-                                    accountId = accountId,
-                                    initialWindow = initialWindow.wireValue,
-                                ),
-                            )
-                        },
-                    )
-                }
+                AgentSettingsScreen(
+                    viewModel = agentSettingsViewModel,
+                    onBack = { nav.popBackStack() },
+                    onOpenAccountDetail = { accountId, initialWindow ->
+                        nav.navigate(
+                            PcRoute.UsageAccountDetail(
+                                accountId = accountId,
+                                initialWindow = initialWindow.wireValue,
+                            ),
+                        )
+                    },
+                )
             },
             usageAccountDetail = { nav, route ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PcTheme.colors.bg)
-                        .statusBarsPadding()
-                        .navigationBarsPadding(),
-                ) {
-                    UsageAccountDetailScreen(
-                        viewModel = agentSettingsViewModel,
-                        accountId = route.accountId,
-                        initialWindow = UsageWindowKey.fromWire(route.initialWindow),
-                        onBack = { nav.popBackStack() },
-                    )
-                }
+                UsageAccountDetailScreen(
+                    viewModel = agentSettingsViewModel,
+                    accountId = route.accountId,
+                    initialWindow = UsageWindowKey.fromWire(route.initialWindow),
+                    onBack = { nav.popBackStack() },
+                )
             },
             agentView = { nav ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PcTheme.colors.bg)
-                        .statusBarsPadding()
-                        .navigationBarsPadding(),
-                ) {
-                    AgentViewScreen(
-                        viewModel = agentViewViewModel,
-                        onBack = { nav.popBackStack() },
-                        onOpenRule = { url, ruleId ->
-                            nav.navigate(PcRoute.AgentRule(ruleId = ruleId, url = url))
-                        },
-                    )
-                }
+                AgentViewScreen(
+                    viewModel = agentViewViewModel,
+                    onBack = { nav.popBackStack() },
+                    onOpenRule = { url, ruleId ->
+                        nav.navigate(PcRoute.AgentRule(ruleId = ruleId, url = url))
+                    },
+                )
             },
             agentRule = { nav, route ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PcTheme.colors.bg)
-                        .statusBarsPadding()
-                        .navigationBarsPadding(),
-                ) {
-                    AgentRuleScreen(
-                        viewModel = agentViewViewModel,
-                        url = route.url,
-                        ruleId = route.ruleId,
-                        onBack = { nav.popBackStack() },
-                    )
-                }
+                AgentRuleScreen(
+                    viewModel = agentViewViewModel,
+                    url = route.url,
+                    ruleId = route.ruleId,
+                    onBack = { nav.popBackStack() },
+                )
             },
             connectionSettings = { nav ->
-                ConnectionSettingsStubScreen(onBack = { nav.popBackStack() })
+                ConnectionSettingsScreen(
+                    viewModel = settingsViewModel,
+                    onBack = { nav.popBackStack() },
+                )
             },
         )
     }
@@ -1004,30 +957,6 @@ fun PcBottomNavBar(
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * Placeholder screen for [PcRoute.ConnectionSettings] until Track D's Connection sub-screen is wired.
- */
-@Composable
-private fun ConnectionSettingsStubScreen(
-    onBack: () -> Unit,
-) {
-    PcScaffold(
-        title = "Connection",
-        onBack = onBack,
-    ) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center,
-        ) {
-            PcEmptyState(
-                icon = Icons.Filled.Cloud,
-                title = "Connection settings",
-                body = "Server URL, bearer token, and network configuration.",
-            )
         }
     }
 }

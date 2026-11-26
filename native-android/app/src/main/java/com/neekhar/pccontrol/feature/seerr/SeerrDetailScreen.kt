@@ -52,10 +52,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -75,6 +73,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -83,7 +82,6 @@ import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
 import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
-import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.PcTone
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -1144,22 +1142,12 @@ private fun SeerrSeasonPickerSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = LocalPcColors.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    ModalBottomSheet(
+    PcBottomSheet(
         onDismissRequest = { if (!submitting) onDismiss() },
-        sheetState = sheetState,
-        containerColor = colors.bg,
-        contentColor = colors.text,
-        dragHandle = { PcSheetDragHandle() },
-        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 18.dp)
-                .padding(bottom = 16.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(

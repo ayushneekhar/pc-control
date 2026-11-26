@@ -17,9 +17,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -33,12 +33,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -60,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.PcDimens
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -68,9 +67,8 @@ import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcPill
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
-import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -106,11 +104,14 @@ fun RootScreen(
         else -> null
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.bg)
-            .statusBarsPadding(),
+    val listState = rememberLazyListState()
+
+    PcScaffold(
+        title = "Root",
+        statusText = statusLabel,
+        statusColor = statusDotColor,
+        listState = listState,
+        applyNavigationBarPadding = false,
     ) {
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
@@ -128,17 +129,11 @@ fun RootScreen(
             modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = PcDimens.Space8),
+                contentPadding = PaddingValues(top = 4.dp, bottom = PcDimens.Space8),
                 verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
             ) {
-                item(key = "header") {
-                    PcScreenHeader(
-                        title = "Root",
-                        statusText = statusLabel,
-                        statusColor = statusDotColor,
-                    )
-                }
 
                 if (state.rootdState == RootdState.NOT_INSTALLED) {
                     item(key = "banner_not_installed") {
@@ -315,14 +310,9 @@ fun RootScreen(
     }
 
     if (state.selectedId != null) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
+        PcBottomSheet(
             onDismissRequest = viewModel::closeDetail,
-            sheetState = sheetState,
-            containerColor = colors.bg,
-            contentColor = colors.text,
-            dragHandle = { PcSheetDragHandle() },
-            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            contentPadding = PaddingValues(0.dp),
         ) {
             RootDetailSheetContent(
                 req = state.detailRequest,

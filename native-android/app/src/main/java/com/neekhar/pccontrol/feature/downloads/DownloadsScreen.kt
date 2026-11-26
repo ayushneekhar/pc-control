@@ -15,12 +15,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -37,8 +36,6 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
@@ -75,8 +72,9 @@ import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcProgressBar
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
+import com.neekhar.pccontrol.core.ui.PcSwitch
 import com.neekhar.pccontrol.core.ui.PcTone
 import com.neekhar.pccontrol.feature.home.ACTIVE_TRANSFER_STATUSES
 import com.neekhar.pccontrol.feature.home.PcFormatters
@@ -139,22 +137,17 @@ fun DownloadsScreenContent(
     val activeDriveCount = state.activeDriveJobs.size
 
     val headerAlert = if (!state.error.isNullOrBlank()) "Offline" else null
+    val listState = rememberLazyListState()
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(colors.bg)
-            .statusBarsPadding()
-            .navigationBarsPadding(),
+    PcScaffold(
+        modifier = modifier,
+        title = "Downloads",
+        statusText = headerAlert,
+        statusTone = PcTone.Bad,
+        showStatusDot = headerAlert != null,
+        onBack = onBack,
+        listState = listState,
     ) {
-        PcScreenHeader(
-            title = "Downloads",
-            statusText = headerAlert,
-            statusTone = PcTone.Bad,
-            showStatusDot = headerAlert != null,
-            onBack = onBack,
-        )
-
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
             onRefresh = onRefresh,
@@ -168,11 +161,10 @@ fun DownloadsScreenContent(
                     modifier = Modifier.align(Alignment.TopCenter),
                 )
             },
-            modifier = Modifier
-                .fillMaxSize()
-                .weight(1f),
+            modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
                     start = PcDimens.ScreenPad,
@@ -212,18 +204,10 @@ fun DownloadsScreenContent(
                                 fontWeight = FontWeight.Medium,
                                 modifier = Modifier.weight(1f),
                             )
-                            Switch(
+                            PcSwitch(
                                 checked = state.altSpeedEnabled,
                                 onCheckedChange = onToggleAltSpeed,
                                 enabled = state.data != null && !state.altSpeedBusy,
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = colors.onAccent,
-                                    checkedTrackColor = colors.warn,
-                                    checkedBorderColor = Color.Transparent,
-                                    uncheckedThumbColor = colors.textDim,
-                                    uncheckedTrackColor = colors.surfaceRaised,
-                                    uncheckedBorderColor = colors.hairline,
-                                ),
                             )
                         }
 

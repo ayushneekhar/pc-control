@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Block
@@ -27,8 +28,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -54,9 +53,10 @@ import com.neekhar.pccontrol.core.ui.PcConfirmDialog
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
+import com.neekhar.pccontrol.core.ui.PcSwitch
 
 private val ACTION_CHOICES = listOf(
     Triple("replace_page", Icons.Filled.Description, "Show my page"),
@@ -98,20 +98,16 @@ fun AgentRuleScreen(
     val title = if (state.rule != null) "Edit rule" else "New rule"
     val subtitle = if (state.ruleUrl.isNotBlank()) "${split.host}${split.path}" else "Agent view"
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.bg),
-    ) {
-        PcScreenHeader(
-            title = title,
-            onBack = onBack,
-        )
+    val listState = rememberLazyListState()
 
+    PcScaffold(
+        title = title,
+        onBack = onBack,
+        listState = listState,
+    ) {
         LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -207,17 +203,9 @@ fun AgentRuleScreen(
                                     fontSize = 12.5.sp,
                                 )
                             }
-                            Switch(
+                            PcSwitch(
                                 checked = draft.enabled,
                                 onCheckedChange = { v -> viewModel.updateDraft { it.copy(enabled = v) } },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = colors.bg,
-                                    checkedTrackColor = colors.text,
-                                    checkedBorderColor = Color.Transparent,
-                                    uncheckedThumbColor = colors.textDim,
-                                    uncheckedTrackColor = colors.surfaceRaised,
-                                    uncheckedBorderColor = colors.hairline,
-                                ),
                             )
                         }
 
@@ -402,7 +390,7 @@ fun AgentRuleScreen(
                                                     fontSize = 13.sp,
                                                     modifier = Modifier.weight(1f),
                                                 )
-                                                Switch(
+                                                PcSwitch(
                                                     checked = pair.regex,
                                                     onCheckedChange = { v ->
                                                         viewModel.updateDraft { d ->
@@ -413,14 +401,6 @@ fun AgentRuleScreen(
                                                             )
                                                         }
                                                     },
-                                                    colors = SwitchDefaults.colors(
-                                                        checkedThumbColor = colors.bg,
-                                                        checkedTrackColor = colors.text,
-                                                        checkedBorderColor = Color.Transparent,
-                                                        uncheckedThumbColor = colors.textDim,
-                                                        uncheckedTrackColor = colors.surfaceRaised,
-                                                        uncheckedBorderColor = colors.hairline,
-                                                    ),
                                                 )
                                                 IconButton(
                                                     onClick = {

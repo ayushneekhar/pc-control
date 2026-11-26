@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
@@ -53,7 +54,7 @@ import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcPill
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import kotlinx.coroutines.delay
 import java.time.Instant
@@ -93,26 +94,22 @@ fun UsageAccountDetailScreen(
         else listOf(summary.fiveHour, summary.weekly)
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.bg),
-    ) {
-        PcScreenHeader(
-            title = "Account",
-            statusText = if (summary?.account?.error != null) "Error" else null,
-            statusColor = if (summary?.account?.error != null) colors.bad else null,
-            onBack = onBack,
-        )
+    val listState = rememberLazyListState()
 
+    PcScaffold(
+        title = "Account",
+        statusText = if (summary?.account?.error != null) "Error" else null,
+        statusColor = if (summary?.account?.error != null) colors.bad else null,
+        onBack = onBack,
+        listState = listState,
+    ) {
         PullToRefreshBox(
             isRefreshing = state.isRefreshing || state.usageLoading,
             onRefresh = { viewModel.loadUsage(force = true) },
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),

@@ -1,6 +1,5 @@
 package com.neekhar.pccontrol.feature.settings
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -10,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,7 +27,7 @@ import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcCompactTextField
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcKeyValueRow
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 
 @Composable
@@ -38,6 +38,7 @@ fun ConnectionSettingsScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val colors = LocalPcColors.current
+    val listState = rememberLazyListState()
 
     val statusText = when {
         state.connectionTesting -> "Checking connection…"
@@ -52,22 +53,17 @@ fun ConnectionSettingsScreen(
         else -> null
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(colors.bg),
+    PcScaffold(
+        modifier = modifier,
+        title = "Connection",
+        statusText = statusText,
+        statusColor = statusColor,
+        onBack = onBack,
+        listState = listState,
     ) {
-        PcScreenHeader(
-            title = "Connection",
-            statusText = statusText,
-            statusColor = statusColor,
-            onBack = onBack,
-        )
-
         LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {

@@ -6,10 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -17,11 +14,7 @@ import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -30,7 +23,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -38,11 +30,12 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCompactTextField
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
-import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
+import com.neekhar.pccontrol.core.ui.PcSwitch
 
 /**
  * Clean ModalBottomSheet for unlocking the laptop's GNOME login keyring or enrolling
@@ -61,7 +54,6 @@ fun KeyringUnlockSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = LocalPcColors.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var password by remember { mutableStateOf("") }
     var saveOnPhone by remember { mutableStateOf(false) }
 
@@ -79,24 +71,16 @@ fun KeyringUnlockSheet(
         }
     }
 
-    ModalBottomSheet(
+    PcBottomSheet(
         onDismissRequest = {
             if (!busy) {
                 password = ""
                 onDismiss()
             }
         },
-        sheetState = sheetState,
-        containerColor = colors.surface,
-        contentColor = colors.text,
-        dragHandle = { PcSheetDragHandle() },
-        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 14.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
@@ -161,18 +145,10 @@ fun KeyringUnlockSheet(
                             fontSize = 12.sp,
                         )
                     }
-                    Switch(
+                    PcSwitch(
                         checked = saveOnPhone,
                         onCheckedChange = { saveOnPhone = it },
                         enabled = !busy,
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = colors.bg,
-                            checkedTrackColor = colors.text,
-                            checkedBorderColor = Color.Transparent,
-                            uncheckedThumbColor = colors.textDim,
-                            uncheckedTrackColor = colors.surfaceRaised,
-                            uncheckedBorderColor = colors.hairline,
-                        ),
                     )
                 }
             }

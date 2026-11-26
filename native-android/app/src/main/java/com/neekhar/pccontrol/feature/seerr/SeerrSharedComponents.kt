@@ -29,9 +29,7 @@ import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,12 +44,12 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcPill
-import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.PcTone
 
 enum class SeerrPosterSize(
@@ -256,7 +254,6 @@ fun SeerrCollectionSheet(
 ) {
     if (!state.visible) return
     val colors = LocalPcColors.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val collection = state.collection
     val parts = collection?.parts.orEmpty()
     val missingParts = SeerrHelpers.collectionMissingParts(collection)
@@ -266,20 +263,11 @@ fun SeerrCollectionSheet(
     val poster = collection?.poster ?: state.seedPoster
     val summary = SeerrHelpers.collectionSummary(collection)
 
-    ModalBottomSheet(
+    PcBottomSheet(
         onDismissRequest = { if (!state.batchSubmitting) onDismiss() },
-        sheetState = sheetState,
-        containerColor = colors.bg,
-        contentColor = colors.text,
-        dragHandle = { PcSheetDragHandle() },
-        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 18.dp)
-                .padding(bottom = 16.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
@@ -35,8 +36,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -65,9 +64,10 @@ import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcPill
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
 import com.neekhar.pccontrol.core.ui.PcStatusDot
+import com.neekhar.pccontrol.core.ui.PcSwitch
 
 private fun actionIcon(action: String): ImageVector = when (action) {
     "replace_page" -> Icons.Filled.Description
@@ -119,26 +119,22 @@ fun AgentViewScreen(
         else -> null
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.bg),
-    ) {
-        PcScreenHeader(
-            title = "Agent view",
-            statusText = headerStatus,
-            statusColor = if (state.error != null) colors.bad else colors.warn,
-            onBack = onBack,
-        )
+    val listState = rememberLazyListState()
 
+    PcScaffold(
+        title = "Agent view",
+        statusText = headerStatus,
+        statusColor = if (state.error != null) colors.bad else colors.warn,
+        onBack = onBack,
+        listState = listState,
+    ) {
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
             onRefresh = viewModel::refresh,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -185,18 +181,10 @@ fun AgentViewScreen(
                                         color = colors.textDim,
                                     )
                                 }
-                                Switch(
+                                PcSwitch(
                                     checked = displayEnabled,
                                     onCheckedChange = viewModel::toggleMaster,
                                     enabled = master != null && !state.switching,
-                                    colors = SwitchDefaults.colors(
-                                        checkedThumbColor = colors.bg,
-                                        checkedTrackColor = colors.text,
-                                        checkedBorderColor = Color.Transparent,
-                                        uncheckedThumbColor = colors.textDim,
-                                        uncheckedTrackColor = colors.surfaceRaised,
-                                        uncheckedBorderColor = colors.hairline,
-                                    ),
                                 )
                             }
 
@@ -425,17 +413,9 @@ fun AgentViewScreen(
                                                     )
                                                 }
                                             }
-                                            Switch(
+                                            PcSwitch(
                                                 checked = rule.enabled,
                                                 onCheckedChange = { v -> viewModel.toggleRuleEnabled(rule, v) },
-                                                colors = SwitchDefaults.colors(
-                                                    checkedThumbColor = colors.bg,
-                                                    checkedTrackColor = colors.text,
-                                                    checkedBorderColor = Color.Transparent,
-                                                    uncheckedThumbColor = colors.textDim,
-                                                    uncheckedTrackColor = colors.surfaceRaised,
-                                                    uncheckedBorderColor = colors.hairline,
-                                                ),
                                             )
                                         }
                                         Row(

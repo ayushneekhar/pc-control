@@ -51,9 +51,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -87,8 +85,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.neekhar.pccontrol.core.platform.ChatForegroundState
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcConfirmDialog
-import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -689,7 +687,6 @@ fun ChatScreen(
 
     // Message Long-Press Actions Sheet
     actionSheetMsg?.let { target ->
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         val preview = remember(target) { ChatLogic.formatMessagePreview(target) }
         val timeStr = remember(target.createdAt) { ChatLogic.formatChatTime(target.createdAt) }
         val metaLabel = remember(target) {
@@ -708,20 +705,12 @@ fun ChatScreen(
             }
         }
 
-        ModalBottomSheet(
+        PcBottomSheet(
             onDismissRequest = { actionSheetMsg = null },
-            sheetState = sheetState,
-            containerColor = colors.surface,
-            contentColor = colors.text,
-            dragHandle = { PcSheetDragHandle() },
-            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         ) {
             Column(
                 verticalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 14.dp),
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 // Message preview header
                 Column(

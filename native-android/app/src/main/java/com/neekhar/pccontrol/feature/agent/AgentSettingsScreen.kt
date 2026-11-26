@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -27,12 +28,8 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -41,11 +38,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -54,10 +52,10 @@ import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
 import com.neekhar.pccontrol.core.ui.PcPill
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
-import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
+import com.neekhar.pccontrol.core.ui.PcSwitch
 import com.neekhar.pccontrol.core.ui.ProviderBrandIcon
 
 private val FIVE_HOUR_THRESHOLDS = listOf(10, 15, 20, 25, 30, 40, 50)
@@ -125,26 +123,22 @@ fun AgentSettingsScreen(
     }
     val selectedHarnessIdx = harnessOptions.indexOfFirst { it.id == state.selectedEngine }.coerceAtLeast(0)
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.bg),
-    ) {
-        PcScreenHeader(
-            title = "Agent settings",
-            statusText = statusText,
-            statusColor = statusColor,
-            onBack = onBack,
-        )
+    val listState = rememberLazyListState()
 
+    PcScaffold(
+        title = "Agent settings",
+        statusText = statusText,
+        statusColor = statusColor,
+        onBack = onBack,
+        listState = listState,
+    ) {
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
             onRefresh = { viewModel.refreshAll(forceUsage = true) },
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp),
@@ -356,20 +350,12 @@ fun AgentSettingsScreen(
                                     fontWeight = FontWeight.Medium,
                                     modifier = Modifier.weight(1f),
                                 )
-                                Switch(
+                                PcSwitch(
                                     checked = gemini?.autoRotate == true,
                                     enabled = gemini != null && !state.saving,
                                     onCheckedChange = { v ->
                                         viewModel.updateSettings(AgentSettingsPatch(gemini = GeminiPatch(autoRotate = v)))
                                     },
-                                    colors = SwitchDefaults.colors(
-                                        checkedThumbColor = colors.bg,
-                                        checkedTrackColor = colors.text,
-                                        checkedBorderColor = Color.Transparent,
-                                        uncheckedThumbColor = colors.textDim,
-                                        uncheckedTrackColor = colors.surfaceRaised,
-                                        uncheckedBorderColor = colors.hairline,
-                                    ),
                                 )
                             }
                             HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
@@ -440,20 +426,12 @@ fun AgentSettingsScreen(
                                     fontWeight = FontWeight.Medium,
                                     modifier = Modifier.weight(1f),
                                 )
-                                Switch(
+                                PcSwitch(
                                     checked = alerts?.enabled ?: true,
                                     enabled = state.settings != null && !state.saving,
                                     onCheckedChange = { v ->
                                         viewModel.updateSettings(AgentSettingsPatch(usageAlerts = UsageAlertsPatch(enabled = v)))
                                     },
-                                    colors = SwitchDefaults.colors(
-                                        checkedThumbColor = colors.bg,
-                                        checkedTrackColor = colors.text,
-                                        checkedBorderColor = Color.Transparent,
-                                        uncheckedThumbColor = colors.textDim,
-                                        uncheckedTrackColor = colors.surfaceRaised,
-                                        uncheckedBorderColor = colors.hairline,
-                                    ),
                                 )
                             }
                             HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
@@ -528,29 +506,22 @@ fun AgentSettingsScreen(
 
     val picker = activePicker
     if (picker != null) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
+        PcBottomSheet(
             onDismissRequest = { activePicker = null },
-            sheetState = sheetState,
-            containerColor = colors.bg,
-            contentColor = colors.text,
-            dragHandle = { PcSheetDragHandle() },
-            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            title = picker.title,
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 10.dp),
+                    .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(
-                    text = picker.title,
-                    color = colors.text,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                PcListCard {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(colors.surfaceRaised),
+                ) {
                     picker.options.forEachIndexed { idx, opt ->
                         if (idx > 0) {
                             HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
@@ -590,7 +561,7 @@ fun AgentSettingsScreen(
                                     modifier = Modifier.size(20.dp),
                                 )
                             } else if (opt.disabled) {
-                                PcPill(text = "Not signed in", color = colors.textFaint, backgroundColor = colors.surfaceRaised)
+                                PcPill(text = "Not signed in", color = colors.textFaint, backgroundColor = colors.surface)
                             }
                         }
                     }
@@ -601,7 +572,6 @@ fun AgentSettingsScreen(
                     onClick = { activePicker = null },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(modifier = Modifier.height(16.dp))
             }
         }
     }

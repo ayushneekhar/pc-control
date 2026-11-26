@@ -62,10 +62,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -88,6 +86,7 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -99,7 +98,6 @@ import com.neekhar.pccontrol.core.ui.PcProgressBar
 import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSegmentOption
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
-import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.PcTone
 import kotlin.math.abs
 
@@ -496,14 +494,9 @@ fun SpaceScreen(
     // Single-item quick action sheet (on short tap outside selection mode)
     val activeFocus = focusedItem
     if (activeFocus != null) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
+        PcBottomSheet(
             onDismissRequest = { focusedItem = null },
-            sheetState = sheetState,
-            containerColor = colors.surface,
-            contentColor = colors.text,
-            dragHandle = { PcSheetDragHandle() },
-            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            contentPadding = PaddingValues(0.dp),
         ) {
             SingleItemActionSheetContent(
                 focused = activeFocus,
@@ -537,17 +530,12 @@ fun SpaceScreen(
         }
     }
 
-    // Confirmation ModalBottomSheet
+    // Confirmation bottom sheet
     val confirmAction = state.confirmAction
     if (confirmAction != null) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
+        PcBottomSheet(
             onDismissRequest = viewModel::dismissConfirm,
-            sheetState = sheetState,
-            containerColor = colors.surface,
-            contentColor = colors.text,
-            dragHandle = { PcSheetDragHandle() },
-            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            contentPadding = PaddingValues(0.dp),
         ) {
             ConfirmActionSheetContent(
                 action = confirmAction,
@@ -1539,7 +1527,6 @@ private fun SingleItemActionSheetContent(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .navigationBarsPadding()
             .padding(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 18.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
@@ -1669,7 +1656,6 @@ private fun ConfirmActionSheetContent(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .navigationBarsPadding()
             .padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {

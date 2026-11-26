@@ -13,11 +13,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -41,12 +41,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -66,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -73,10 +70,10 @@ import com.neekhar.pccontrol.core.ui.PcConfirmDialog
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
-import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.PcStatusDot
+import com.neekhar.pccontrol.core.ui.PcSwitch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,21 +106,20 @@ fun SettingsScreen(
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.bg),
-    ) {
-        PcScreenHeader(title = "Settings")
+    val listState = rememberLazyListState()
 
+    PcScaffold(
+        title = "Settings",
+        listState = listState,
+        applyNavigationBarPadding = false,
+    ) {
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
             onRefresh = viewModel::refreshAll,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp),
@@ -310,14 +306,9 @@ fun SettingsScreen(
     }
 
     if (state.showCrashViewer) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
+        PcBottomSheet(
             onDismissRequest = { viewModel.setCrashViewerVisible(false) },
-            sheetState = sheetState,
-            containerColor = colors.bg,
-            contentColor = colors.text,
-            dragHandle = { PcSheetDragHandle() },
-            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            contentPadding = PaddingValues(0.dp),
         ) {
             CrashReportsSheetContent(
                 reports = state.crashReports,
@@ -326,18 +317,6 @@ fun SettingsScreen(
             )
         }
     }
-}
-
-@Composable
-private fun settingsSwitchColors() = LocalPcColors.current.let { colors ->
-    SwitchDefaults.colors(
-        checkedThumbColor = colors.bg,
-        checkedTrackColor = colors.text,
-        checkedBorderColor = Color.Transparent,
-        uncheckedThumbColor = colors.textDim,
-        uncheckedTrackColor = colors.surfaceRaised,
-        uncheckedBorderColor = colors.hairline,
-    )
 }
 
 @Composable
@@ -412,11 +391,10 @@ private fun VpnListRow(
                     )
                 }
             }
-            Switch(
+            PcSwitch(
                 checked = enabled,
                 onCheckedChange = onToggle,
                 enabled = state != null && !busy,
-                colors = settingsSwitchColors(),
             )
         }
 
@@ -503,11 +481,10 @@ private fun KeyboardLockListRow(
                     )
                 }
             }
-            Switch(
+            PcSwitch(
                 checked = enabled,
                 onCheckedChange = onToggle,
                 enabled = state != null && !unavailable && !busy,
-                colors = settingsSwitchColors(),
             )
         }
 
@@ -1095,58 +1072,44 @@ private fun ThemePickerSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = LocalPcColors.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    ModalBottomSheet(
+    PcBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = colors.bg,
-        contentColor = colors.text,
-        dragHandle = { PcSheetDragHandle() },
-        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        title = "Theme",
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .clip(RoundedCornerShape(16.dp))
+                .background(colors.surfaceRaised),
         ) {
-            Text(
-                text = "Theme",
-                color = colors.text,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            PcListCard {
-                ThemeMode.entries.forEachIndexed { idx, mode ->
-                    if (idx > 0) {
-                        HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
-                    }
-                    val isSelected = mode == selected
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(mode) }
-                            .defaultMinSize(minHeight = 52.dp)
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text(
-                            text = mode.label,
-                            color = colors.text,
-                            fontSize = 15.sp,
-                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+            ThemeMode.entries.forEachIndexed { idx, mode ->
+                if (idx > 0) {
+                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                }
+                val isSelected = mode == selected
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(mode) }
+                        .defaultMinSize(minHeight = 52.dp)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = mode.label,
+                        color = colors.text,
+                        fontSize = 15.sp,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                    )
+                    if (isSelected) {
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = "Selected",
+                            tint = colors.accent,
+                            modifier = Modifier.size(20.dp),
                         )
-                        if (isSelected) {
-                            Icon(
-                                imageVector = Icons.Filled.Check,
-                                contentDescription = "Selected",
-                                tint = colors.accent,
-                                modifier = Modifier.size(20.dp),
-                            )
-                        }
                     }
                 }
             }
@@ -1164,7 +1127,6 @@ private fun CrashReportsSheetContent(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 18.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),

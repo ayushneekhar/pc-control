@@ -2,21 +2,21 @@
   "expo": {
     "name": "PC Control",
     "slug": "pc-control",
-    "version": "1.6.8",
+    "version": "1.6.9",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "pccontrol",
     "userInterfaceStyle": "automatic",
-    "backgroundColor": "#0B0D12",
+    "backgroundColor": "#08090A",
     "android": {
       "package": "com.neekhar.pccontrol",
-      "versionCode": 24,
+      "versionCode": 25,
       "allowBackup": false,
       "predictiveBackGestureEnabled": false,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-foreground.png",
         "monochromeImage": "./assets/adaptive-monochrome.png",
-        "backgroundColor": "#11151F"
+        "backgroundColor": "#0B0D0E"
       },
       "blockedPermissions": [
         "android.permission.SYSTEM_ALERT_WINDOW",

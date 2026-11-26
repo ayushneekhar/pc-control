@@ -1,5 +1,7 @@
 package com.neekhar.pccontrol.feature.system
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,24 +30,29 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
@@ -130,7 +138,7 @@ fun VitalsTab(
             return@LazyColumn
         }
 
-        // 1. Hero CPU Card (44sp tabular + native Canvas sparkline + per-core strip)
+        // 1. Hero CPU Card (44sp tabular + auto-scaled Canvas sparkline)
         item(key = "cpu_hero") {
             CpuHeroCard(vitals = v, history = state.history)
         }
@@ -146,17 +154,18 @@ fun VitalsTab(
             ) {
                 MetricTile(
                     label = "Memory",
-                    value = String.format(Locale.US, "%.1f / %.0f GB", v.mem.used / gib, v.mem.total / gib),
+                    value = String.format(Locale.US, "%.1f", v.mem.used / gib),
+                    unit = String.format(Locale.US, " / %.0f GB", v.mem.total / gib),
                     percent = v.mem.pct,
                     sub = "${v.mem.pct.roundToInt()}% used",
-                    sparkValues = state.history.map { it.mem },
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight(),
                 )
                 MetricTile(
                     label = "Swap",
-                    value = String.format(Locale.US, "%.1f / %.0f GB", v.swap.used / gib, v.swap.total / gib),
+                    value = String.format(Locale.US, "%.1f", v.swap.used / gib),
+                    unit = String.format(Locale.US, " / %.0f GB", v.swap.total / gib),
                     percent = v.swap.pct,
                     sub = "${v.swap.pct.roundToInt()}% used",
                     modifier = Modifier
@@ -178,10 +187,10 @@ fun VitalsTab(
             ) {
                 MetricTile(
                     label = "GPU",
-                    value = gpu?.let { "${it.util.roundToInt()}%" } ?: "–",
+                    value = gpu?.let { "${it.util.roundToInt()}" } ?: "–",
+                    unit = if (gpu != null) "%" else null,
                     percent = gpu?.util,
                     sub = gpu?.let { "${it.temp.roundToInt()}° · ${it.power.roundToInt()} W" } ?: "Not available",
-                    sparkValues = if (gpu != null) state.history.map { it.gpu } else null,
                     barColorOverride = colors.textDim,
                     modifier = Modifier
                         .weight(1f)
@@ -189,9 +198,8 @@ fun VitalsTab(
                 )
                 MetricTile(
                     label = "VRAM",
-                    value = gpu?.let {
-                        String.format(Locale.US, "%.1f / %.0f GB", it.memUsed / 1024.0, it.memTotal / 1024.0)
-                    } ?: "–",
+                    value = gpu?.let { String.format(Locale.US, "%.1f", it.memUsed / 1024.0) } ?: "–",
+                    unit = gpu?.let { String.format(Locale.US, " / %.0f GB", it.memTotal / 1024.0) },
                     percent = vramPct,
                     sub = vramPct?.let { "${it.roundToInt()}% used" } ?: "Not available",
                     barColorOverride = colors.textDim,
@@ -206,8 +214,10 @@ fun VitalsTab(
         val temps = ServiceHelpers.sortedTemperatures(v.temps)
         if (temps.isNotEmpty()) {
             item(key = "temps_section") {
-                Column(verticalArrangement = Arrangement.spacedBy(PcDimens.Space2)) {
-                    Spacer(modifier = Modifier.height(4.dp))
+                Column(
+                    modifier = Modifier.padding(top = PcDimens.Space3),
+                    verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+                ) {
                     PcSectionLabel(label = "Temperatures")
                     PcListCard {
                         temps.forEachIndexed { idx, (key, tempC) ->
@@ -220,12 +230,27 @@ fun VitalsTab(
                                 title = ServiceHelpers.prettyTempLabel(key),
                                 trailingContent = {
                                     Text(
-                                        text = "${tempC.roundToInt()}°C",
-                                        color = tempColor,
-                                        style = TabularNumStyle.copy(
-                                            fontSize = 15.sp,
-                                            fontWeight = FontWeight.Medium,
-                                        ),
+                                        text = buildAnnotatedString {
+                                            withStyle(
+                                                SpanStyle(
+                                                    color = tempColor,
+                                                    fontSize = 16.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                ),
+                                            ) {
+                                                append("${tempC.roundToInt()}")
+                                            }
+                                            withStyle(
+                                                SpanStyle(
+                                                    color = colors.textDim,
+                                                    fontSize = 12.5.sp,
+                                                    fontWeight = FontWeight.Normal,
+                                                ),
+                                            ) {
+                                                append("°C")
+                                            }
+                                        },
+                                        style = TabularNumStyle,
                                     )
                                 },
                                 showChevron = false,
@@ -239,8 +264,10 @@ fun VitalsTab(
 
         // 5. Power & I/O
         item(key = "power_io") {
-            Column(verticalArrangement = Arrangement.spacedBy(PcDimens.Space2)) {
-                Spacer(modifier = Modifier.height(4.dp))
+            Column(
+                modifier = Modifier.padding(top = PcDimens.Space3),
+                verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+            ) {
                 PcSectionLabel(label = "Power & I/O")
                 PcListCard {
                     PcListRow(
@@ -341,6 +368,7 @@ private fun CpuHeroCard(
 
         Spacer(modifier = Modifier.height(10.dp))
 
+        val cpuSparkMax = remember(cpuValues) { computeCpuSparklineMax(cpuValues) }
         VitalsSparkline(
             series = listOf(
                 SparklineSeries(
@@ -351,20 +379,9 @@ private fun CpuHeroCard(
             ),
             baselineColor = colors.hairline,
             dotColor = colors.accent,
-            maxValue = 100.0,
+            maxValue = cpuSparkMax,
             height = 48.dp,
         )
-
-        if (vitals.percpu.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(10.dp))
-            PerCoreCpuStrip(
-                perCpu = vitals.percpu,
-                trackColor = colors.surfaceRaised,
-                normalColor = colors.textDim,
-                warnColor = colors.warn,
-                height = 8.dp,
-            )
-        }
 
         if (vitals.load.isNotEmpty()) {
             Spacer(modifier = Modifier.height(8.dp))
@@ -384,7 +401,7 @@ private fun MetricTile(
     percent: Double?,
     sub: String,
     modifier: Modifier = Modifier,
-    sparkValues: List<Double?>? = null,
+    unit: String? = null,
     barColorOverride: Color? = null,
 ) {
     val colors = LocalPcColors.current
@@ -405,13 +422,31 @@ private fun MetricTile(
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
-            text = value,
-            color = if (over) colors.warn else colors.text,
-            style = TabularNumStyle.copy(
-                fontSize = 19.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = (-0.3).sp,
-            ),
+            text = buildAnnotatedString {
+                withStyle(
+                    SpanStyle(
+                        color = if (over) colors.warn else colors.text,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Medium,
+                        letterSpacing = (-0.3).sp,
+                    ),
+                ) {
+                    append(value)
+                }
+                if (!unit.isNullOrEmpty()) {
+                    withStyle(
+                        SpanStyle(
+                            color = colors.textDim,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Normal,
+                            letterSpacing = 0.sp,
+                        ),
+                    ) {
+                        append(unit)
+                    }
+                }
+            },
+            style = TabularNumStyle,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -432,23 +467,6 @@ private fun MetricTile(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        if (!sparkValues.isNullOrEmpty()) {
-            Spacer(modifier = Modifier.height(8.dp))
-            VitalsSparkline(
-                series = listOf(
-                    SparklineSeries(
-                        values = sparkValues,
-                        color = colors.textDim,
-                        strokeWidthDp = 1.5f,
-                    ),
-                ),
-                baselineColor = colors.hairline,
-                dotColor = if (over) colors.warn else colors.text,
-                maxValue = 100.0,
-                height = 28.dp,
-                maxPoints = 40,
-            )
-        }
     }
 }
 
@@ -465,8 +483,10 @@ private fun NetworkVitalsSection(
     val rxSeries = remember(history) { history.map { it.rx } }
     val txSeries = remember(history) { history.map { it.tx } }
 
-    Column(verticalArrangement = Arrangement.spacedBy(PcDimens.Space2)) {
-        Spacer(modifier = Modifier.height(4.dp))
+    Column(
+        modifier = Modifier.padding(top = PcDimens.Space3),
+        verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+    ) {
         PcSectionLabel(label = "Network")
         PcCard {
             Row(
@@ -561,8 +581,10 @@ private fun NetworkVitalsSection(
 @Composable
 private fun DisksVitalsSection(disks: List<DiskUsage>) {
     val colors = LocalPcColors.current
-    Column(verticalArrangement = Arrangement.spacedBy(PcDimens.Space2)) {
-        Spacer(modifier = Modifier.height(4.dp))
+    Column(
+        modifier = Modifier.padding(top = PcDimens.Space3),
+        verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+    ) {
         PcSectionLabel(label = "Disks")
         PcCard {
             if (disks.isEmpty()) {
@@ -624,26 +646,53 @@ private fun ProcessesVitalsSection(
 ) {
     val colors = LocalPcColors.current
     val allProcs = state.vitals?.procs
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (state.showProcesses) 180f else 0f,
+        label = "top_processes_chevron",
+    )
 
-    Column(verticalArrangement = Arrangement.spacedBy(PcDimens.Space2)) {
-        Spacer(modifier = Modifier.height(4.dp))
-        PcSectionLabel(
-            label = "Top processes",
-            trailing = {
-                Switch(
-                    checked = state.showProcesses,
-                    onCheckedChange = onToggleProcesses,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = colors.onAccent,
-                        checkedTrackColor = colors.accent,
-                        checkedBorderColor = Color.Transparent,
-                        uncheckedThumbColor = colors.textDim,
-                        uncheckedTrackColor = colors.surfaceRaised,
-                        uncheckedBorderColor = colors.hairline,
-                    ),
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = PcDimens.Space3)
+            .animateContentSize(),
+        verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = 44.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(role = Role.Button) { onToggleProcesses(!state.showProcesses) }
+                .padding(horizontal = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = "Top processes",
+                color = colors.textDim,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (state.showProcesses && allProcs != null) {
+                Text(
+                    text = "${allProcs.size}",
+                    color = colors.textFaint,
+                    style = TabularNumStyle.copy(fontSize = 12.sp),
                 )
-            },
-        )
+            }
+            Icon(
+                imageVector = Icons.Filled.KeyboardArrowDown,
+                contentDescription = if (state.showProcesses) "Collapse top processes" else "Expand top processes",
+                tint = colors.textDim,
+                modifier = Modifier
+                    .size(20.dp)
+                    .rotate(chevronRotation),
+            )
+        }
 
         if (state.showProcesses) {
             if (allProcs == null) {

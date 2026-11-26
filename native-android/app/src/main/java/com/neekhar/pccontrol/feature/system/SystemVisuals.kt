@@ -40,6 +40,19 @@ data class SparklineSeries(
 )
 
 /**
+ * Auto-scales the CPU sparkline Y-axis ceiling to `max(20, peak * 1.2)` so low/idle
+ * telemetry shows living detail instead of a flat line along the bottom.
+ */
+fun computeCpuSparklineMax(values: List<Double?>, maxPoints: Int = 60): Double {
+    val peak = values
+        .takeLast(maxPoints)
+        .filterNotNull()
+        .filter { it.isFinite() && it >= 0.0 }
+        .maxOrNull() ?: 0.0
+    return max(20.0, peak * 1.2)
+}
+
+/**
  * Smooth anti-aliased Jetpack Compose Canvas sparkline with no gradients or glow,
  * adhering strictly to docs/DESIGN.md.
  */

@@ -4,11 +4,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,29 +17,29 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Fingerprint
-import androidx.compose.material.icons.filled.FolderOff
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -52,13 +51,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.PcDimens
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
@@ -71,7 +71,6 @@ import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
-import com.neekhar.pccontrol.core.ui.PcStatusDot
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -88,6 +87,7 @@ fun RootScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val colors = LocalPcColors.current
+    val pullState = rememberPullToRefreshState()
 
     LaunchedEffect(initialRequestId) {
         if (!initialRequestId.isNullOrBlank()) {
@@ -106,174 +106,210 @@ fun RootScreen(
         else -> null
     }
 
-    PullToRefreshBox(
-        isRefreshing = state.isRefreshing,
-        onRefresh = viewModel::refresh,
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(colors.bg),
+            .background(colors.bg)
+            .statusBarsPadding(),
     ) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item(key = "header") {
-                PcScreenHeader(
-                    title = "Root",
-                    statusText = statusLabel,
-                    statusColor = statusDotColor,
-                    actions = {
-                        if (state.waitingCount > 0) {
-                            PcPill(
-                                text = "${state.waitingCount} waiting",
-                                color = colors.warn,
-                                backgroundColor = colors.warnSoft,
-                            )
-                        }
-                    },
+        PullToRefreshBox(
+            isRefreshing = state.isRefreshing,
+            onRefresh = viewModel::refresh,
+            state = pullState,
+            indicator = {
+                PullToRefreshDefaults.Indicator(
+                    state = pullState,
+                    isRefreshing = state.isRefreshing,
+                    containerColor = colors.surfaceRaised,
+                    color = colors.accent,
+                    modifier = Modifier.align(Alignment.TopCenter),
                 )
-            }
-
-            if (state.rootdState == RootdState.NOT_INSTALLED) {
-                item(key = "banner_not_installed") {
-                    PcCard {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                text = "rootd isn't installed yet",
-                                color = colors.text,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            Text(
-                                text = "Root approvals need the root daemon on the laptop. Run this once in a terminal:",
-                                color = colors.textDim,
-                                fontSize = 13.5.sp,
-                                lineHeight = 19.sp,
-                            )
-                            Text(
-                                text = "sudo ~/code/pc-control/server/install-rootd.sh",
-                                color = colors.accent,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 12.5.sp,
-                            )
-                        }
-                    }
-                }
-            }
-
-            if (state.rootdState == RootdState.DOWN) {
-                item(key = "banner_down") {
-                    PcErrorBanner(
-                        message = "rootd is not running · Check: sudo systemctl status rootd",
+            },
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = PcDimens.Space8),
+                verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+            ) {
+                item(key = "header") {
+                    PcScreenHeader(
+                        title = "Root",
+                        statusText = statusLabel,
+                        statusColor = statusDotColor,
                     )
                 }
-            }
 
-            if (state.rootdState == RootdState.OK && !state.enrolled) {
-                item(key = "banner_enroll") {
-                    PcCard {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Fingerprint,
-                                    contentDescription = null,
-                                    tint = colors.warn,
-                                    modifier = Modifier.size(20.dp),
-                                )
+                if (state.rootdState == RootdState.NOT_INSTALLED) {
+                    item(key = "banner_not_installed") {
+                        PcCard(
+                            modifier = Modifier.padding(
+                                start = PcDimens.ScreenPad,
+                                end = PcDimens.ScreenPad,
+                                bottom = PcDimens.Space4,
+                            ),
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(
-                                    text = "This phone can't approve yet",
+                                    text = "rootd isn't installed yet",
                                     color = colors.text,
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.SemiBold,
                                 )
+                                Text(
+                                    text = "Root approvals need the root daemon on the laptop. Run this once in a terminal:",
+                                    color = colors.textDim,
+                                    fontSize = 13.5.sp,
+                                    lineHeight = 19.sp,
+                                )
+                                Text(
+                                    text = "sudo ~/code/pc-control/server/install-rootd.sh",
+                                    color = colors.accent,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.5.sp,
+                                )
                             }
-                            Text(
-                                text = "Set up root approvals in Settings to enroll this phone's hardware key.",
-                                color = colors.textDim,
-                                fontSize = 13.5.sp,
-                                lineHeight = 19.sp,
-                            )
-                            PcButton(
-                                label = "Open Settings",
-                                variant = PcButtonVariant.Subtle,
-                                onClick = onOpenSettings,
-                            )
                         }
                     }
                 }
-            }
 
-            item(key = "sec_waiting") {
-                PcSectionLabel(label = "Waiting for you")
-            }
-
-            if (state.pending.isEmpty()) {
-                item(key = "empty_waiting") {
-                    PcCard {
-                        PcEmptyState(
-                            icon = Icons.Filled.VerifiedUser,
-                            title = "Nothing waiting",
-                            body = "New root approval requests will appear here.",
+                if (state.rootdState == RootdState.DOWN) {
+                    item(key = "banner_down") {
+                        PcErrorBanner(
+                            message = "rootd is not running · Check: sudo systemctl status rootd",
+                            modifier = Modifier.padding(
+                                start = PcDimens.ScreenPad,
+                                end = PcDimens.ScreenPad,
+                                bottom = PcDimens.Space4,
+                            ),
                         )
                     }
                 }
-            } else {
-                items(
-                    count = state.pending.size,
-                    key = { "pending_${state.pending[it].id}" },
-                ) { idx ->
-                    val req = state.pending[idx]
-                    PendingRequestCard(
-                        req = req,
-                        busyKey = state.busyKey,
-                        onDecide = { d -> viewModel.decide(req, d) },
-                        onOpenDetail = { viewModel.openDetail(req.id) },
-                    )
-                }
-            }
 
-            item(key = "sec_history") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "History")
-            }
-
-            if (state.historyError != null) {
-                item(key = "history_err") {
-                    PcErrorBanner(message = state.historyError!!)
-                }
-            }
-
-            if (state.history.isEmpty() && state.historyError == null) {
-                item(key = "history_empty") {
-                    Text(
-                        text = "No commands yet.",
-                        color = colors.textFaint,
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(horizontal = 4.dp),
-                    )
-                }
-            } else if (state.history.isNotEmpty()) {
-                item(key = "history_list") {
-                    PcListCard {
-                        state.history.forEachIndexed { idx, item ->
-                            if (idx > 0) {
-                                HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                if (state.rootdState == RootdState.OK && !state.enrolled) {
+                    item(key = "banner_enroll") {
+                        PcCard(
+                            modifier = Modifier.padding(
+                                start = PcDimens.ScreenPad,
+                                end = PcDimens.ScreenPad,
+                                bottom = PcDimens.Space4,
+                            ),
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Fingerprint,
+                                        contentDescription = null,
+                                        tint = colors.warn,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                    Text(
+                                        text = "This phone can't approve yet",
+                                        color = colors.text,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                }
+                                Text(
+                                    text = "Set up root approvals in Settings to enroll this phone's hardware key.",
+                                    color = colors.textDim,
+                                    fontSize = 13.5.sp,
+                                    lineHeight = 19.sp,
+                                )
+                                PcButton(
+                                    label = "Open Settings",
+                                    variant = PcButtonVariant.Subtle,
+                                    onClick = onOpenSettings,
+                                )
                             }
-                            HistoryRow(
-                                req = item,
-                                onClick = { viewModel.openDetail(item.id) },
-                            )
                         }
                     }
                 }
-            }
 
-            item(key = "bottom_pad") {
-                Spacer(modifier = Modifier.height(24.dp))
+                item(key = "sec_waiting") {
+                    PcSectionLabel(
+                        label = "Waiting for you",
+                        modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                    )
+                }
+
+                if (state.pending.isEmpty()) {
+                    item(key = "empty_waiting") {
+                        PcCard(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                            PcEmptyState(
+                                icon = Icons.Filled.VerifiedUser,
+                                title = "Nothing waiting",
+                                body = "New root approval requests will appear here.",
+                            )
+                        }
+                    }
+                } else {
+                    items(
+                        count = state.pending.size,
+                        key = { "pending_${state.pending[it].id}" },
+                    ) { idx ->
+                        val req = state.pending[idx]
+                        PendingRequestCard(
+                            req = req,
+                            busyKey = state.busyKey,
+                            onDecide = { d -> viewModel.decide(req, d) },
+                            onOpenDetail = { viewModel.openDetail(req.id) },
+                            modifier = Modifier.padding(
+                                start = PcDimens.ScreenPad,
+                                end = PcDimens.ScreenPad,
+                                top = if (idx > 0) 4.dp else 0.dp,
+                            ),
+                        )
+                    }
+                }
+
+                item(key = "sec_history") {
+                    PcSectionLabel(
+                        label = "History",
+                        modifier = Modifier.padding(
+                            start = PcDimens.ScreenPad,
+                            end = PcDimens.ScreenPad,
+                            top = PcDimens.Space4,
+                        ),
+                    )
+                }
+
+                if (state.historyError != null) {
+                    item(key = "history_err") {
+                        PcErrorBanner(
+                            message = state.historyError!!,
+                            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                        )
+                    }
+                }
+
+                if (state.history.isEmpty() && state.historyError == null) {
+                    item(key = "history_empty") {
+                        Text(
+                            text = "No commands yet.",
+                            color = colors.textFaint,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad + 4.dp),
+                        )
+                    }
+                } else if (state.history.isNotEmpty()) {
+                    item(key = "history_list") {
+                        PcListCard(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                            state.history.forEachIndexed { idx, item ->
+                                if (idx > 0) {
+                                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                                }
+                                HistoryRow(
+                                    req = item,
+                                    onClick = { viewModel.openDetail(item.id) },
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -315,13 +351,13 @@ fun RootScreen(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PendingRequestCard(
     req: RootRequest,
     busyKey: String?,
     onDecide: (Decision) -> Unit,
     onOpenDetail: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
     val isPending = req.status == "pending"
@@ -337,11 +373,10 @@ private fun PendingRequestCard(
     val secsLeft = max(0, ((req.expires * 1000.0 - nowMs) / 1000.0).roundToInt())
     val cmd = remember(req.argv) { RootPayload.commandLine(req.argv) }
     val longCmd = remember(req.argv) { RootPayload.isLongCommand(req.argv) }
-    val userPath = remember(req.argv) { RootPayload.hasUserWritablePath(req.argv) }
     var showArgs by remember(req.id, longCmd) { mutableStateOf(longCmd) }
     var reviewedFull by remember(req.id) { mutableStateOf(false) }
 
-    PcCard {
+    PcCard(modifier = modifier) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -371,28 +406,6 @@ private fun PendingRequestCard(
                     )
                 } else {
                     RootStatusPill(req)
-                }
-            }
-
-            if (userPath || !req.snapSha256.isNullOrBlank()) {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    if (userPath) {
-                        PcPill(
-                            text = "Path under /home or /tmp",
-                            color = colors.warn,
-                            backgroundColor = colors.warnSoft,
-                        )
-                    }
-                    if (!req.snapSha256.isNullOrBlank()) {
-                        PcPill(
-                            text = "Snapshotted · ${req.snapSha256.take(12)}…",
-                            color = colors.accent,
-                            backgroundColor = colors.accentSoft,
-                        )
-                    }
                 }
             }
 
@@ -485,7 +498,7 @@ private fun PendingRequestCard(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    PcButton(
+                    RootActionButton(
                         label = "Deny",
                         variant = PcButtonVariant.Subtle,
                         enabled = busyKey == null,
@@ -493,7 +506,7 @@ private fun PendingRequestCard(
                         onClick = { onDecide(Decision.DENY) },
                         modifier = Modifier.weight(1f),
                     )
-                    PcButton(
+                    RootActionButton(
                         label = "Approve",
                         variant = PcButtonVariant.Primary,
                         enabled = busyKey == null && secsLeft > 0 && (!longCmd || reviewedFull),
@@ -511,6 +524,63 @@ private fun PendingRequestCard(
                 )
             }
         }
+    }
+}
+
+/**
+ * Root approval action button whose disabled state uses clean `surfaceRaised` + `textFaint`
+ * instead of alpha-fading the primary accent fill.
+ */
+@Composable
+private fun RootActionButton(
+    label: String,
+    variant: PcButtonVariant,
+    enabled: Boolean,
+    busy: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalPcColors.current
+    val interactive = enabled && !busy
+    val (bg, fg) = when {
+        !enabled && !busy -> colors.surfaceRaised to colors.textFaint
+        variant == PcButtonVariant.Primary -> colors.accent to colors.onAccent
+        variant == PcButtonVariant.Danger -> colors.badSoft to colors.bad
+        else -> colors.surfaceRaised to colors.text
+    }
+    val interactionSource = remember { MutableInteractionSource() }
+
+    Row(
+        modifier = modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(PcDimens.RadiusSm))
+            .background(bg)
+            .clickable(
+                enabled = interactive,
+                role = Role.Button,
+                interactionSource = interactionSource,
+                indication = ripple(),
+                onClick = onClick,
+            )
+            .padding(horizontal = PcDimens.Space4),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+    ) {
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = fg,
+            )
+        }
+        Text(
+            text = label,
+            color = fg,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -698,7 +768,7 @@ private fun RootDetailSheetContent(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    PcButton(
+                    RootActionButton(
                         label = "Deny",
                         variant = PcButtonVariant.Subtle,
                         enabled = busyKey == null,
@@ -706,7 +776,7 @@ private fun RootDetailSheetContent(
                         onClick = { onDecide(req, Decision.DENY) },
                         modifier = Modifier.weight(1f),
                     )
-                    PcButton(
+                    RootActionButton(
                         label = "Approve",
                         variant = PcButtonVariant.Primary,
                         enabled = busyKey == null && (!longCmd || reviewedFull),

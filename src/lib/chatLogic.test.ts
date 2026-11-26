@@ -3,6 +3,7 @@ import test from 'node:test';
 import { _setCacheBackendForTests, CacheBackend } from './cache';
 import {
   applyChatListAutoFormat,
+  applyOptimisticSteer,
   attachmentImageCacheKey,
   buildAttachmentDataUri,
   buildChatAttachmentSource,
@@ -38,11 +39,13 @@ import {
   parseInlineTokens,
   parseMessageSegments,
   prependOlderMessages,
+  preserveOptimisticSteers,
   reconcileQueuedMessages,
   replySenderLabel,
   resolveChatLinkUrl,
   resolveChatTarget,
   resolveT3ThreadUrl,
+  rollbackOptimisticSteer,
   setChatEndpoint,
   shortEffortLabel,
   shortModelLabel,
@@ -1339,4 +1342,71 @@ test('canSteerQueuedMessage, upsertChatMessage, reconcileQueuedMessages, and par
   }
   assert.equal(parsed.events[2].event, 'progress');
   assert.equal(parsed.rest, 'event: message\ndata: {"partial":true');
+});
+
+test('optimistic steering helpers prevent polling/SSE flicker and roll back cleanly on failure', () => {
+  const active: ChatMessage = {
+    id: 'u1',
+    role: 'user',
+    engine: 'claude',
+    text: 'first',
+    created_at: 10,
+    status: 'done',
+    queued: false,
+  };
+  const queued: ChatMessage = {
+    id: 'u2',
+    role: 'user',
+    engine: 'claude',
+    text: 'second',
+    created_at: 11,
+    status: 'done',
+    queued: true,
+  };
+  const otherQueued: ChatMessage = {
+    id: 'u3',
+    role: 'user',
+    engine: 'claude',
+    text: 'third',
+    created_at: 12,
+    status: 'done',
+    queued: true,
+  };
+
+  // Immediate optimistic transition on tap
+  const afterTap = applyOptimisticSteer([active, queued, otherQueued], 'u2');
+  assert.equal(afterTap[1].queued, false);
+  assert.equal(afterTap[1].steered, true);
+  assert.equal(afterTap[2].queued, true);
+  assert.equal(applyOptimisticSteer(afterTap, 'u2'), afterTap);
+
+  // In-flight steer set prevents polling merge + SSE snapshot + stale SSE message from flickering u2 back to queued
+  const inFlight = new Set(['u2']);
+  const afterPoll = preserveOptimisticSteers(
+    mergeChatMessages(afterTap, [active, queued, otherQueued]),
+    inFlight,
+  );
+  assert.equal(afterPoll[1].queued, false);
+  assert.equal(afterPoll[1].steered, true);
+  assert.equal(afterPoll[2].queued, true);
+
+  const afterSnapshot = reconcileQueuedMessages(afterTap, ['u2', 'u3'], true, inFlight);
+  assert.equal(afterSnapshot, afterTap);
+  assert.equal(afterSnapshot[1].queued, false);
+  assert.equal(afterSnapshot[2].queued, true);
+
+  const afterStaleSse = preserveOptimisticSteers(upsertChatMessage(afterTap, queued), inFlight);
+  assert.equal(afterStaleSse[1].queued, false);
+  assert.equal(afterStaleSse[1].steered, true);
+
+  // Once steer fails while still running, rollback restores queued: true and clears steered
+  const rolledBackRunning = rollbackOptimisticSteer(afterTap, 'u2', true);
+  assert.equal(rolledBackRunning[1].queued, true);
+  assert.equal(rolledBackRunning[1].steered, false);
+  assert.equal(rolledBackRunning[2].queued, true);
+
+  // If the active turn already finished before failure, rollback does not leave a stale queued flag
+  const rolledBackIdle = rollbackOptimisticSteer(afterTap, 'u2', false);
+  assert.equal(rolledBackIdle[1].queued, false);
+  assert.equal(rolledBackIdle[1].steered, false);
 });

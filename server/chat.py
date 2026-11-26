@@ -604,43 +604,47 @@ class T3Client:
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         args = arguments if arguments is not None else {}
-        with self._lock:
-            token = self._get_token_locked()
-            res: dict[str, Any] | None = None
-            for attempt in range(2):
-                try:
-                    sid = self._session_id or self._init_session_locked(token)
-                    res, new_sid = self._post_rpc(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": self._next_id_locked(),
-                            "method": "tools/call",
-                            "params": {"name": name, "arguments": args},
-                        },
-                        token=token,
-                        sid=sid or None,
-                    )
-                    if new_sid:
+        res: dict[str, Any] | None = None
+        for attempt in range(2):
+            with self._lock:
+                token = self._get_token_locked()
+                sid = self._session_id or self._init_session_locked(token)
+                req_id = self._next_id_locked()
+            try:
+                res, new_sid = self._post_rpc(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "method": "tools/call",
+                        "params": {"name": name, "arguments": args},
+                    },
+                    token=token,
+                    sid=sid or None,
+                )
+                if new_sid:
+                    with self._lock:
                         self._session_id = new_sid
-                    break
-                except urllib.error.HTTPError as exc:
-                    self._session_id = None
+                break
+            except urllib.error.HTTPError as exc:
+                with self._lock:
+                    if self._session_id == sid:
+                        self._session_id = None
                     if exc.code in (401, 403) and attempt == 0:
                         try:
-                            token = self._get_token_locked(force_reload=True)
+                            self._get_token_locked(force_reload=True)
                         except Exception:
                             pass
-                    if attempt == 0 and exc.code in (400, 401, 403, 404, 410):
-                        try:
-                            exc.close()
-                        except Exception:
-                            pass
-                        continue
+                if attempt == 0 and exc.code in (400, 401, 403, 404, 410):
                     try:
-                        err_body = exc.read().decode("utf-8", errors="replace")[:200]
-                    finally:
                         exc.close()
-                    raise RuntimeError(f"T3 HTTP {exc.code} on {name}: {err_body}") from None
+                    except Exception:
+                        pass
+                    continue
+                try:
+                    err_body = exc.read().decode("utf-8", errors="replace")[:200]
+                finally:
+                    exc.close()
+                raise RuntimeError(f"T3 HTTP {exc.code} on {name}: {err_body}") from None
 
         if not isinstance(res, dict):
             return {}

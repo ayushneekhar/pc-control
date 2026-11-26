@@ -70,6 +70,7 @@ import {
   uploadChatAttachment,
 } from '../lib/chatApi';
 import {
+  applyOptimisticSteer,
   attachmentImageCacheKey,
   buildChatListItems,
   buildReplyRef,
@@ -108,9 +109,11 @@ import {
   parseInlineTokens,
   parseMessageSegments,
   prependOlderMessages,
+  preserveOptimisticSteers,
   reconcileQueuedMessages,
   replySenderLabel,
   resolveChatLinkUrl,
+  rollbackOptimisticSteer,
   shouldCaptureSwipeReply,
   shouldPollChat,
   SWIPE_REPLY_RESET_THRESHOLD,
@@ -352,26 +355,28 @@ const COMPOSER_MARKDOWN_SHORTCUTS: MarkdownShortcutsConfig = {
   heading: false,
 };
 
-function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
+function buildBubbleMarkdownStyle(t: Theme, isUser: boolean, muted = false): MarkdownStyle {
   const inlineCodeBg = isUser ? t.bg : t.cardAlt;
   const blockSurfaceBg = isUser ? t.bg : t.card;
   const lineHeight = isUser ? 21 : 22;
   const blockMarginBottom = isUser ? 6 : 8;
+  const textColor = muted ? t.textDim : t.text;
+  const bulletColor = muted ? t.textFaint : t.accent;
   return {
     paragraph: {
       fontSize: 15,
       lineHeight,
-      color: t.text,
+      color: textColor,
       marginTop: 0,
       marginBottom: blockMarginBottom,
     },
     list: {
       fontSize: 15,
       lineHeight,
-      color: t.text,
-      bulletColor: t.accent,
+      color: textColor,
+      bulletColor,
       bulletSize: 5,
-      markerColor: t.accent,
+      markerColor: bulletColor,
       markerFontWeight: '500',
       markerMinWidth: 16,
       gapWidth: 8,
@@ -382,11 +387,11 @@ function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
     },
     strong: {
       fontWeight: 'bold',
-      color: t.text,
+      color: textColor,
     },
     em: {
       fontStyle: 'italic',
-      color: t.text,
+      color: textColor,
     },
     link: {
       color: t.accent,
@@ -395,7 +400,7 @@ function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
     code: {
       fontFamily: t.mono,
       fontSize: 13,
-      color: t.text,
+      color: textColor,
       backgroundColor: inlineCodeBg,
       borderColor: t.border,
     },
@@ -403,7 +408,7 @@ function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
       fontFamily: t.mono,
       fontSize: 12.5,
       lineHeight: 18,
-      color: t.text,
+      color: textColor,
       backgroundColor: blockSurfaceBg,
       borderColor: t.border,
       borderWidth: StyleSheet.hairlineWidth,
@@ -416,7 +421,7 @@ function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
       fontSize: 14.5,
       lineHeight: 20,
       color: t.textDim,
-      borderColor: t.accent,
+      borderColor: bulletColor,
       borderWidth: 2,
       gapWidth: 10,
       backgroundColor: blockSurfaceBg,
@@ -425,11 +430,11 @@ function buildBubbleMarkdownStyle(t: Theme, isUser: boolean): MarkdownStyle {
       marginTop: 4,
       marginBottom: blockMarginBottom,
     },
-    h1: { fontSize: 18, lineHeight: 24, fontWeight: '600', color: t.text, marginTop: isUser ? 6 : 10, marginBottom: 4 },
-    h2: { fontSize: 17, lineHeight: 23, fontWeight: '600', color: t.text, marginTop: isUser ? 6 : 10, marginBottom: 4 },
-    h3: { fontSize: 16, lineHeight: 22, fontWeight: '600', color: t.text, marginTop: isUser ? 6 : 8, marginBottom: 4 },
-    h4: { fontSize: 15, lineHeight: 21, fontWeight: '600', color: t.text, marginTop: 6, marginBottom: 3 },
-    h5: { fontSize: 15, lineHeight: 21, fontWeight: '500', color: t.text, marginTop: 4, marginBottom: 3 },
+    h1: { fontSize: 18, lineHeight: 24, fontWeight: '600', color: textColor, marginTop: isUser ? 6 : 10, marginBottom: 4 },
+    h2: { fontSize: 17, lineHeight: 23, fontWeight: '600', color: textColor, marginTop: isUser ? 6 : 10, marginBottom: 4 },
+    h3: { fontSize: 16, lineHeight: 22, fontWeight: '600', color: textColor, marginTop: isUser ? 6 : 8, marginBottom: 4 },
+    h4: { fontSize: 15, lineHeight: 21, fontWeight: '600', color: textColor, marginTop: 6, marginBottom: 3 },
+    h5: { fontSize: 15, lineHeight: 21, fontWeight: '500', color: textColor, marginTop: 4, marginBottom: 3 },
     h6: { fontSize: 14, lineHeight: 20, fontWeight: '500', color: t.textDim, marginTop: 4, marginBottom: 3 },
     thematicBreak: {
       color: t.border,
@@ -452,17 +457,19 @@ function buildComposerMarkdownStyle(t: Theme): MarkdownTextInputStyle {
 function MarkdownSegment({
   text,
   isUser,
+  muted,
   onCopyCode,
   onLongPress,
 }: {
   text: string;
   isUser: boolean;
+  muted?: boolean;
   onCopyCode: (code: string) => void;
   onLongPress?: () => void;
 }) {
   const t = useTheme();
   const normalized = useMemo(() => normalizeMarkdownForDisplay(text), [text]);
-  const markdownStyle = useMemo(() => buildBubbleMarkdownStyle(t, isUser), [t, isUser]);
+  const markdownStyle = useMemo(() => buildBubbleMarkdownStyle(t, isUser, muted), [t, isUser, muted]);
 
   const handleLinkPress = useCallback((event: LinkPressEvent) => {
     const targetUrl = resolveChatLinkUrl(event.url);
@@ -1084,12 +1091,14 @@ function MarkdownImageCard({
 function MessageBody({
   text,
   isUser,
+  muted,
   onCopyCode,
   onPressImage,
   onLongPress,
 }: {
   text: string;
   isUser: boolean;
+  muted?: boolean;
   onCopyCode: (code: string) => void;
   onPressImage: (img: PreviewImageItem) => void;
   onLongPress?: () => void;
@@ -1143,6 +1152,7 @@ function MessageBody({
             key={idx}
             text={seg.text}
             isUser={isUser}
+            muted={muted}
             onCopyCode={onCopyCode}
             onLongPress={onLongPress}
           />
@@ -1595,7 +1605,6 @@ type MessageBubbleProps = {
   canRetry: boolean;
   isQueued: boolean;
   canSteer: boolean;
-  isSteering: boolean;
   onLongPress: (msg: ChatMessage) => void;
   onReply: (msg: ChatMessage) => void;
   onCopy: (text: string) => void;
@@ -1611,7 +1620,6 @@ const MessageBubble = React.memo(function MessageBubble({
   canRetry,
   isQueued,
   canSteer,
-  isSteering,
   onLongPress,
   onReply,
   onCopy,
@@ -1731,6 +1739,7 @@ const MessageBubble = React.memo(function MessageBubble({
           <MessageBody
             text={msg.text}
             isUser={isUser}
+            muted={isUser && isQueued}
             onCopyCode={onCopyCode}
             onPressImage={onPressImage}
             onLongPress={handleLongPress}
@@ -1742,6 +1751,8 @@ const MessageBubble = React.memo(function MessageBubble({
   );
 
   if (isUser) {
+    const queuedBg = t.dark ? '#0E0E0E' : '#E2E2E2';
+    const queuedBorder = t.dark ? '#3D3D3D' : '#AEAEAE';
     return (
       <SwipeableMessageRow msg={msg} enabled={canSwipeReply} onSwipeReply={onReply}>
         <View style={st.userGroup}>
@@ -1752,7 +1763,9 @@ const MessageBubble = React.memo(function MessageBubble({
               style={({ pressed }) => [
                 st.bubble,
                 st.bubbleUser,
-                { backgroundColor: t.cardAlt },
+                isQueued
+                  ? [st.bubbleUserQueued, { backgroundColor: queuedBg, borderColor: queuedBorder }]
+                  : { backgroundColor: t.cardAlt },
                 pressed && canOpenActions && { opacity: 0.84 },
               ]}
             >
@@ -1767,19 +1780,15 @@ const MessageBubble = React.memo(function MessageBubble({
                   <Text style={[st.queuedSep, { color: t.textFaint }]}>·</Text>
                   <Pressable
                     onPress={() => onSteer(msg)}
-                    disabled={isSteering}
                     hitSlop={STEER_HIT_SLOP}
                     accessibilityRole="button"
-                    accessibilityLabel={isSteering ? 'Sending queued message now' : 'Send queued message now'}
+                    accessibilityLabel="Send queued message now"
                     style={({ pressed }) => [
                       st.sendNowBtn,
-                      { opacity: isSteering ? 0.55 : pressed ? 0.65 : 1 },
+                      { opacity: pressed ? 0.65 : 1 },
                     ]}
                   >
-                    {isSteering ? <ActivityIndicator size={11} color={t.accent} /> : null}
-                    <Text style={[st.sendNowText, { color: t.accent }]}>
-                      {isSteering ? 'Sending…' : 'Send now'}
-                    </Text>
+                    <Text style={[st.sendNowText, { color: t.accent }]}>Send now</Text>
                   </Pressable>
                 </>
               ) : null}
@@ -1859,7 +1868,6 @@ export default function ChatScreen() {
   const [hasMore, setHasMore] = useState<boolean>(() => cached?.has_more ?? false);
   const [running, setRunning] = useState(false);
   const [activeProgress, setActiveProgress] = useState<ChatProgress | null>(null);
-  const [steeringIds, setSteeringIds] = useState<Set<string>>(() => new Set());
   const [sseConnected, setSseConnected] = useState(false);
   const [loadingInitial, setLoadingInitial] = useState(() => !cached);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -1921,7 +1929,7 @@ export default function ChatScreen() {
   const runningRef = useRef(running);
   const engineRef = useRef<ChatEngine>(engine);
   const hasMoreRef = useRef(hasMore);
-  const steeringIdsRef = useRef<Set<string>>(steeringIds);
+  const optimisticSteeredIdsRef = useRef<Set<string>>(new Set());
   const nearBottomRef = useRef(true);
   const atBottomRef = useRef(true);
   const userDraggingRef = useRef(false);
@@ -1977,10 +1985,6 @@ export default function ChatScreen() {
   useEffect(() => {
     hasMoreRef.current = hasMore;
   }, [hasMore]);
-
-  useEffect(() => {
-    steeringIdsRef.current = steeringIds;
-  }, [steeringIds]);
 
   useEffect(() => {
     pendingAttachmentsRef.current = pendingAttachments;
@@ -2166,7 +2170,10 @@ export default function ChatScreen() {
         setActiveProgress(res.running ? (res.progress ?? null) : null);
         setHasMore(res.has_more);
         setMessages((prev) => {
-          const next = mergeChatMessages(prev, res.messages);
+          const next = preserveOptimisticSteers(
+            mergeChatMessages(prev, res.messages),
+            optimisticSteeredIdsRef.current,
+          );
           persistCache(next, res.engine, res.has_more);
           return next;
         });
@@ -2252,7 +2259,12 @@ export default function ChatScreen() {
           setActiveProgress(ev.data.running ? (ev.data.progress ?? null) : null);
           const qids = ev.data.queued_ids ?? [];
           setMessages((prev) => {
-            const next = reconcileQueuedMessages(prev, qids, ev.data.running);
+            const next = reconcileQueuedMessages(
+              prev,
+              qids,
+              ev.data.running,
+              optimisticSteeredIdsRef.current,
+            );
             if (next !== prev) {
               persistCache(next, ev.data.engine, hasMoreRef.current);
             }
@@ -2270,7 +2282,10 @@ export default function ChatScreen() {
             setActiveProgress(ev.data.progress);
           }
           setMessages((prev) => {
-            const next = upsertChatMessage(prev, ev.data.message, ev.data.removed_message_id);
+            const next = preserveOptimisticSteers(
+              upsertChatMessage(prev, ev.data.message, ev.data.removed_message_id),
+              optimisticSteeredIdsRef.current,
+            );
             persistCache(next, nextEngine, hasMoreRef.current);
             return next;
           });
@@ -2612,7 +2627,10 @@ export default function ChatScreen() {
         setMessages((prev) => {
           const confirmed = [res.user_message, ...(res.assistant_message ? [res.assistant_message] : [])];
           const withoutOpt = prev.filter((m) => m.id !== optUser.id);
-          const next = mergeChatMessages(withoutOpt, [...withoutOpt.filter((m) => !m.optimistic), ...confirmed]);
+          const next = preserveOptimisticSteers(
+            mergeChatMessages(withoutOpt, [...withoutOpt.filter((m) => !m.optimistic), ...confirmed]),
+            optimisticSteeredIdsRef.current,
+          );
           persistCache(next, res.engine, hasMore);
           return next;
         });
@@ -2644,39 +2662,51 @@ export default function ChatScreen() {
 
   const onSteerMessage = useCallback(
     async (msg: ChatMessage) => {
-      if (!msg.id || msg.optimistic || steeringIdsRef.current.has(msg.id)) return;
+      if (!msg.id || msg.optimistic || optimisticSteeredIdsRef.current.has(msg.id)) return;
       triggerHaptic('tick');
       setErr(null);
-      setSteeringIds((prev) => {
-        const next = new Set(prev);
-        next.add(msg.id);
+      optimisticSteeredIdsRef.current.add(msg.id);
+      setMessages((prev) => {
+        const next = applyOptimisticSteer(prev, msg.id);
+        if (next !== prev) {
+          persistCache(next, engineRef.current, hasMoreRef.current);
+        }
         return next;
       });
       try {
         const res = await steerChatMessage(msg.id);
+        optimisticSteeredIdsRef.current.delete(msg.id);
         if (!mountedRef.current) return;
         setRunning(res.running);
         if (!res.running) {
           setActiveProgress(null);
         }
         setMessages((prev) => {
-          const next = upsertChatMessage(prev, res.user_message);
+          const next = preserveOptimisticSteers(
+            upsertChatMessage(prev, res.user_message),
+            optimisticSteeredIdsRef.current,
+          );
           persistCache(next, engineRef.current, hasMoreRef.current);
           return next;
         });
       } catch (e) {
+        optimisticSteeredIdsRef.current.delete(msg.id);
         if (!mountedRef.current) return;
+        const errData = (e as { data?: { user_message?: ChatMessage; running?: boolean } } | null)?.data;
+        if (typeof errData?.running === 'boolean') {
+          setRunning(errData.running);
+          if (!errData.running) setActiveProgress(null);
+        }
+        setMessages((prev) => {
+          const restored = errData?.user_message
+            ? upsertChatMessage(prev, errData.user_message)
+            : rollbackOptimisticSteer(prev, msg.id, runningRef.current);
+          const next = preserveOptimisticSteers(restored, optimisticSteeredIdsRef.current);
+          persistCache(next, engineRef.current, hasMoreRef.current);
+          return next;
+        });
         setErr((e as Error).message || 'Failed to send message now');
         void loadMessages({ silent: true });
-      } finally {
-        if (mountedRef.current) {
-          setSteeringIds((prev) => {
-            if (!prev.has(msg.id)) return prev;
-            const next = new Set(prev);
-            next.delete(msg.id);
-            return next;
-          });
-        }
       }
     },
     [loadMessages, persistCache],
@@ -2954,7 +2984,6 @@ export default function ChatScreen() {
         }
         isQueued={Boolean(running && item.role === 'user' && item.queued)}
         canSteer={canSteerQueuedMessage(item, running)}
-        isSteering={steeringIds.has(item.id)}
         onLongPress={onOpenMessageActions}
         onReply={onStartReplyMessage}
         onCopy={onCopy}
@@ -2967,7 +2996,6 @@ export default function ChatScreen() {
     ),
     [
       running,
-      steeringIds,
       onOpenMessageActions,
       onStartReplyMessage,
       onCopy,
@@ -3760,6 +3788,13 @@ const st = StyleSheet.create({
   bubbleUser: {
     maxWidth: '82%',
     borderBottomRightRadius: 5,
+  },
+  bubbleUserQueued: {
+    borderWidth: 1,
+    borderStyle: 'dotted',
+    paddingHorizontal: 12,
+    paddingTop: 7,
+    paddingBottom: 7,
   },
   assistantPlain: {
     width: '100%',

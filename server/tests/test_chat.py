@@ -2433,6 +2433,54 @@ class ChatSteeringAndSseTests(unittest.TestCase):
                 for p in reversed(patches):
                     p.stop()
 
+    def test_t3_client_allows_concurrent_steer_while_thread_wait_is_blocking(self):
+        """T3Client.call_tool must not hold its lock across _post_rpc so steer doesn't stall behind t3_thread_wait."""
+        with tempfile.TemporaryDirectory() as td:
+            creds = os.path.join(td, "creds.json")
+            with open(creds, "w", encoding="utf-8") as f:
+                json.dump({"mcpOAuth": {"t3|local": {"accessToken": "tok-1"}}}, f)
+
+            client = chat_mod.T3Client(mcp_url="http://127.0.0.1:3773/mcp", credentials_file=creds)
+            client._session_id = "sid-1"
+
+            wait_entered = threading.Event()
+            release_wait = threading.Event()
+            steer_finished = threading.Event()
+
+            def fake_post_rpc(body, *, token, sid=None):
+                name = (body.get("params") or {}).get("name")
+                if name == "t3_thread_wait":
+                    wait_entered.set()
+                    release_wait.wait(timeout=5.0)
+                    return {"result": {"content": [{"type": "text", "text": json.dumps({"status": "running"})}]}}, sid
+                if name == "t3_thread_send":
+                    return {"result": {"content": [{"type": "text", "text": json.dumps({"ok": True, "steered": True})}]}}, sid
+                return {"result": {"content": []}}, sid
+
+            client._post_rpc = fake_post_rpc
+
+            wait_result = {}
+
+            def run_wait():
+                wait_result["res"] = client.call_tool("t3_thread_wait", {"threadId": "thr-1", "timeoutMs": 2000})
+
+            t = threading.Thread(target=run_wait, daemon=True)
+            t.start()
+            self.assertTrue(wait_entered.wait(timeout=2.0))
+
+            steer_res = client.call_tool(
+                "t3_thread_send",
+                {"threadId": "thr-1", "message": "pivot now", "mode": "steer"},
+            )
+            steer_finished.set()
+            self.assertEqual(steer_res, {"ok": True, "steered": True})
+            self.assertTrue(t.is_alive(), "t3_thread_wait should still be blocking while steer completed")
+
+            release_wait.set()
+            t.join(timeout=2.0)
+            self.assertFalse(t.is_alive())
+            self.assertEqual(wait_result.get("res"), {"status": "running"})
+
 
 if __name__ == "__main__":
     unittest.main()

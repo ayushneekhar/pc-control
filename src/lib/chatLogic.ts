@@ -392,15 +392,69 @@ export function reconcileQueuedMessages(
   current: ChatMessage[],
   queuedIds: readonly string[],
   running: boolean,
+  optimisticSteeredIds?: ReadonlySet<string>,
 ): ChatMessage[] {
   const queuedSet = running ? new Set(queuedIds) : new Set<string>();
   let changed = false;
   const next = current.map((m) => {
     if (m.role !== 'user' || m.optimistic) return m;
+    if (optimisticSteeredIds?.has(m.id)) {
+      if (!m.queued) return m;
+      changed = true;
+      return { ...m, queued: false, steered: true };
+    }
     const shouldBeQueued = queuedSet.has(m.id);
     if (Boolean(m.queued) === shouldBeQueued) return m;
     changed = true;
     return { ...m, queued: shouldBeQueued };
+  });
+  return changed ? next : current;
+}
+
+/** Optimistically mark a queued user message as steered immediately upon tapping "Send now". */
+export function applyOptimisticSteer(current: ChatMessage[], messageId: string): ChatMessage[] {
+  let changed = false;
+  const next = current.map((m) => {
+    if (m.role !== 'user' || m.id !== messageId) return m;
+    if (m.queued === false && m.steered === true) return m;
+    changed = true;
+    return { ...m, queued: false, steered: true };
+  });
+  return changed ? next : current;
+}
+
+/** Roll back an optimistic steer when the steer request fails. */
+export function rollbackOptimisticSteer(
+  current: ChatMessage[],
+  messageId: string,
+  stillRunning: boolean,
+): ChatMessage[] {
+  let changed = false;
+  const next = current.map((m) => {
+    if (m.role !== 'user' || m.id !== messageId) return m;
+    const nextQueued = stillRunning;
+    if (Boolean(m.queued) === nextQueued && !m.steered) return m;
+    changed = true;
+    return { ...m, queued: nextQueued, steered: false };
+  });
+  return changed ? next : current;
+}
+
+/**
+ * Prevent incoming polling/SSE updates from flickering an in-flight optimistically steered
+ * message back to `queued: true` before the steer HTTP request completes.
+ */
+export function preserveOptimisticSteers(
+  current: ChatMessage[],
+  optimisticSteeredIds: ReadonlySet<string>,
+): ChatMessage[] {
+  if (optimisticSteeredIds.size === 0) return current;
+  let changed = false;
+  const next = current.map((m) => {
+    if (m.role !== 'user' || !optimisticSteeredIds.has(m.id)) return m;
+    if (!m.queued) return m;
+    changed = true;
+    return { ...m, queued: false, steered: true };
   });
   return changed ? next : current;
 }

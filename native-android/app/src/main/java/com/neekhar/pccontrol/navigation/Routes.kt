@@ -37,6 +37,8 @@ sealed interface PcRoute {
     data class Cams(
         val initialTab: String? = null,
         val sharedYoutubeUrl: String? = null,
+        val replayCam: String? = null,
+        val replayTsMs: Long? = null,
     ) : PcRoute
 
     @Serializable
@@ -61,13 +63,19 @@ sealed interface PcRoute {
     data object AgentSettings : PcRoute
 
     @Serializable
-    data class UsageAccountDetail(val accountId: String) : PcRoute
+    data class UsageAccountDetail(
+        val accountId: String,
+        val initialWindow: String? = null,
+    ) : PcRoute
 
     @Serializable
     data object AgentView : PcRoute
 
     @Serializable
-    data class AgentRule(val ruleId: String? = null) : PcRoute
+    data class AgentRule(
+        val ruleId: String? = null,
+        val url: String? = null,
+    ) : PcRoute
 }
 
 /**
@@ -159,7 +167,7 @@ object DeepLinkParser {
         val first = segments[0].lowercase()
 
         return when (first) {
-            "home", "routes" -> PcRoute.Home
+            "home", "routes" -> if (query["unlockKeyring"] == "1") PcRoute.Settings else PcRoute.Home
             "system" -> PcRoute.System(initialTab = segments.getOrNull(1)?.lowercase() ?: query["tab"])
             "vitals" -> PcRoute.System(initialTab = "vitals")
             "health", "services" -> PcRoute.System(initialTab = "services")
@@ -173,6 +181,8 @@ object DeepLinkParser {
             "cams" -> PcRoute.Cams(
                 initialTab = segments.getOrNull(1)?.lowercase() ?: query["tab"],
                 sharedYoutubeUrl = query["share"],
+                replayCam = query["cam"],
+                replayTsMs = query["ts"]?.toLongOrNull(),
             )
             "seerr" -> when {
                 segments.size >= 3 && segments[1].equals("person", ignoreCase = true) -> {
@@ -195,10 +205,17 @@ object DeepLinkParser {
             "agent-settings" -> PcRoute.AgentSettings
             "agent-usage" -> {
                 val accountId = segments.getOrNull(1) ?: query["accountId"]
-                if (!accountId.isNullOrBlank()) PcRoute.UsageAccountDetail(accountId = accountId) else PcRoute.AgentSettings
+                if (!accountId.isNullOrBlank()) {
+                    PcRoute.UsageAccountDetail(accountId = accountId, initialWindow = query["window"])
+                } else {
+                    PcRoute.AgentSettings
+                }
             }
             "agent-view" -> PcRoute.AgentView
-            "agent-rule" -> PcRoute.AgentRule(ruleId = segments.getOrNull(1) ?: query["ruleId"])
+            "agent-rule" -> PcRoute.AgentRule(
+                ruleId = segments.getOrNull(1) ?: query["ruleId"],
+                url = query["url"],
+            )
             else -> null
         }
     }

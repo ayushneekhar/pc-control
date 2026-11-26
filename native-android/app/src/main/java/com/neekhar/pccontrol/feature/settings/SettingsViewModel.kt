@@ -89,15 +89,15 @@ class SettingsViewModel(
 
     private val _uiState = MutableStateFlow(
         SettingsUiState(
-            serverUrlInput = api.baseUrl,
-            chatBaseUrlInput = api.chatBaseUrl,
-            chatTokenInput = api.chatToken,
-            savedServerUrl = api.baseUrl,
-            savedChatBaseUrl = api.chatBaseUrl,
-            savedChatToken = api.chatToken,
+            serverUrlInput = prefs.current.value.serverUrl,
+            chatBaseUrlInput = prefs.current.value.chatUrl,
+            chatTokenInput = prefs.current.value.chatToken,
+            savedServerUrl = prefs.current.value.serverUrl,
+            savedChatBaseUrl = prefs.current.value.chatUrl,
+            savedChatToken = prefs.current.value.chatToken,
             keyringVaultSupported = platform.keyringVaultSupported(),
             keyringHasSaved = platform.keyringHasSaved(),
-            themeMode = ThemeMode.fromId(prefs.themeMode),
+            themeMode = ThemeMode.fromId(prefs.current.value.themeMode.storageValue),
             currentVersionName = platform.currentVersionName(),
             currentVersionCode = platform.currentVersionCode(),
             fcmDiagnostics = platform.fcmDiagnostics(),
@@ -107,6 +107,22 @@ class SettingsViewModel(
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
 
     init {
+        viewModelScope.launch {
+            prefs.snapshots.collect { snap ->
+                _uiState.update { cur ->
+                    val shouldUpdateInputs = !cur.connectionDirty
+                    cur.copy(
+                        serverUrlInput = if (shouldUpdateInputs) snap.serverUrl else cur.serverUrlInput,
+                        chatBaseUrlInput = if (shouldUpdateInputs) snap.chatUrl else cur.chatBaseUrlInput,
+                        chatTokenInput = if (shouldUpdateInputs) snap.chatToken else cur.chatTokenInput,
+                        savedServerUrl = snap.serverUrl,
+                        savedChatBaseUrl = snap.chatUrl,
+                        savedChatToken = snap.chatToken,
+                        themeMode = ThemeMode.fromId(snap.themeMode.storageValue),
+                    )
+                }
+            }
+        }
         refreshAll()
     }
 
@@ -155,10 +171,6 @@ class SettingsViewModel(
             return
         }
 
-        prefs.serverUrl = cleanServer
-        prefs.chatBaseUrl = cleanChat
-        prefs.chatToken = cleanToken
-
         _uiState.update {
             it.copy(
                 serverUrlInput = cleanServer,
@@ -171,6 +183,8 @@ class SettingsViewModel(
             )
         }
         viewModelScope.launch {
+            prefs.setServerUrl(cleanServer)
+            prefs.setChatConfig(cleanChat, cleanToken)
             testConnection()
             platform.registerFcmToken()
             loadPushDiagnostics()
@@ -490,8 +504,10 @@ class SettingsViewModel(
     // ---- Appearance ----
 
     fun setThemeMode(mode: ThemeMode) {
-        prefs.themeMode = mode.id
         _uiState.update { it.copy(themeMode = mode) }
+        viewModelScope.launch {
+            prefs.setThemeMode(com.neekhar.pccontrol.core.theme.ThemeMode.fromStorage(mode.id))
+        }
     }
 
     // ---- App Updates (Native GitHub Releases APK) ----

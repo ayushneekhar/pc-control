@@ -110,7 +110,7 @@ fun SettingsScreen(
 
             // ---- Agent links ----
             item(key = "sec_agent") {
-                PcSectionLabel(text = "Agent")
+                PcSectionLabel(label = "Agent")
             }
             item(key = "card_agent_links") {
                 val agentSub = state.agentSummary?.let { a ->
@@ -143,7 +143,7 @@ fun SettingsScreen(
             // ---- PC Controls ----
             item(key = "sec_pc_controls") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "PC controls")
+                PcSectionLabel(label = "PC controls")
             }
             item(key = "card_vpn") {
                 VpnCard(
@@ -181,7 +181,7 @@ fun SettingsScreen(
             // ---- Notifications ----
             item(key = "sec_notifications") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "Notifications")
+                PcSectionLabel(label = "Notifications")
             }
             item(key = "card_notifications") {
                 NotificationsCard(
@@ -197,7 +197,7 @@ fun SettingsScreen(
             // ---- Appearance ----
             item(key = "sec_appearance") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "Appearance")
+                PcSectionLabel(label = "Appearance")
             }
             item(key = "card_appearance") {
                 PcCard {
@@ -220,7 +220,7 @@ fun SettingsScreen(
             // ---- Connection ----
             item(key = "sec_connection") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "Connection")
+                PcSectionLabel(label = "Connection")
             }
             item(key = "card_connection") {
                 ConnectionCard(
@@ -243,7 +243,7 @@ fun SettingsScreen(
             // ---- App Updates (Native GitHub Releases APK) ----
             item(key = "sec_updates") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "App updates")
+                PcSectionLabel(label = "App updates")
             }
             item(key = "card_updates") {
                 AppUpdatesCard(
@@ -261,7 +261,7 @@ fun SettingsScreen(
             // ---- Diagnostics ----
             item(key = "sec_diagnostics") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "Diagnostics")
+                PcSectionLabel(label = "Diagnostics")
             }
             item(key = "card_diagnostics") {
                 DiagnosticsCard(
@@ -296,9 +296,9 @@ fun SettingsScreen(
         PcConfirmDialog(
             title = "Forget keyring password?",
             message = "Removes the encrypted password and its Keystore key from this phone. You can still unlock by typing it manually.",
-            confirmText = "Forget",
-            dismissText = "Cancel",
-            isDestructive = true,
+            confirmLabel = "Forget",
+            dismissLabel = "Cancel",
+            confirmVariant = PcButtonVariant.Danger,
             onConfirm = {
                 showForgetConfirm = false
                 viewModel.forgetKeyringPassword()
@@ -588,9 +588,9 @@ private fun KeyringCard(
 
             if (locked) {
                 PcButton(
-                    text = if (hasSaved) "Unlock (fingerprint)" else "Unlock keyring",
+                    label = if (hasSaved) "Unlock (fingerprint)" else "Unlock keyring",
                     variant = PcButtonVariant.Primary,
-                    loading = busy,
+                    busy = busy,
                     onClick = onUnlock,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -602,7 +602,7 @@ private fun KeyringCard(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     PcButton(
-                        text = if (hasSaved) "Change password" else "Save password",
+                        label = if (hasSaved) "Change password" else "Save password",
                         variant = if (hasSaved || locked) PcButtonVariant.Subtle else PcButtonVariant.Primary,
                         enabled = !busy,
                         onClick = onSavePassword,
@@ -610,7 +610,7 @@ private fun KeyringCard(
                     )
                     if (hasSaved) {
                         PcButton(
-                            text = "Forget",
+                            label = "Forget",
                             variant = PcButtonVariant.Danger,
                             enabled = !busy,
                             onClick = onForget,
@@ -911,14 +911,14 @@ private fun ConnectionCard(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 PcButton(
-                    text = "Test",
+                    label = "Test",
                     variant = PcButtonVariant.Subtle,
-                    loading = testing,
+                    busy = testing,
                     onClick = onTest,
                     modifier = Modifier.weight(1f),
                 )
                 PcButton(
-                    text = "Save",
+                    label = "Save",
                     variant = PcButtonVariant.Primary,
                     enabled = dirty,
                     onClick = onSave,
@@ -1031,15 +1031,15 @@ private fun AppUpdatesCard(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 PcButton(
-                    text = "Check updates",
+                    label = "Check updates",
                     variant = PcButtonVariant.Subtle,
-                    loading = checking,
+                    busy = checking,
                     onClick = onCheck,
                     modifier = Modifier.weight(1f),
                 )
                 if (hasNewer) {
                     PcButton(
-                        text = "Download & Install",
+                        label = "Download & Install",
                         variant = PcButtonVariant.Primary,
                         onClick = onDownloadInstall,
                         modifier = Modifier.weight(1.3f),
@@ -1096,13 +1096,13 @@ private fun DiagnosticsCard(
                 }
                 if (!fcm.notificationsEnabled) {
                     PcButton(
-                        text = "Allow",
+                        label = "Allow",
                         variant = PcButtonVariant.Subtle,
                         onClick = onOpenNotifSettings,
                     )
                 } else if (!fcmOk) {
                     PcButton(
-                        text = "Retry",
+                        label = "Retry",
                         variant = PcButtonVariant.Subtle,
                         onClick = onRetryPush,
                     )
@@ -1154,7 +1154,7 @@ private fun CrashReportsSheetContent(
             )
             if (reports.isNotEmpty()) {
                 PcButton(
-                    text = "Clear all",
+                    label = "Clear all",
                     variant = PcButtonVariant.Danger,
                     onClick = onClear,
                 )
@@ -1198,7 +1198,7 @@ private fun CrashReportsSheetContent(
         }
 
         PcButton(
-            text = "Close",
+            label = "Close",
             variant = PcButtonVariant.Subtle,
             onClick = onClose,
             modifier = Modifier.fillMaxWidth(),

@@ -408,6 +408,36 @@ fun PcPill(
 }
 
 /**
+ * Small status / metadata pill with explicit foreground and background colors.
+ */
+@Composable
+fun PcPill(
+    text: String,
+    color: Color,
+    backgroundColor: Color,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .clip(CircleShape)
+            .background(backgroundColor)
+            .padding(horizontal = 9.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = text,
+            color = color,
+            style = TabularNumStyle.copy(
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+            ),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
  * Action button matching DESIGN.md:
  * - Primary: accent fill + black text
  * - Subtle: surfaceRaised fill + primary text
@@ -545,6 +575,27 @@ fun <T> PcSegmentedControl(
 }
 
 /**
+ * Convenience string-list overload of [PcSegmentedControl] indexed by [selectedIndex].
+ */
+@Composable
+fun PcSegmentedControl(
+    options: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val segmentOptions = remember(options) {
+        options.mapIndexed { idx, label -> PcSegmentOption(id = idx, label = label) }
+    }
+    PcSegmentedControl(
+        options = segmentOptions,
+        selected = selectedIndex,
+        onSelect = onSelect,
+        modifier = modifier,
+    )
+}
+
+/**
  * 7.dp status dot indicator (ok / warn / bad / accent / dim / faint).
  */
 @Composable
@@ -553,12 +604,27 @@ fun PcStatusDot(
     tone: PcTone = PcTone.Faint,
     size: Dp = 7.dp,
 ) {
-    val colors = PcTheme.colors
+    PcStatusDot(
+        color = PcTheme.colors.toneForeground(tone),
+        modifier = modifier,
+        size = size,
+    )
+}
+
+/**
+ * 7.dp status dot indicator with an explicit [Color].
+ */
+@Composable
+fun PcStatusDot(
+    color: Color,
+    modifier: Modifier = Modifier,
+    size: Dp = 7.dp,
+) {
     Box(
         modifier = modifier
             .size(size)
             .clip(CircleShape)
-            .background(colors.toneForeground(tone)),
+            .background(color),
     )
 }
 
@@ -603,6 +669,7 @@ fun PcScreenHeader(
     modifier: Modifier = Modifier,
     statusText: String? = null,
     statusTone: PcTone = PcTone.Faint,
+    statusColor: Color? = null,
     showStatusDot: Boolean = false,
     onBack: (() -> Unit)? = null,
     actions: @Composable RowScope.() -> Unit = {},
@@ -642,7 +709,9 @@ fun PcScreenHeader(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    if (showStatusDot) {
+                    if (statusColor != null) {
+                        PcStatusDot(color = statusColor, size = 7.dp)
+                    } else if (showStatusDot) {
                         PcStatusDot(tone = statusTone, size = 7.dp)
                     }
                     Text(
@@ -779,7 +848,7 @@ fun PcEmptyState(
  */
 @Composable
 fun PcErrorBanner(
-    title: String,
+    title: String = "",
     modifier: Modifier = Modifier,
     message: String? = null,
     tone: PcTone = PcTone.Bad,
@@ -818,16 +887,18 @@ fun PcErrorBanner(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(
-                text = title,
-                color = fg,
-                fontSize = 14.5.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+            if (title.isNotEmpty()) {
+                Text(
+                    text = title,
+                    color = fg,
+                    fontSize = 14.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
             if (!message.isNullOrEmpty()) {
                 Text(
                     text = message,
-                    color = colors.textDim,
+                    color = if (title.isEmpty()) fg else colors.textDim,
                     fontSize = 13.5.sp,
                     lineHeight = 19.sp,
                 )

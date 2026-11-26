@@ -146,7 +146,7 @@ fun AgentSettingsScreen(
 
             // ---- Harness Switcher ----
             item(key = "sec_harness") {
-                PcSectionLabel(text = "Harness")
+                PcSectionLabel(label = "Harness")
             }
             item(key = "card_harness") {
                 PcCard {
@@ -179,7 +179,7 @@ fun AgentSettingsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    PcSectionLabel(text = "AI usage")
+                    PcSectionLabel(label = "AI usage")
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -244,21 +244,21 @@ fun AgentSettingsScreen(
             // ---- Claude defaults ----
             item(key = "sec_claude") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "Claude")
+                PcSectionLabel(label = "Claude")
             }
             item(key = "card_claude") {
                 PcListCard {
                     PcListRow(
                         icon = Icons.Filled.SmartToy,
                         title = "Account",
-                        trailingText = claude?.account?.ifBlank { "—" } ?: "—",
+                        trailing = claude?.account?.ifBlank { "—" } ?: "—",
                         showChevron = false,
                     )
                     HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
                     PcListRow(
                         icon = Icons.Filled.Tune,
                         title = "Model",
-                        trailingText = claudeModelLabel,
+                        trailing = claudeModelLabel,
                         onClick = if (claude != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -276,7 +276,7 @@ fun AgentSettingsScreen(
                     PcListRow(
                         icon = Icons.Filled.Speed,
                         title = "Effort",
-                        trailingText = claude?.let { formatEffort(it.effort) } ?: "—",
+                        trailing = claude?.let { formatEffort(it.effort) } ?: "—",
                         onClick = if (claude != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -294,9 +294,9 @@ fun AgentSettingsScreen(
                         HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
                         Column(modifier = Modifier.padding(14.dp)) {
                             PcButton(
-                                text = "Restart agent now",
+                                label = "Restart agent now",
                                 variant = PcButtonVariant.Subtle,
-                                loading = state.restartingClaude,
+                                busy = state.restartingClaude,
                                 onClick = { showRestartConfirm = true },
                                 modifier = Modifier.fillMaxWidth(),
                             )
@@ -308,7 +308,7 @@ fun AgentSettingsScreen(
             // ---- Gemini defaults ----
             item(key = "sec_gemini") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "Gemini")
+                PcSectionLabel(label = "Gemini")
             }
             item(key = "card_gemini") {
                 PcListCard {
@@ -316,7 +316,7 @@ fun AgentSettingsScreen(
                         icon = Icons.Filled.SmartToy,
                         title = "Account",
                         subtitle = geminiInst?.email ?: if (geminiInst?.signedIn == false) "Not signed in" else null,
-                        trailingText = geminiInst?.label ?: gemini?.instanceId?.ifBlank { "—" } ?: "—",
+                        trailing = geminiInst?.label ?: gemini?.instanceId?.ifBlank { "—" } ?: "—",
                         onClick = if (gemini != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -376,7 +376,7 @@ fun AgentSettingsScreen(
                     PcListRow(
                         icon = Icons.Filled.Tune,
                         title = "Model",
-                        trailingText = geminiModelLabel,
+                        trailing = geminiModelLabel,
                         onClick = if (gemini != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -394,7 +394,7 @@ fun AgentSettingsScreen(
                     PcListRow(
                         icon = Icons.Filled.Speed,
                         title = "Effort",
-                        trailingText = gemini?.let { formatEffort(it.thoughtLevel) } ?: "—",
+                        trailing = gemini?.let { formatEffort(it.thoughtLevel) } ?: "—",
                         onClick = if (gemini != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -414,7 +414,7 @@ fun AgentSettingsScreen(
             // ---- Usage Alerts ----
             item(key = "sec_alerts") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "Usage alerts")
+                PcSectionLabel(label = "Usage alerts")
             }
             item(key = "card_alerts") {
                 PcListCard {
@@ -456,7 +456,7 @@ fun AgentSettingsScreen(
                     PcListRow(
                         icon = Icons.Filled.HourglassBottom,
                         title = "5-hour threshold",
-                        trailingText = alerts?.let { "${it.fiveHourPct}% left" } ?: "—",
+                        trailing = alerts?.let { "${it.fiveHourPct}% left" } ?: "—",
                         onClick = if (alerts != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -478,7 +478,7 @@ fun AgentSettingsScreen(
                     PcListRow(
                         icon = Icons.Filled.CalendarMonth,
                         title = "Weekly threshold",
-                        trailingText = alerts?.let { "${it.weeklyPct}% left" } ?: "—",
+                        trailing = alerts?.let { "${it.weeklyPct}% left" } ?: "—",
                         onClick = if (alerts != null && !state.saving) {
                             {
                                 activePicker = PickerRequest(
@@ -502,14 +502,14 @@ fun AgentSettingsScreen(
             // ---- Conversation reset ----
             item(key = "sec_convo") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "Conversation")
+                PcSectionLabel(label = "Conversation")
             }
             item(key = "card_convo") {
                 PcCard {
                     PcButton(
-                        text = "Start fresh",
+                        label = "Start fresh",
                         variant = PcButtonVariant.Subtle,
-                        loading = state.resetting,
+                        busy = state.resetting,
                         onClick = { showResetConfirm = true },
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -590,7 +590,7 @@ fun AgentSettingsScreen(
                     }
                 }
                 PcButton(
-                    text = "Cancel",
+                    label = "Cancel",
                     variant = PcButtonVariant.Subtle,
                     onClick = { activePicker = null },
                     modifier = Modifier.fillMaxWidth(),
@@ -604,8 +604,8 @@ fun AgentSettingsScreen(
         PcConfirmDialog(
             title = "Restart Claude agent?",
             message = "Applies your model and effort changes immediately.",
-            confirmText = "Restart",
-            dismissText = "Cancel",
+            confirmLabel = "Restart",
+            dismissLabel = "Cancel",
             onConfirm = {
                 showRestartConfirm = false
                 viewModel.restartClaudeAgent()
@@ -618,8 +618,8 @@ fun AgentSettingsScreen(
         PcConfirmDialog(
             title = "Start a fresh conversation?",
             message = "Clears the current conversation context for the active agent.",
-            confirmText = "Start fresh",
-            dismissText = "Cancel",
+            confirmLabel = "Start fresh",
+            dismissLabel = "Cancel",
             onConfirm = {
                 showResetConfirm = false
                 viewModel.resetConversation()
@@ -632,7 +632,7 @@ fun AgentSettingsScreen(
         PcConfirmDialog(
             title = "Agent",
             message = state.noticeMessage!!,
-            confirmText = "OK",
+            confirmLabel = "OK",
             onConfirm = viewModel::dismissNotice,
             onDismiss = viewModel::dismissNotice,
         )

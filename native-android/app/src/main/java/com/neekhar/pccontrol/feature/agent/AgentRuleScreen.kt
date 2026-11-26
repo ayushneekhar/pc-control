@@ -145,7 +145,7 @@ fun AgentRuleScreen(
         // Step 1: Choose action when creating a rule from a captured URL
         if (!state.loading && state.rule == null && state.ruleUrl.isNotBlank()) {
             item(key = "sec_action") {
-                PcSectionLabel(text = "Choose action")
+                PcSectionLabel(label = "Choose action")
             }
             item(key = "action_list") {
                 PcListCard {
@@ -156,7 +156,7 @@ fun AgentRuleScreen(
                         PcListRow(
                             icon = icon,
                             title = label,
-                            trailingText = if (state.busyAction == actionId) "Creating…" else null,
+                            trailing = if (state.busyAction == actionId) "Creating…" else null,
                             onClick = if (state.busyAction == null) {
                                 { viewModel.chooseActionForNewRule(actionId) }
                             } else null,
@@ -184,7 +184,7 @@ fun AgentRuleScreen(
             }
 
             item(key = "sec_rule") {
-                PcSectionLabel(text = "Rule")
+                PcSectionLabel(label = "Rule")
             }
             item(key = "card_rule") {
                 PcCard {
@@ -235,7 +235,7 @@ fun AgentRuleScreen(
             }
 
             item(key = "sec_match") {
-                PcSectionLabel(text = "Match")
+                PcSectionLabel(label = "Match")
             }
             item(key = "card_match") {
                 PcCard {
@@ -293,7 +293,7 @@ fun AgentRuleScreen(
             // Action-specific editor
             when (draft.action) {
                 "replace_page" -> {
-                    item(key = "sec_html") { PcSectionLabel(text = "HTML") }
+                    item(key = "sec_html") { PcSectionLabel(label = "HTML") }
                     item(key = "card_html") {
                         PcCard {
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -326,9 +326,9 @@ fun AgentRuleScreen(
                                         .height(260.dp),
                                 )
                                 PcButton(
-                                    text = "Reset to original",
+                                    label = "Reset to original",
                                     variant = PcButtonVariant.Subtle,
-                                    loading = state.busyAction == "original",
+                                    busy = state.busyAction == "original",
                                     onClick = viewModel::resetHtmlToOriginal,
                                     modifier = Modifier.fillMaxWidth(),
                                 )
@@ -338,7 +338,7 @@ fun AgentRuleScreen(
                 }
 
                 "replace_text" -> {
-                    item(key = "sec_replacements") { PcSectionLabel(text = "Replacements") }
+                    item(key = "sec_replacements") { PcSectionLabel(label = "Replacements") }
                     item(key = "card_replacements") {
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             if (draft.replacements.isEmpty()) {
@@ -432,7 +432,7 @@ fun AgentRuleScreen(
                                 }
                             }
                             PcButton(
-                                text = "Add pair",
+                                label = "Add pair",
                                 variant = PcButtonVariant.Subtle,
                                 onClick = {
                                     viewModel.updateDraft { d ->
@@ -446,7 +446,7 @@ fun AgentRuleScreen(
                 }
 
                 "hide" -> {
-                    item(key = "sec_selectors") { PcSectionLabel(text = "CSS selectors") }
+                    item(key = "sec_selectors") { PcSectionLabel(label = "CSS selectors") }
                     item(key = "card_selectors") {
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             if (draft.selectors.isEmpty()) {
@@ -494,7 +494,7 @@ fun AgentRuleScreen(
                                 }
                             }
                             PcButton(
-                                text = "Add selector",
+                                label = "Add selector",
                                 variant = PcButtonVariant.Subtle,
                                 onClick = {
                                     viewModel.updateDraft { d -> d.copy(selectors = d.selectors + "") }
@@ -506,7 +506,7 @@ fun AgentRuleScreen(
                 }
 
                 "block" -> {
-                    item(key = "sec_block") { PcSectionLabel(text = "Block mode") }
+                    item(key = "sec_block") { PcSectionLabel(label = "Block mode") }
                     item(key = "card_block") {
                         PcCard {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -551,15 +551,15 @@ fun AgentRuleScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     PcButton(
-                        text = "Delete",
+                        label = "Delete",
                         variant = PcButtonVariant.Danger,
                         onClick = { showDeleteConfirm = true },
                         modifier = Modifier.weight(1f),
                     )
                     PcButton(
-                        text = "Save",
+                        label = "Save",
                         variant = PcButtonVariant.Primary,
-                        loading = state.busyAction == "save",
+                        busy = state.busyAction == "save",
                         onClick = viewModel::saveRule,
                         modifier = Modifier.weight(2f),
                     )
@@ -577,9 +577,9 @@ fun AgentRuleScreen(
         PcConfirmDialog(
             title = "Delete rule?",
             message = r.name.ifBlank { r.match },
-            confirmText = "Delete",
-            dismissText = "Cancel",
-            isDestructive = true,
+            confirmLabel = "Delete",
+            dismissLabel = "Cancel",
+            confirmVariant = PcButtonVariant.Danger,
             onConfirm = {
                 showDeleteConfirm = false
                 viewModel.deleteRule(r.id, onDeleted = onBack)

@@ -217,7 +217,7 @@ fun AgentViewScreen(
                                 lineHeight = 19.sp,
                             )
                             PcButton(
-                                text = "Retry",
+                                label = "Retry",
                                 variant = PcButtonVariant.Subtle,
                                 onClick = viewModel::load,
                             )
@@ -352,7 +352,7 @@ fun AgentViewScreen(
                                 PcEmptyState(
                                     icon = Icons.Filled.FilterList,
                                     title = "No rules yet",
-                                    subtitle = "Select a captured URL to create a rewrite or block rule.",
+                                    body = "Select a captured URL to create a rewrite or block rule.",
                                 )
                             }
                         }
@@ -478,9 +478,9 @@ fun AgentViewScreen(
         PcConfirmDialog(
             title = "Delete rule?",
             message = toDelete.name.ifBlank { toDelete.match },
-            confirmText = "Delete",
-            dismissText = "Cancel",
-            isDestructive = true,
+            confirmLabel = "Delete",
+            dismissLabel = "Cancel",
+            confirmVariant = PcButtonVariant.Danger,
             onConfirm = {
                 pendingDelete = null
                 viewModel.deleteRule(toDelete.id)

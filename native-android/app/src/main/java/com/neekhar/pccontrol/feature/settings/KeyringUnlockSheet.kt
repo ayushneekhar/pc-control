@@ -191,7 +191,7 @@ fun KeyringUnlockSheet(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 PcButton(
-                    text = "Cancel",
+                    label = "Cancel",
                     variant = PcButtonVariant.Subtle,
                     enabled = !busy,
                     onClick = {
@@ -201,10 +201,10 @@ fun KeyringUnlockSheet(
                     modifier = Modifier.weight(1f),
                 )
                 PcButton(
-                    text = if (mode == KeyringSheetMode.SAVE_PASSWORD) "Save" else "Unlock",
+                    label = if (mode == KeyringSheetMode.SAVE_PASSWORD) "Save" else "Unlock",
                     variant = PcButtonVariant.Primary,
                     enabled = !busy && password.isNotEmpty(),
-                    loading = busy,
+                    busy = busy,
                     onClick = submit,
                     modifier = Modifier.weight(1.2f),
                 )

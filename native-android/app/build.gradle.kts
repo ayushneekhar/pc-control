@@ -163,9 +163,6 @@ dependencies {
 
     implementation(libs.webrtc)
 
-    implementation(libs.markdown.m3)
-    implementation(libs.markdown.coil3)
-
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
 }

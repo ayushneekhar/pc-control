@@ -126,7 +126,7 @@ fun UsageAccountDetailScreen(
                         PcEmptyState(
                             icon = Icons.Filled.PersonOff,
                             title = "Account not found",
-                            subtitle = "Pull down to refresh usage data from your PC.",
+                            body = "Pull down to refresh usage data from your PC.",
                         )
                     }
                 }
@@ -202,7 +202,7 @@ fun UsageAccountDetailScreen(
 
                 item(key = "sec_info") {
                     Spacer(modifier = Modifier.height(4.dp))
-                    PcSectionLabel(text = "Account info")
+                    PcSectionLabel(label = "Account info")
                 }
                 item(key = "card_info") {
                     PcCard {

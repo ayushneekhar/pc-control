@@ -123,15 +123,15 @@ fun RootScreen(
                     title = "Root",
                     statusText = statusLabel,
                     statusColor = statusDotColor,
-                    trailing = if (state.waitingCount > 0) {
-                        {
+                    actions = {
+                        if (state.waitingCount > 0) {
                             PcPill(
                                 text = "${state.waitingCount} waiting",
                                 color = colors.warn,
                                 backgroundColor = colors.warnSoft,
                             )
                         }
-                    } else null,
+                    },
                 )
             }
 
@@ -198,7 +198,7 @@ fun RootScreen(
                                 lineHeight = 19.sp,
                             )
                             PcButton(
-                                text = "Open Settings",
+                                label = "Open Settings",
                                 variant = PcButtonVariant.Subtle,
                                 onClick = onOpenSettings,
                             )
@@ -208,7 +208,7 @@ fun RootScreen(
             }
 
             item(key = "sec_waiting") {
-                PcSectionLabel(text = "Waiting for you")
+                PcSectionLabel(label = "Waiting for you")
             }
 
             if (state.pending.isEmpty()) {
@@ -217,7 +217,7 @@ fun RootScreen(
                         PcEmptyState(
                             icon = Icons.Filled.VerifiedUser,
                             title = "Nothing waiting",
-                            subtitle = "New root approval requests will appear here.",
+                            body = "New root approval requests will appear here.",
                         )
                     }
                 }
@@ -238,7 +238,7 @@ fun RootScreen(
 
             item(key = "sec_history") {
                 Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(text = "History")
+                PcSectionLabel(label = "History")
             }
 
             if (state.historyError != null) {
@@ -302,8 +302,8 @@ fun RootScreen(
         PcConfirmDialog(
             title = alert.title,
             message = alert.message,
-            confirmText = if (alert.requiresReenroll) "Open Settings" else "OK",
-            dismissText = if (alert.requiresReenroll) "Close" else null,
+            confirmLabel = if (alert.requiresReenroll) "Open Settings" else "OK",
+            dismissLabel = if (alert.requiresReenroll) "Close" else null,
             onConfirm = {
                 viewModel.dismissAlert()
                 if (alert.requiresReenroll) onOpenSettings()
@@ -484,25 +484,25 @@ private fun PendingRequestCard(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     PcButton(
-                        text = "Deny",
+                        label = "Deny",
                         variant = PcButtonVariant.Subtle,
                         enabled = busyKey == null,
-                        loading = busyKey == "${req.id}:deny",
+                        busy = busyKey == "${req.id}:deny",
                         onClick = { onDecide(Decision.DENY) },
                         modifier = Modifier.weight(1f),
                     )
                     PcButton(
-                        text = "Approve",
+                        label = "Approve",
                         variant = PcButtonVariant.Primary,
                         enabled = busyKey == null && secsLeft > 0 && (!longCmd || reviewedFull),
-                        loading = busyKey == "${req.id}:approve",
+                        busy = busyKey == "${req.id}:approve",
                         onClick = { onDecide(Decision.APPROVE) },
                         modifier = Modifier.weight(1.4f),
                     )
                 }
             } else {
                 PcButton(
-                    text = "View output",
+                    label = "View output",
                     variant = PcButtonVariant.Subtle,
                     onClick = onOpenDetail,
                     modifier = Modifier.fillMaxWidth(),
@@ -697,18 +697,18 @@ private fun RootDetailSheetContent(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     PcButton(
-                        text = "Deny",
+                        label = "Deny",
                         variant = PcButtonVariant.Subtle,
                         enabled = busyKey == null,
-                        loading = busyKey == "${req.id}:deny",
+                        busy = busyKey == "${req.id}:deny",
                         onClick = { onDecide(req, Decision.DENY) },
                         modifier = Modifier.weight(1f),
                     )
                     PcButton(
-                        text = "Approve",
+                        label = "Approve",
                         variant = PcButtonVariant.Primary,
                         enabled = busyKey == null && (!longCmd || reviewedFull),
-                        loading = busyKey == "${req.id}:approve",
+                        busy = busyKey == "${req.id}:approve",
                         onClick = { onDecide(req, Decision.APPROVE) },
                         modifier = Modifier.weight(1.4f),
                     )
@@ -752,7 +752,7 @@ private fun RootDetailSheetContent(
         }
 
         PcButton(
-            text = "Close",
+            label = "Close",
             variant = PcButtonVariant.Subtle,
             onClick = onClose,
             modifier = Modifier.fillMaxWidth(),

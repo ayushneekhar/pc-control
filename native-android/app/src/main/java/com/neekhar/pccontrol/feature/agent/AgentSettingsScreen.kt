@@ -24,7 +24,6 @@ import androidx.compose.material.icons.filled.HourglassBottom
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -42,7 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -147,8 +146,8 @@ fun AgentSettingsScreen(
         ) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 24.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp),
             ) {
                 // ---- Harness Switcher (direct compact segmented control, no outer card or redundant label) ----
                 item(key = "harness_switcher") {
@@ -174,23 +173,13 @@ fun AgentSettingsScreen(
                     }
                 }
 
-                // ---- AI Usage ----
+                // ---- AI Usage (refreshed via native PullToRefreshBox) ----
                 item(key = "usage_section") {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            PcSectionLabel(
-                                label = "AI usage",
-                                modifier = Modifier.weight(1f),
-                            )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                if (state.usage?.stale == true) {
+                        PcSectionLabel(
+                            label = "AI usage",
+                            trailing = if (state.usage?.stale == true) {
+                                {
                                     Text(
                                         text = "updating…",
                                         color = colors.textFaint,
@@ -199,28 +188,10 @@ fun AgentSettingsScreen(
                                         softWrap = false,
                                     )
                                 }
-                                if (state.usageLoading) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp,
-                                        color = colors.accent,
-                                    )
-                                } else {
-                                    Text(
-                                        text = "Refresh",
-                                        color = colors.accent,
-                                        fontSize = 12.5.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        softWrap = false,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .clickable { viewModel.loadUsage(force = true) }
-                                            .padding(horizontal = 6.dp, vertical = 3.dp),
-                                    )
-                                }
-                            }
-                        }
+                            } else {
+                                null
+                            },
+                        )
 
                         if (!state.usageError.isNullOrBlank()) {
                             PcErrorBanner(message = state.usageError!!)
@@ -278,6 +249,7 @@ fun AgentSettingsScreen(
                                 icon = Icons.Filled.Tune,
                                 title = "Model",
                                 trailing = claudeModelLabel,
+                                showChevron = true,
                                 showDivider = true,
                                 onClick = if (claude != null && !state.saving) {
                                     {
@@ -296,6 +268,7 @@ fun AgentSettingsScreen(
                                 icon = Icons.Filled.Speed,
                                 title = "Effort",
                                 trailing = claude?.let { formatEffort(it.effort) } ?: "—",
+                                showChevron = true,
                                 showDivider = showClaudeRestart,
                                 onClick = if (claude != null && !state.saving) {
                                     {
@@ -341,6 +314,7 @@ fun AgentSettingsScreen(
                                 title = "Account",
                                 subtitle = geminiInst?.email ?: if (geminiInst?.signedIn == false) "Not signed in" else null,
                                 trailing = geminiInst?.label ?: gemini?.instanceId?.ifBlank { "—" } ?: "—",
+                                showChevron = true,
                                 showDivider = true,
                                 onClick = if (gemini != null && !state.saving) {
                                     {
@@ -390,9 +364,11 @@ fun AgentSettingsScreen(
                                     },
                                     colors = SwitchDefaults.colors(
                                         checkedThumbColor = colors.bg,
-                                        checkedTrackColor = colors.accent,
-                                        uncheckedThumbColor = colors.textFaint,
+                                        checkedTrackColor = colors.text,
+                                        checkedBorderColor = Color.Transparent,
+                                        uncheckedThumbColor = colors.textDim,
                                         uncheckedTrackColor = colors.surfaceRaised,
+                                        uncheckedBorderColor = colors.hairline,
                                     ),
                                 )
                             }
@@ -401,6 +377,7 @@ fun AgentSettingsScreen(
                                 icon = Icons.Filled.Tune,
                                 title = "Model",
                                 trailing = geminiModelLabel,
+                                showChevron = true,
                                 showDivider = true,
                                 onClick = if (gemini != null && !state.saving) {
                                     {
@@ -419,6 +396,7 @@ fun AgentSettingsScreen(
                                 icon = Icons.Filled.Speed,
                                 title = "Effort",
                                 trailing = gemini?.let { formatEffort(it.thoughtLevel) } ?: "—",
+                                showChevron = true,
                                 showDivider = false,
                                 onClick = if (gemini != null && !state.saving) {
                                     {
@@ -470,9 +448,11 @@ fun AgentSettingsScreen(
                                     },
                                     colors = SwitchDefaults.colors(
                                         checkedThumbColor = colors.bg,
-                                        checkedTrackColor = colors.accent,
-                                        uncheckedThumbColor = colors.textFaint,
+                                        checkedTrackColor = colors.text,
+                                        checkedBorderColor = Color.Transparent,
+                                        uncheckedThumbColor = colors.textDim,
                                         uncheckedTrackColor = colors.surfaceRaised,
+                                        uncheckedBorderColor = colors.hairline,
                                     ),
                                 )
                             }
@@ -481,6 +461,7 @@ fun AgentSettingsScreen(
                                 icon = Icons.Filled.HourglassBottom,
                                 title = "5-hour threshold",
                                 trailing = alerts?.let { "${it.fiveHourPct}% left" } ?: "—",
+                                showChevron = true,
                                 showDivider = true,
                                 onClick = if (alerts != null && !state.saving) {
                                     {
@@ -503,6 +484,7 @@ fun AgentSettingsScreen(
                                 icon = Icons.Filled.CalendarMonth,
                                 title = "Weekly threshold",
                                 trailing = alerts?.let { "${it.weeklyPct}% left" } ?: "—",
+                                showChevron = true,
                                 showDivider = false,
                                 onClick = if (alerts != null && !state.saving) {
                                     {

@@ -1,10 +1,19 @@
 package com.neekhar.pccontrol.feature.space
 
+import android.view.HapticFeedbackConstants
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,8 +41,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CheckBox
-import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudDownload
@@ -42,10 +50,11 @@ import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.IndeterminateCheckBox
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -69,10 +78,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
 import com.neekhar.pccontrol.core.ui.PcButton
@@ -86,8 +99,14 @@ import com.neekhar.pccontrol.core.ui.PcProgressBar
 import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSegmentOption
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
+import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.PcTone
 import kotlin.math.abs
+
+private sealed interface FocusedSpaceItem {
+    data class Local(val item: SpaceCandidate) : FocusedSpaceItem
+    data class Drive(val item: DriveItem) : FocusedSpaceItem
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -97,10 +116,18 @@ fun SpaceScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val colors = LocalPcColors.current
+    val view = LocalView.current
+
+    var searchOpen by remember { mutableStateOf(false) }
+    var focusedItem by remember { mutableStateOf<FocusedSpaceItem?>(null) }
 
     DisposableEffect(viewModel) {
         viewModel.startStream()
         onDispose { viewModel.stopStream() }
+    }
+
+    BackHandler(enabled = state.hasSelection) {
+        viewModel.clearSelection()
     }
 
     val hdd = state.localData?.hdd
@@ -122,6 +149,8 @@ fun SpaceScreen(
     }
 
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val showSearchField = searchOpen || state.query.isNotEmpty()
+    val selectionMode = state.hasSelection
 
     Box(
         modifier = Modifier
@@ -139,6 +168,26 @@ fun SpaceScreen(
                 statusTone = statusTone,
                 showStatusDot = statusText != null,
                 onBack = onBack,
+                actions = {
+                    IconButton(
+                        onClick = {
+                            if (showSearchField) {
+                                viewModel.updateQuery("")
+                                searchOpen = false
+                            } else {
+                                searchOpen = true
+                            }
+                        },
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = if (showSearchField) Icons.Filled.Close else Icons.Filled.Search,
+                            contentDescription = if (showSearchField) "Close search" else "Search media",
+                            tint = if (showSearchField) colors.text else colors.textDim,
+                            modifier = Modifier.size(21.dp),
+                        )
+                    }
+                },
             )
 
             PullToRefreshBox(
@@ -153,8 +202,8 @@ fun SpaceScreen(
                     contentPadding = PaddingValues(
                         start = 18.dp,
                         end = 18.dp,
-                        top = 4.dp,
-                        bottom = (if (state.hasSelection) 136.dp else 28.dp) + navBottom,
+                        top = 2.dp,
+                        bottom = (if (selectionMode) 144.dp else 28.dp) + navBottom,
                     ),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
@@ -211,17 +260,15 @@ fun SpaceScreen(
                         }
                     }
 
-                    item(key = "hdd_summary") {
+                    // ONE unified Disk + Google Drive storage summary card
+                    item(key = "storage_summary") {
                         if (hdd != null) {
-                            HddSummaryCard(hdd = hdd)
+                            UnifiedStorageCard(
+                                hdd = hdd,
+                                drive = state.driveData,
+                            )
                         } else {
-                            HddSummarySkeleton()
-                        }
-                    }
-
-                    state.driveData?.let { drive ->
-                        item(key = "drive_summary") {
-                            DriveStatusCard(drive = drive)
+                            StorageSummarySkeleton()
                         }
                     }
 
@@ -244,16 +291,13 @@ fun SpaceScreen(
                         }
                     }
 
-                    item(key = "tabs") {
-                        PcSegmentedControl(
-                            options = tabOptions,
-                            selected = state.tab,
-                            onSelect = viewModel::selectTab,
-                        )
-                    }
-
-                    item(key = "search_and_filters") {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // Collapsible search field (hidden by default so media starts higher)
+                    item(key = "search_bar") {
+                        AnimatedVisibility(
+                            visible = showSearchField,
+                            enter = expandVertically() + fadeIn(),
+                            exit = shrinkVertically() + fadeOut(),
+                        ) {
                             SpaceSearchField(
                                 query = state.query,
                                 placeholder = when (state.tab) {
@@ -263,25 +307,30 @@ fun SpaceScreen(
                                 },
                                 onQueryChange = viewModel::updateQuery,
                             )
+                        }
+                    }
+
+                    // Compact tabs + filter/sort controls (2 tight rows instead of 4 stacked rows)
+                    item(key = "controls") {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            PcSegmentedControl(
+                                options = tabOptions,
+                                selected = state.tab,
+                                onSelect = viewModel::selectTab,
+                            )
                             FilterAndSortBar(
                                 tab = state.tab,
                                 localStatusChip = state.localStatusChip,
                                 driveKindFilter = state.driveKindFilter,
                                 sort = state.sort,
+                                visibleCount = if (state.tab == SpaceTab.OFFLOADED) {
+                                    state.visibleDrive.size
+                                } else {
+                                    state.visibleLocal.size
+                                },
                                 onSelectLocalChip = viewModel::selectLocalStatusChip,
                                 onSelectDriveFilter = viewModel::selectDriveKindFilter,
                                 onSelectSort = viewModel::selectSort,
-                            )
-                        }
-                    }
-
-                    val visSel = state.visibleSelection
-                    if (visSel.visibleCount > 0) {
-                        item(key = "select_bar") {
-                            SelectAllRow(
-                                selection = visSel,
-                                visibleTotalBytes = state.visibleSelectableTotalBytes,
-                                onToggleSelectAll = viewModel::toggleSelectAllVisible,
                             )
                         }
                     }
@@ -330,10 +379,21 @@ fun SpaceScreen(
                                         items.forEachIndexed { index, item ->
                                             DriveItemRow(
                                                 item = item,
+                                                selectionMode = selectionMode,
                                                 selected = item.relPath in selectedPaths,
                                                 activeJob = activeMap[item.relPath],
                                                 showDivider = index < items.lastIndex,
-                                                onToggle = { viewModel.toggleDriveItem(item.relPath) },
+                                                onClick = {
+                                                    if (selectionMode) {
+                                                        viewModel.toggleDriveItem(item.relPath)
+                                                    } else {
+                                                        focusedItem = FocusedSpaceItem.Drive(item)
+                                                    }
+                                                },
+                                                onLongClick = {
+                                                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                                                    viewModel.toggleDriveItem(item.relPath)
+                                                },
                                             )
                                         }
                                     }
@@ -378,10 +438,21 @@ fun SpaceScreen(
                                         items.forEachIndexed { index, item ->
                                             CandidateRow(
                                                 item = item,
+                                                selectionMode = selectionMode,
                                                 selected = item.id in selectedIds,
                                                 activeJob = activeMap[item.id],
                                                 showDivider = index < items.lastIndex,
-                                                onToggle = { viewModel.toggleLocalItem(item.id) },
+                                                onClick = {
+                                                    if (selectionMode) {
+                                                        viewModel.toggleLocalItem(item.id)
+                                                    } else {
+                                                        focusedItem = FocusedSpaceItem.Local(item)
+                                                    }
+                                                },
+                                                onLongClick = {
+                                                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                                                    viewModel.toggleLocalItem(item.id)
+                                                },
                                             )
                                         }
                                     }
@@ -393,19 +464,21 @@ fun SpaceScreen(
             }
         }
 
-        // Sticky multi-select action bar
+        // Sleek floating contextual action bar shown ONLY when items are selected
         AnimatedVisibility(
-            visible = state.hasSelection,
-            enter = slideInVertically(initialOffsetY = { it }),
-            exit = slideOutVertically(targetOffsetY = { it }),
+            visible = selectionMode,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             SelectionActionBar(
                 isDriveMode = state.tab == SpaceTab.OFFLOADED,
                 count = if (state.tab == SpaceTab.OFFLOADED) state.driveSelection.count else state.localSelection.count,
                 totalBytes = if (state.tab == SpaceTab.OFFLOADED) state.driveSelection.totalBytes else state.localSelection.totalBytes,
+                allVisibleSelected = state.visibleSelection.allSelected,
                 offloadDisabled = state.driveExplicitlyUnconfigured,
                 onClear = viewModel::clearSelection,
+                onToggleSelectAll = viewModel::toggleSelectAllVisible,
                 onPrimaryAction = {
                     viewModel.requestConfirm(
                         if (state.tab == SpaceTab.OFFLOADED) SpaceConfirmAction.RESTORE else SpaceConfirmAction.OFFLOAD,
@@ -420,6 +493,50 @@ fun SpaceScreen(
         }
     }
 
+    // Single-item quick action sheet (on short tap outside selection mode)
+    val activeFocus = focusedItem
+    if (activeFocus != null) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { focusedItem = null },
+            sheetState = sheetState,
+            containerColor = colors.surface,
+            contentColor = colors.text,
+            dragHandle = { PcSheetDragHandle() },
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        ) {
+            SingleItemActionSheetContent(
+                focused = activeFocus,
+                offloadDisabled = state.driveExplicitlyUnconfigured,
+                onSelectMultiple = {
+                    focusedItem = null
+                    when (activeFocus) {
+                        is FocusedSpaceItem.Local -> viewModel.toggleLocalItem(activeFocus.item.id)
+                        is FocusedSpaceItem.Drive -> viewModel.toggleDriveItem(activeFocus.item.relPath)
+                    }
+                },
+                onPrimaryAction = {
+                    focusedItem = null
+                    when (activeFocus) {
+                        is FocusedSpaceItem.Local ->
+                            viewModel.selectOnlyLocalAndConfirm(activeFocus.item.id, SpaceConfirmAction.OFFLOAD)
+                        is FocusedSpaceItem.Drive ->
+                            viewModel.selectOnlyDriveAndConfirm(activeFocus.item.relPath, SpaceConfirmAction.RESTORE)
+                    }
+                },
+                onDeleteAction = {
+                    focusedItem = null
+                    when (activeFocus) {
+                        is FocusedSpaceItem.Local ->
+                            viewModel.selectOnlyLocalAndConfirm(activeFocus.item.id, SpaceConfirmAction.DELETE_LOCAL)
+                        is FocusedSpaceItem.Drive ->
+                            viewModel.selectOnlyDriveAndConfirm(activeFocus.item.relPath, SpaceConfirmAction.DELETE_DRIVE)
+                    }
+                },
+            )
+        }
+    }
+
     // Confirmation ModalBottomSheet
     val confirmAction = state.confirmAction
     if (confirmAction != null) {
@@ -429,7 +546,8 @@ fun SpaceScreen(
             sheetState = sheetState,
             containerColor = colors.surface,
             contentColor = colors.text,
-            dragHandle = null,
+            dragHandle = { PcSheetDragHandle() },
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
         ) {
             ConfirmActionSheetContent(
                 action = confirmAction,
@@ -443,19 +561,15 @@ fun SpaceScreen(
     }
 }
 
+/**
+ * Single unified storage card combining HDD free/used bar and a compact Google Drive summary line.
+ */
 @Composable
-private fun HddSummaryCard(hdd: SpaceHdd) {
+private fun UnifiedStorageCard(
+    hdd: SpaceHdd,
+    drive: DriveStatusResponse?,
+) {
     val colors = LocalPcColors.current
-    if (!hdd.mounted) {
-        PcErrorBanner(
-            title = "HDD not mounted",
-            message = hdd.mount.takeIf { it.isNotBlank() },
-            tone = PcTone.Warn,
-            icon = Icons.Filled.Storage,
-        )
-        return
-    }
-
     val total = hdd.totalBytes ?: 0L
     val used = hdd.usedBytes ?: 0L
     val free = hdd.freeBytes ?: 0L
@@ -467,195 +581,187 @@ private fun HddSummaryCard(hdd: SpaceHdd) {
         0f
     }
 
-    val lowNow = free < hdd.thresholdBytes
-    val lowAfter = predicted < hdd.thresholdBytes
+    val lowNow = hdd.mounted && free < hdd.thresholdBytes
+    val lowAfter = hdd.mounted && predicted < hdd.thresholdBytes
     val usedBarColor = when {
         predicted < 0L -> colors.bad
         lowNow || lowAfter -> colors.warn
-        else -> colors.accent
+        else -> colors.text
     }
-    val freeTextColor = if (lowNow) colors.warn else colors.text
-    val hasPending = hdd.pendingCount > 0 || hdd.pendingBytes > 0L
+    val hasPending = hdd.mounted && (hdd.pendingCount > 0 || hdd.pendingBytes > 0L)
 
-    PcCard {
+    PcCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                Text(
-                    text = "${formatBytes(free)} free",
-                    color = freeTextColor,
-                    style = TabularNumStyle.copy(
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    ),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = "${formatBytes(used)} / ${formatBytes(total)}",
-                    color = colors.textDim,
-                    style = TabularNumStyle.copy(
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Normal,
-                    ),
-                    maxLines = 1,
-                )
-            }
-
-            // Segmented horizontal storage bar: used + pending downloads + free track
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(6.dp)
-                    .clip(CircleShape)
-                    .background(colors.surfaceRaised),
-            ) {
-                Row(modifier = Modifier.fillMaxSize()) {
-                    if (usedFraction > 0f) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .weight(usedFraction)
-                                .background(usedBarColor),
-                        )
-                    }
-                    if (pendingFraction > 0f) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .weight(pendingFraction)
-                                .background(colors.warn),
-                        )
-                    }
-                    val remaining = (1f - usedFraction - pendingFraction).coerceAtLeast(0f)
-                    if (remaining > 0f) {
-                        Spacer(modifier = Modifier.weight(remaining))
-                    }
-                }
-            }
-
-            if (hasPending) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    val dlSuffix = if (hdd.pendingCount == 1) "" else "s"
-                    val unknownSuffix = if (hdd.pendingUnknown > 0) " (+${hdd.pendingUnknown} unknown)" else ""
-                    Text(
-                        text = "After ${hdd.pendingCount} active download$dlSuffix$unknownSuffix",
-                        color = colors.textDim,
-                        style = TabularNumStyle.copy(fontSize = 12.5.sp),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (predicted >= 0L) {
-                            "${formatBytes(predicted)} free"
-                        } else {
-                            "${formatBytes(abs(predicted))} short"
-                        },
-                        color = when {
-                            predicted < 0L -> colors.bad
-                            lowAfter -> colors.warn
-                            else -> colors.accent
-                        },
-                        style = TabularNumStyle.copy(
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        ),
-                        maxLines = 1,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DriveStatusCard(drive: DriveStatusResponse) {
-    val colors = LocalPcColors.current
-    val quota = drive.quota
-    val total = quota?.totalBytes ?: 0L
-    val used = quota?.usedBytes ?: 0L
-    val free = quota?.freeBytes ?: if (total > 0L) (total - used).coerceAtLeast(0L) else 0L
-    val progress = if (total > 0L) (used.toDouble() / total.toDouble()).toFloat().coerceIn(0f, 1f) else 0f
-
-    PcCard {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            if (!hdd.mounted) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.weight(1f),
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.CloudDone,
+                        imageVector = Icons.Filled.Storage,
                         contentDescription = null,
-                        tint = colors.textDim,
+                        tint = colors.warn,
                         modifier = Modifier.size(18.dp),
                     )
-                    Text(
-                        text = "Google Drive",
-                        color = colors.text,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "HDD not mounted",
+                            color = colors.warn,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        if (hdd.mount.isNotBlank()) {
+                            Text(
+                                text = hdd.mount,
+                                color = colors.textDim,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 }
-                when {
-                    !drive.configured -> PcPill(label = "Not configured", tone = PcTone.Dim)
-                    drive.mounted -> PcPill(label = "Playable in Jellyfin", tone = PcTone.Ok, showDot = true)
-                    else -> PcPill(label = "Mount offline", tone = PcTone.Warn, showDot = true)
-                }
-            }
-
-            if (!drive.configured) {
-                Text(
-                    text = "Configure the 'gdrive' remote in rclone and enable rclone-gdrive.service to offload media.",
-                    color = colors.textDim,
-                    fontSize = 12.5.sp,
-                    lineHeight = 18.sp,
-                )
-            } else if (total > 0L) {
-                PcProgressBar(
-                    progress = progress,
-                    color = if (progress > 0.90f) colors.warn else colors.accent,
-                    height = 5.dp,
-                )
+            } else {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Bottom,
                 ) {
+                    Text(
+                        text = "${formatBytes(free)} free",
+                        color = if (lowNow) colors.warn else colors.text,
+                        style = TabularNumStyle.copy(
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     Text(
                         text = "${formatBytes(used)} / ${formatBytes(total)}",
                         color = colors.textDim,
                         style = TabularNumStyle.copy(fontSize = 12.5.sp),
                         maxLines = 1,
                     )
+                }
+
+                // Segmented horizontal HDD bar: used + pending downloads + free track
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(5.dp)
+                        .clip(CircleShape)
+                        .background(colors.surfaceRaised),
+                ) {
+                    Row(modifier = Modifier.fillMaxSize()) {
+                        if (usedFraction > 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .weight(usedFraction)
+                                    .background(usedBarColor),
+                            )
+                        }
+                        if (pendingFraction > 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .weight(pendingFraction)
+                                    .background(colors.warn),
+                            )
+                        }
+                        val remaining = (1f - usedFraction - pendingFraction).coerceAtLeast(0f)
+                        if (remaining > 0f) {
+                            Spacer(modifier = Modifier.weight(remaining))
+                        }
+                    }
+                }
+
+                if (hasPending) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val dlSuffix = if (hdd.pendingCount == 1) "" else "s"
+                        val unknownSuffix = if (hdd.pendingUnknown > 0) " (+${hdd.pendingUnknown})" else ""
+                        Text(
+                            text = "After ${hdd.pendingCount} download$dlSuffix$unknownSuffix",
+                            color = colors.textDim,
+                            style = TabularNumStyle.copy(fontSize = 12.sp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (predicted >= 0L) {
+                                "${formatBytes(predicted)} free"
+                            } else {
+                                "${formatBytes(abs(predicted))} short"
+                            },
+                            color = when {
+                                predicted < 0L -> colors.bad
+                                lowAfter -> colors.warn
+                                else -> colors.textDim
+                            },
+                            style = TabularNumStyle.copy(
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                            ),
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
+
+            // Compact Google Drive offloaded summary line inside the same card
+            if (drive != null) {
+                HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                val quota = drive.quota
+                val dTotal = quota?.totalBytes ?: 0L
+                val dUsed = quota?.usedBytes ?: 0L
+                val dFree = quota?.freeBytes ?: if (dTotal > 0L) (dTotal - dUsed).coerceAtLeast(0L) else 0L
+                val countLabel = "${drive.items.size} offloaded"
+                val driveLeftText = when {
+                    !drive.configured -> "Drive · Not configured"
+                    !drive.mounted -> "Drive · Mount offline · $countLabel"
+                    else -> "Drive · $countLabel"
+                }
+                val driveRightText = if (drive.configured && dTotal > 0L) {
+                    "${formatBytes(dFree)} free"
+                } else {
+                    null
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = if (drive.configured && drive.mounted) Icons.Filled.CloudDone else Icons.Filled.CloudOff,
+                        contentDescription = null,
+                        tint = if (drive.configured && !drive.mounted) colors.warn else colors.textFaint,
+                        modifier = Modifier.size(15.dp),
+                    )
                     Text(
-                        text = "${formatBytes(free)} free · ${drive.items.size} item${if (drive.items.size == 1) "" else "s"}",
-                        color = colors.textDim,
+                        text = driveLeftText,
+                        color = if (drive.configured && !drive.mounted) colors.warn else colors.textDim,
                         style = TabularNumStyle.copy(fontSize = 12.5.sp),
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
                     )
+                    if (driveRightText != null) {
+                        Text(
+                            text = driveRightText,
+                            color = colors.textFaint,
+                            style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                            maxLines = 1,
+                        )
+                    }
                 }
-            } else {
-                Text(
-                    text = "${drive.items.size} offloaded item${if (drive.items.size == 1) "" else "s"}",
-                    color = colors.textDim,
-                    style = TabularNumStyle.copy(fontSize = 12.5.sp),
-                )
             }
         }
     }
@@ -682,26 +788,26 @@ private fun ActiveTransfersCard(
                     Icon(
                         imageVector = Icons.Filled.CloudSync,
                         contentDescription = null,
-                        tint = colors.accent,
+                        tint = colors.textDim,
                         modifier = Modifier.size(18.dp),
                     )
                     Text(
                         text = "Active transfers",
                         color = colors.text,
-                        fontSize = 15.sp,
+                        fontSize = 14.5.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
                 PcPill(
                     label = "${jobs.size} active",
-                    tone = PcTone.Accent,
+                    tone = PcTone.Dim,
                     showDot = true,
                 )
             }
 
             jobs.forEachIndexed { idx, job ->
                 if (idx > 0) {
-                    HorizontalDivider(color = colors.hairline, thickness = 1.dp)
+                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
                 }
                 val isCopying = job.status == "copying"
                 val isVerifying = job.status == "verifying"
@@ -746,7 +852,7 @@ private fun ActiveTransfersCard(
                                     }
                                 },
                                 color = colors.text,
-                                fontSize = 14.5.sp,
+                                fontSize = 14.sp,
                                 fontWeight = FontWeight.Medium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -754,7 +860,7 @@ private fun ActiveTransfersCard(
                             Text(
                                 text = metaParts.joinToString(" · "),
                                 color = colors.textDim,
-                                style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                                style = TabularNumStyle.copy(fontSize = 12.sp),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -766,7 +872,7 @@ private fun ActiveTransfersCard(
                     PcProgressBar(
                         progress = progress,
                         color = if (isVerifying) colors.warn else colors.accent,
-                        height = 5.dp,
+                        height = 4.dp,
                     )
 
                     if (job.canCancel) {
@@ -799,7 +905,7 @@ private fun SpaceSearchField(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(42.dp)
+            .height(40.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(colors.surface)
             .padding(horizontal = 12.dp),
@@ -810,7 +916,7 @@ private fun SpaceSearchField(
             imageVector = Icons.Filled.Search,
             contentDescription = null,
             tint = colors.textFaint,
-            modifier = Modifier.size(18.dp),
+            modifier = Modifier.size(17.dp),
         )
         Box(modifier = Modifier.weight(1f)) {
             if (query.isEmpty()) {
@@ -856,6 +962,7 @@ private fun FilterAndSortBar(
     localStatusChip: LocalStatusChip,
     driveKindFilter: SpaceFilter,
     sort: SpaceSort,
+    visibleCount: Int,
     onSelectLocalChip: (LocalStatusChip) -> Unit,
     onSelectDriveFilter: (SpaceFilter) -> Unit,
     onSelectSort: (SpaceSort) -> Unit,
@@ -891,67 +998,79 @@ private fun FilterAndSortBar(
             }
         }
 
-        Box {
-            Row(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(colors.surface)
-                    .clickable { sortMenuExpanded = true }
-                    .padding(horizontal = 12.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Sort,
-                    contentDescription = "Sort",
-                    tint = colors.textDim,
-                    modifier = Modifier.size(15.dp),
-                )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (visibleCount > 0) {
                 Text(
-                    text = if (tab == SpaceTab.OFFLOADED && sort == SpaceSort.WATCHED) "Recent" else sort.label,
-                    color = colors.text,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
+                    text = "$visibleCount",
+                    color = colors.textFaint,
+                    style = TabularNumStyle.copy(fontSize = 12.sp),
                 )
             }
-
-            DropdownMenu(
-                expanded = sortMenuExpanded,
-                onDismissRequest = { sortMenuExpanded = false },
-                containerColor = colors.surfaceRaised,
-            ) {
-                SpaceSort.entries.forEach { option ->
-                    val label = if (tab == SpaceTab.OFFLOADED && option == SpaceSort.WATCHED) {
-                        "Recent"
-                    } else {
-                        option.label
-                    }
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = label,
-                                color = if (sort == option) colors.accent else colors.text,
-                                fontWeight = if (sort == option) FontWeight.SemiBold else FontWeight.Normal,
-                                fontSize = 14.sp,
-                            )
-                        },
-                        trailingIcon = if (sort == option) {
-                            {
-                                Icon(
-                                    imageVector = Icons.Filled.Check,
-                                    contentDescription = null,
-                                    tint = colors.accent,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            }
-                        } else {
-                            null
-                        },
-                        onClick = {
-                            sortMenuExpanded = false
-                            onSelectSort(option)
-                        },
+            Box {
+                Row(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(colors.surface)
+                        .clickable { sortMenuExpanded = true }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Sort,
+                        contentDescription = "Sort",
+                        tint = colors.textDim,
+                        modifier = Modifier.size(14.dp),
                     )
+                    Text(
+                        text = if (tab == SpaceTab.OFFLOADED && sort == SpaceSort.WATCHED) "Recent" else sort.label,
+                        color = colors.textDim,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = sortMenuExpanded,
+                    onDismissRequest = { sortMenuExpanded = false },
+                    containerColor = colors.surfaceRaised,
+                ) {
+                    SpaceSort.entries.forEach { option ->
+                        val label = if (tab == SpaceTab.OFFLOADED && option == SpaceSort.WATCHED) {
+                            "Recent"
+                        } else {
+                            option.label
+                        }
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = label,
+                                    color = if (sort == option) colors.text else colors.textDim,
+                                    fontWeight = if (sort == option) FontWeight.SemiBold else FontWeight.Normal,
+                                    fontSize = 14.sp,
+                                )
+                            },
+                            trailingIcon = if (sort == option) {
+                                {
+                                    Icon(
+                                        imageVector = Icons.Filled.Check,
+                                        contentDescription = null,
+                                        tint = colors.accent,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                            onClick = {
+                                sortMenuExpanded = false
+                                onSelectSort(option)
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -968,80 +1087,100 @@ private fun FilterChipButton(
     Box(
         modifier = Modifier
             .clip(CircleShape)
-            .background(if (selected) colors.accentSoft else colors.surface)
+            .background(if (selected) colors.surfaceRaised else colors.surface)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
+            .padding(horizontal = 11.dp, vertical = 5.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
-            color = if (selected) colors.accent else colors.textDim,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
+            color = if (selected) colors.text else colors.textFaint,
+            fontSize = 12.5.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
         )
     }
 }
 
 @Composable
-private fun SelectAllRow(
-    selection: VisibleSelectionState,
-    visibleTotalBytes: Long,
-    onToggleSelectAll: () -> Unit,
+private fun SpacePosterThumbnail(
+    posterUrl: String?,
+    isSeason: Boolean,
+    selected: Boolean,
+    selectionMode: Boolean,
+    locked: Boolean,
+    width: Dp = 36.dp,
+    height: Dp = 52.dp,
 ) {
     val colors = LocalPcColors.current
-    Row(
+    val shape = RoundedCornerShape(6.dp)
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
+            .size(width = width, height = height)
+            .clip(shape)
+            .background(colors.surfaceRaised)
+            .alpha(if (locked) 0.45f else 1f),
+        contentAlignment = Alignment.Center,
     ) {
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .clickable(onClick = onToggleSelectAll)
-                .padding(vertical = 4.dp, horizontal = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Icon(
-                imageVector = when {
-                    selection.allSelected -> Icons.Filled.CheckBox
-                    selection.someSelected -> Icons.Filled.IndeterminateCheckBox
-                    else -> Icons.Filled.CheckBoxOutlineBlank
-                },
+        Icon(
+            imageVector = if (isSeason) Icons.Filled.Tv else Icons.Filled.Movie,
+            contentDescription = null,
+            tint = colors.textFaint,
+            modifier = Modifier.size(18.dp),
+        )
+        if (!posterUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = posterUrl,
                 contentDescription = null,
-                tint = if (selection.allSelected || selection.someSelected) colors.accent else colors.textFaint,
-                modifier = Modifier.size(20.dp),
-            )
-            Text(
-                text = if (selection.allSelected) "Deselect all" else "Select all",
-                color = if (selection.allSelected) colors.accent else colors.text,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
             )
         }
-
-        Text(
-            text = if (selection.selectedVisibleCount > 0) {
-                "${selection.selectedVisibleCount} of ${selection.visibleCount} selected"
-            } else {
-                "${selection.visibleCount} item${if (selection.visibleCount == 1) "" else "s"} · ${formatBytes(visibleTotalBytes)}"
-            },
-            color = colors.textDim,
-            style = TabularNumStyle.copy(fontSize = 12.5.sp),
-            maxLines = 1,
-        )
+        if (!locked && selected) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(colors.overlay),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .background(colors.accent),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = "Selected",
+                        tint = colors.onAccent,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
+        } else if (!locked && selectionMode) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(3.dp)
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(colors.overlay)
+                    .border(1.dp, colors.onMediaDim, CircleShape),
+            )
+        }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CandidateRow(
     item: SpaceCandidate,
+    selectionMode: Boolean,
     selected: Boolean,
     activeJob: TransferJob?,
     showDivider: Boolean,
-    onToggle: () -> Unit,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
     val locked = activeJob != null
@@ -1057,24 +1196,27 @@ private fun CandidateRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(if (!locked && selected) colors.accentSoft else colors.surface)
-                .clickable(enabled = !locked, onClick = onToggle)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .background(if (!locked && selected) colors.surfaceRaised else colors.surface)
+                .combinedClickable(
+                    enabled = !locked,
+                    onClick = onClick,
+                    onLongClick = onLongClick,
+                )
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Icon(
-                imageVector = if (!locked && selected) Icons.Filled.CheckBox else Icons.Filled.CheckBoxOutlineBlank,
-                contentDescription = null,
-                tint = if (!locked && selected) colors.accent else colors.textFaint,
-                modifier = Modifier
-                    .size(22.dp)
-                    .alpha(if (locked) 0.32f else 1f),
+            SpacePosterThumbnail(
+                posterUrl = item.resolvedPosterUrl,
+                isSeason = item.isSeason,
+                selected = selected,
+                selectionMode = selectionMode,
+                locked = locked,
             )
 
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 Text(
                     text = item.title,
@@ -1100,14 +1242,22 @@ private fun CandidateRow(
                     }
                     if (activeJob != null) {
                         InFlightBadge(job = activeJob)
-                    } else if (!item.isWatched) {
-                        PcPill(label = "Unwatched", tone = PcTone.Dim)
-                    } else if (item.warnUnwatched && item.unwatchedUsers.isNotEmpty()) {
-                        PcPill(
-                            label = item.unwatchedUsers.joinToString(", "),
-                            tone = PcTone.Warn,
-                            icon = Icons.Filled.Warning,
+                    } else if (item.isWatched) {
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = "Watched",
+                            tint = colors.textFaint,
+                            modifier = Modifier.size(13.dp),
                         )
+                        if (item.warnUnwatched && item.unwatchedUsers.isNotEmpty()) {
+                            Text(
+                                text = "${item.unwatchedUsers.joinToString(", ")} unwatched",
+                                color = colors.warn,
+                                fontSize = 11.5.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
             }
@@ -1117,7 +1267,7 @@ private fun CandidateRow(
                 color = if (locked) colors.textDim else colors.text,
                 style = TabularNumStyle.copy(
                     fontSize = 13.5.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Medium,
                 ),
                 maxLines = 1,
             )
@@ -1126,20 +1276,23 @@ private fun CandidateRow(
         if (showDivider) {
             HorizontalDivider(
                 color = colors.hairline,
-                thickness = 1.dp,
-                modifier = Modifier.padding(start = 50.dp),
+                thickness = 0.5.dp,
+                modifier = Modifier.padding(start = 64.dp),
             )
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DriveItemRow(
     item: DriveItem,
+    selectionMode: Boolean,
     selected: Boolean,
     activeJob: TransferJob?,
     showDivider: Boolean,
-    onToggle: () -> Unit,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
     val locked = activeJob != null
@@ -1155,24 +1308,27 @@ private fun DriveItemRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(if (!locked && selected) colors.accentSoft else colors.surface)
-                .clickable(enabled = !locked, onClick = onToggle)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .background(if (!locked && selected) colors.surfaceRaised else colors.surface)
+                .combinedClickable(
+                    enabled = !locked,
+                    onClick = onClick,
+                    onLongClick = onLongClick,
+                )
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Icon(
-                imageVector = if (!locked && selected) Icons.Filled.CheckBox else Icons.Filled.CheckBoxOutlineBlank,
-                contentDescription = null,
-                tint = if (!locked && selected) colors.accent else colors.textFaint,
-                modifier = Modifier
-                    .size(22.dp)
-                    .alpha(if (locked) 0.32f else 1f),
+            SpacePosterThumbnail(
+                posterUrl = item.resolvedPosterUrl,
+                isSeason = item.isSeason,
+                selected = selected,
+                selectionMode = selectionMode,
+                locked = locked,
             )
 
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 Text(
                     text = item.title,
@@ -1209,7 +1365,7 @@ private fun DriveItemRow(
                 color = if (locked) colors.textDim else colors.text,
                 style = TabularNumStyle.copy(
                     fontSize = 13.5.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Medium,
                 ),
                 maxLines = 1,
             )
@@ -1218,8 +1374,8 @@ private fun DriveItemRow(
         if (showDivider) {
             HorizontalDivider(
                 color = colors.hairline,
-                thickness = 1.dp,
-                modifier = Modifier.padding(start = 50.dp),
+                thickness = 0.5.dp,
+                modifier = Modifier.padding(start = 64.dp),
             )
         }
     }
@@ -1235,51 +1391,72 @@ private fun InFlightBadge(job: TransferJob) {
     )
 }
 
+/**
+ * Floating contextual multi-select action bar shown only while items are selected.
+ */
 @Composable
 private fun SelectionActionBar(
     isDriveMode: Boolean,
     count: Int,
     totalBytes: Long,
+    allVisibleSelected: Boolean,
     offloadDisabled: Boolean,
     onClear: () -> Unit,
+    onToggleSelectAll: () -> Unit,
     onPrimaryAction: () -> Unit,
     onDeleteAction: () -> Unit,
 ) {
     val colors = LocalPcColors.current
-    Column(
+    val shape = RoundedCornerShape(18.dp)
+
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(colors.surface)
-            .navigationBarsPadding(),
+            .navigationBarsPadding()
+            .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
-        HorizontalDivider(color = colors.hairline, thickness = 1.dp)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 12.dp),
+                .clip(shape)
+                .background(colors.surfaceRaised)
+                .border(0.5.dp, colors.hairline, shape)
+                .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = "Clear selection",
+                    tint = colors.textDim,
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onClear),
+                )
                 Text(
                     text = "$count selected · ${formatBytes(totalBytes)}",
                     color = colors.text,
                     style = TabularNumStyle.copy(
-                        fontSize = 14.sp,
+                        fontSize = 13.5.sp,
                         fontWeight = FontWeight.SemiBold,
                     ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
                 Text(
-                    text = "Clear",
+                    text = if (allVisibleSelected) "Deselect all" else "Select all",
                     color = colors.textDim,
-                    fontSize = 13.sp,
+                    fontSize = 12.5.sp,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .clickable(onClick = onClear)
+                        .clickable(onClick = onToggleSelectAll)
                         .padding(horizontal = 6.dp, vertical = 2.dp),
                 )
             }
@@ -1289,9 +1466,10 @@ private fun SelectionActionBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 PcButton(
-                    label = if (isDriveMode) "Restore to HDD" else "Offload to Drive",
+                    label = if (isDriveMode) "Restore" else "Offload",
                     icon = if (isDriveMode) Icons.Filled.CloudDownload else Icons.Filled.CloudUpload,
                     variant = PcButtonVariant.Primary,
+                    compact = true,
                     enabled = isDriveMode || !offloadDisabled,
                     onClick = onPrimaryAction,
                     modifier = Modifier.weight(1f),
@@ -1300,10 +1478,145 @@ private fun SelectionActionBar(
                     label = "Delete",
                     icon = Icons.Filled.Delete,
                     variant = PcButtonVariant.Danger,
+                    compact = true,
                     onClick = onDeleteAction,
+                    modifier = Modifier.weight(0.85f),
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun SingleItemActionSheetContent(
+    focused: FocusedSpaceItem,
+    offloadDisabled: Boolean,
+    onSelectMultiple: () -> Unit,
+    onPrimaryAction: () -> Unit,
+    onDeleteAction: () -> Unit,
+) {
+    val colors = LocalPcColors.current
+    val isDrive = focused is FocusedSpaceItem.Drive
+    val title = when (focused) {
+        is FocusedSpaceItem.Local -> focused.item.title
+        is FocusedSpaceItem.Drive -> focused.item.title
+    }
+    val subtitle = when (focused) {
+        is FocusedSpaceItem.Local -> {
+            val local = focused.item
+            buildList {
+                val sub = local.subtitle
+                if (!sub.isNullOrBlank()) add(sub)
+                else if (local.year != null) add(local.year.toString())
+                if (local.isSeason && local.episodeCount != null && local.episodeCount > 0) {
+                    add("${local.episodeCount} ep")
+                }
+                add(formatBytes(local.sizeBytes))
+            }.joinToString(" · ")
+        }
+        is FocusedSpaceItem.Drive -> {
+            val driveItem = focused.item
+            buildList {
+                val sub = driveItem.subtitle
+                if (!sub.isNullOrBlank()) add(sub)
+                else if (driveItem.year != null) add(driveItem.year.toString())
+                if (driveItem.isSeason && driveItem.episodeCount != null && driveItem.episodeCount > 0) {
+                    add("${driveItem.episodeCount} ep")
+                }
+                add(formatBytes(driveItem.sizeBytes))
+            }.joinToString(" · ")
+        }
+    }
+    val posterUrl = when (focused) {
+        is FocusedSpaceItem.Local -> focused.item.resolvedPosterUrl
+        is FocusedSpaceItem.Drive -> focused.item.resolvedPosterUrl
+    }
+    val isSeason = when (focused) {
+        is FocusedSpaceItem.Local -> focused.item.isSeason
+        is FocusedSpaceItem.Drive -> focused.item.isSeason
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            SpacePosterThumbnail(
+                posterUrl = posterUrl,
+                isSeason = isSeason,
+                selected = false,
+                selectionMode = false,
+                locked = false,
+                width = 42.dp,
+                height = 60.dp,
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(
+                    text = title,
+                    color = colors.text,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = subtitle,
+                    color = colors.textDim,
+                    style = TabularNumStyle.copy(fontSize = 13.sp),
+                )
+                if (focused is FocusedSpaceItem.Local) {
+                    val watchedInfo = when {
+                        focused.item.watchedUsers.isNotEmpty() ->
+                            "Watched by ${focused.item.watchedUsers.joinToString(", ")}"
+                        focused.item.isWatched -> "Watched"
+                        else -> "Not watched yet"
+                    }
+                    Text(
+                        text = watchedInfo,
+                        color = colors.textFaint,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            PcButton(
+                label = if (isDrive) "Restore" else "Offload",
+                icon = if (isDrive) Icons.Filled.CloudDownload else Icons.Filled.CloudUpload,
+                variant = PcButtonVariant.Primary,
+                enabled = isDrive || !offloadDisabled,
+                onClick = onPrimaryAction,
+                modifier = Modifier.weight(1f),
+            )
+            PcButton(
+                label = "Delete",
+                icon = Icons.Filled.Delete,
+                variant = PcButtonVariant.Danger,
+                onClick = onDeleteAction,
+                modifier = Modifier.weight(0.9f),
+            )
+        }
+
+        PcButton(
+            label = "Select multiple",
+            icon = Icons.Filled.CheckCircle,
+            variant = PcButtonVariant.Subtle,
+            onClick = onSelectMultiple,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
@@ -1357,7 +1670,7 @@ private fun ConfirmActionSheetContent(
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            .padding(horizontal = 20.dp, vertical = 20.dp),
+            .padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(
@@ -1637,9 +1950,9 @@ private fun DriveDeleteFeedbackCard(
 }
 
 @Composable
-private fun HddSummarySkeleton() {
+private fun StorageSummarySkeleton() {
     val colors = LocalPcColors.current
-    PcCard {
+    PcCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1663,8 +1976,16 @@ private fun HddSummarySkeleton() {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(6.dp)
+                    .height(5.dp)
                     .clip(CircleShape)
+                    .background(colors.surfaceRaised),
+            )
+            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+            Box(
+                modifier = Modifier
+                    .width(150.dp)
+                    .height(13.dp)
+                    .clip(RoundedCornerShape(6.dp))
                     .background(colors.surfaceRaised),
             )
         }
@@ -1679,14 +2000,14 @@ private fun MediaListSkeleton() {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Box(
                     modifier = Modifier
-                        .size(20.dp)
-                        .clip(RoundedCornerShape(5.dp))
+                        .size(width = 36.dp, height = 52.dp)
+                        .clip(RoundedCornerShape(6.dp))
                         .background(colors.surfaceRaised),
                 )
                 Column(
@@ -1719,8 +2040,8 @@ private fun MediaListSkeleton() {
             if (idx < 4) {
                 HorizontalDivider(
                     color = colors.hairline,
-                    thickness = 1.dp,
-                    modifier = Modifier.padding(start = 50.dp),
+                    thickness = 0.5.dp,
+                    modifier = Modifier.padding(start = 64.dp),
                 )
             }
         }

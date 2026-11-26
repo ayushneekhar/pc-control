@@ -256,4 +256,44 @@ class UsageSummaryTest {
         assertTrue(d3.fiveHour.projection is AccountWindowProjection.RunsOut)
         assertEquals("At current pace, runs out in ~1h", d3.fiveHour.projection?.label)
     }
+
+    @Test
+    fun formatSingleAccountWindowMetaFormatsCleanSingleLine() {
+        val now = Instant.parse("2026-11-24T12:00:00Z")
+        val claude = makeAcc(
+            id = "claude",
+            harness = "claude",
+            label = "Claude",
+            fiveHour = AgentUsageWindow(
+                remainingPct = 98.0,
+                usedPct = 2.0,
+                resetsAt = now.plusSeconds(69L * 60L).toString(),
+            ),
+            weekly = AgentUsageWindow(
+                remainingPct = 100.0,
+                usedPct = 0.0,
+                status = "Quota available",
+            ),
+        )
+
+        val fiveHourRow = UsageSummary.summarizeWindowGroup(listOf(claude), UsageWindowKey.FIVE_HOUR, now).rows.first()
+        assertEquals("98% left · resets 1h 9m", UsageSummary.formatSingleAccountWindowMeta(fiveHourRow))
+
+        val weeklyRow = UsageSummary.summarizeWindowGroup(listOf(claude), UsageWindowKey.WEEKLY, now).rows.first()
+        assertEquals("100% left", UsageSummary.formatSingleAccountWindowMeta(weeklyRow))
+
+        val signedOutRow = UsageSummary.summarizeWindowGroup(
+            listOf(makeAcc(id = "so", harness = "claude", signedIn = false)),
+            UsageWindowKey.FIVE_HOUR,
+            now,
+        ).rows.first()
+        assertEquals("Not signed in", UsageSummary.formatSingleAccountWindowMeta(signedOutRow))
+
+        val errRow = UsageSummary.summarizeWindowGroup(
+            listOf(makeAcc(id = "er", harness = "claude", error = "429")),
+            UsageWindowKey.FIVE_HOUR,
+            now,
+        ).rows.first()
+        assertEquals("Error", UsageSummary.formatSingleAccountWindowMeta(errRow))
+    }
 }

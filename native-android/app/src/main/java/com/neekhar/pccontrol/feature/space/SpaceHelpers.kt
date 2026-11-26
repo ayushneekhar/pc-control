@@ -498,3 +498,23 @@ fun formatDuration(seconds: Long): String {
         else -> "${secs}s"
     }
 }
+
+private const val TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185"
+
+/**
+ * Resolves an optional poster URL or TMDB relative path (e.g. "/abc.jpg") into a loadable HTTP(S) URL.
+ */
+fun resolveSpacePosterUrl(
+    poster: String? = null,
+    posterUrl: String? = null,
+    posterPath: String? = null,
+): String? {
+    val raw = listOf(poster, posterUrl, posterPath)
+        .firstNotNullOfOrNull { it?.trim()?.takeIf { s -> s.isNotEmpty() } }
+        ?: return null
+    return when {
+        raw.startsWith("https://", ignoreCase = true) || raw.startsWith("http://", ignoreCase = true) -> raw
+        raw.startsWith("/") -> "$TMDB_POSTER_BASE$raw"
+        else -> null
+    }
+}

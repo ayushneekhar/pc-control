@@ -410,6 +410,23 @@ object UsageSummary {
         return if (dur != null) "Updated $dur ago" else "Updated ${diffSec}s ago"
     }
 
+    /**
+     * Single-line header summary for single-account usage windows (e.g. "98% left · resets 1h 9m").
+     */
+    fun formatSingleAccountWindowMeta(row: AccountWindowState): String = when (row.state) {
+        AccountWindowRowState.SIGNED_OUT -> "Not signed in"
+        AccountWindowRowState.ERROR -> "Error"
+        AccountWindowRowState.MISSING -> "—"
+        AccountWindowRowState.OK -> {
+            val pct = (row.remainingPct ?: 0.0).roundToInt()
+            if (!row.countdownLabel.isNullOrBlank()) {
+                "$pct% left · resets ${row.countdownLabel}"
+            } else {
+                "$pct% left"
+            }
+        }
+    }
+
     fun summarizeAccountWindowDetail(
         poolAccounts: List<AgentUsageAccount>,
         accountId: String,

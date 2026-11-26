@@ -93,130 +93,129 @@ fun UsageAccountDetailScreen(
         else listOf(summary.fiveHour, summary.weekly)
     }
 
-    PullToRefreshBox(
-        isRefreshing = state.isRefreshing || state.usageLoading,
-        onRefresh = { viewModel.loadUsage(force = true) },
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(colors.bg),
     ) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+        PcScreenHeader(
+            title = "Account",
+            statusText = if (summary?.account?.error != null) "Error" else null,
+            statusColor = if (summary?.account?.error != null) colors.bad else null,
+            onBack = onBack,
+        )
+
+        PullToRefreshBox(
+            isRefreshing = state.isRefreshing || state.usageLoading,
+            onRefresh = { viewModel.loadUsage(force = true) },
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
         ) {
-            item(key = "header") {
-                PcScreenHeader(
-                    title = "Account",
-                    statusText = if (summary?.account?.error != null) "Error" else null,
-                    statusColor = if (summary?.account?.error != null) colors.bad else null,
-                    onBack = onBack,
-                )
-            }
-
-            if (!state.usageError.isNullOrBlank()) {
-                item(key = "err") {
-                    PcErrorBanner(message = state.usageError!!)
-                }
-            }
-
-            if (summary == null) {
-                item(key = "empty") {
-                    PcCard {
-                        PcEmptyState(
-                            icon = Icons.Filled.PersonOff,
-                            title = "Account not found",
-                            body = "Pull down to refresh usage data from your PC.",
-                        )
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                if (!state.usageError.isNullOrBlank()) {
+                    item(key = "err") {
+                        PcErrorBanner(message = state.usageError!!)
                     }
                 }
-            } else {
-                val acc = summary.account
-                val (statusLabel, statusFg, statusBg) = when {
-                    !acc.signedIn -> Triple("Not signed in", colors.textFaint, colors.surfaceRaised)
-                    !acc.error.isNullOrBlank() -> Triple("Error", colors.bad, colors.badSoft)
-                    else -> Triple("Signed in", colors.ok, colors.okSoft)
-                }
 
-                item(key = "hero") {
-                    PcCard {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                ProviderUsageIcon(
-                                    key = summary.providerKey,
-                                    tint = colors.text,
-                                    modifier = Modifier.size(24.dp),
-                                )
-                                Text(
-                                    text = acc.label,
-                                    color = colors.text,
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                if (summary.poolSize > 1) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(999.dp))
-                                            .background(colors.surfaceRaised)
-                                            .padding(horizontal = 9.dp, vertical = 4.dp),
-                                    ) {
-                                        Text(
-                                            text = "#${summary.poolIndex} of ${summary.poolSize}",
-                                            color = colors.textDim,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            style = TabularNumStyle,
-                                        )
+                if (summary == null) {
+                    item(key = "empty") {
+                        PcCard {
+                            PcEmptyState(
+                                icon = Icons.Filled.PersonOff,
+                                title = "Account not found",
+                                body = "Pull down to refresh usage data from your PC.",
+                            )
+                        }
+                    }
+                } else {
+                    val acc = summary.account
+                    val (statusLabel, statusFg, statusBg) = when {
+                        !acc.signedIn -> Triple("Not signed in", colors.textFaint, colors.surfaceRaised)
+                        !acc.error.isNullOrBlank() -> Triple("Error", colors.bad, colors.badSoft)
+                        else -> Triple("Signed in", colors.textDim, colors.surfaceRaised)
+                    }
+
+                    item(key = "hero") {
+                        PcCard {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    ProviderUsageIcon(
+                                        key = summary.providerKey,
+                                        tint = colors.textDim,
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                    Text(
+                                        text = acc.label,
+                                        color = colors.text,
+                                        fontSize = 19.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    if (summary.poolSize > 1) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(colors.surfaceRaised)
+                                                .padding(horizontal = 9.dp, vertical = 4.dp),
+                                        ) {
+                                            Text(
+                                                text = "#${summary.poolIndex} of ${summary.poolSize}",
+                                                color = colors.textDim,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                style = TabularNumStyle,
+                                            )
+                                        }
                                     }
                                 }
-                            }
 
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                if (!acc.email.isNullOrBlank()) {
-                                    Text(text = acc.email, color = colors.text, fontSize = 14.sp)
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    if (!acc.email.isNullOrBlank()) {
+                                        Text(text = acc.email, color = colors.text, fontSize = 14.sp)
+                                    }
+                                    Text(text = summary.providerSubtitle, color = colors.textDim, fontSize = 12.5.sp)
                                 }
-                                Text(text = summary.providerSubtitle, color = colors.textDim, fontSize = 12.5.sp)
+
+                                PcPill(text = statusLabel, color = statusFg, backgroundColor = statusBg)
                             }
-
-                            PcPill(text = statusLabel, color = statusFg, backgroundColor = statusBg)
                         }
                     }
-                }
 
-                if (!acc.error.isNullOrBlank()) {
-                    item(key = "acc_error") {
-                        PcErrorBanner(message = acc.error)
+                    if (!acc.error.isNullOrBlank()) {
+                        item(key = "acc_error") {
+                            PcErrorBanner(message = acc.error)
+                        }
                     }
-                }
 
-                items(count = windows.size, key = { "win_${windows[it].windowKey.wireValue}" }) { idx ->
-                    WindowDetailCard(detail = windows[idx])
-                }
+                    items(count = windows.size, key = { "win_${windows[it].windowKey.wireValue}" }) { idx ->
+                        WindowDetailCard(detail = windows[idx])
+                    }
 
-                item(key = "sec_info") {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    PcSectionLabel(label = "Account info")
-                }
-                item(key = "card_info") {
-                    PcCard {
+                    item(key = "sec_info") {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            AccountKvRow("Status", statusLabel, valueColor = statusFg)
-                            AccountKvRow("Email", acc.email ?: "—")
-                            AccountKvRow("Instance ID", acc.id, mono = true)
-                            AccountKvRow("Last updated", UsageSummary.formatUpdatedAgo(state.usage?.ts, nowMs))
+                            PcSectionLabel(label = "Account info")
+                            PcCard {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    AccountKvRow("Status", statusLabel, valueColor = statusFg)
+                                    AccountKvRow("Email", acc.email ?: "—")
+                                    AccountKvRow("Instance ID", acc.id, mono = true)
+                                    AccountKvRow("Last updated", UsageSummary.formatUpdatedAgo(state.usage?.ts, nowMs))
+                                }
+                            }
                         }
                     }
                 }
-            }
-
-            item(key = "bottom_pad") {
-                Spacer(modifier = Modifier.height(24.dp))
             }
         }
     }
@@ -243,9 +242,8 @@ private fun WindowDetailCard(detail: AccountWindowDetail) {
                 )
                 if (detail.paceStatus != null) {
                     val (fg, bg) = when (detail.paceStatus) {
-                        PaceStatus.UNDER_PACE -> colors.ok to colors.okSoft
                         PaceStatus.AHEAD_OF_PACE -> colors.warn to colors.warnSoft
-                        PaceStatus.ON_PACE -> colors.textDim to colors.surfaceRaised
+                        PaceStatus.UNDER_PACE, PaceStatus.ON_PACE -> colors.textDim to colors.surfaceRaised
                     }
                     PcPill(text = detail.paceStatus.label, color = fg, backgroundColor = bg)
                 }
@@ -299,7 +297,7 @@ private fun WindowDetailCard(detail: AccountWindowDetail) {
                 state = detail.state,
                 remainingPct = detail.remainingPct,
                 expectedRemainingPct = detail.expectedRemainingPct,
-                height = 24.dp,
+                height = 6.dp,
             )
 
             if (detail.state == AccountWindowRowState.OK) {

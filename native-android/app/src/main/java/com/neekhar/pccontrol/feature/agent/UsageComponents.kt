@@ -8,34 +8,40 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
 import com.neekhar.pccontrol.core.ui.PcCard
+import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.ProviderBrandIcon
 import kotlin.math.roundToInt
 
@@ -62,21 +68,21 @@ fun usageSegmentColors(
     }
     return when {
         remainingPct < 15.0 -> UsageSegmentPalette(
-            fill = colors.bad.copy(alpha = 0.28f),
+            fill = colors.bad,
             badgeBg = colors.badSoft,
             badgeFg = colors.bad,
             pctFg = colors.bad,
         )
         remainingPct < 40.0 -> UsageSegmentPalette(
-            fill = colors.warn.copy(alpha = 0.26f),
+            fill = colors.warn,
             badgeBg = colors.warnSoft,
             badgeFg = colors.warn,
             pctFg = colors.warn,
         )
         else -> UsageSegmentPalette(
-            fill = colors.ok.copy(alpha = 0.24f),
-            badgeBg = colors.okSoft,
-            badgeFg = colors.ok,
+            fill = colors.accent,
+            badgeBg = colors.surfaceRaised,
+            badgeFg = colors.textDim,
             pctFg = colors.text,
         )
     }
@@ -108,12 +114,15 @@ fun ProviderUsageIcon(
     }
 }
 
+/**
+ * Sleek thin progress bar (4.dp default) with a vertical pace tick mark.
+ */
 @Composable
 fun UsageProgressBar(
     state: AccountWindowRowState,
     remainingPct: Double?,
     expectedRemainingPct: Double?,
-    height: Dp = 24.dp,
+    height: Dp = 4.dp,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
@@ -123,62 +132,47 @@ fun UsageProgressBar(
     } else {
         0f
     }
-    val showHatch = state == AccountWindowRowState.OK && fillFraction < 1f
-    val hatchColor = colors.text.copy(alpha = 0.08f)
     val trackBg = colors.surfaceRaised
+    val tickColor = colors.text
+    val canvasHeight = (height + 6.dp).coerceAtLeast(10.dp)
 
-    Box(
+    Canvas(
         modifier = modifier
             .fillMaxWidth()
-            .height(height)
-            .clip(RoundedCornerShape(7.dp))
-            .background(trackBg),
+            .height(canvasHeight),
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val w = size.width
-            val h = size.height
-            val fillWidth = w * fillFraction
+        val w = size.width
+        val totalH = size.height
+        val barH = height.toPx().coerceAtMost(totalH)
+        val barTop = (totalH - barH) / 2f
+        val radius = CornerRadius(barH / 2f, barH / 2f)
 
-            if (showHatch) {
-                val startX = fillWidth
-                var x = startX - h
-                val step = 8.dp.toPx()
-                val stroke = 1.5.dp.toPx()
-                while (x < w + h) {
-                    val x1 = x.coerceAtLeast(startX)
-                    val y1 = if (x < startX) (startX - x) else 0f
-                    val x2 = (x + h).coerceAtMost(w)
-                    val y2 = if (x + h > w) (w - x) else h
-                    if (x2 > x1) {
-                        drawLine(
-                            color = hatchColor,
-                            start = Offset(x1, y1),
-                            end = Offset(x2, y2),
-                            strokeWidth = stroke,
-                        )
-                    }
-                    x += step
-                }
-            }
+        drawRoundRect(
+            color = trackBg,
+            topLeft = Offset(0f, barTop),
+            size = Size(w, barH),
+            cornerRadius = radius,
+        )
 
-            if (fillWidth > 0f) {
-                drawRect(
-                    color = palette.fill,
-                    topLeft = Offset.Zero,
-                    size = Size(fillWidth, h),
-                )
-            }
+        val fillWidth = (w * fillFraction).coerceAtLeast(0f)
+        if (fillWidth > 0f) {
+            drawRoundRect(
+                color = palette.fill,
+                topLeft = Offset(0f, barTop),
+                size = Size(fillWidth.coerceAtLeast(barH.coerceAtMost(w)), barH),
+                cornerRadius = radius,
+            )
+        }
 
-            if (expectedRemainingPct != null) {
-                val tickX = w * (expectedRemainingPct / 100.0).toFloat().coerceIn(0.02f, 0.98f)
-                val padY = 2.dp.toPx()
-                drawLine(
-                    color = colors.text.copy(alpha = 0.9f),
-                    start = Offset(tickX, padY),
-                    end = Offset(tickX, h - padY),
-                    strokeWidth = 2.dp.toPx(),
-                )
-            }
+        if (expectedRemainingPct != null) {
+            val tickX = w * (expectedRemainingPct / 100.0).toFloat().coerceIn(0.02f, 0.98f)
+            drawLine(
+                color = tickColor,
+                start = Offset(tickX, 0f),
+                end = Offset(tickX, totalH),
+                strokeWidth = 1.5.dp.toPx(),
+                cap = StrokeCap.Round,
+            )
         }
     }
 }
@@ -191,50 +185,174 @@ fun GroupedUsageSection(
     val colors = LocalPcColors.current
     val groups = UsageSummary.groupAccountsByProvider(accounts)
 
-    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
         groups.forEach { group ->
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
                     modifier = Modifier.padding(horizontal = 2.dp),
                 ) {
                     ProviderUsageIcon(
                         key = group.key,
                         tint = colors.textDim,
-                        modifier = Modifier.size(17.dp),
+                        modifier = Modifier.size(16.dp),
                     )
                     Text(
                         text = group.name,
-                        color = colors.text,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        color = colors.textDim,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
                     )
                 }
 
-                if (group.key == UsageProviderKey.OPENCODE) {
-                    group.accounts.forEach { acc ->
-                        OpenCodeUsageCard(acc = acc)
+                when {
+                    group.key == UsageProviderKey.OPENCODE -> {
+                        group.accounts.forEach { acc ->
+                            OpenCodeUsageCard(acc = acc)
+                        }
                     }
-                } else {
-                    WindowUsageCard(
-                        accounts = group.accounts,
-                        windowKey = UsageWindowKey.FIVE_HOUR,
-                        onSelectAccount = onSelectAccount,
-                    )
-                    WindowUsageCard(
-                        accounts = group.accounts,
-                        windowKey = UsageWindowKey.WEEKLY,
-                        onSelectAccount = onSelectAccount,
-                    )
+                    group.accounts.size == 1 -> {
+                        SingleAccountUsageCard(
+                            account = group.accounts.first(),
+                            onSelectAccount = onSelectAccount,
+                        )
+                    }
+                    else -> {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            MultiAccountWindowCard(
+                                accounts = group.accounts,
+                                windowKey = UsageWindowKey.FIVE_HOUR,
+                                onSelectAccount = onSelectAccount,
+                            )
+                            MultiAccountWindowCard(
+                                accounts = group.accounts,
+                                windowKey = UsageWindowKey.WEEKLY,
+                                onSelectAccount = onSelectAccount,
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+/**
+ * Clean single-account usage card (e.g. Claude):
+ * Combines 5-hour and Weekly windows into one PcListCard, each with a single
+ * "98% left · resets 1h 9m" header over a sleek 4.dp progress bar with a pace tick.
+ */
 @Composable
-private fun WindowUsageCard(
+private fun SingleAccountUsageCard(
+    account: AgentUsageAccount,
+    onSelectAccount: (account: AgentUsageAccount, windowKey: UsageWindowKey) -> Unit,
+) {
+    val colors = LocalPcColors.current
+    val fiveHourSummary = UsageSummary.summarizeWindowGroup(listOf(account), UsageWindowKey.FIVE_HOUR)
+    val weeklySummary = UsageSummary.summarizeWindowGroup(listOf(account), UsageWindowKey.WEEKLY)
+    val windows = listOf(fiveHourSummary, weeklySummary)
+
+    PcListCard {
+        windows.forEachIndexed { idx, summary ->
+            if (idx > 0) {
+                HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+            }
+            val row = summary.rows.first()
+            val palette = usageSegmentColors(row.state, row.remainingPct)
+            val metaAnnotated = buildAnnotatedString {
+                when (row.state) {
+                    AccountWindowRowState.SIGNED_OUT -> {
+                        withStyle(SpanStyle(color = colors.textFaint)) { append("Not signed in") }
+                    }
+                    AccountWindowRowState.ERROR -> {
+                        withStyle(SpanStyle(color = colors.bad, fontWeight = FontWeight.Medium)) { append("Error") }
+                    }
+                    AccountWindowRowState.MISSING -> {
+                        withStyle(SpanStyle(color = colors.textFaint)) { append("—") }
+                    }
+                    AccountWindowRowState.OK -> {
+                        val pct = (row.remainingPct ?: 0.0).roundToInt()
+                        withStyle(SpanStyle(color = palette.pctFg, fontWeight = FontWeight.SemiBold)) {
+                            append("$pct% left")
+                        }
+                        if (!row.countdownLabel.isNullOrBlank()) {
+                            withStyle(SpanStyle(color = colors.textDim)) {
+                                append(" · resets ${row.countdownLabel}")
+                            }
+                        }
+                    }
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onSelectAccount(account, summary.windowKey) }
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = summary.title,
+                        color = colors.text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    if (summary.paceStatus == PaceStatus.AHEAD_OF_PACE) {
+                        Text(
+                            text = "· ${summary.paceStatus.label}",
+                            color = colors.warn,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                        )
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        text = metaAnnotated,
+                        style = TabularNumStyle.copy(fontSize = 13.sp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Icon(
+                        imageVector = Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = colors.textFaint,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+
+                UsageProgressBar(
+                    state = row.state,
+                    remainingPct = row.remainingPct,
+                    expectedRemainingPct = row.expectedRemainingPct,
+                    height = 4.dp,
+                )
+            }
+        }
+
+        if (!account.error.isNullOrBlank()) {
+            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+            Text(
+                text = account.error,
+                color = colors.bad,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun MultiAccountWindowCard(
     accounts: List<AgentUsageAccount>,
     windowKey: UsageWindowKey,
     onSelectAccount: (account: AgentUsageAccount, windowKey: UsageWindowKey) -> Unit,
@@ -249,71 +367,52 @@ private fun WindowUsageCard(
 
     PcCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            // Compact summary header
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        text = summary.title,
-                        color = colors.text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
+                    Row(
+                        verticalAlignment = Alignment.Baseline,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = summary.title,
+                            color = colors.text,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            text = summary.aggregateRemainingPct?.let { "$it% left" } ?: "—",
+                            color = colors.text,
+                            style = TabularNumStyle.copy(
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            ),
+                        )
+                    }
                     if (summary.paceStatus != null) {
                         Text(
                             text = summary.paceStatus.label,
-                            color = colors.textFaint,
-                            fontSize = 12.5.sp,
+                            color = if (summary.paceStatus == PaceStatus.AHEAD_OF_PACE) colors.warn else colors.textFaint,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
                         )
                     }
                 }
 
-                Row(
-                    verticalAlignment = Alignment.Bottom,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = summary.aggregateRemainingPct?.let { "$it%" } ?: "—",
-                        color = colors.text,
-                        fontSize = 28.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        style = TabularNumStyle,
-                    )
-                    if (summary.aggregateRemainingPct != null) {
-                        Text(
-                            text = "left",
-                            color = colors.textDim,
-                            fontSize = 13.5.sp,
-                            modifier = Modifier.padding(bottom = 4.dp),
-                        )
-                    }
-                }
-
                 if (summary.replenishment != null) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Refresh,
-                            contentDescription = null,
-                            tint = colors.textFaint,
-                            modifier = Modifier.size(13.dp),
-                        )
-                        Text(
-                            text = "+${summary.replenishment.gainPct}% in ${summary.replenishment.durationLabel}",
-                            color = colors.textFaint,
-                            fontSize = 12.sp,
-                            style = TabularNumStyle,
-                        )
-                    }
+                    Text(
+                        text = "+${summary.replenishment.gainPct}% in ${summary.replenishment.durationLabel}",
+                        color = colors.textFaint,
+                        style = TabularNumStyle.copy(fontSize = 12.sp),
+                    )
                 }
             }
 
-            // Segmented horizontal bar across accounts in this pool
+            // Sleek grouped progress bars across accounts
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -322,44 +421,36 @@ private fun WindowUsageCard(
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .height(28.dp)
-                            .clip(RoundedCornerShape(7.dp))
-                            .clickable { onSelectAccount(row.account, windowKey) },
-                        contentAlignment = Alignment.Center,
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable { onSelectAccount(row.account, windowKey) }
+                            .padding(vertical = 2.dp),
                     ) {
                         UsageProgressBar(
                             state = row.state,
                             remainingPct = row.remainingPct,
                             expectedRemainingPct = row.expectedRemainingPct,
-                            height = 28.dp,
-                        )
-                        Text(
-                            text = row.index.toString(),
-                            color = if (row.state == AccountWindowRowState.OK) colors.text else colors.textFaint,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            style = TabularNumStyle,
+                            height = 5.dp,
                         )
                     }
                 }
             }
 
-            // Per-account rows
+            // Per-account compact scannable rows
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 summary.rows.forEach { row ->
                     val palette = usageSegmentColors(row.state, row.remainingPct)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
+                            .clip(RoundedCornerShape(8.dp))
                             .clickable { onSelectAccount(row.account, windowKey) }
-                            .padding(vertical = 6.dp, horizontal = 4.dp),
+                            .padding(vertical = 5.dp, horizontal = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(20.dp)
+                                .size(18.dp)
                                 .clip(RoundedCornerShape(5.dp))
                                 .background(palette.badgeBg),
                             contentAlignment = Alignment.Center,
@@ -367,8 +458,8 @@ private fun WindowUsageCard(
                             Text(
                                 text = row.index.toString(),
                                 color = palette.badgeFg,
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
                                 style = TabularNumStyle,
                             )
                         }
@@ -388,40 +479,29 @@ private fun WindowUsageCard(
                         ) {
                             when (row.state) {
                                 AccountWindowRowState.SIGNED_OUT -> {
-                                    Text(text = "Not signed in", color = colors.textFaint, fontSize = 12.5.sp)
+                                    Text(text = "Not signed in", color = colors.textFaint, fontSize = 12.sp)
                                 }
                                 AccountWindowRowState.ERROR -> {
-                                    Text(text = "Error", color = colors.bad, fontSize = 12.5.sp, fontWeight = FontWeight.Medium)
+                                    Text(text = "Error", color = colors.bad, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                                 }
                                 AccountWindowRowState.MISSING -> {
-                                    Text(text = "—", color = colors.textFaint, fontSize = 13.5.sp)
+                                    Text(text = "—", color = colors.textFaint, fontSize = 13.sp)
                                 }
                                 AccountWindowRowState.OK -> {
                                     Text(
                                         text = "${(row.remainingPct ?: 0.0).roundToInt()}%",
                                         color = palette.pctFg,
-                                        fontSize = 13.5.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        style = TabularNumStyle,
+                                        style = TabularNumStyle.copy(
+                                            fontSize = 13.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                        ),
                                     )
                                     if (!row.countdownLabel.isNullOrBlank()) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Filled.Refresh,
-                                                contentDescription = null,
-                                                tint = colors.textFaint,
-                                                modifier = Modifier.size(12.dp),
-                                            )
-                                            Text(
-                                                text = row.countdownLabel,
-                                                color = colors.textFaint,
-                                                fontSize = 12.sp,
-                                                style = TabularNumStyle,
-                                            )
-                                        }
+                                        Text(
+                                            text = row.countdownLabel,
+                                            color = colors.textFaint,
+                                            style = TabularNumStyle.copy(fontSize = 12.sp),
+                                        )
                                     }
                                 }
                             }
@@ -489,14 +569,8 @@ private fun OpenCodeUsageCard(acc: AgentUsageAccount) {
                 }
 
                 if (zen?.status == "ok") {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(colors.surfaceRaised)
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
+                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -511,7 +585,7 @@ private fun OpenCodeUsageCard(acc: AgentUsageAccount) {
                                 text = "${zen.messages ?: 0} msgs · ${zen.totalCost ?: "$0.00"}",
                                 color = colors.text,
                                 fontSize = 12.5.sp,
-                                fontWeight = FontWeight.SemiBold,
+                                fontWeight = FontWeight.Medium,
                                 style = TabularNumStyle,
                             )
                         }
@@ -550,7 +624,7 @@ private fun OpenCodeUsageCard(acc: AgentUsageAccount) {
 fun UsageSkeletonCard(segments: Int = 4) {
     val colors = LocalPcColors.current
     PcCard {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -564,19 +638,12 @@ fun UsageSkeletonCard(segments: Int = 4) {
                 )
                 Box(
                     modifier = Modifier
-                        .width(72.dp)
-                        .height(12.dp)
+                        .width(108.dp)
+                        .height(14.dp)
                         .clip(RoundedCornerShape(4.dp))
                         .background(colors.surfaceRaised),
                 )
             }
-            Box(
-                modifier = Modifier
-                    .width(96.dp)
-                    .height(28.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(colors.surfaceRaised),
-            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -585,8 +652,8 @@ fun UsageSkeletonCard(segments: Int = 4) {
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .height(28.dp)
-                            .clip(RoundedCornerShape(7.dp))
+                            .height(5.dp)
+                            .clip(CircleShape)
                             .background(colors.surfaceRaised),
                     )
                 }

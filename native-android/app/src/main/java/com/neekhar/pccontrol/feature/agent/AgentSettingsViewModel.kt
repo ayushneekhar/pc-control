@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.network.PcApiClient
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -61,67 +62,78 @@ class AgentSettingsViewModel(
     fun refreshAll(forceUsage: Boolean = true) {
         viewModelScope.launch {
             _uiState.update { it.copy(isRefreshing = true) }
-            launch { loadAgentState() }
-            launch { loadSettings() }
-            launch { loadUsage(force = forceUsage, silent = false) }
-            _uiState.update { it.copy(isRefreshing = false) }
+            try {
+                coroutineScope {
+                    launch { loadAgentStateSuspend() }
+                    launch { loadSettingsSuspend() }
+                    launch { loadUsageSuspend(force = forceUsage, silent = false) }
+                }
+            } finally {
+                _uiState.update { it.copy(isRefreshing = false) }
+            }
         }
     }
 
     fun loadAgentState() {
+        viewModelScope.launch { loadAgentStateSuspend() }
+    }
+
+    private suspend fun loadAgentStateSuspend() {
         if (_uiState.value.pendingEngine != null) return
-        viewModelScope.launch {
-            when (val res = api.getJson<AgentState>("/pc/api/agent")) {
-                is ApiResult.Success -> {
-                    if (_uiState.value.pendingEngine == null) {
-                        _uiState.update { it.copy(agentState = res.data, agentError = null) }
-                    }
+        when (val res = api.getJson<AgentState>("/pc/api/agent")) {
+            is ApiResult.Success -> {
+                if (_uiState.value.pendingEngine == null) {
+                    _uiState.update { it.copy(agentState = res.data, agentError = null) }
                 }
-                is ApiResult.Error -> {
-                    if (_uiState.value.pendingEngine == null) {
-                        _uiState.update { it.copy(agentError = res.message) }
-                    }
+            }
+            is ApiResult.Error -> {
+                if (_uiState.value.pendingEngine == null) {
+                    _uiState.update { it.copy(agentError = res.message) }
                 }
             }
         }
     }
 
     fun loadSettings() {
-        viewModelScope.launch {
-            when (val res = api.getJson<AgentSettings>("/pc/api/agent/settings")) {
-                is ApiResult.Success -> _uiState.update { it.copy(settings = res.data, settingsError = null) }
-                is ApiResult.Error -> _uiState.update { it.copy(settingsError = res.message) }
-            }
+        viewModelScope.launch { loadSettingsSuspend() }
+    }
+
+    private suspend fun loadSettingsSuspend() {
+        when (val res = api.getJson<AgentSettings>("/pc/api/agent/settings")) {
+            is ApiResult.Success -> _uiState.update { it.copy(settings = res.data, settingsError = null) }
+            is ApiResult.Error -> _uiState.update { it.copy(settingsError = res.message) }
         }
     }
 
     fun loadUsage(force: Boolean = false, silent: Boolean = false) {
+        viewModelScope.launch { loadUsageSuspend(force = force, silent = silent) }
+    }
+
+    private suspend fun loadUsageSuspend(force: Boolean = false, silent: Boolean = false) {
         staleRepollJob?.cancel()
         if (force) staleAttempts = 0
-        viewModelScope.launch {
-            if (!silent) _uiState.update { it.copy(usageLoading = true) }
-            val path = if (force) "/pc/api/agent/usage?refresh=1" else "/pc/api/agent/usage"
-            when (val res = api.getJson<AgentUsageResponse>(path)) {
-                is ApiResult.Success -> {
-                    _uiState.update {
-                        it.copy(usage = res.data, usageLoading = false, usageError = null)
-                    }
-                    // Reload settings so newly discovered emails appear in the Gemini account picker.
-                    loadSettings()
-                    if (res.data.stale == true && staleAttempts < STALE_REPOLL_MAX) {
-                        staleAttempts++
-                        staleRepollJob = viewModelScope.launch {
-                            delay(STALE_REPOLL_MS)
-                            loadUsage(force = false, silent = true)
-                        }
-                    } else if (res.data.stale != true) {
-                        staleAttempts = 0
-                    }
+        if (!silent) _uiState.update { it.copy(usageLoading = true) }
+        val path = if (force) "/pc/api/agent/usage?refresh=1" else "/pc/api/agent/usage"
+        when (val res = api.getJson<AgentUsageResponse>(path)) {
+            is ApiResult.Success -> {
+                _uiState.update {
+                    it.copy(usage = res.data, usageLoading = false, usageError = null)
                 }
-                is ApiResult.Error -> {
-                    _uiState.update {
-                        it.copy(usageLoading = false, usageError = res.message)
+                // Reload settings so newly discovered emails appear in the Gemini account picker.
+                loadSettingsSuspend()
+                if (res.data.stale == true && staleAttempts < STALE_REPOLL_MAX) {
+                    staleAttempts++
+                    staleRepollJob = viewModelScope.launch {
+                        delay(STALE_REPOLL_MS)
+                        loadUsageSuspend(force = false, silent = true)
                     }
+                } else if (res.data.stale != true) {
+                    staleAttempts = 0
+                }
+            }
+            is ApiResult.Error -> {
+                _uiState.update {
+                    it.copy(usageLoading = false, usageError = res.message)
                 }
             }
         }

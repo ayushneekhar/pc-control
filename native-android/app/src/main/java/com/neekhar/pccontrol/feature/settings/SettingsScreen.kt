@@ -1,40 +1,43 @@
 package com.neekhar.pccontrol.feature.settings
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -53,10 +56,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -65,15 +69,12 @@ import com.neekhar.pccontrol.core.theme.TabularNumStyle
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
-import com.neekhar.pccontrol.core.ui.PcCompactTextField
 import com.neekhar.pccontrol.core.ui.PcConfirmDialog
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
-import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
-import com.neekhar.pccontrol.core.ui.PcSegmentedControl
 import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.PcStatusDot
 
@@ -83,188 +84,202 @@ fun SettingsScreen(
     viewModel: SettingsViewModel,
     onOpenAgentSettings: () -> Unit = {},
     onOpenAgentView: () -> Unit = {},
+    onOpenConnectionSettings: (() -> Unit)? = null,
 ) {
     val state by viewModel.uiState.collectAsState()
     val colors = LocalPcColors.current
     var showForgetConfirm by remember { mutableStateOf(false) }
+    var showThemeSheet by remember { mutableStateOf(false) }
+    var showInlineConnectionScreen by remember { mutableStateOf(false) }
 
-    PullToRefreshBox(
-        isRefreshing = state.isRefreshing,
-        onRefresh = viewModel::refreshAll,
+    if (showInlineConnectionScreen && onOpenConnectionSettings == null) {
+        BackHandler { showInlineConnectionScreen = false }
+        ConnectionSettingsScreen(
+            viewModel = viewModel,
+            onBack = { showInlineConnectionScreen = false },
+        )
+        return
+    }
+
+    val openConnection = {
+        if (onOpenConnectionSettings != null) {
+            onOpenConnectionSettings()
+        } else {
+            showInlineConnectionScreen = true
+        }
+    }
+
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(colors.bg),
     ) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+        PcScreenHeader(title = "Settings")
+
+        PullToRefreshBox(
+            isRefreshing = state.isRefreshing,
+            onRefresh = viewModel::refreshAll,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
         ) {
-            item(key = "header") {
-                PcScreenHeader(title = "Settings")
-            }
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp),
+            ) {
+                // ---- Agent ----
+                item(key = "section_agent") {
+                    val agentSub = state.agentSummary?.let { a ->
+                        val name = if (a.engine == "gemini") "Gemini" else "Claude"
+                        val active = if (a.engine == "gemini") a.geminiActive else a.claudeActive
+                        when {
+                            !a.available -> "Unavailable"
+                            a.switching -> "$name · Switching…"
+                            else -> "$name · ${if (active) "Running" else "Stopped"}"
+                        }
+                    } ?: "Harness, models & AI usage"
 
-            // ---- Agent links ----
-            item(key = "sec_agent") {
-                PcSectionLabel(label = "Agent")
-            }
-            item(key = "card_agent_links") {
-                val agentSub = state.agentSummary?.let { a ->
-                    val name = if (a.engine == "gemini") "Gemini" else "Claude"
-                    val active = if (a.engine == "gemini") a.geminiActive else a.claudeActive
-                    when {
-                        !a.available -> "Unavailable"
-                        a.switching -> "$name · Switching…"
-                        else -> "$name · ${if (active) "Running" else "Stopped"}"
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PcSectionLabel(label = "Agent")
+                        PcListCard {
+                            PcListRow(
+                                icon = Icons.Filled.SmartToy,
+                                title = "Agent settings",
+                                subtitle = agentSub,
+                                showDivider = true,
+                                onClick = onOpenAgentSettings,
+                            )
+                            PcListRow(
+                                icon = Icons.Filled.Visibility,
+                                title = "Agent view",
+                                subtitle = "Capture proxy & website rewrite rules",
+                                showDivider = false,
+                                onClick = onOpenAgentView,
+                            )
+                        }
                     }
-                } ?: "Harness, models & AI usage"
+                }
 
-                PcListCard {
-                    PcListRow(
-                        icon = Icons.Filled.SmartToy,
-                        title = "Agent settings",
-                        subtitle = agentSub,
-                        showDivider = true,
-                        onClick = onOpenAgentSettings,
-                    )
-                    PcListRow(
-                        icon = Icons.Filled.Visibility,
-                        title = "Agent view",
-                        subtitle = "Capture proxy & website rewrite rules",
-                        showDivider = false,
-                        onClick = onOpenAgentView,
-                    )
+                // ---- PC Controls (single grouped PcListCard) ----
+                item(key = "section_pc_controls") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PcSectionLabel(label = "PC controls")
+                        PcListCard {
+                            VpnListRow(
+                                state = state.vpnState,
+                                pending = state.vpnPending,
+                                busy = state.vpnBusy,
+                                error = state.vpnError,
+                                onToggle = viewModel::toggleVpn,
+                            )
+                            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                            KeyboardLockListRow(
+                                state = state.kbdLockState,
+                                pending = state.kbdLockPending,
+                                busy = state.kbdLockBusy,
+                                error = state.kbdLockError,
+                                onToggle = viewModel::toggleKbdLock,
+                            )
+                            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                            KeyringListRow(
+                                status = state.keyringStatus,
+                                vaultSupported = state.keyringVaultSupported,
+                                hasSaved = state.keyringHasSaved,
+                                busy = state.keyringBusy,
+                                error = state.keyringError,
+                                notice = state.keyringNotice,
+                                onUnlock = viewModel::unlockKeyringWithBiometricsOrPrompt,
+                                onSavePassword = viewModel::openKeyringSaveSheet,
+                                onForget = { showForgetConfirm = true },
+                                onDismissNotice = viewModel::clearKeyringFeedback,
+                            )
+                        }
+                    }
+                }
+
+                // ---- Notifications (compact 2-column check table) ----
+                item(key = "section_notifications") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PcSectionLabel(label = "Notifications")
+                        NotificationRoutingCard(
+                            settings = state.notifSettings,
+                            expanded = state.notifExpanded,
+                            error = state.notifError,
+                            onToggleExpand = viewModel::toggleNotifExpanded,
+                            onToggleMaster = viewModel::setNotifMaster,
+                            onToggleCategory = viewModel::setNotifCategory,
+                        )
+                    }
+                }
+
+                // ---- App (Connection, Theme, Updates) ----
+                item(key = "section_app") {
+                    val hostSummary = remember(state.serverInfo, state.savedServerUrl) {
+                        connectionHostSummary(state.serverInfo, state.savedServerUrl)
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PcSectionLabel(label = "App")
+                        PcListCard {
+                            PcListRow(
+                                icon = Icons.Filled.Dns,
+                                title = "Connection",
+                                subtitle = if (!state.connectionError.isNullOrBlank()) "Offline" else null,
+                                trailing = hostSummary,
+                                showChevron = true,
+                                showDivider = true,
+                                onClick = openConnection,
+                            )
+                            PcListRow(
+                                icon = Icons.Filled.DarkMode,
+                                title = "Theme",
+                                trailing = state.themeMode.label,
+                                showChevron = true,
+                                showDivider = true,
+                                onClick = { showThemeSheet = true },
+                            )
+                            AppUpdatesListRow(
+                                currentVersionName = state.currentVersionName,
+                                currentVersionCode = state.currentVersionCode,
+                                latestRelease = state.latestRelease,
+                                hasNewer = state.hasNewerApk,
+                                checking = state.updateChecking,
+                                error = state.updateError,
+                                onCheck = viewModel::checkForApkUpdate,
+                                onDownloadInstall = viewModel::installLatestApk,
+                            )
+                        }
+                    }
+                }
+
+                // ---- Diagnostics ----
+                item(key = "section_diagnostics") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PcSectionLabel(label = "Diagnostics")
+                        DiagnosticsListCard(
+                            fcm = state.fcmDiagnostics,
+                            serverRegistered = state.fcmServerRegistered,
+                            crashCount = state.crashReports.size,
+                            onRetryPush = viewModel::retryPushRegistration,
+                            onOpenNotifSettings = viewModel::openNotificationSettings,
+                            onOpenCrashViewer = { viewModel.setCrashViewerVisible(true) },
+                        )
+                    }
                 }
             }
-
-            // ---- PC Controls ----
-            item(key = "sec_pc_controls") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "PC controls")
-            }
-            item(key = "card_vpn") {
-                VpnCard(
-                    state = state.vpnState,
-                    pending = state.vpnPending,
-                    busy = state.vpnBusy,
-                    error = state.vpnError,
-                    onToggle = viewModel::toggleVpn,
-                )
-            }
-            item(key = "card_kbd_lock") {
-                KeyboardLockCard(
-                    state = state.kbdLockState,
-                    pending = state.kbdLockPending,
-                    busy = state.kbdLockBusy,
-                    error = state.kbdLockError,
-                    onToggle = viewModel::toggleKbdLock,
-                )
-            }
-            item(key = "card_keyring") {
-                KeyringCard(
-                    status = state.keyringStatus,
-                    vaultSupported = state.keyringVaultSupported,
-                    hasSaved = state.keyringHasSaved,
-                    busy = state.keyringBusy,
-                    error = state.keyringError,
-                    notice = state.keyringNotice,
-                    onUnlock = viewModel::unlockKeyringWithBiometricsOrPrompt,
-                    onSavePassword = viewModel::openKeyringSaveSheet,
-                    onForget = { showForgetConfirm = true },
-                    onDismissNotice = viewModel::clearKeyringFeedback,
-                )
-            }
-
-            // ---- Notifications ----
-            item(key = "sec_notifications") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "Notifications")
-            }
-            item(key = "card_notifications") {
-                NotificationsCard(
-                    settings = state.notifSettings,
-                    expanded = state.notifExpanded,
-                    error = state.notifError,
-                    onToggleExpand = viewModel::toggleNotifExpanded,
-                    onToggleMaster = viewModel::setNotifMaster,
-                    onToggleCategory = viewModel::setNotifCategory,
-                )
-            }
-
-            // ---- Appearance ----
-            item(key = "sec_appearance") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "Appearance")
-            }
-            item(key = "card_appearance") {
-                PcSegmentedControl(
-                    options = ThemeMode.entries.map { it.label },
-                    selectedIndex = ThemeMode.entries.indexOf(state.themeMode),
-                    onSelect = { idx -> viewModel.setThemeMode(ThemeMode.entries[idx]) },
-                )
-            }
-
-            // ---- Connection ----
-            item(key = "sec_connection") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "Connection")
-            }
-            item(key = "card_connection") {
-                ConnectionCard(
-                    serverUrl = state.serverUrlInput,
-                    chatBaseUrl = state.chatBaseUrlInput,
-                    chatToken = state.chatTokenInput,
-                    dirty = state.connectionDirty,
-                    testing = state.connectionTesting,
-                    info = state.serverInfo,
-                    whoAmI = state.whoAmI,
-                    error = state.connectionError,
-                    onServerUrlChange = viewModel::onServerUrlChange,
-                    onChatBaseUrlChange = viewModel::onChatBaseUrlChange,
-                    onChatTokenChange = viewModel::onChatTokenChange,
-                    onSave = viewModel::saveConnection,
-                    onTest = viewModel::testConnection,
-                )
-            }
-
-            // ---- App Updates (Native GitHub Releases APK) ----
-            item(key = "sec_updates") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "App updates")
-            }
-            item(key = "card_updates") {
-                AppUpdatesCard(
-                    currentVersionName = state.currentVersionName,
-                    currentVersionCode = state.currentVersionCode,
-                    latestRelease = state.latestRelease,
-                    hasNewer = state.hasNewerApk,
-                    checking = state.updateChecking,
-                    error = state.updateError,
-                    onCheck = viewModel::checkForApkUpdate,
-                    onDownloadInstall = viewModel::installLatestApk,
-                )
-            }
-
-            // ---- Diagnostics ----
-            item(key = "sec_diagnostics") {
-                Spacer(modifier = Modifier.height(4.dp))
-                PcSectionLabel(label = "Diagnostics")
-            }
-            item(key = "card_diagnostics") {
-                DiagnosticsCard(
-                    fcm = state.fcmDiagnostics,
-                    serverRegistered = state.fcmServerRegistered,
-                    crashCount = state.crashReports.size,
-                    onRetryPush = viewModel::retryPushRegistration,
-                    onOpenNotifSettings = viewModel::openNotificationSettings,
-                    onOpenCrashViewer = { viewModel.setCrashViewerVisible(true) },
-                )
-            }
-
-            item(key = "bottom_pad") {
-                Spacer(modifier = Modifier.height(24.dp))
-            }
         }
+    }
+
+    if (showThemeSheet) {
+        ThemePickerSheet(
+            selected = state.themeMode,
+            onSelect = { mode ->
+                viewModel.setThemeMode(mode)
+                showThemeSheet = false
+            },
+            onDismiss = { showThemeSheet = false },
+        )
     }
 
     if (state.showKeyringSheet) {
@@ -314,7 +329,19 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun VpnCard(
+private fun settingsSwitchColors() = LocalPcColors.current.let { colors ->
+    SwitchDefaults.colors(
+        checkedThumbColor = colors.bg,
+        checkedTrackColor = colors.text,
+        checkedBorderColor = Color.Transparent,
+        uncheckedThumbColor = colors.textDim,
+        uncheckedTrackColor = colors.surfaceRaised,
+        uncheckedBorderColor = colors.hairline,
+    )
+}
+
+@Composable
+private fun VpnListRow(
     state: VpnState?,
     pending: Boolean?,
     busy: Boolean,
@@ -329,8 +356,12 @@ private fun VpnCard(
         busy -> if (enabled) "Turning on…" else "Turning off…"
         !enabled -> "Off"
         down -> "Tunnel down"
-        noPort -> "Connected, no forwarded port"
-        else -> "Connected via Proton VPN"
+        noPort -> "Connected · no forwarded port"
+        else -> buildList {
+            add("Proton VPN")
+            state?.forwardedPort?.let { add(":$it") }
+            state?.publicIp?.takeIf { it.isNotBlank() }?.let { add(it) }
+        }.joinToString(" · ")
     }
     val dotColor = when {
         down || noPort -> colors.warn
@@ -338,74 +369,74 @@ private fun VpnCard(
         else -> colors.textFaint
     }
 
-    PcCard {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Shield,
-                    contentDescription = null,
-                    tint = if (down || noPort) colors.warn else if (enabled) colors.accent else colors.textDim,
-                    modifier = Modifier.size(22.dp),
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Torrent VPN",
-                        color = colors.text,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        PcStatusDot(color = dotColor)
-                        Text(text = statusText, color = colors.textDim, fontSize = 13.sp)
-                    }
-                }
-                Switch(
-                    checked = enabled,
-                    onCheckedChange = onToggle,
-                    enabled = state != null && !busy,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = colors.bg,
-                        checkedTrackColor = colors.accent,
-                        uncheckedThumbColor = colors.textFaint,
-                        uncheckedTrackColor = colors.surfaceRaised,
-                    ),
-                )
-            }
-
-            if (!error.isNullOrBlank()) {
-                PcErrorBanner(message = error)
-            }
-            if (!state?.lastError.isNullOrBlank()) {
-                Text(
-                    text = state!!.lastError!!,
-                    color = if (down) colors.warn else colors.textFaint,
-                    fontSize = 12.5.sp,
-                    lineHeight = 18.sp,
-                )
-            }
-
-            SettingsKvRow(
-                label = "Forwarded port",
-                value = if (enabled) state?.forwardedPort?.toString() ?: "Waiting for NAT-PMP…" else "—",
-                mono = enabled && state?.forwardedPort != null,
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Shield,
+                contentDescription = null,
+                tint = if (down || noPort) colors.warn else colors.textDim,
+                modifier = Modifier.size(20.dp),
             )
-            SettingsKvRow(
-                label = "VPN public IP",
-                value = if (enabled) state?.publicIp ?: "—" else "—",
-                mono = enabled && !state?.publicIp.isNullOrBlank(),
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = "Torrent VPN",
+                    color = colors.text,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    PcStatusDot(color = dotColor, size = 6.dp)
+                    Text(
+                        text = statusText,
+                        color = colors.textFaint,
+                        style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = onToggle,
+                enabled = state != null && !busy,
+                colors = settingsSwitchColors(),
+            )
+        }
+
+        val lastError = state?.lastError
+        if (!error.isNullOrBlank()) {
+            PcErrorBanner(message = error)
+        } else if (!lastError.isNullOrBlank()) {
+            Text(
+                text = lastError,
+                color = if (down) colors.warn else colors.textFaint,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(start = 34.dp),
             )
         }
     }
 }
 
 @Composable
-private fun KeyboardLockCard(
+private fun KeyboardLockListRow(
     state: KbdLockState?,
     pending: Boolean?,
     busy: Boolean,
@@ -429,54 +460,65 @@ private fun KeyboardLockCard(
         else -> colors.textFaint
     }
 
-    PcCard {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Keyboard,
+                contentDescription = null,
+                tint = colors.textDim,
+                modifier = Modifier.size(20.dp),
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Filled.Keyboard,
-                    contentDescription = null,
-                    tint = if (enabled) colors.accent else colors.textDim,
-                    modifier = Modifier.size(22.dp),
+                Text(
+                    text = "Keyboard lock",
+                    color = colors.text,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    PcStatusDot(color = dotColor, size = 6.dp)
                     Text(
-                        text = "Keyboard lock",
-                        color = colors.text,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        text = statusText,
+                        color = colors.textFaint,
+                        fontSize = 12.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        PcStatusDot(color = dotColor)
-                        Text(text = statusText, color = colors.textDim, fontSize = 13.sp)
-                    }
                 }
-                Switch(
-                    checked = enabled,
-                    onCheckedChange = onToggle,
-                    enabled = state != null && !unavailable && !busy,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = colors.bg,
-                        checkedTrackColor = colors.accent,
-                        uncheckedThumbColor = colors.textFaint,
-                        uncheckedTrackColor = colors.surfaceRaised,
-                    ),
-                )
             }
-            if (!error.isNullOrBlank()) {
-                PcErrorBanner(message = error)
-            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = onToggle,
+                enabled = state != null && !unavailable && !busy,
+                colors = settingsSwitchColors(),
+            )
+        }
+
+        if (!error.isNullOrBlank()) {
+            PcErrorBanner(message = error)
         }
     }
 }
 
 @Composable
-private fun KeyringCard(
+private fun KeyringListRow(
     status: KeyringStatus?,
     vaultSupported: Boolean,
     hasSaved: Boolean,
@@ -495,118 +537,125 @@ private fun KeyringCard(
         locked -> colors.warn
         else -> colors.ok
     }
-    val subtitle = when {
-        status == null -> "Checking…"
-        locked -> "Locked · RDP unavailable (${status.rdp})"
-        else -> "Unlocked · RDP ${status.rdp}"
-    }
+    val statusLine = remember(status, hasSaved) { keyringStatusSummary(status, hasSaved) }
 
-    PcCard {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Icon(
+                imageVector = if (locked) Icons.Filled.Lock else Icons.Filled.Fingerprint,
+                contentDescription = null,
+                tint = if (locked) colors.warn else colors.textDim,
+                modifier = Modifier.size(20.dp),
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Icon(
-                    imageVector = if (locked) Icons.Filled.Lock else Icons.Filled.Fingerprint,
-                    contentDescription = null,
-                    tint = if (locked) colors.warn else if (hasSaved) colors.ok else colors.textDim,
-                    modifier = Modifier.size(22.dp),
+                Text(
+                    text = "Keyring",
+                    color = colors.text,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Keyring",
-                        color = colors.text,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        PcStatusDot(color = dotColor)
-                        Text(text = subtitle, color = colors.textDim, fontSize = 13.sp)
-                    }
-                }
-                if (locked) {
-                    PcPill(text = "Locked", color = colors.warn, backgroundColor = colors.warnSoft)
-                } else if (hasSaved) {
-                    PcPill(text = "Saved", color = colors.ok, backgroundColor = colors.okSoft)
-                }
-            }
-
-            SettingsKvRow(
-                label = "Saved password",
-                value = if (hasSaved) "Encrypted (fingerprint)" else "Not saved",
-            )
-            SettingsKvRow(
-                label = "Storage",
-                value = "Phone Keystore only",
-            )
-
-            if (!error.isNullOrBlank()) {
-                PcErrorBanner(message = error)
-            }
-            if (!notice.isNullOrBlank()) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(colors.okSoft)
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    PcStatusDot(color = dotColor, size = 6.dp)
                     Text(
-                        text = notice,
-                        color = colors.ok,
-                        fontSize = 13.sp,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        text = "Dismiss",
-                        color = colors.text,
+                        text = statusLine,
+                        color = colors.textFaint,
                         fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier
-                            .padding(start = 6.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable(onClick = onDismissNotice)
-                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
-
             if (locked) {
                 PcButton(
-                    label = if (hasSaved) "Unlock (fingerprint)" else "Unlock keyring",
+                    label = "Unlock",
                     variant = PcButtonVariant.Primary,
+                    compact = true,
                     busy = busy,
                     onClick = onUnlock,
-                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else if (vaultSupported && !hasSaved) {
+                PcButton(
+                    label = "Save",
+                    variant = PcButtonVariant.Subtle,
+                    compact = true,
+                    enabled = !busy,
+                    onClick = onSavePassword,
                 )
             }
+        }
 
-            if (vaultSupported) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
+        if (!error.isNullOrBlank()) {
+            PcErrorBanner(message = error)
+        }
+
+        if (!notice.isNullOrBlank()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 34.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = notice,
+                    color = colors.textDim,
+                    fontSize = 12.5.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "Dismiss",
+                    color = colors.text,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier
+                        .padding(start = 8.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(onClick = onDismissNotice)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+        }
+
+        if (vaultSupported && (hasSaved || locked)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 34.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PcButton(
+                    label = if (hasSaved) "Change password" else "Save password",
+                    variant = PcButtonVariant.Subtle,
+                    compact = true,
+                    enabled = !busy,
+                    onClick = onSavePassword,
+                )
+                if (hasSaved) {
                     PcButton(
-                        label = if (hasSaved) "Change password" else "Save password",
-                        variant = if (hasSaved || locked) PcButtonVariant.Subtle else PcButtonVariant.Primary,
+                        label = "Forget",
+                        variant = PcButtonVariant.Danger,
+                        compact = true,
                         enabled = !busy,
-                        onClick = onSavePassword,
-                        modifier = Modifier.weight(1f),
+                        onClick = onForget,
                     )
-                    if (hasSaved) {
-                        PcButton(
-                            label = "Forget",
-                            variant = PcButtonVariant.Danger,
-                            enabled = !busy,
-                            onClick = onForget,
-                        )
-                    }
                 }
             }
         }
@@ -614,7 +663,7 @@ private fun KeyringCard(
 }
 
 @Composable
-private fun NotificationsCard(
+private fun NotificationRoutingCard(
     settings: NotifSettings?,
     expanded: Boolean,
     error: String?,
@@ -623,164 +672,189 @@ private fun NotificationsCard(
     onToggleCategory: (categoryId: String, channel: String, enabled: Boolean) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val summary = remember(settings) { notifRoutingSummary(settings) }
 
-    PcCard {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable(onClick = onToggleExpand)
-                    .padding(horizontal = 4.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+    PcListCard(modifier = Modifier.animateContentSize()) {
+        // Expandable header row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggleExpand)
+                .defaultMinSize(minHeight = 56.dp)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Notifications,
+                contentDescription = null,
+                tint = colors.textDim,
+                modifier = Modifier.size(20.dp),
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Filled.Notifications,
-                    contentDescription = null,
-                    tint = colors.accent,
-                    modifier = Modifier.size(22.dp),
-                )
                 Text(
                     text = "Where notifications go",
                     color = colors.text,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Icon(
-                    imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = null,
-                    tint = colors.textDim,
-                    modifier = Modifier.size(22.dp),
+                Text(
+                    text = summary,
+                    color = colors.textFaint,
+                    style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
+            Icon(
+                imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                tint = colors.textFaint,
+                modifier = Modifier.size(20.dp),
+            )
+        }
 
-            if (!error.isNullOrBlank()) {
+        if (!error.isNullOrBlank()) {
+            Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                 PcErrorBanner(message = error)
             }
+        }
 
-            if (settings == null) {
-                Text(text = "Loading…", color = colors.textDim, fontSize = 13.5.sp)
-            } else {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(colors.surfaceRaised)
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+        if (settings != null) {
+            val tgMaster = settings.masters["telegram"] == true
+            val appMaster = settings.masters["app"] == true
+
+            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+
+            // Column headers + master row aligned to the same 2-column grid
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Channel",
+                    color = colors.textFaint,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = if (settings.channels.telegram.configured) "Telegram" else "Telegram · off",
+                    color = colors.textFaint,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.width(68.dp),
+                )
+                Text(
+                    text = "App",
+                    color = colors.textFaint,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.width(52.dp),
+                )
+            }
+
+            // Master row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 12.dp, top = 2.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "All notifications",
+                    color = colors.text,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                )
+                Box(
+                    modifier = Modifier.width(68.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    val tgOn = settings.masters["telegram"] == true
-                    val appOn = settings.masters["app"] == true
-
-                    MasterChannelToggle(
-                        label = "Telegram",
-                        subtitle = if (!settings.channels.telegram.configured) "not set up" else if (tgOn) "on" else "off",
-                        icon = Icons.Filled.Send,
-                        checked = tgOn,
-                        onCheckedChange = { onToggleMaster("telegram", it) },
-                        modifier = Modifier.weight(1f),
-                    )
-                    MasterChannelToggle(
-                        label = "App",
-                        subtitle = if (!settings.channels.app.configured) "not set up" else if (appOn) "on" else "off",
-                        icon = Icons.Filled.PhoneAndroid,
-                        checked = appOn,
-                        onCheckedChange = { onToggleMaster("app", it) },
-                        modifier = Modifier.weight(1f),
+                    CompactCheckToggle(
+                        checked = tgMaster,
+                        dimmed = !settings.channels.telegram.configured,
+                        contentDescription = "Telegram notifications",
+                        onToggle = { onToggleMaster("telegram", !tgMaster) },
                     )
                 }
+                Box(
+                    modifier = Modifier.width(52.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CompactCheckToggle(
+                        checked = appMaster,
+                        dimmed = !settings.channels.app.configured,
+                        contentDescription = "App notifications",
+                        onToggle = { onToggleMaster("app", !appMaster) },
+                    )
+                }
+            }
 
-                AnimatedVisibility(visible = expanded) {
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+            // Per-category compact 2-column check table
+            if (expanded && settings.categories.isNotEmpty()) {
+                settings.categories.forEach { cat ->
+                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                    val supportsTelegram = cat.channels == null || "telegram" in cat.channels
+                    val anyActive = (supportsTelegram && cat.telegram && tgMaster) || (cat.app && appMaster)
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 42.dp)
+                            .padding(start = 16.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = cat.label,
+                            color = if (anyActive) colors.text else colors.textDim,
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.Normal,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Box(
+                            modifier = Modifier.width(68.dp),
+                            contentAlignment = Alignment.Center,
                         ) {
-                            Text(
-                                text = "Category",
-                                color = colors.textDim,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text(
-                                text = "Telegram",
-                                color = colors.textDim,
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.width(64.dp),
-                            )
-                            Text(
-                                text = "App",
-                                color = colors.textDim,
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.width(56.dp),
-                            )
+                            if (supportsTelegram) {
+                                CompactCheckToggle(
+                                    checked = cat.telegram,
+                                    dimmed = !tgMaster,
+                                    contentDescription = "${cat.label} Telegram",
+                                    onToggle = { onToggleCategory(cat.id, "telegram", !cat.telegram) },
+                                )
+                            } else {
+                                Text(
+                                    text = "—",
+                                    color = colors.textFaint,
+                                    fontSize = 13.sp,
+                                )
+                            }
                         }
-                        HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
-
-                        val tgMaster = settings.masters["telegram"] == true
-                        val appMaster = settings.masters["app"] == true
-
-                        settings.categories.forEachIndexed { idx, cat ->
-                            if (idx > 0) {
-                                HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
-                            }
-                            val supportsTelegram = cat.channels == null || "telegram" in cat.channels
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = cat.label,
-                                        color = if (cat.telegram || cat.app) colors.text else colors.textFaint,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Medium,
-                                    )
-                                }
-                                Box(
-                                    modifier = Modifier.width(64.dp),
-                                    contentAlignment = Alignment.CenterStart,
-                                ) {
-                                    if (supportsTelegram) {
-                                        Switch(
-                                            checked = cat.telegram,
-                                            onCheckedChange = { onToggleCategory(cat.id, "telegram", it) },
-                                            colors = SwitchDefaults.colors(
-                                                checkedThumbColor = colors.bg,
-                                                checkedTrackColor = if (tgMaster) colors.accent else colors.hairline,
-                                                uncheckedThumbColor = colors.textFaint,
-                                                uncheckedTrackColor = colors.surfaceRaised,
-                                            ),
-                                        )
-                                    } else {
-                                        Text(text = "–", color = colors.textFaint, fontSize = 15.sp)
-                                    }
-                                }
-                                Box(
-                                    modifier = Modifier.width(56.dp),
-                                    contentAlignment = Alignment.CenterStart,
-                                ) {
-                                    Switch(
-                                        checked = cat.app,
-                                        onCheckedChange = { onToggleCategory(cat.id, "app", it) },
-                                        colors = SwitchDefaults.colors(
-                                            checkedThumbColor = colors.bg,
-                                            checkedTrackColor = if (appMaster) colors.accent else colors.hairline,
-                                            uncheckedThumbColor = colors.textFaint,
-                                            uncheckedTrackColor = colors.surfaceRaised,
-                                        ),
-                                    )
-                                }
-                            }
+                        Box(
+                            modifier = Modifier.width(52.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CompactCheckToggle(
+                                checked = cat.app,
+                                dimmed = !appMaster,
+                                contentDescription = "${cat.label} App",
+                                onToggle = { onToggleCategory(cat.id, "app", !cat.app) },
+                            )
                         }
                     }
                 }
@@ -790,135 +864,55 @@ private fun NotificationsCard(
 }
 
 @Composable
-private fun MasterChannelToggle(
-    label: String,
-    subtitle: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+private fun CompactCheckToggle(
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier,
+    dimmed: Boolean,
+    contentDescription: String,
+    onToggle: () -> Unit,
 ) {
     val colors = LocalPcColors.current
-    Row(
-        modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    val shape = RoundedCornerShape(6.dp)
+    val boxBg = when {
+        checked && !dimmed -> colors.accentSoft
+        checked -> colors.surfaceRaised
+        else -> Color.Transparent
+    }
+    val boxBorder = when {
+        checked && !dimmed -> colors.accent.copy(alpha = 0.5f)
+        checked -> colors.hairline
+        else -> colors.hairline
+    }
+    val iconTint = if (dimmed) colors.textFaint else colors.accent
+
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(role = Role.Checkbox, onClick = onToggle),
+        contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = if (checked) colors.accent else colors.textFaint,
-            modifier = Modifier.size(18.dp),
-        )
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = label, color = colors.text, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
-            Text(text = subtitle, color = colors.textFaint, fontSize = 11.5.sp)
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = colors.bg,
-                checkedTrackColor = colors.accent,
-                uncheckedThumbColor = colors.textFaint,
-                uncheckedTrackColor = colors.surface,
-            ),
-        )
-    }
-}
-
-@Composable
-private fun ConnectionCard(
-    serverUrl: String,
-    chatBaseUrl: String,
-    chatToken: String,
-    dirty: Boolean,
-    testing: Boolean,
-    info: ServerInfo?,
-    whoAmI: String?,
-    error: String?,
-    onServerUrlChange: (String) -> Unit,
-    onChatBaseUrlChange: (String) -> Unit,
-    onChatTokenChange: (String) -> Unit,
-    onSave: () -> Unit,
-    onTest: () -> Unit,
-) {
-    val colors = LocalPcColors.current
-
-    PcCard {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(text = "Laptop server URL (tailnet)", color = colors.textDim, fontSize = 12.5.sp)
-                PcCompactTextField(
-                    value = serverUrl,
-                    onValueChange = onServerUrlChange,
-                    mono = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .clip(shape)
+                .background(boxBg)
+                .border(width = 1.dp, color = boxBorder, shape = shape),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (checked) {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = contentDescription,
+                    tint = iconTint,
+                    modifier = Modifier.size(13.dp),
                 )
-            }
-
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(text = "Chat API URL", color = colors.textDim, fontSize = 12.5.sp)
-                PcCompactTextField(
-                    value = chatBaseUrl,
-                    onValueChange = onChatBaseUrlChange,
-                    mono = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
-                )
-            }
-
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(text = "Chat token", color = colors.textDim, fontSize = 12.5.sp)
-                PcCompactTextField(
-                    value = chatToken,
-                    onValueChange = onChatTokenChange,
-                    mono = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                PcButton(
-                    label = "Test",
-                    variant = PcButtonVariant.Subtle,
-                    busy = testing,
-                    onClick = onTest,
-                    modifier = Modifier.weight(1f),
-                )
-                PcButton(
-                    label = "Save",
-                    variant = PcButtonVariant.Primary,
-                    enabled = dirty,
-                    onClick = onSave,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-
-            if (!error.isNullOrBlank()) {
-                PcErrorBanner(message = error)
-            }
-
-            if (info != null) {
-                HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
-                SettingsKvRow(label = "Host", value = info.host.ifBlank { "—" })
-                SettingsKvRow(label = "Signed in as", value = whoAmI ?: "—")
-                val rootdLabel = if (info.rootd.state == "ok") {
-                    "running · ${info.rootd.devices ?: 0} phone(s)"
-                } else {
-                    info.rootd.state.replace('_', ' ')
-                }
-                SettingsKvRow(label = "rootd", value = rootdLabel)
             }
         }
     }
 }
 
 @Composable
-private fun AppUpdatesCard(
+private fun AppUpdatesListRow(
     currentVersionName: String,
     currentVersionCode: Int,
     latestRelease: ApkReleaseInfo?,
@@ -929,101 +923,86 @@ private fun AppUpdatesCard(
     onDownloadInstall: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val subtitle = when {
+        hasNewer && latestRelease != null -> "v$currentVersionName → v${latestRelease.versionName} available"
+        checking -> "Checking GitHub Releases…"
+        !error.isNullOrBlank() -> error
+        latestRelease != null -> "v$currentVersionName · Up to date"
+        else -> "v$currentVersionName ($currentVersionCode)"
+    }
 
-    PcCard {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = !checking, onClick = if (hasNewer) onDownloadInstall else onCheck)
+                .defaultMinSize(minHeight = 56.dp)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.SystemUpdate,
+                contentDescription = null,
+                tint = colors.textDim,
+                modifier = Modifier.size(20.dp),
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Filled.SystemUpdate,
-                    contentDescription = null,
-                    tint = if (hasNewer) colors.accent else colors.textDim,
-                    modifier = Modifier.size(22.dp),
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "GitHub Releases APK",
-                        color = colors.text,
-                        fontSize = 15.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        text = "Installed v$currentVersionName ($currentVersionCode)",
-                        color = colors.textDim,
-                        fontSize = 12.5.sp,
-                        style = TabularNumStyle,
-                    )
-                }
-                if (hasNewer) {
-                    PcPill(text = "Update ready", color = colors.accent, backgroundColor = colors.accentSoft)
-                }
-            }
-
-            if (hasNewer && latestRelease != null) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(colors.accentSoft)
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = "New version: v${latestRelease.versionName} (${latestRelease.versionCode})",
-                        color = colors.accent,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        style = TabularNumStyle,
-                    )
-                    if (!latestRelease.releaseNotes.isNullOrBlank()) {
-                        Text(
-                            text = latestRelease.releaseNotes,
-                            color = colors.textDim,
-                            fontSize = 12.5.sp,
-                            lineHeight = 17.sp,
-                        )
-                    }
-                }
-            } else if (latestRelease != null) {
                 Text(
-                    text = "Up to date (latest v${latestRelease.versionName}).",
-                    color = colors.textFaint,
-                    fontSize = 12.5.sp,
+                    text = "App updates",
+                    color = colors.text,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = subtitle,
+                    color = if (hasNewer) colors.accent else if (!error.isNullOrBlank()) colors.bad else colors.textFaint,
+                    style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-
-            if (!error.isNullOrBlank()) {
-                PcErrorBanner(message = error)
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                PcButton(
-                    label = "Check updates",
-                    variant = PcButtonVariant.Subtle,
-                    busy = checking,
-                    onClick = onCheck,
-                    modifier = Modifier.weight(1f),
+            when {
+                checking -> CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = colors.textDim,
                 )
-                if (hasNewer) {
-                    PcButton(
-                        label = "Download & Install",
-                        variant = PcButtonVariant.Primary,
-                        onClick = onDownloadInstall,
-                        modifier = Modifier.weight(1.3f),
-                    )
-                }
+                hasNewer -> PcButton(
+                    label = "Install",
+                    variant = PcButtonVariant.Primary,
+                    compact = true,
+                    onClick = onDownloadInstall,
+                )
+                else -> Text(
+                    text = "Check",
+                    color = colors.textDim,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                )
             }
+        }
+
+        val releaseNotes = latestRelease?.releaseNotes
+        if (hasNewer && !releaseNotes.isNullOrBlank()) {
+            Text(
+                text = releaseNotes,
+                color = colors.textDim,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                modifier = Modifier.padding(start = 50.dp, end = 16.dp, bottom = 12.dp),
+            )
         }
     }
 }
 
 @Composable
-private fun DiagnosticsCard(
+private fun DiagnosticsListCard(
     fcm: FcmDiagnostics,
     serverRegistered: Boolean?,
     crashCount: Int,
@@ -1042,50 +1021,57 @@ private fun DiagnosticsCard(
     }
 
     PcListCard {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .defaultMinSize(minHeight = 56.dp)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            Icon(
+                imageVector = Icons.Filled.NotificationsActive,
+                contentDescription = null,
+                tint = colors.textDim,
+                modifier = Modifier.size(20.dp),
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                PcStatusDot(color = if (fcmOk) colors.ok else colors.warn)
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "FCM push status",
-                        color = colors.text,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
+                Text(
+                    text = "Push notifications",
+                    color = colors.text,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    PcStatusDot(color = if (fcmOk) colors.ok else colors.warn, size = 6.dp)
                     Text(
                         text = fcmStatus,
                         color = colors.textFaint,
                         fontSize = 12.5.sp,
-                    )
-                }
-                if (!fcm.notificationsEnabled) {
-                    PcButton(
-                        label = "Allow",
-                        variant = PcButtonVariant.Subtle,
-                        onClick = onOpenNotifSettings,
-                    )
-                } else if (!fcmOk) {
-                    PcButton(
-                        label = "Retry",
-                        variant = PcButtonVariant.Subtle,
-                        onClick = onRetryPush,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
-            if (!fcm.token.isNullOrBlank()) {
-                Text(
-                    text = "Token: ${fcm.token.take(24)}…",
-                    color = colors.textFaint,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.5.sp,
+            if (!fcm.notificationsEnabled) {
+                PcButton(
+                    label = "Allow",
+                    variant = PcButtonVariant.Subtle,
+                    compact = true,
+                    onClick = onOpenNotifSettings,
+                )
+            } else if (!fcmOk) {
+                PcButton(
+                    label = "Retry",
+                    variant = PcButtonVariant.Subtle,
+                    compact = true,
+                    onClick = onRetryPush,
                 )
             }
         }
@@ -1093,10 +1079,78 @@ private fun DiagnosticsCard(
         PcListRow(
             icon = Icons.Filled.BugReport,
             title = "Crash reports",
-            subtitle = if (crashCount == 0) "No crash reports recorded" else "$crashCount recorded crash report${if (crashCount == 1) "" else "s"}",
+            trailing = if (crashCount == 0) "None" else "$crashCount",
+            showChevron = true,
             showDivider = false,
             onClick = onOpenCrashViewer,
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ThemePickerSheet(
+    selected: ThemeMode,
+    onSelect: (ThemeMode) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = LocalPcColors.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = colors.bg,
+        contentColor = colors.text,
+        dragHandle = { PcSheetDragHandle() },
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Theme",
+                color = colors.text,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            PcListCard {
+                ThemeMode.entries.forEachIndexed { idx, mode ->
+                    if (idx > 0) {
+                        HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                    }
+                    val isSelected = mode == selected
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(mode) }
+                            .defaultMinSize(minHeight = 52.dp)
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = mode.label,
+                            color = colors.text,
+                            fontSize = 15.sp,
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                        )
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Filled.Check,
+                                contentDescription = "Selected",
+                                tint = colors.accent,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1110,8 +1164,9 @@ private fun CrashReportsSheetContent(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
-            .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 12.dp),
+            .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 18.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(
@@ -1129,6 +1184,7 @@ private fun CrashReportsSheetContent(
                 PcButton(
                     label = "Clear all",
                     variant = PcButtonVariant.Danger,
+                    compact = true,
                     onClick = onClear,
                 )
             }
@@ -1175,30 +1231,6 @@ private fun CrashReportsSheetContent(
             variant = PcButtonVariant.Subtle,
             onClick = onClose,
             modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-    }
-}
-
-@Composable
-private fun SettingsKvRow(label: String, value: String, mono: Boolean = false) {
-    val colors = LocalPcColors.current
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(text = label, color = colors.textDim, fontSize = 13.sp)
-        Spacer(modifier = Modifier.width(12.dp))
-        Text(
-            text = value,
-            color = colors.text,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = TabularNumStyle,
         )
     }
 }

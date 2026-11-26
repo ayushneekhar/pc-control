@@ -375,7 +375,6 @@ private fun MultiAccountWindowCard(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Row(
-                        verticalAlignment = Alignment.Baseline,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(
@@ -383,6 +382,7 @@ private fun MultiAccountWindowCard(
                             color = colors.text,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Medium,
+                            modifier = Modifier.alignByBaseline(),
                         )
                         Text(
                             text = summary.aggregateRemainingPct?.let { "$it% left" } ?: "—",
@@ -391,6 +391,7 @@ private fun MultiAccountWindowCard(
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.SemiBold,
                             ),
+                            modifier = Modifier.alignByBaseline(),
                         )
                     }
                     if (summary.paceStatus != null) {

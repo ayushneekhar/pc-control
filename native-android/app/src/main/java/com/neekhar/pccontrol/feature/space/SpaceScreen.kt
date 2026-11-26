@@ -291,7 +291,7 @@ fun SpaceScreen(
 
                     // Collapsible search field (hidden by default so media starts higher)
                     item(key = "search_bar") {
-                        AnimatedVisibility(
+                        androidx.compose.animation.AnimatedVisibility(
                             visible = showSearchField,
                             enter = expandVertically() + fadeIn(),
                             exit = shrinkVertically() + fadeOut(),

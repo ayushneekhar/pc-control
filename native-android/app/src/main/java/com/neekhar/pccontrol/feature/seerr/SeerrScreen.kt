@@ -9,8 +9,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,13 +25,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cancel
-import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tv
@@ -58,12 +61,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
-import com.neekhar.pccontrol.core.ui.PcButton
-import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
-import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcTone
@@ -164,7 +164,7 @@ fun SeerrScreen(
                     }
 
                     item(key = "results_header") {
-                        PcSectionLabel(label = "Results (${filtered.size})")
+                        PcSectionLabel(label = "Results")
                     }
 
                     if (filtered.isEmpty()) {
@@ -178,22 +178,34 @@ fun SeerrScreen(
                             }
                         }
                     } else {
+                        val gridRows = filtered.chunked(3)
                         items(
-                            items = filtered,
-                            key = { "${it.mediaType}:${it.id}" },
-                        ) { item ->
-                            SeerrSearchResultRow(
-                                item = item,
-                                busy = state.busyMovieId == item.id && item.isMovie,
-                                onClick = {
-                                    if (item.isCollection) {
-                                        viewModel.openCollection(item.id, item.title, item.poster)
-                                    } else {
-                                        onOpenDetail(item.mediaType, item.id, item)
-                                    }
-                                },
-                                onQuickRequest = { viewModel.requestMovie(item.id) },
-                            )
+                            items = gridRows,
+                            key = { row ->
+                                "grid:" + row.joinToString(",") { "${it.mediaType}:${it.id}" }
+                            },
+                        ) { rowItems ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                for (item in rowItems) {
+                                    SeerrPosterGridCard(
+                                        item = item,
+                                        onClick = {
+                                            if (item.isCollection) {
+                                                viewModel.openCollection(item.id, item.title, item.poster)
+                                            } else {
+                                                onOpenDetail(item.mediaType, item.id, item)
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                                repeat(3 - rowItems.size) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
                         }
                     }
                 } else {
@@ -416,81 +428,118 @@ private fun SeerrSearchBar(
 }
 
 @Composable
-private fun SeerrSearchResultRow(
+private fun SeerrPosterGridCard(
     item: SeerrItem,
-    busy: Boolean,
     onClick: () -> Unit,
-    onQuickRequest: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
-    val canQuickRequestMovie = item.isMovie && SeerrHelpers.isRequestableMovie(item.status)
+    val badge = if (item.isCollection) null else SeerrHelpers.statusBadge(item.status)
+    val fallbackIcon = when {
+        item.isCollection -> Icons.Filled.CollectionsBookmark
+        item.isTv -> Icons.Filled.Tv
+        else -> Icons.Filled.Movie
+    }
+    val subLine = buildList {
+        item.year?.let { add(it.toString()) }
+        if (item.isTv) add("TV")
+    }.joinToString(" · ")
 
-    PcCard(
-        onClick = onClick,
-        contentPadding = PaddingValues(12.dp),
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(10.dp))
+                .background(colors.surfaceRaised),
         ) {
-            SeerrPoster(
-                url = item.poster,
-                mediaType = item.mediaType,
-                size = SeerrPosterSize.SM,
+            Icon(
+                imageVector = fallbackIcon,
+                contentDescription = null,
+                tint = colors.textFaint,
+                modifier = Modifier
+                    .size(26.dp)
+                    .align(Alignment.Center),
             )
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                Text(
-                    text = item.title,
-                    color = colors.text,
-                    fontSize = 14.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+            if (!item.poster.isNullOrBlank()) {
+                AsyncImage(
+                    model = item.poster,
+                    contentDescription = item.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+            }
+            if (item.isCollection) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(5.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(colors.surfaceRaised.copy(alpha = 0.92f))
+                        .border(0.5.dp, colors.hairline, RoundedCornerShape(999.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
                 ) {
-                    if (item.isCollection) {
-                        PcPill(label = "Collection", tone = PcTone.Accent)
-                    } else {
-                        PcPill(
-                            label = if (item.isTv) "TV" else "Movie",
-                            tone = PcTone.Faint,
-                        )
-                    }
-                    item.year?.let { year ->
-                        Text(
-                            text = year.toString(),
-                            color = colors.textFaint,
-                            style = TabularNumStyle.copy(fontSize = 12.sp),
-                        )
-                    }
-                    SeerrRatingInline(voteAverage = item.voteAverage)
-                    if (!item.isCollection) {
-                        SeerrStatusPill(status = item.status)
-                    }
+                    Text(
+                        text = "Collection",
+                        color = colors.textDim,
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                }
+            } else if (badge != null) {
+                val (fg, _) = seerrToneColors(badge.tone)
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(5.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(colors.mediaChip)
+                        .border(0.5.dp, colors.mediaChipBorder, RoundedCornerShape(999.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(fg),
+                    )
+                    Text(
+                        text = badge.label,
+                        color = colors.onMedia,
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
                 }
             }
-            if (canQuickRequestMovie) {
-                PcButton(
-                    label = "Request",
-                    onClick = onQuickRequest,
-                    variant = PcButtonVariant.Primary,
-                    compact = true,
-                    busy = busy,
-                    enabled = !busy,
-                )
-            } else {
-                Icon(
-                    imageVector = Icons.Filled.ChevronRight,
-                    contentDescription = null,
-                    tint = colors.textFaint,
-                    modifier = Modifier.size(20.dp),
+        }
+        Column(
+            modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = item.title,
+                color = colors.text,
+                fontSize = 12.5.sp,
+                lineHeight = 16.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (subLine.isNotEmpty()) {
+                Text(
+                    text = subLine,
+                    color = colors.textFaint,
+                    style = TabularNumStyle.copy(fontSize = 11.sp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -507,14 +556,14 @@ private fun SeerrRecentPosterCard(
     Column(
         modifier = Modifier
             .width(104.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(colors.surface)
+            .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(152.dp)
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(10.dp))
                 .background(colors.surfaceRaised),
         ) {
             if (!request.poster.isNullOrBlank()) {
@@ -536,19 +585,27 @@ private fun SeerrRecentPosterCard(
             }
             if (badge != null) {
                 val (fg, _) = seerrToneColors(badge.tone)
-                Box(
+                Row(
                     modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(6.dp)
+                        .align(Alignment.TopEnd)
+                        .padding(5.dp)
                         .clip(RoundedCornerShape(999.dp))
                         .background(colors.mediaChip)
                         .border(0.5.dp, colors.mediaChipBorder, RoundedCornerShape(999.dp))
                         .padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(fg),
+                    )
                     Text(
                         text = badge.label,
-                        color = fg,
-                        fontSize = 10.sp,
+                        color = colors.onMedia,
+                        fontSize = 9.5.sp,
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
                     )
@@ -556,14 +613,14 @@ private fun SeerrRecentPosterCard(
             }
         }
         Column(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+            modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Text(
                 text = request.title,
                 color = colors.text,
                 fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
+                fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

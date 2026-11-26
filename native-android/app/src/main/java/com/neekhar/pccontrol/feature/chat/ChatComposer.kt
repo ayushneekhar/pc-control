@@ -10,6 +10,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.content.MediaType
 import androidx.compose.foundation.content.ReceiveContentListener
 import androidx.compose.foundation.content.consume
@@ -25,7 +26,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -44,14 +44,10 @@ import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -69,9 +65,10 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -86,14 +83,13 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
-import com.neekhar.pccontrol.core.ui.PcSheetDragHandle
 import com.neekhar.pccontrol.core.ui.ProviderBrandIcon
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatComposer(
     draft: String,
@@ -120,13 +116,13 @@ fun ChatComposer(
     val colors = LocalPcColors.current
     val onAccent = if (colors.accent.luminance() > 0.4f) Color.Black else Color.White
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
 
     val textFieldState = rememberTextFieldState(initialText = draft)
     var lastObservedText by remember { mutableStateOf(draft) }
     var lastSelection by remember { mutableStateOf(TextRange(draft.length)) }
-    var showAttachSheet by remember { mutableStateOf(false) }
 
     // Sync external draft mutations (clear after send, edit & resend, rollback on failure) into TextFieldState.
     LaunchedEffect(draft) {
@@ -283,8 +279,7 @@ fun ChatComposer(
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .padding(end = 6.dp)
-                        .size(30.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .clickable(onClick = onCancelReply),
                 ) {
@@ -308,7 +303,7 @@ fun ChatComposer(
                     .clip(RoundedCornerShape(12.dp))
                     .background(colors.surface)
                     .border(0.5.dp, colors.accent.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                    .padding(start = 12.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
+                    .padding(start = 12.dp, end = 2.dp),
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Edit,
@@ -337,7 +332,7 @@ fun ChatComposer(
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(28.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .clickable(onClick = onCancelEdit),
                 ) {
@@ -354,34 +349,54 @@ fun ChatComposer(
         // Single-row composer pill: + on left | expanding multiline input | provider icon | Send/Stop (bottom-aligned)
         Row(
             verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
+                .clip(RoundedCornerShape(26.dp))
                 .background(colors.surface)
                 .border(
                     width = if (editingState != null) 1.dp else 0.5.dp,
                     color = if (editingState != null) colors.accent else colors.hairline,
-                    shape = RoundedCornerShape(24.dp),
+                    shape = RoundedCornerShape(26.dp),
                 )
-                .padding(horizontal = 6.dp, vertical = 6.dp),
+                .padding(horizontal = 4.dp, vertical = 4.dp),
         ) {
-            // Attach button
+            // Direct attach button: tap = Photo Picker, long-press = File Picker (44dp touch target)
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(36.dp)
+                    .size(44.dp)
                     .alpha(if (canAddAttachment) 1f else 0.4f)
                     .clip(CircleShape)
-                    .background(colors.surfaceRaised)
-                    .clickable(enabled = canAddAttachment) { showAttachSheet = true },
+                    .combinedClickable(
+                        enabled = canAddAttachment,
+                        onClickLabel = "Attach photo",
+                        onLongClickLabel = "Attach file",
+                        onClick = {
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        },
+                        onLongClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            filePickerLauncher.launch("*/*")
+                        },
+                    ),
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Add,
-                    contentDescription = "Add photo or file",
-                    tint = colors.text,
-                    modifier = Modifier.size(19.dp),
-                )
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(colors.surfaceRaised),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = "Attach photo (hold for file)",
+                        tint = colors.text,
+                        modifier = Modifier.size(19.dp),
+                    )
+                }
             }
 
             // Auto-expanding multiline input with Gboard image paste (contentReceiver)
@@ -389,8 +404,8 @@ fun ChatComposer(
                 contentAlignment = Alignment.CenterStart,
                 modifier = Modifier
                     .weight(1f)
-                    .heightIn(min = 36.dp)
-                    .padding(horizontal = 4.dp, vertical = 7.dp),
+                    .heightIn(min = 44.dp)
+                    .padding(horizontal = 4.dp, vertical = 10.dp),
             ) {
                 BasicTextField(
                     state = textFieldState,
@@ -433,44 +448,58 @@ fun ChatComposer(
                 )
             }
 
-            // Icon-only official provider button directly left of Send/Stop
+            // Icon-only official provider button directly left of Send/Stop (44dp touch target)
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(36.dp)
+                    .size(44.dp)
                     .clip(CircleShape)
-                    .background(colors.surfaceRaised)
                     .clickable(onClick = onOpenModelPicker),
             ) {
-                ProviderBrandIcon(
-                    isClaude = engine != ChatEngines.GEMINI,
-                    tint = colors.accent,
-                    contentDescription = if (modelChipLabel.isNotBlank()) {
-                        "Switch model ($modelChipLabel)"
-                    } else {
-                        "Switch model and effort"
-                    },
-                    modifier = Modifier.size(18.dp),
-                )
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(colors.surfaceRaised),
+                ) {
+                    ProviderBrandIcon(
+                        isClaude = engine != ChatEngines.GEMINI,
+                        tint = colors.accent,
+                        contentDescription = if (modelChipLabel.isNotBlank()) {
+                            "Switch model ($modelChipLabel)"
+                        } else {
+                            "Switch model and effort"
+                        },
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
             }
 
-            // Send / Queue / Stop button
+            // Send / Queue / Stop button (44dp touch target)
             when {
                 showStopAction -> {
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(44.dp)
                             .clip(CircleShape)
-                            .background(colors.badSoft)
                             .clickable(onClick = onStopGeneration),
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Stop,
-                            contentDescription = "Stop generation",
-                            tint = colors.bad,
-                            modifier = Modifier.size(18.dp),
-                        )
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(colors.badSoft),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Stop,
+                                contentDescription = "Stop generation",
+                                tint = colors.bad,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
                     }
                 }
 
@@ -478,68 +507,34 @@ fun ChatComposer(
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(44.dp)
                             .clip(CircleShape)
-                            .background(if (canSend) colors.accent else colors.surfaceRaised)
                             .clickable(enabled = canSend, onClick = onSend),
                     ) {
-                        if (sending) {
-                            CircularProgressIndicator(
-                                color = colors.accent,
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Rounded.ArrowUpward,
-                                contentDescription = if (running) "Queue message" else "Send message",
-                                tint = if (canSend) onAccent else colors.textFaint,
-                                modifier = Modifier.size(19.dp),
-                            )
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(if (canSend) colors.accent else colors.surfaceRaised),
+                        ) {
+                            if (sending) {
+                                CircularProgressIndicator(
+                                    color = colors.accent,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.ArrowUpward,
+                                    contentDescription = if (running) "Queue message" else "Send message",
+                                    tint = if (canSend) onAccent else colors.textFaint,
+                                    modifier = Modifier.size(19.dp),
+                                )
+                            }
                         }
                     }
                 }
-            }
-        }
-    }
-
-    if (showAttachSheet) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
-            onDismissRequest = { showAttachSheet = false },
-            sheetState = sheetState,
-            containerColor = colors.surface,
-            contentColor = colors.text,
-            dragHandle = { PcSheetDragHandle() },
-            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-        ) {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 14.dp),
-            ) {
-                AttachSheetRow(
-                    icon = Icons.Rounded.PhotoLibrary,
-                    title = "Photo",
-                    subtitle = "Choose images from your device",
-                    onClick = {
-                        showAttachSheet = false
-                        photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    },
-                )
-                AttachSheetRow(
-                    icon = Icons.Rounded.Description,
-                    title = "File",
-                    subtitle = "Documents, logs, or any file up to 15 MB",
-                    onClick = {
-                        showAttachSheet = false
-                        filePickerLauncher.launch("*/*")
-                    },
-                )
             }
         }
     }
@@ -727,53 +722,6 @@ private fun PendingFileChip(
                 contentDescription = "Remove ${attachment.name}",
                 tint = colors.textDim,
                 modifier = Modifier.size(14.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun AttachSheetRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    onClick: () -> Unit,
-) {
-    val colors = LocalPcColors.current
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 10.dp),
-    ) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .size(40.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(colors.surfaceRaised),
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = colors.accent,
-                modifier = Modifier.size(20.dp),
-            )
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                color = colors.text,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-            )
-            Text(
-                text = subtitle,
-                color = colors.textFaint,
-                fontSize = 12.5.sp,
             )
         }
     }

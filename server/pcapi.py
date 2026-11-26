@@ -5524,6 +5524,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*_chat_manager().handle_push(b))
             if path == "/api/chat/new":
                 return self.send_json(*_chat_manager().handle_new(b))
+            if path == "/api/chat/stop":
+                return self.send_json(*_chat_manager().handle_stop(b))
             if path == "/api/chat/agent":
                 return self.send_json(*AGENT_SETTINGS.update(b))
             if path == "/api/chat/agent/switch":

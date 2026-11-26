@@ -934,6 +934,26 @@ def _is_not_running_steer_error(exc: Exception) -> bool:
     )
 
 
+def _is_not_running_interrupt_error(exc: Exception) -> bool:
+    """Return True if t3_thread_interrupt failed because the thread has no active run or is missing."""
+    if _is_thread_missing_error(exc) or _is_not_running_steer_error(exc):
+        return True
+    msg = str(exc).lower()
+    return any(
+        phrase in msg
+        for phrase in (
+            "nothing to interrupt",
+            "cannot interrupt",
+            "already interrupted",
+            "already stopped",
+            "already cancelled",
+            "already canceled",
+            "no run",
+            "no active",
+        )
+    )
+
+
 def _callback_accepts_step_id(cb: Callable[..., None] | None) -> tuple[bool, bool]:
     """Return (accepts_step_id_kwarg, accepts_3rd_positional)."""
     if cb is None:
@@ -993,6 +1013,13 @@ class T3ThreadAdapter:
             return d if isinstance(d, dict) else {}
         except Exception:
             return {}
+
+    def active_thread_id(self) -> str | None:
+        state = self._read_thread_state()
+        raw_tid = state.get("thread_id")
+        if isinstance(raw_tid, str) and raw_tid.strip():
+            return raw_tid.strip()
+        return None
 
     def _write_thread_state(self, data: dict[str, Any]) -> None:
         p = Path(self.thread_file)
@@ -1342,6 +1369,22 @@ class T3ThreadAdapter:
                 "mode": "steer",
             },
         )
+        return res if isinstance(res, dict) else {}
+
+    def interrupt(
+        self,
+        *,
+        thread_id: str | None = None,
+        reason: str = "Stopped by user from PC Control Chat",
+    ) -> dict[str, Any]:
+        """Interrupt the active run on the persistent T3 thread."""
+        tid = (thread_id or "").strip() or (self.active_thread_id() or "")
+        if not tid:
+            return {"interrupted": False, "threadId": None}
+        args: dict[str, Any] = {"threadId": tid}
+        if reason:
+            args["reason"] = reason
+        res = self.client.call_tool("t3_thread_interrupt", args)
         return res if isinstance(res, dict) else {}
 
     def promote_queued_run(
@@ -2245,7 +2288,9 @@ class ChatManager:
                 with self._lock:
                     if self._active_job is job:
                         self._active_job = None
-                    self._in_flight = max(0, self._in_flight - 1)
+                    if not job.get("in_flight_released"):
+                        job["in_flight_released"] = True
+                        self._in_flight = max(0, self._in_flight - 1)
                     still_running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
                 if msg_rec is not None:
                     self._emit(
@@ -2303,13 +2348,13 @@ class ChatManager:
         job_finished = threading.Event()
 
         def _publish_progress() -> None:
-            if job_finished.is_set():
+            if job_finished.is_set() or job.get("stopped"):
                 return
             with progress_lock:
                 snap_steps = [{"t": s["t"], "text": s["text"]} for s in raw_steps[-MAX_PROGRESS_STEPS:]]
             snap: dict[str, Any] | None = None
             with self._lock:
-                if not job_finished.is_set():
+                if not job_finished.is_set() and not job.get("stopped"):
                     snap = {
                         "engine": engine,
                         "started": started_ts,
@@ -2376,7 +2421,7 @@ class ChatManager:
                 _publish_progress()
 
         def on_t3_state(t3_state: dict[str, Any]) -> None:
-            if job_finished.is_set() or not isinstance(t3_state, dict):
+            if job_finished.is_set() or job.get("stopped") or not isinstance(t3_state, dict):
                 return
             new_queued = bool(t3_state.get("queued"))
             changed_msg: dict[str, Any] | None = None
@@ -2463,22 +2508,25 @@ class ChatManager:
             self.store.append(msg_rec)
             self._push_reply(label, reply, is_error=False)
         except Exception as exc:
-            err = _clip(str(exc) or type(exc).__name__, 300)
-            final_progress = _build_final_progress()
-            msg_rec = {
-                "id": self._new_id(),
-                "role": "assistant",
-                "engine": engine,
-                "text": "",
-                "created_at": float(self.clock()),
-                "status": "error",
-                "error": err,
-                "reply_to": user_id,
-            }
-            if final_progress is not None:
-                msg_rec["progress"] = final_progress
-            self.store.append(msg_rec)
-            self._push_reply(f"{label} · Error", err, is_error=True)
+            if job.get("stopped"):
+                msg_rec = None
+            else:
+                err = _clip(str(exc) or type(exc).__name__, 300)
+                final_progress = _build_final_progress()
+                msg_rec = {
+                    "id": self._new_id(),
+                    "role": "assistant",
+                    "engine": engine,
+                    "text": "",
+                    "created_at": float(self.clock()),
+                    "status": "error",
+                    "error": err,
+                    "reply_to": user_id,
+                }
+                if final_progress is not None:
+                    msg_rec["progress"] = final_progress
+                self.store.append(msg_rec)
+                self._push_reply(f"{label} · Error", err, is_error=True)
         finally:
             job_finished.set()
             with progress_lock:
@@ -3164,4 +3212,109 @@ class ChatManager:
             "engine": engine,
             "boundary_message": boundary,
             "running": running,
+        }
+
+    def handle_stop(self, _body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+        """Interrupt the active T3 chat turn and settle any in-flight/queued chat job state."""
+        stop_reason = "Stopped by user from PC Control Chat"
+        with self._lock:
+            active_job = self._active_job
+            engine = active_job["engine"] if active_job is not None else self._current_engine()
+            job_thread_id = (
+                str(active_job.get("t3_thread_id")).strip()
+                if active_job is not None and isinstance(active_job.get("t3_thread_id"), str)
+                else ""
+            ) or None
+            marked_stopped = False
+            if active_job is not None and not active_job.get("stopped"):
+                active_job["stopped"] = True
+                marked_stopped = True
+
+        adapter = self.gemini_adapter if engine == "gemini" else self.claude_adapter
+        thread_id = job_thread_id
+        if not thread_id and hasattr(adapter, "active_thread_id"):
+            try:
+                thread_id = adapter.active_thread_id()
+            except Exception:
+                thread_id = None
+
+        interrupted = False
+        if thread_id and hasattr(adapter, "interrupt"):
+            try:
+                res = adapter.interrupt(thread_id=thread_id, reason=stop_reason)
+                if isinstance(res, dict) and isinstance(res.get("interrupted"), bool):
+                    interrupted = res["interrupted"]
+                elif isinstance(res, dict) and str(res.get("status") or "").strip().lower() in (
+                    "idle",
+                    "not_running",
+                    "noop",
+                ):
+                    interrupted = False
+                else:
+                    interrupted = True
+            except Exception as exc:
+                if _is_not_running_interrupt_error(exc):
+                    interrupted = False
+                else:
+                    if marked_stopped and active_job is not None:
+                        with self._lock:
+                            active_job["stopped"] = False
+                    return 502, {
+                        "ok": False,
+                        "error": _clip(str(exc) or "Failed to interrupt active chat turn", 240),
+                        "engine": engine,
+                        "threadId": thread_id,
+                    }
+
+        cleared_updates: list[tuple[dict[str, Any], str | None]] = []
+        with self._lock:
+            self._active_progress = None
+            jobs_to_clear: list[dict[str, Any]] = []
+            if active_job is not None:
+                jobs_to_clear.append(active_job)
+                if self._active_job is active_job:
+                    self._active_job = None
+            if self._queue:
+                jobs_to_clear.extend(list(self._queue))
+                self._queue.clear()
+
+            for j in jobs_to_clear:
+                j["stopped"] = True
+                j["t3_queued_run_id"] = None
+                if not j.get("in_flight_released"):
+                    j["in_flight_released"] = True
+                    self._in_flight = max(0, self._in_flight - 1)
+                uid = j.get("user_id")
+                if isinstance(uid, str) and uid:
+                    removed_pending_id = self.store.remove_pending_assistant_for(uid)
+                    cur_u = self.store.get_by_id(uid)
+                    if cur_u is not None and cur_u.get("queued"):
+                        updated_u = self.store.update(uid, queued=False)
+                        if updated_u is not None:
+                            cleared_updates.append((updated_u, removed_pending_id))
+                    elif removed_pending_id:
+                        if cur_u is not None:
+                            cleared_updates.append((cur_u, removed_pending_id))
+
+        snap = self.snapshot_state()
+        now_ts = int(self.clock())
+        for updated_u, removed_pending_id in cleared_updates:
+            self._emit(
+                "message",
+                {
+                    "message": _public_message(updated_u),
+                    "running": snap["running"],
+                    "engine": updated_u.get("engine") or engine,
+                    **({"removed_message_id": removed_pending_id} if removed_pending_id else {}),
+                    "ts": now_ts,
+                },
+            )
+        self._emit("snapshot", snap)
+
+        return 200, {
+            "ok": True,
+            "interrupted": interrupted,
+            "engine": engine,
+            "threadId": thread_id,
+            "running": snap["running"],
         }

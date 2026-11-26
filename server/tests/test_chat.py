@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+import queue
 import stat
 import subprocess
 import sys
@@ -2480,6 +2481,281 @@ class ChatSteeringAndSseTests(unittest.TestCase):
             t.join(timeout=2.0)
             self.assertFalse(t.is_alive())
             self.assertEqual(wait_result.get("res"), {"status": "running"})
+
+
+class ChatStopEndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tok_file = os.path.join(self.tmp.name, "chat-token")
+        self.hist_file = os.path.join(self.tmp.name, "chat-history.jsonl")
+        self.gemini_thread_file = os.path.join(self.tmp.name, "gemini-t3-thread.json")
+        self.claude_thread_file = os.path.join(self.tmp.name, "claude-t3-thread.json")
+        self.last_channel_file = os.path.join(self.tmp.name, "last-channel.json")
+        self.secret = "stop-endpoint-chat-token-98765"
+        with open(self.tok_file, "w", encoding="utf-8") as f:
+            f.write(self.secret + "\n")
+
+        self.engine = "gemini"
+        self.notify = FakeNotify()
+
+        class FakeT3StopClient:
+            def __init__(self):
+                self.calls = []
+                self.wait_entered = threading.Event()
+                self.interrupted_ev = threading.Event()
+                self.interrupt_response = {"interrupted": True}
+                self.interrupt_error = None
+                self.block_wait = False
+
+            def call_tool(self, name, arguments=None):
+                args = dict(arguments or {})
+                self.calls.append((name, args))
+                if name == "t3_thread_read":
+                    return {"thread": {"latestRunId": "run-prev"}, "items": []}
+                if name == "t3_thread_send":
+                    return {"threadId": args.get("threadId"), "runId": "run-active"}
+                if name == "t3_thread_wait":
+                    if self.block_wait:
+                        self.wait_entered.set()
+                        self.interrupted_ev.wait(timeout=5.0)
+                        return {
+                            "thread": {"threadId": args.get("threadId"), "latestRunId": "run-active"},
+                            "run": {"runId": "run-active", "status": "interrupted"},
+                            "status": "interrupted",
+                            "error": "Stopped by user from PC Control Chat",
+                        }
+                    return {"status": "completed", "run": {"runId": "run-active", "status": "completed"}}
+                if name == "t3_thread_interrupt":
+                    if self.interrupt_error is not None:
+                        raise self.interrupt_error
+                    self.interrupted_ev.set()
+                    return dict(self.interrupt_response)
+                return {}
+
+        self.gemini_client = FakeT3StopClient()
+        self.claude_client = FakeT3StopClient()
+        self.gemini_adapter = chat_mod.T3GeminiAdapter(
+            client=self.gemini_client,
+            thread_file=self.gemini_thread_file,
+            poll_wait_ms=50,
+            retry_delay=0.01,
+        )
+        self.claude_adapter = chat_mod.T3ClaudeAdapter(
+            client=self.claude_client,
+            thread_file=self.claude_thread_file,
+            poll_wait_ms=50,
+            retry_delay=0.01,
+        )
+        self.chat_mgr = chat_mod.ChatManager(
+            store=chat_mod.ChatHistoryStore(self.hist_file),
+            engine_fn=lambda: self.engine,
+            gemini_adapter=self.gemini_adapter,
+            claude_adapter=self.claude_adapter,
+            notify=self.notify,
+            last_channel_file=self.last_channel_file,
+            progress_min_interval=0.0,
+        )
+
+        self.orig_chat_tok = chat_mod.CHAT_TOKEN_FILE
+        self.orig_allowed = pcapi.ALLOWED_LOGINS
+        self.orig_chat = pcapi.CHAT
+        chat_mod.CHAT_TOKEN_FILE = self.tok_file
+        pcapi.ALLOWED_LOGINS = {"ayush@example.com"}
+        pcapi.CHAT = self.chat_mgr
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), pcapi.H)
+        self.port = self.srv.server_address[1]
+        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.gemini_client.interrupted_ev.set()
+        self.claude_client.interrupted_ev.set()
+        self.chat_mgr.wait_idle(timeout=3.0)
+        self.srv.shutdown()
+        self.srv.server_close()
+        chat_mod.CHAT_TOKEN_FILE = self.orig_chat_tok
+        pcapi.ALLOWED_LOGINS = self.orig_allowed
+        pcapi.CHAT = self.orig_chat
+        self.tmp.cleanup()
+
+    def _req(self, method, path, body=None, headers=None):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        if body is None:
+            data = None
+        elif isinstance(body, bytes):
+            data = body
+        else:
+            data = json.dumps(body).encode("utf-8")
+        h = dict(headers or {})
+        if data is not None and "Content-Type" not in h:
+            h["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=h, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", errors="replace")
+            e.close()
+            try:
+                return e.code, json.loads(raw)
+            except ValueError:
+                return e.code, {"raw": raw}
+
+    def test_stop_requires_auth_and_accepts_chat_token_or_tailnet(self):
+        with open(self.gemini_thread_file, "w", encoding="utf-8") as f:
+            json.dump({"thread_id": "gem-thr-auth"}, f)
+
+        # Unauthenticated proxied request -> 403
+        code, _ = self._req("POST", "/pc/api/chat/stop", {}, headers={"X-Forwarded-For": "203.0.113.5"})
+        self.assertEqual(code, 403)
+
+        # Wrong bearer token -> 403
+        code, _ = self._req(
+            "POST",
+            "/pc/api/chat/stop",
+            {},
+            headers={"X-Forwarded-For": "203.0.113.5", "Authorization": "Bearer wrong-token"},
+        )
+        self.assertEqual(code, 403)
+
+        # Valid chat bearer token (Cloudflare Tunnel / agent.neekhar.dev) -> 200
+        cf_headers = {"X-Forwarded-For": "203.0.113.5", "Authorization": f"Bearer {self.secret}"}
+        code, data = self._req("POST", "/pc/api/chat/stop", b"", headers=cf_headers)
+        self.assertEqual(code, 200)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["interrupted"])
+        self.assertEqual(data["engine"], "gemini")
+        self.assertEqual(data["threadId"], "gem-thr-auth")
+
+        # Valid Tailscale identity -> 200
+        ts_headers = {"X-Forwarded-For": "100.64.0.2", "Tailscale-User-Login": "ayush@example.com"}
+        code, data = self._req("POST", "/pc/api/chat/stop", {}, headers=ts_headers)
+        self.assertEqual(code, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["threadId"], "gem-thr-auth")
+
+    def test_stop_interrupts_active_gemini_turn_and_settles_inflight_state(self):
+        with open(self.gemini_thread_file, "w", encoding="utf-8") as f:
+            json.dump({"thread_id": "gem-thr-42"}, f)
+        self.engine = "gemini"
+        self.gemini_client.block_wait = True
+
+        cf_headers = {"X-Forwarded-For": "203.0.113.5", "Authorization": f"Bearer {self.secret}"}
+        q = self.chat_mgr.subscribe()
+        try:
+            # Start an active turn and queue a second message behind it.
+            code1, _ = self._req("POST", "/pc/api/chat/send", {"text": "long task", "client_id": "s1"}, headers=cf_headers)
+            self.assertEqual(code1, 202)
+            self.assertTrue(self.gemini_client.wait_entered.wait(timeout=3.0))
+
+            code2, _ = self._req("POST", "/pc/api/chat/send", {"text": "queued follow-up", "client_id": "s2"}, headers=cf_headers)
+            self.assertEqual(code2, 202)
+            self.assertTrue(self.chat_mgr.is_running())
+
+            # Stop the active turn.
+            code_stop, stop_data = self._req("POST", "/pc/api/chat/stop", {}, headers=cf_headers)
+            self.assertEqual(code_stop, 200)
+            self.assertEqual(stop_data["ok"], True)
+            self.assertEqual(stop_data["interrupted"], True)
+            self.assertEqual(stop_data["engine"], "gemini")
+            self.assertEqual(stop_data["threadId"], "gem-thr-42")
+            self.assertEqual(stop_data["running"], False)
+
+            # Verify t3_thread_interrupt was called with exact threadId and reason.
+            interrupt_calls = [args for name, args in self.gemini_client.calls if name == "t3_thread_interrupt"]
+            self.assertEqual(
+                interrupt_calls,
+                [{"threadId": "gem-thr-42", "reason": "Stopped by user from PC Control Chat"}],
+            )
+
+            # Shimmer/working state settled immediately and worker unwinds cleanly.
+            self.assertFalse(self.chat_mgr.is_running())
+            self.assertTrue(self.chat_mgr.wait_idle(timeout=3.0))
+            snap = self.chat_mgr.snapshot_state()
+            self.assertFalse(snap["running"])
+            self.assertIsNone(snap["progress"])
+            self.assertEqual(snap["queued_ids"], [])
+
+            # SSE emitted a snapshot with running=False and progress=None.
+            events = []
+            while True:
+                try:
+                    events.append(q.get_nowait())
+                except queue.Empty:
+                    break
+            snaps = [payload for ev, payload in events if ev == "snapshot"]
+            self.assertTrue(any(s.get("running") is False and s.get("progress") is None for s in snaps))
+
+            # No error assistant bubble or error push notification emitted for user-initiated stop.
+            msgs, _ = self.chat_mgr.store.get_messages(limit=20)
+            self.assertFalse(any(m.get("status") == "error" for m in msgs))
+            self.assertEqual(self.notify.calls, [])
+        finally:
+            self.chat_mgr.unsubscribe(q)
+
+    def test_stop_interrupts_active_claude_thread(self):
+        with open(self.claude_thread_file, "w", encoding="utf-8") as f:
+            json.dump({"thread_id": "claude-thr-99"}, f)
+        self.engine = "claude"
+        self.claude_client.block_wait = True
+
+        cf_headers = {"X-Forwarded-For": "203.0.113.5", "Authorization": f"Bearer {self.secret}"}
+        code1, _ = self._req("POST", "/pc/api/chat/send", {"text": "claude task", "client_id": "c1"}, headers=cf_headers)
+        self.assertEqual(code1, 202)
+        self.assertTrue(self.claude_client.wait_entered.wait(timeout=3.0))
+
+        code_stop, stop_data = self._req("POST", "/pc/api/chat/stop", {}, headers=cf_headers)
+        self.assertEqual(code_stop, 200)
+        self.assertEqual(stop_data["ok"], True)
+        self.assertEqual(stop_data["interrupted"], True)
+        self.assertEqual(stop_data["engine"], "claude")
+        self.assertEqual(stop_data["threadId"], "claude-thr-99")
+        self.assertEqual(stop_data["running"], False)
+
+        interrupt_calls = [args for name, args in self.claude_client.calls if name == "t3_thread_interrupt"]
+        self.assertEqual(
+            interrupt_calls,
+            [{"threadId": "claude-thr-99", "reason": "Stopped by user from PC Control Chat"}],
+        )
+        self.assertEqual(self.gemini_client.calls, [])
+        self.assertTrue(self.chat_mgr.wait_idle(timeout=3.0))
+
+    def test_stop_handles_idle_and_missing_thread_cleanly(self):
+        cf_headers = {"X-Forwarded-For": "203.0.113.5", "Authorization": f"Bearer {self.secret}"}
+
+        # 1. Missing thread file -> 200 ok=True, interrupted=False, threadId=None, no T3 call
+        self.engine = "gemini"
+        code, data = self._req("POST", "/pc/api/chat/stop", {}, headers=cf_headers)
+        self.assertEqual(code, 200)
+        self.assertEqual(data["ok"], True)
+        self.assertEqual(data["interrupted"], False)
+        self.assertEqual(data["engine"], "gemini")
+        self.assertIsNone(data["threadId"])
+        self.assertEqual(self.gemini_client.calls, [])
+
+        # 2. Thread exists, T3 returns interrupted=False (idle)
+        with open(self.gemini_thread_file, "w", encoding="utf-8") as f:
+            json.dump({"thread_id": "gem-idle-1"}, f)
+        self.gemini_client.interrupt_response = {"interrupted": False}
+        code, data = self._req("POST", "/pc/api/chat/stop", {}, headers=cf_headers)
+        self.assertEqual(code, 200)
+        self.assertEqual(data["ok"], True)
+        self.assertEqual(data["interrupted"], False)
+        self.assertEqual(data["engine"], "gemini")
+        self.assertEqual(data["threadId"], "gem-idle-1")
+
+        # 3. Thread exists, T3 raises "no active run" error -> treated cleanly as interrupted=False
+        self.engine = "claude"
+        with open(self.claude_thread_file, "w", encoding="utf-8") as f:
+            json.dump({"thread_id": "claude-idle-2"}, f)
+        self.claude_client.interrupt_error = RuntimeError("Thread is idle: no active run to interrupt")
+        code, data = self._req("POST", "/pc/api/chat/stop", {}, headers=cf_headers)
+        self.assertEqual(code, 200)
+        self.assertEqual(data["ok"], True)
+        self.assertEqual(data["interrupted"], False)
+        self.assertEqual(data["engine"], "claude")
+        self.assertEqual(data["threadId"], "claude-idle-2")
 
 
 if __name__ == "__main__":

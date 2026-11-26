@@ -76,6 +76,9 @@ sealed interface PcRoute {
         val ruleId: String? = null,
         val url: String? = null,
     ) : PcRoute
+
+    @Serializable
+    data object ConnectionSettings : PcRoute
 }
 
 /**
@@ -216,6 +219,7 @@ object DeepLinkParser {
                 ruleId = segments.getOrNull(1) ?: query["ruleId"],
                 url = query["url"],
             )
+            "connection-settings", "connection" -> PcRoute.ConnectionSettings
             else -> null
         }
     }

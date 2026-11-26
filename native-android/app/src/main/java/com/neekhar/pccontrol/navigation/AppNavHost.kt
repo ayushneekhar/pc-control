@@ -2,23 +2,40 @@ package com.neekhar.pccontrol.navigation
 
 import android.content.Context
 import android.net.Uri
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -28,6 +45,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChatBubble
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Security
@@ -49,7 +67,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -57,6 +74,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.fragment.app.FragmentActivity
@@ -64,6 +82,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -83,6 +102,8 @@ import com.neekhar.pccontrol.core.theme.PcTheme
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcConfirmDialog
+import com.neekhar.pccontrol.core.ui.PcEmptyState
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.feature.agent.AgentRuleScreen
 import com.neekhar.pccontrol.feature.agent.AgentSettingsScreen
 import com.neekhar.pccontrol.feature.agent.AgentSettingsViewModel
@@ -158,6 +179,9 @@ class PcScreenRegistry(
     val usageAccountDetail: @Composable (NavHostController, PcRoute.UsageAccountDetail) -> Unit,
     val agentView: @Composable (NavHostController) -> Unit,
     val agentRule: @Composable (NavHostController, PcRoute.AgentRule) -> Unit,
+    val connectionSettings: @Composable (NavHostController) -> Unit = { nav ->
+        ConnectionSettingsStubScreen(onBack = { nav.popBackStack() })
+    },
 )
 
 @Serializable
@@ -199,6 +223,7 @@ private suspend fun readSharedAttachments(
  * Top-level application shell hosting the 5-tab bottom navigation bar, [AppNavHost],
  * real feature screens wired via [AppContainer], deep-link dispatch, and share-intent routing.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PcAppShell(
     container: AppContainer,
@@ -516,12 +541,23 @@ fun PcAppShell(
                     )
                 }
             },
+            connectionSettings = { nav ->
+                ConnectionSettingsStubScreen(onBack = { nav.popBackStack() })
+            },
         )
     }
 
-    val showBottomBar = !isInPictureInPictureMode && PcBottomTab.entries.any { tab ->
+    var lastSelectedTab by remember { mutableStateOf(PcBottomTab.Home) }
+    val activeTab = PcBottomTab.entries.firstOrNull { tab ->
         currentDestination?.hierarchy?.any { it.hasRoute(tab.routeClass) } == true
     }
+    if (activeTab != null) {
+        lastSelectedTab = activeTab
+    }
+
+    val isOnChat = activeTab == PcBottomTab.Chat
+    val isImeVisible = WindowInsets.isImeVisible
+    val showBottomBar = !isInPictureInPictureMode && activeTab != null && !(isOnChat && isImeVisible)
 
     var pendingMagnet by remember { mutableStateOf<SharedTarget.Magnet?>(null) }
     var magnetBusy by remember { mutableStateOf(false) }
@@ -622,12 +658,24 @@ fun PcAppShell(
         contentColor = colors.text,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            if (showBottomBar) {
+            AnimatedVisibility(
+                visible = showBottomBar,
+                enter = expandVertically(
+                    expandFrom = Alignment.Top,
+                    animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
+                ) + fadeIn(
+                    animationSpec = tween(durationMillis = 160, easing = LinearOutSlowInEasing),
+                ),
+                exit = shrinkVertically(
+                    shrinkTowards = Alignment.Top,
+                    animationSpec = tween(durationMillis = 160, easing = FastOutLinearInEasing),
+                ) + fadeOut(
+                    animationSpec = tween(durationMillis = 120, easing = FastOutLinearInEasing),
+                ),
+            ) {
                 PcBottomNavBar(
                     tabs = PcBottomTab.entries,
-                    isSelected = { tab ->
-                        currentDestination?.hierarchy?.any { it.hasRoute(tab.routeClass) } == true
-                    },
+                    isSelected = { tab -> tab == (activeTab ?: lastSelectedTab) },
                     badgeFor = { tab ->
                         if (tab == PcBottomTab.Root && rootPendingCount > 0) rootPendingCount else null
                     },
@@ -703,6 +751,14 @@ private fun NavHostController.navigateToDeepLink(route: PcRoute) {
     }
 }
 
+private fun NavDestination?.isTopTabDestination(): Boolean =
+    this != null && PcBottomTab.entries.any { tab ->
+        hierarchy.any { it.hasRoute(tab.routeClass) }
+    }
+
+private fun NavDestination?.isDrillInDestination(): Boolean =
+    this != null && !isTopTabDestination()
+
 @Composable
 fun AppNavHost(
     navController: NavHostController,
@@ -713,10 +769,68 @@ fun AppNavHost(
         navController = navController,
         startDestination = PcRoute.Home,
         modifier = modifier,
-        enterTransition = { fadeIn(animationSpec = tween(durationMillis = 150)) },
-        exitTransition = { fadeOut(animationSpec = tween(durationMillis = 150)) },
-        popEnterTransition = { fadeIn(animationSpec = tween(durationMillis = 150)) },
-        popExitTransition = { fadeOut(animationSpec = tween(durationMillis = 150)) },
+        enterTransition = {
+            if (targetState.destination.isDrillInDestination()) {
+                slideInHorizontally(
+                    initialOffsetX = { (it * 0.22f).toInt() },
+                    animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+                ) + fadeIn(
+                    animationSpec = tween(durationMillis = 210, delayMillis = 35, easing = LinearOutSlowInEasing),
+                )
+            } else {
+                fadeIn(
+                    animationSpec = tween(durationMillis = 190, delayMillis = 35, easing = LinearOutSlowInEasing),
+                ) + scaleIn(
+                    initialScale = 0.97f,
+                    animationSpec = tween(durationMillis = 190, delayMillis = 35, easing = FastOutSlowInEasing),
+                )
+            }
+        },
+        exitTransition = {
+            if (targetState.destination.isDrillInDestination()) {
+                slideOutHorizontally(
+                    targetOffsetX = { -(it * 0.14f).toInt() },
+                    animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                ) + fadeOut(
+                    animationSpec = tween(durationMillis = 110, easing = FastOutLinearInEasing),
+                )
+            } else {
+                fadeOut(
+                    animationSpec = tween(durationMillis = 90, easing = FastOutLinearInEasing),
+                )
+            }
+        },
+        popEnterTransition = {
+            if (initialState.destination.isDrillInDestination()) {
+                slideInHorizontally(
+                    initialOffsetX = { -(it * 0.14f).toInt() },
+                    animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                ) + fadeIn(
+                    animationSpec = tween(durationMillis = 200, delayMillis = 30, easing = LinearOutSlowInEasing),
+                )
+            } else {
+                fadeIn(
+                    animationSpec = tween(durationMillis = 190, delayMillis = 35, easing = LinearOutSlowInEasing),
+                ) + scaleIn(
+                    initialScale = 0.97f,
+                    animationSpec = tween(durationMillis = 190, delayMillis = 35, easing = FastOutSlowInEasing),
+                )
+            }
+        },
+        popExitTransition = {
+            if (initialState.destination.isDrillInDestination()) {
+                slideOutHorizontally(
+                    targetOffsetX = { (it * 0.22f).toInt() },
+                    animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
+                ) + fadeOut(
+                    animationSpec = tween(durationMillis = 110, easing = FastOutLinearInEasing),
+                )
+            } else {
+                fadeOut(
+                    animationSpec = tween(durationMillis = 90, easing = FastOutLinearInEasing),
+                )
+            }
+        },
     ) {
         composable<PcRoute.Home> { screens.home(navController) }
         composable<PcRoute.System> { entry -> screens.system(navController, entry.toRoute()) }
@@ -736,13 +850,15 @@ fun AppNavHost(
         composable<PcRoute.UsageAccountDetail> { entry -> screens.usageAccountDetail(navController, entry.toRoute()) }
         composable<PcRoute.AgentView> { screens.agentView(navController) }
         composable<PcRoute.AgentRule> { entry -> screens.agentRule(navController, entry.toRoute()) }
+        composable<PcRoute.ConnectionSettings> { screens.connectionSettings(navController) }
     }
 }
 
 /**
  * Material 3 Expressive 5-tab bottom bar matching docs/DESIGN.md:
  * - True black (or light bg) fill with hairline top divider
- * - Active tab: 64x32dp mint-soft pill (`accentSoft`) with mint icon (`accent`) and crisp text label
+ * - Active tab: smoothly sliding 64x32dp mint-soft pill (`accentSoft`) with mint icon (`accent`)
+ *   and crisp text label
  * - Inactive tab: faint icon + label (`textFaint`)
  */
 @Composable
@@ -754,6 +870,11 @@ fun PcBottomNavBar(
     modifier: Modifier = Modifier,
 ) {
     val colors = PcTheme.colors
+    val type = PcTheme.type
+    val count = tabs.size
+    if (count == 0) return
+    val selectedIndex = tabs.indexOfFirst { isSelected(it) }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -761,85 +882,152 @@ fun PcBottomNavBar(
             .navigationBarsPadding(),
     ) {
         HorizontalDivider(thickness = 0.5.dp, color = colors.hairline)
-        Row(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 6.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            tabs.forEach { tab ->
-                val selected = isSelected(tab)
-                val badge = badgeFor(tab)
-                val interactionSource = remember { MutableInteractionSource() }
+            val tabWidth = maxWidth / count
+            val pillWidth = 64.dp.coerceAtMost((tabWidth - 8.dp).coerceAtLeast(36.dp))
+            val pillHeight = 32.dp
+            val targetPillOffset = if (selectedIndex >= 0) {
+                tabWidth * selectedIndex + (tabWidth - pillWidth) / 2f
+            } else {
+                0.dp
+            }
+            val animatedPillOffset by animateDpAsState(
+                targetValue = targetPillOffset,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+                label = "bottomNavPillOffset",
+            )
 
-                Column(
+            if (selectedIndex >= 0) {
+                Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .semantics { this.selected = selected }
-                        .clickable(
-                            role = Role.Tab,
-                            interactionSource = interactionSource,
-                            indication = null,
-                            onClick = { onSelect(tab) },
-                        ),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Box(
-                            modifier = Modifier
-                                .width(64.dp)
-                                .height(32.dp)
-                                .clip(CircleShape)
-                                .background(if (selected) colors.accentSoft else Color.Transparent)
-                                .indication(
-                                    interactionSource = interactionSource,
-                                    indication = ripple(),
-                                ),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                imageVector = tab.icon,
-                                contentDescription = tab.label,
-                                tint = if (selected) colors.accent else colors.textFaint,
-                                modifier = Modifier.size(24.dp),
-                            )
-                        }
-                        if (badge != null && badge > 0) {
+                        .offset { IntOffset(animatedPillOffset.roundToPx(), 0) }
+                        .width(pillWidth)
+                        .height(pillHeight)
+                        .clip(CircleShape)
+                        .background(colors.accentSoft),
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                tabs.forEach { tab ->
+                    val selected = isSelected(tab)
+                    val badge = badgeFor(tab)
+                    val interactionSource = remember { MutableInteractionSource() }
+                    val iconTint by animateColorAsState(
+                        targetValue = if (selected) colors.accent else colors.textFaint,
+                        animationSpec = tween(durationMillis = 180),
+                        label = "bottomNavIconTint",
+                    )
+                    val labelColor by animateColorAsState(
+                        targetValue = if (selected) colors.text else colors.textFaint,
+                        animationSpec = tween(durationMillis = 180),
+                        label = "bottomNavLabelColor",
+                    )
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .defaultMinSize(minHeight = 52.dp)
+                            .semantics { this.selected = selected }
+                            .clickable(
+                                role = Role.Tab,
+                                interactionSource = interactionSource,
+                                indication = null,
+                                onClick = { onSelect(tab) },
+                            ),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Top,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
                             Box(
                                 modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .offset(x = (-6).dp, y = (-2).dp)
+                                    .width(pillWidth)
+                                    .height(pillHeight)
                                     .clip(CircleShape)
-                                    .background(colors.warn)
-                                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                                    .indication(
+                                        interactionSource = interactionSource,
+                                        indication = ripple(),
+                                    ),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Text(
-                                    text = if (badge > 99) "99+" else badge.toString(),
-                                    color = colors.bg,
-                                    style = TabularNumStyle.copy(
-                                        fontSize = 10.sp,
-                                        lineHeight = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                    ),
-                                    maxLines = 1,
+                                Icon(
+                                    imageVector = tab.icon,
+                                    contentDescription = tab.label,
+                                    tint = iconTint,
+                                    modifier = Modifier.size(24.dp),
                                 )
                             }
+                            if (badge != null && badge > 0) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .offset(x = (-6).dp, y = (-2).dp)
+                                        .clip(CircleShape)
+                                        .background(colors.warn)
+                                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text = if (badge > 99) "99+" else badge.toString(),
+                                        color = colors.bg,
+                                        style = TabularNumStyle.copy(
+                                            fontSize = 10.sp,
+                                            lineHeight = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                        ),
+                                        maxLines = 1,
+                                    )
+                                }
+                            }
                         }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = tab.label,
+                            color = labelColor,
+                            style = type.micro.copy(
+                                fontSize = 11.5.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = tab.label,
-                        color = if (selected) colors.text else colors.textFaint,
-                        fontSize = 11.5.sp,
-                        lineHeight = 15.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
                 }
             }
+        }
+    }
+}
+
+/**
+ * Placeholder screen for [PcRoute.ConnectionSettings] until Track D's Connection sub-screen is wired.
+ */
+@Composable
+private fun ConnectionSettingsStubScreen(
+    onBack: () -> Unit,
+) {
+    PcScaffold(
+        title = "Connection",
+        onBack = onBack,
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            PcEmptyState(
+                icon = Icons.Filled.Cloud,
+                title = "Connection settings",
+                body = "Server URL, bearer token, and network configuration.",
+            )
         }
     }
 }

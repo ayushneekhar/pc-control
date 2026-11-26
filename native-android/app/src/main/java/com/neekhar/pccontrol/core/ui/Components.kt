@@ -1,13 +1,20 @@
 package com.neekhar.pccontrol.core.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -19,6 +26,8 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -36,11 +45,18 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SheetState
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -64,6 +80,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -72,6 +89,7 @@ import com.neekhar.pccontrol.core.theme.PcColors
 import com.neekhar.pccontrol.core.theme.PcDimens
 import com.neekhar.pccontrol.core.theme.PcTheme
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.tabular
 
 enum class PcTone {
     Ok,
@@ -164,6 +182,8 @@ fun PcListCard(
 
 /**
  * Single row inside a [PcListCard]. Min height 56.dp, hairline separator when [showDivider] is true.
+ * [dividerStartIndent] defaults to `52.dp` when a leading icon or leading slot is present so
+ * hairlines align with the title text rather than bleeding full-width under the icon.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -181,8 +201,10 @@ fun PcListRow(
     showDivider: Boolean = true,
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
+    dividerStartIndent: Dp = if (icon != null || leading != null) 52.dp else 0.dp,
 ) {
     val colors = PcTheme.colors
+    val type = PcTheme.type
     val chevronVisible = showChevron ?: (onClick != null && trailing == null && trailingContent == null)
 
     val clickableModifier = if (onClick != null || onLongClick != null) {
@@ -225,8 +247,7 @@ fun PcListRow(
                 Text(
                     text = title,
                     color = if (danger) colors.bad else colors.text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -235,8 +256,7 @@ fun PcListRow(
                     subtitle != null -> Text(
                         text = subtitle,
                         color = colors.textFaint,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Normal,
+                        style = type.caption,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -268,6 +288,7 @@ fun PcListRow(
         }
         if (showDivider) {
             HorizontalDivider(
+                modifier = Modifier.padding(start = dividerStartIndent),
                 thickness = 0.5.dp,
                 color = colors.hairline,
             )
@@ -462,10 +483,12 @@ fun PcPill(
 
 /**
  * Action button matching DESIGN.md:
- * - Primary: accent fill + black text
- * - Subtle: surfaceRaised fill + primary text
+ * - Primary: accent fill + black text (when disabled: surfaceRaised fill + textFaint text)
+ * - Subtle: surfaceRaised fill + primary text (when disabled: surfaceRaised + textFaint)
  * - Danger: badSoft fill + bad text
- * - Ghost: transparent + accent text
+ * - Ghost: transparent + accent text (when disabled: transparent + textFaint)
+ *
+ * Guarantees a minimum 48.dp interactive touch target even for compact variants.
  */
 @Composable
 fun PcButton(
@@ -479,29 +502,48 @@ fun PcButton(
     compact: Boolean = false,
 ) {
     val colors = PcTheme.colors
-    val (bg, fg) = when (variant) {
-        PcButtonVariant.Primary -> colors.accent to colors.onAccent
-        PcButtonVariant.Subtle -> colors.surfaceRaised to colors.text
-        PcButtonVariant.Danger -> colors.badSoft to colors.bad
-        PcButtonVariant.Ghost -> Color.Transparent to colors.accent
+    val isClickable = enabled && !busy
+    val (bg, fg) = when {
+        !enabled && variant == PcButtonVariant.Primary ->
+            colors.surfaceRaised to colors.textFaint
+        !enabled && variant == PcButtonVariant.Subtle ->
+            colors.surfaceRaised to colors.textFaint
+        !enabled && variant == PcButtonVariant.Danger ->
+            colors.badSoft.copy(alpha = 0.5f) to colors.bad.copy(alpha = 0.45f)
+        !enabled && variant == PcButtonVariant.Ghost ->
+            Color.Transparent to colors.textFaint
+        variant == PcButtonVariant.Primary ->
+            colors.accent to colors.onAccent
+        variant == PcButtonVariant.Subtle ->
+            colors.surfaceRaised to colors.text
+        variant == PcButtonVariant.Danger ->
+            colors.badSoft to colors.bad
+        else ->
+            Color.Transparent to colors.accent
     }
-    val isEnabled = enabled && !busy
+    val visualAlpha = if (enabled && busy) 0.85f else 1f
     val height = if (compact) 36.dp else 44.dp
     val radius = if (compact) 10.dp else PcDimens.RadiusSm
+    val shape = RoundedCornerShape(radius)
     val interactionSource = remember { MutableInteractionSource() }
 
     Row(
         modifier = modifier
-            .height(height)
-            .clip(RoundedCornerShape(radius))
-            .background(bg)
-            .alpha(if (isEnabled) 1f else 0.45f)
             .clickable(
-                enabled = isEnabled,
+                enabled = isClickable,
                 role = Role.Button,
                 interactionSource = interactionSource,
-                indication = ripple(),
+                indication = null,
                 onClick = onClick,
+            )
+            .minimumInteractiveComponentSize()
+            .height(height)
+            .clip(shape)
+            .background(bg)
+            .alpha(visualAlpha)
+            .indication(
+                interactionSource = interactionSource,
+                indication = ripple(),
             )
             .padding(horizontal = if (compact) PcDimens.Space3 else PcDimens.Space4),
         verticalAlignment = Alignment.CenterVertically,
@@ -531,6 +573,96 @@ fun PcButton(
     }
 }
 
+/**
+ * Shared restrained switch control:
+ * subtle mint track + crisp mint thumb when checked, dark `surfaceRaised` when unchecked.
+ * Replaces duplicated inline `SwitchDefaults.colors(...)` definitions across feature screens.
+ */
+@Composable
+fun PcSwitch(
+    checked: Boolean,
+    onCheckedChange: ((Boolean) -> Unit)?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val colors = PcTheme.colors
+    val checkedTrack = colors.accent.copy(alpha = if (colors.isDark) 0.28f else 0.22f)
+    val checkedBorder = colors.accent.copy(alpha = if (colors.isDark) 0.48f else 0.40f)
+
+    Switch(
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        modifier = modifier,
+        enabled = enabled,
+        colors = SwitchDefaults.colors(
+            checkedThumbColor = colors.accent,
+            checkedTrackColor = checkedTrack,
+            checkedBorderColor = checkedBorder,
+            uncheckedThumbColor = colors.textDim,
+            uncheckedTrackColor = colors.surfaceRaised,
+            uncheckedBorderColor = colors.hairline,
+            disabledCheckedThumbColor = colors.accent.copy(alpha = 0.42f),
+            disabledCheckedTrackColor = colors.surfaceRaised,
+            disabledCheckedBorderColor = colors.hairline,
+            disabledUncheckedThumbColor = colors.textFaint.copy(alpha = 0.55f),
+            disabledUncheckedTrackColor = colors.surfaceRaised.copy(alpha = 0.55f),
+            disabledUncheckedBorderColor = colors.hairline.copy(alpha = 0.55f),
+        ),
+    )
+}
+
+/**
+ * Standard interactive icon button with a guaranteed 48.dp minimum touch target.
+ */
+@Composable
+fun PcIconButton(
+    icon: ImageVector,
+    contentDescription: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    tint: Color = PcTheme.colors.text,
+    containerColor: Color = Color.Transparent,
+    iconSize: Dp = 22.dp,
+    visualSize: Dp = 40.dp,
+) {
+    val colors = PcTheme.colors
+    val interactionSource = remember { MutableInteractionSource() }
+    val resolvedTint = if (enabled) tint else colors.textFaint
+
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .clickable(
+                enabled = enabled,
+                role = Role.Button,
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(visualSize)
+                .clip(CircleShape)
+                .background(containerColor)
+                .indication(
+                    interactionSource = interactionSource,
+                    indication = ripple(),
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = resolvedTint,
+                modifier = Modifier.size(iconSize),
+            )
+        }
+    }
+}
+
 @Immutable
 data class PcSegmentOption<T>(
     val id: T,
@@ -539,7 +671,7 @@ data class PcSegmentOption<T>(
 )
 
 /**
- * Surface track with raised selected segment.
+ * Surface track with smoothly sliding `surfaceRaised` pill indicator (never solid mint).
  */
 @Composable
 fun <T> PcSegmentedControl(
@@ -549,50 +681,94 @@ fun <T> PcSegmentedControl(
     modifier: Modifier = Modifier,
 ) {
     val colors = PcTheme.colors
-    Row(
+    val count = options.size
+    if (count == 0) return
+
+    val selectedIndex = options.indexOfFirst { it.id == selected }
+    val hasSelection = selectedIndex >= 0
+    val trackPadding = 4.dp
+    val segmentGap = 2.dp
+    val segmentHeight = 40.dp
+
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(colors.surface)
-            .padding(3.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(trackPadding),
     ) {
-        options.forEach { option ->
-            val isSelected = option.id == selected
-            val interactionSource = remember { MutableInteractionSource() }
-            Row(
+        val totalGap = segmentGap * (count - 1)
+        val segmentWidth = ((maxWidth - totalGap) / count).coerceAtLeast(0.dp)
+        val targetOffset = if (hasSelection) {
+            (segmentWidth + segmentGap) * selectedIndex
+        } else {
+            0.dp
+        }
+        val animatedOffset by animateDpAsState(
+            targetValue = targetOffset,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = Spring.StiffnessMediumLow,
+            ),
+            label = "pcSegmentPillOffset",
+        )
+
+        if (hasSelection) {
+            Box(
                 modifier = Modifier
-                    .weight(1f)
-                    .height(34.dp)
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(if (isSelected) colors.surfaceRaised else Color.Transparent)
-                    .clickable(
-                        role = Role.Tab,
-                        interactionSource = interactionSource,
-                        indication = ripple(),
-                        onClick = { onSelect(option.id) },
-                    )
-                    .padding(horizontal = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
-            ) {
-                if (option.icon != null) {
-                    Icon(
-                        imageVector = option.icon,
-                        contentDescription = null,
-                        tint = if (isSelected) colors.text else colors.textDim,
-                        modifier = Modifier.size(15.dp),
+                    .offset { IntOffset(animatedOffset.roundToPx(), 0) }
+                    .width(segmentWidth)
+                    .height(segmentHeight)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(colors.surfaceRaised),
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(segmentGap),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            options.forEach { option ->
+                val isSelected = option.id == selected
+                val interactionSource = remember { MutableInteractionSource() }
+                val contentColor by animateColorAsState(
+                    targetValue = if (isSelected) colors.text else colors.textDim,
+                    animationSpec = tween(durationMillis = 160),
+                    label = "pcSegmentContentColor",
+                )
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(segmentHeight)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(
+                            role = Role.Tab,
+                            interactionSource = interactionSource,
+                            indication = ripple(),
+                            onClick = { onSelect(option.id) },
+                        )
+                        .padding(horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
+                ) {
+                    if (option.icon != null) {
+                        Icon(
+                            imageVector = option.icon,
+                            contentDescription = null,
+                            tint = contentColor,
+                            modifier = Modifier.size(15.dp),
+                        )
+                    }
+                    Text(
+                        text = option.label,
+                        color = contentColor,
+                        fontSize = 13.sp,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Text(
-                    text = option.label,
-                    color = if (isSelected) colors.text else colors.textDim,
-                    fontSize = 13.sp,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
             }
         }
     }
@@ -699,22 +875,23 @@ fun PcScreenHeader(
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     val colors = PcTheme.colors
+    val type = PcTheme.type
     Row(
         modifier = modifier
             .fillMaxWidth()
             .padding(
-                start = if (onBack != null) 6.dp else PcDimens.ScreenPad,
+                start = if (onBack != null) 4.dp else PcDimens.ScreenPad,
                 end = PcDimens.ScreenPad,
                 top = PcDimens.Space4,
                 bottom = PcDimens.Space4,
             ),
         verticalAlignment = Alignment.Bottom,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         if (onBack != null) {
             IconButton(
                 onClick = onBack,
-                modifier = Modifier.size(40.dp),
+                modifier = Modifier.size(48.dp),
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -740,11 +917,7 @@ fun PcScreenHeader(
                     }
                     Text(
                         text = statusText,
-                        color = colors.textDim,
-                        style = TabularNumStyle.copy(
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.Normal,
-                        ),
+                        style = type.caption.tabular(),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -753,10 +926,7 @@ fun PcScreenHeader(
             Text(
                 text = title,
                 color = colors.text,
-                fontSize = 30.sp,
-                lineHeight = 35.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = (-0.5).sp,
+                style = type.screenTitle,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -780,6 +950,7 @@ fun PcSectionLabel(
     trailing: (@Composable () -> Unit)? = null,
 ) {
     val colors = PcTheme.colors
+    val type = PcTheme.type
     Row(
         modifier = modifier
             .then(if (trailing != null) Modifier.fillMaxWidth() else Modifier)
@@ -797,9 +968,7 @@ fun PcSectionLabel(
         }
         Text(
             text = label,
-            color = colors.textDim,
-            fontSize = 12.5.sp,
-            fontWeight = FontWeight.Medium,
+            style = type.sectionLabel,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = if (trailing != null) Modifier.weight(1f) else Modifier,
@@ -828,6 +997,56 @@ fun PcSheetDragHandle(modifier: Modifier = Modifier) {
                 .clip(CircleShape)
                 .background(colors.hairline),
         )
+    }
+}
+
+/**
+ * Shared Material 3 [ModalBottomSheet] wrapper using `PcTheme.colors.surface` (never `#000000`
+ * black-on-black), compact [PcSheetDragHandle], and clean bottom `navigationBarsPadding()`.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PcBottomSheet(
+    onDismissRequest: () -> Unit,
+    modifier: Modifier = Modifier,
+    sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    title: String? = null,
+    contentPadding: PaddingValues = PaddingValues(
+        start = PcDimens.ScreenPad,
+        end = PcDimens.ScreenPad,
+        top = PcDimens.Space2,
+        bottom = PcDimens.Space4,
+    ),
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val colors = PcTheme.colors
+    val type = PcTheme.type
+    ModalBottomSheet(
+        onDismissRequest = onDismissRequest,
+        modifier = modifier,
+        sheetState = sheetState,
+        containerColor = colors.surface,
+        contentColor = colors.text,
+        scrimColor = colors.overlay,
+        dragHandle = { PcSheetDragHandle() },
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(contentPadding),
+        ) {
+            if (!title.isNullOrBlank()) {
+                Text(
+                    text = title,
+                    color = colors.text,
+                    style = type.collapsedTitle,
+                    modifier = Modifier.padding(bottom = PcDimens.Space3),
+                )
+            }
+            content()
+        }
     }
 }
 
@@ -1107,7 +1326,7 @@ fun PcKeyValueRow(
 }
 
 /**
- * Compact 42.dp single-line text field replacing oversized Material 3 OutlinedTextField.
+ * Compact 48.dp single-line text field replacing oversized Material 3 OutlinedTextField.
  */
 @Composable
 fun PcCompactTextField(
@@ -1132,7 +1351,7 @@ fun PcCompactTextField(
         singleLine = true,
         textStyle = TextStyle(
             color = if (enabled) colors.text else colors.textFaint,
-            fontSize = 14.sp,
+            fontSize = 14.5.sp,
             fontFamily = if (mono) FontFamily.Monospace else FontFamily.SansSerif,
         ),
         cursorBrush = SolidColor(colors.accent),
@@ -1147,7 +1366,7 @@ fun PcCompactTextField(
                 contentAlignment = Alignment.CenterStart,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(42.dp)
+                    .defaultMinSize(minHeight = 48.dp)
                     .clip(shape)
                     .background(colors.surfaceRaised)
                     .border(
@@ -1155,13 +1374,13 @@ fun PcCompactTextField(
                         color = if (focused) colors.accent else colors.hairline,
                         shape = shape,
                     )
-                    .padding(horizontal = 12.dp),
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
                 if (value.isEmpty() && !placeholder.isNullOrEmpty()) {
                     Text(
                         text = placeholder,
                         color = colors.textFaint,
-                        fontSize = 14.sp,
+                        fontSize = 14.5.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )

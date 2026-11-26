@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.Collections
 
 sealed interface ChatUiEvent {
@@ -22,7 +24,6 @@ sealed interface ChatUiEvent {
     data class ScrollToMessageIndex(val index: Int) : ChatUiEvent
     data class ShowToast(val message: String) : ChatUiEvent
     data object FocusComposer : ChatUiEvent
-    data object CloseModelPicker : ChatUiEvent
 }
 
 class ChatViewModel(
@@ -46,6 +47,8 @@ class ChatViewModel(
 
     private var sseJob: Job? = null
     private var pollJob: Job? = null
+    private val modelApplyMutex = Mutex()
+    private var pendingModelApplies: Int = 0
 
     private fun buildInitialState(): ChatUiState {
         val cached = repository.loadCachedChatState()
@@ -557,32 +560,73 @@ class ChatViewModel(
     }
 
     fun applyModelSelection(selection: AgentSelectionResult) {
-        if (_uiState.value.applyingModel) return
+        val prevEngine = _uiState.value.engine
+        val prevSettings = _uiState.value.agentSettings
+        val engineChanged = selection.engine != prevEngine
+
+        _uiState.update { state ->
+            val optimisticSettings = state.agentSettings?.let { cur ->
+                cur.copy(
+                    claude = selection.patch.claude?.let { p ->
+                        cur.claude.copy(
+                            model = p.model ?: cur.claude.model,
+                            effort = p.effort ?: cur.claude.effort,
+                        )
+                    } ?: cur.claude,
+                    gemini = selection.patch.gemini?.let { p ->
+                        cur.gemini.copy(
+                            instanceId = p.instanceId ?: cur.gemini.instanceId,
+                            model = p.model ?: cur.gemini.model,
+                            thoughtLevel = p.thoughtLevel ?: cur.gemini.thoughtLevel,
+                        )
+                    } ?: cur.gemini,
+                )
+            }
+            state.copy(
+                engine = selection.engine,
+                agentSettings = optimisticSettings,
+                applyingModel = true,
+                applyModelError = null,
+            )
+        }
+
+        pendingModelApplies += 1
         viewModelScope.launch {
-            _uiState.update { it.copy(applyingModel = true, applyModelError = null) }
             try {
-                if (!selection.patch.isEmpty) {
-                    val updated = repository.updateAgentSettings(selection.patch)
-                    _uiState.update { it.copy(agentSettings = updated) }
-                }
-                if (selection.engine != _uiState.value.engine) {
-                    repository.switchAgent(selection.engine)
-                    _uiState.update { state ->
-                        val next = state.copy(engine = selection.engine)
-                        repository.saveCachedChatState(next.messages, next.engine, next.hasMore)
-                        next
+                modelApplyMutex.withLock {
+                    if (!selection.patch.isEmpty) {
+                        val updated = repository.updateAgentSettings(selection.patch)
+                        if (pendingModelApplies <= 1) {
+                            _uiState.update { it.copy(agentSettings = updated) }
+                        }
+                    }
+                    if (engineChanged) {
+                        repository.switchAgent(selection.engine)
+                        val cur = _uiState.value
+                        repository.saveCachedChatState(cur.messages, cur.engine, cur.hasMore)
                     }
                 }
-                _uiState.update { it.copy(applyingModel = false, applyModelError = null) }
-                _events.tryEmit(ChatUiEvent.CloseModelPicker)
+                _uiState.update { it.copy(applyModelError = null) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        applyingModel = false,
-                        applyModelError = e.message ?: "Failed to update model settings",
-                    )
+                if (pendingModelApplies <= 1) {
+                    _uiState.update {
+                        it.copy(
+                            engine = prevEngine,
+                            agentSettings = prevSettings,
+                            applyModelError = e.message ?: "Failed to update model settings",
+                        )
+                    }
+                } else {
+                    _uiState.update {
+                        it.copy(applyModelError = e.message ?: "Failed to update model settings")
+                    }
+                }
+            } finally {
+                pendingModelApplies = (pendingModelApplies - 1).coerceAtLeast(0)
+                if (pendingModelApplies == 0) {
+                    _uiState.update { it.copy(applyingModel = false) }
                 }
             }
         }

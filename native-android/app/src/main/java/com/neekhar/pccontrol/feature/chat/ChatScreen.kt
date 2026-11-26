@@ -238,10 +238,6 @@ fun ChatScreen(
                 is ChatUiEvent.FocusComposer -> {
                     focusTrigger += 1
                 }
-
-                is ChatUiEvent.CloseModelPicker -> {
-                    showModelPicker = false
-                }
             }
         }
     }
@@ -255,6 +251,7 @@ fun ChatScreen(
     }
 
     val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val topOverlayBarHeight = 44.dp
     val hasFloatingAttachments = state.pendingAttachments.isNotEmpty() || state.uploadingCount > 0
 
     Column(
@@ -272,14 +269,14 @@ fun ChatScreen(
             when {
                 state.loadingInitial && listItems.isEmpty() -> {
                     ChatSkeletonPlaceholder(
-                        modifier = Modifier.padding(top = statusBarTop),
+                        modifier = Modifier.padding(top = statusBarTop + topOverlayBarHeight),
                     )
                 }
 
                 listItems.isEmpty() -> {
                     ChatEmptyState(
                         engine = state.engine,
-                        modifier = Modifier.padding(top = statusBarTop),
+                        modifier = Modifier.padding(top = statusBarTop + topOverlayBarHeight),
                     )
                 }
 
@@ -289,7 +286,7 @@ fun ChatScreen(
                         contentPadding = PaddingValues(
                             start = 18.dp,
                             end = 18.dp,
-                            top = statusBarTop + 12.dp,
+                            top = statusBarTop + 56.dp,
                             bottom = if (hasFloatingAttachments) 86.dp else 14.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -359,7 +356,6 @@ fun ChatScreen(
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                     viewModel.startReply(target)
                                 },
-                                onCopy = { text -> copyToClipboard(text) },
                                 onCopyCode = { code -> copyToClipboard(code, "Copied code") },
                                 onRetry = { errMsg -> viewModel.retryAssistantError(errMsg) },
                                 onSteer = { queuedMsg ->
@@ -377,11 +373,12 @@ fun ChatScreen(
                 }
             }
 
-            // Subtle top fade scrim so scrolling messages dissolve smoothly under the status bar
+            // Subtle top fade scrim covering status bar + floating top-right New chat area
+            val scrimSolidHeight = statusBarTop + 36.dp
             val scrimFadeHeight = 24.dp
-            val totalScrimHeight = statusBarTop + scrimFadeHeight
+            val totalScrimHeight = scrimSolidHeight + scrimFadeHeight
             val solidStop = if (totalScrimHeight > 0.dp) {
-                (statusBarTop / totalScrimHeight).coerceIn(0f, 0.95f)
+                (scrimSolidHeight / totalScrimHeight).coerceIn(0f, 0.95f)
             } else {
                 0f
             }
@@ -399,13 +396,14 @@ fun ChatScreen(
                     ),
             )
 
-            // Top floating overlay: offline/reconnecting/error pill (hidden when live) + subtle New chat icon button
+            // Top floating overlay inside the status-bar fade scrim: status pill + New chat button
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .statusBarsPadding()
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                    .height(topOverlayBarHeight)
+                    .padding(horizontal = 10.dp),
             ) {
                 val errMsg = state.error?.takeIf { it.isNotBlank() }
                 val showOfflinePill = errMsg == null && !state.sseConnected && !state.loadingInitial
@@ -416,7 +414,7 @@ fun ChatScreen(
                     exit = fadeOut(),
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .padding(end = 42.dp),
+                        .padding(horizontal = 46.dp),
                 ) {
                     if (errMsg != null) {
                         Row(
@@ -484,31 +482,38 @@ fun ChatScreen(
                     }
                 }
 
-                // Subtle floating New chat button in top-right (zero header bar overhead)
+                // Floating New chat button cleanly seated inside the top-right scrim (44dp touch target)
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .size(34.dp)
+                        .align(Alignment.CenterEnd)
+                        .size(44.dp)
                         .alpha(if (state.resetting) 0.5f else 1f)
                         .clip(CircleShape)
-                        .background(colors.surfaceRaised.copy(alpha = 0.88f))
-                        .border(0.5.dp, colors.hairline, CircleShape)
                         .clickable(enabled = !state.resetting) { showNewChatDialog = true },
                 ) {
-                    if (state.resetting) {
-                        CircularProgressIndicator(
-                            color = colors.text,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(14.dp),
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Rounded.EditNote,
-                            contentDescription = "New conversation",
-                            tint = colors.textDim,
-                            modifier = Modifier.size(18.dp),
-                        )
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(colors.surfaceRaised.copy(alpha = 0.92f))
+                            .border(0.5.dp, colors.hairline, CircleShape),
+                    ) {
+                        if (state.resetting) {
+                            CircularProgressIndicator(
+                                color = colors.text,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(14.dp),
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.EditNote,
+                                contentDescription = "New conversation",
+                                tint = colors.textDim,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
                     }
                 }
             }

@@ -35,14 +35,11 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -51,7 +48,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -74,7 +70,6 @@ import coil3.request.ImageRequest
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.MonoTextStyle
 import com.neekhar.pccontrol.core.theme.PcDimens
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcStatusDot
@@ -88,26 +83,23 @@ data class LiveCamFeed(
 )
 
 /**
- * Live tab: pure-Kotlin WebRTC camera wall (`cat`, `cat2`, `cat3`/`cat3hd`), cat alerts toggle,
- * pinch-to-zoom video cards with instant JPEG frame placeholders, fullscreen landscape, and
- * native `cat3` PTZ control pad + saved presets.
+ * Live tab: pure-Kotlin WebRTC camera wall (`cat`, `cat2`, `cat3`/`cat3hd`), hero + thumbnail strip
+ * default layout with optional stacked grid, pinch-to-zoom video cards with instant JPEG frame
+ * placeholders, fullscreen landscape, and native `cat3` PTZ control pad + saved presets.
  */
 @Composable
 fun LiveTab(
     feeds: Map<CamId, LiveCamFeed>,
     snapshotBaseUrl: String,
-    focusedCam: CamId?,
+    heroCam: CamId,
+    stackedLayout: Boolean,
     cat3Hd: Boolean,
     hardwareCaps: CamsHardwareCapabilities,
     camMicOn: Boolean,
     ptzOpen: Boolean,
     ptzPresets: List<PtzPreset>,
     activePresetId: String?,
-    detectorState: DetectorState?,
-    detectorLoaded: Boolean,
-    detectorBusy: Boolean,
-    detectorLine: String,
-    onSelectFocus: (CamId?) -> Unit,
+    onSelectHero: (CamId) -> Unit,
     onToggleCat3Hd: () -> Unit,
     onToggleCamMic: () -> Unit,
     onTogglePtzOpen: () -> Unit,
@@ -115,73 +107,17 @@ fun LiveTab(
     onPtzStop: () -> Unit,
     onRunPtzPreset: (PtzPreset) -> Unit,
     onEnterFullscreen: (CamId) -> Unit,
-    onToggleDetector: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val colors = LocalPcColors.current
+    val view = LocalView.current
 
     Column(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
     ) {
-        // Cat alerts toggle row
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(PcDimens.Space3),
-        ) {
-            val detOn = detectorState?.enabled == true
-            val detReady = detectorState != null && !detectorBusy
-            Row(
-                modifier = Modifier
-                    .height(42.dp)
-                    .clip(CircleShape)
-                    .background(if (detOn) colors.accentSoft else colors.surface)
-                    .alpha(if (detectorState != null) 1f else 0.55f)
-                    .clickable(enabled = detReady) { onToggleDetector(!detOn) }
-                    .padding(start = 12.dp, end = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Videocam,
-                    contentDescription = null,
-                    tint = if (detOn) colors.accent else colors.textDim,
-                    modifier = Modifier.size(18.dp),
-                )
-                Text(
-                    text = "Cat alerts",
-                    color = if (detOn) colors.text else colors.textDim,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-                Switch(
-                    checked = detOn,
-                    onCheckedChange = { onToggleDetector(it) },
-                    enabled = detReady,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = colors.onAccent,
-                        checkedTrackColor = colors.accent,
-                        uncheckedThumbColor = colors.textDim,
-                        uncheckedTrackColor = colors.surfaceRaised,
-                        uncheckedBorderColor = colors.hairline,
-                    ),
-                )
-            }
-
-            Text(
-                text = if (detectorState == null && !detectorLoaded) "Connecting to detector…" else detectorLine,
-                color = colors.textDim,
-                fontSize = 12.5.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-        }
-
-        // Video feed cards: focused (1 big + telemetry + 2 compact thumbs) or full 3-card stack
-        if (focusedCam != null) {
-            val mainFeed = feeds[focusedCam] ?: LiveCamFeed(focusedCam, LinkState(), null)
+        if (!stackedLayout) {
+            // Default Hero + Thumbnail strip layout: 1 large 16:9 hero feed + compact horizontal strip below
+            val mainFeed = feeds[heroCam] ?: LiveCamFeed(heroCam, LinkState(), null)
             LiveCamCard(
                 feed = mainFeed,
                 snapshotBaseUrl = snapshotBaseUrl,
@@ -191,8 +127,8 @@ fun LiveTab(
                 camMicOn = camMicOn,
                 cat3Hd = cat3Hd,
                 ptzOpen = ptzOpen,
-                onTapCard = { onSelectFocus(null) },
-                onFullscreen = { onEnterFullscreen(focusedCam) },
+                onTapCard = {},
+                onFullscreen = { onEnterFullscreen(heroCam) },
                 onToggleCamMic = onToggleCamMic,
                 onToggleCat3Hd = onToggleCat3Hd,
                 onTogglePtz = onTogglePtzOpen,
@@ -200,22 +136,7 @@ fun LiveTab(
                 onPtzStop = onPtzStop,
             )
 
-            StreamTelemetryLine(
-                state = mainFeed.state,
-                hdDecoder = if (focusedCam == CamId.CAT3 && cat3Hd) hardwareCaps.h265?.name else null,
-            )
-
-            if (focusedCam == CamId.CAT3) {
-                PtzPresetsSection(
-                    presets = ptzPresets,
-                    activePresetId = activePresetId,
-                    onRunPreset = onRunPtzPreset,
-                    onPtzStart = onPtzStart,
-                    onPtzStop = onPtzStop,
-                )
-            }
-
-            val others = CamsConfig.CAMS.filter { it != focusedCam }
+            val others = CamsConfig.CAMS.filter { it != heroCam }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -231,7 +152,10 @@ fun LiveTab(
                         camMicOn = false,
                         cat3Hd = cat3Hd,
                         ptzOpen = false,
-                        onTapCard = { onSelectFocus(cam) },
+                        onTapCard = {
+                            view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                            onSelectHero(cam)
+                        },
                         onFullscreen = {},
                         onToggleCamMic = {},
                         onToggleCat3Hd = {},
@@ -242,7 +166,23 @@ fun LiveTab(
                     )
                 }
             }
+
+            StreamTelemetryLine(
+                state = mainFeed.state,
+                hdDecoder = if (heroCam == CamId.CAT3 && cat3Hd) hardwareCaps.h265?.name else null,
+            )
+
+            if (heroCam == CamId.CAT3) {
+                PtzPresetsSection(
+                    presets = ptzPresets,
+                    activePresetId = activePresetId,
+                    onRunPreset = onRunPtzPreset,
+                    onPtzStart = onPtzStart,
+                    onPtzStop = onPtzStop,
+                )
+            }
         } else {
+            // Optional stacked full-width grid view
             CamsConfig.CAMS.forEach { cam ->
                 val feed = feeds[cam] ?: LiveCamFeed(cam, LinkState(), null)
                 LiveCamCard(
@@ -254,7 +194,7 @@ fun LiveTab(
                     camMicOn = camMicOn,
                     cat3Hd = cat3Hd,
                     ptzOpen = ptzOpen,
-                    onTapCard = { onSelectFocus(cam) },
+                    onTapCard = { onSelectHero(cam) },
                     onFullscreen = { onEnterFullscreen(cam) },
                     onToggleCamMic = onToggleCamMic,
                     onToggleCat3Hd = onToggleCat3Hd,
@@ -368,11 +308,15 @@ private fun LiveCamCard(
             .fillMaxSize()
             .background(colors.media)
     } else {
+        val shape = RoundedCornerShape(corner)
         modifier
             .fillMaxWidth()
             .aspectRatio(16f / 9f)
-            .clip(RoundedCornerShape(corner))
+            .clip(shape)
             .background(colors.media)
+            .then(
+                if (compact) Modifier.border(0.5.dp, colors.hairline, shape) else Modifier,
+            )
     }
 
     Box(modifier = cardModifier) {
@@ -394,7 +338,7 @@ private fun LiveCamCard(
                 PinchZoomBox(
                     enabled = true,
                     resetKey = "${feed.camId.id}:$fullscreen:$focused",
-                    onTap = if (fullscreen) null else onTapCard,
+                    onTap = if (fullscreen || focused) null else onTapCard,
                     modifier = Modifier.fillMaxSize(),
                 ) {
                     WebRtcLivePlayer(

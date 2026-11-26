@@ -307,7 +307,7 @@ fun SeerrCollectionSheet(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        PcPill(label = "Collection", tone = PcTone.Accent)
+                        PcPill(label = "Collection", tone = PcTone.Dim)
                         if (summary.isNotEmpty()) {
                             Text(
                                 text = summary,

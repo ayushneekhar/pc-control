@@ -11,6 +11,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -31,10 +32,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -42,23 +46,22 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
+import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -75,10 +78,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -108,7 +113,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.floor
 import kotlin.math.max
 
 private data class CamsToast(
@@ -199,7 +203,10 @@ fun CamsScreen(
 
     // Live view controls
     var cat3Hd by remember { mutableStateOf(hardwareCaps.liveHdSupported) }
-    var focusedCam by remember { mutableStateOf<CamId?>(null) }
+    var heroCam by remember {
+        mutableStateOf(CamId.fromId(prefs.current.value.lastSelectedCam) ?: CamId.CAT)
+    }
+    var stackedLayout by remember { mutableStateOf(false) }
     var fullscreenCam by remember { mutableStateOf<CamId?>(null) }
     var replayFullscreen by remember { mutableStateOf(false) }
     var ptzOpen by remember { mutableStateOf(false) }
@@ -332,45 +339,6 @@ fun CamsScreen(
         }
     }
 
-    // Detector state polling while active (15 s)
-    var detectorState by remember { mutableStateOf<DetectorState?>(null) }
-    var detectorLoaded by remember { mutableStateOf(false) }
-    var detectorBusy by remember { mutableStateOf(false) }
-
-    LaunchedEffect(isForeground, stackActive) {
-        if (!isForeground || !stackActive) return@LaunchedEffect
-        while (isActive) {
-            if (!detectorBusy) {
-                when (val res = repository.getDetectorState()) {
-                    is ApiResult.Success -> detectorState = res.data
-                    is ApiResult.Error -> detectorState = null
-                }
-                detectorLoaded = true
-            }
-            delay(15_000L)
-        }
-    }
-
-    fun toggleDetector(on: Boolean) {
-        val prev = detectorState ?: return
-        if (detectorBusy) return
-        detectorBusy = true
-        detectorState = prev.copy(enabled = on)
-        scope.launch {
-            when (val res = repository.toggleDetector(on)) {
-                is ApiResult.Success -> {
-                    detectorState = res.data
-                    showToast(if (on) "Cat alerts on" else "Cat alerts off: detector paused", 2000L)
-                }
-                is ApiResult.Error -> {
-                    detectorState = prev
-                    showToast("Couldn't reach the cat detector. Nothing changed.")
-                }
-            }
-            detectorBusy = false
-        }
-    }
-
     // Screen keep-awake while watching
     DisposableEffect(isForeground, stackActive, activity) {
         if (activity != null && isForeground && stackActive) {
@@ -483,7 +451,7 @@ fun CamsScreen(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            showToast("Microphone allowed. Hold or tap Talk to speak.", 3000L)
+            showToast("Microphone allowed. Hold to talk.", 3000L)
         } else {
             showToast("Talk needs microphone permission in Android settings.", 4200L)
         }
@@ -501,10 +469,7 @@ fun CamsScreen(
     }
 
     // Automatic Picture-in-Picture whenever Live or Replay video is actively playing
-    val activePipCam = fullscreenCam
-        ?: focusedCam
-        ?: feeds.entries.firstOrNull { it.value.state.fps > 0 }?.key
-        ?: CamId.CAT
+    val activePipCam = fullscreenCam ?: heroCam
     val livePlaying = stackActive && activeTab == CamsTab.LIVE &&
         feeds.values.any { it.videoTrack != null || it.state.fps > 0 || it.state.phase == LinkPhase.LIVE }
     val replayActive = stackActive && activeTab == CamsTab.REPLAY && replayPlaying
@@ -637,17 +602,13 @@ fun CamsScreen(
         else -> PcTone.Faint
     }
 
-    val detectorLine = remember(detectorState, detectorLoaded) {
-        buildDetectorLine(detectorState, detectorLoaded)
-    }
-
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(colors.bg),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top bar with Back + title + Cat Cams master power switch + overflow menu (hidden in Replay fullscreen)
+            // Top bar with Back + title + Live layout toggle + compact master switch + overflow menu
             if (!inReplayFullscreen) {
             Row(
                 modifier = Modifier
@@ -656,7 +617,7 @@ fun CamsScreen(
                     .statusBarsPadding()
                     .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
                     Icon(
@@ -691,27 +652,26 @@ fun CamsScreen(
                     }
                 }
 
-                // Master power toggle directly in header
-                if (catCamBusy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier
-                            .padding(end = 4.dp)
-                            .size(18.dp),
-                        strokeWidth = 2.dp,
-                        color = colors.textDim,
-                    )
+                // Toggle between Hero + thumbnail strip (default) and stacked grid
+                if (stackActive && activeTab == CamsTab.LIVE) {
+                    IconButton(
+                        onClick = { stackedLayout = !stackedLayout },
+                        modifier = Modifier.size(40.dp),
+                    ) {
+                        Icon(
+                            imageVector = if (stackedLayout) Icons.Filled.Dashboard else Icons.Filled.ViewAgenda,
+                            contentDescription = if (stackedLayout) "Switch to hero view" else "Switch to stacked view",
+                            tint = if (stackedLayout) colors.accent else colors.textDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
-                Switch(
+
+                // Compact, understated master power switch
+                CompactMasterSwitch(
                     checked = catCamEnabled,
+                    busy = catCamBusy,
                     onCheckedChange = { toggleMasterCatCams(it) },
-                    enabled = !catCamBusy,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = colors.onAccent,
-                        checkedTrackColor = colors.accent,
-                        uncheckedThumbColor = colors.textDim,
-                        uncheckedTrackColor = colors.surfaceRaised,
-                        uncheckedBorderColor = colors.hairline,
-                    ),
                 )
 
                 Box {
@@ -854,7 +814,7 @@ fun CamsScreen(
                         target = replayTarget,
                         fullscreen = replayFullscreen,
                         isInPip = false,
-                        bottomInset = (if (showAudioBar) 108.dp else 28.dp) + navBottom,
+                        bottomInset = (if (showAudioBar) 76.dp else 28.dp) + navBottom,
                         onPlayingChange = { replayPlaying = it },
                         onToggleFullscreen = { replayFullscreen = !replayFullscreen },
                         onTargetConsumed = { replayTarget = null },
@@ -869,7 +829,7 @@ fun CamsScreen(
                     DetectionsTab(
                         visible = isForeground,
                         repository = repository,
-                        bottomInset = (if (showAudioBar) 96.dp else 16.dp) + navBottom,
+                        bottomInset = (if (showAudioBar) 72.dp else 16.dp) + navBottom,
                         onJumpToReplay = { cam, tsMs ->
                             val parsed = ReplayMath.parseSightingTarget(cam, tsMs)
                             if (parsed != null) {
@@ -890,7 +850,7 @@ fun CamsScreen(
                                 start = PcDimens.ScreenPad,
                                 end = PcDimens.ScreenPad,
                                 top = PcDimens.Space3,
-                                bottom = (if (showAudioBar) 108.dp else 28.dp) + navBottom,
+                                bottom = (if (showAudioBar) 76.dp else 28.dp) + navBottom,
                             ),
                         verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
                     ) {
@@ -907,22 +867,18 @@ fun CamsScreen(
                                 LiveTab(
                                     feeds = feeds,
                                     snapshotBaseUrl = apiClient.baseUrl,
-                                    focusedCam = focusedCam,
+                                    heroCam = heroCam,
+                                    stackedLayout = stackedLayout,
                                     cat3Hd = cat3Hd,
                                     hardwareCaps = hardwareCaps,
                                     camMicOn = camMicOn,
                                     ptzOpen = ptzOpen,
                                     ptzPresets = ptzPresets,
                                     activePresetId = activePresetId,
-                                    detectorState = detectorState,
-                                    detectorLoaded = detectorLoaded,
-                                    detectorBusy = detectorBusy,
-                                    detectorLine = detectorLine,
-                                    onSelectFocus = { cam ->
-                                        focusedCam = cam
-                                        if (cam != null) {
-                                            scope.launch { prefs.setLastSelectedCam(cam.id) }
-                                        }
+                                    onSelectHero = { cam ->
+                                        heroCam = cam
+                                        stackedLayout = false
+                                        scope.launch { prefs.setLastSelectedCam(cam.id) }
                                     },
                                     onToggleCat3Hd = ::toggleCat3Hd,
                                     onToggleCamMic = { camMicOn = !camMicOn },
@@ -931,7 +887,6 @@ fun CamsScreen(
                                     onPtzStop = ::stopPtz,
                                     onRunPtzPreset = ::runPtzPreset,
                                     onEnterFullscreen = { fullscreenCam = it },
-                                    onToggleDetector = ::toggleDetector,
                                 )
                             }
 
@@ -954,7 +909,7 @@ fun CamsScreen(
             }
         }
 
-        // Bottom persistent Listen / Talk bar
+        // Bottom slim Listen / Hold-to-Talk bar
         if (showAudioBar) {
             val talkSeconds = if (talkStartedAtMs > 0L) max(0L, (nowMs - talkStartedAtMs) / 1000L) else 0L
             ListenTalkBar(
@@ -965,27 +920,18 @@ fun CamsScreen(
                 talkSeconds = talkSeconds,
                 onToggleListen = { listenOn = !listenOn },
                 onTalkPressDown = {
-                    val wasOn = talkMode != TalkMode.OFF
-                    if (!wasOn) {
-                        if (!hasMicPermission()) {
-                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            false
-                        } else {
-                            talkStartedAtMs = System.currentTimeMillis()
-                            nowMs = talkStartedAtMs
-                            talkMode = TalkMode.HELD
-                            true
-                        }
-                    } else {
+                    if (!hasMicPermission()) {
+                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         false
+                    } else {
+                        talkStartedAtMs = System.currentTimeMillis()
+                        nowMs = talkStartedAtMs
+                        talkMode = TalkMode.HELD
+                        true
                     }
                 },
-                onTalkRelease = { pressDurationMs, wasAlreadyOn ->
-                    if (wasAlreadyOn) {
-                        talkMode = TalkMode.OFF
-                    } else if (talkMode != TalkMode.OFF) {
-                        talkMode = if (pressDurationMs < 400L) TalkMode.LATCHED else TalkMode.OFF
-                    }
+                onTalkRelease = {
+                    talkMode = TalkMode.OFF
                 },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
@@ -997,8 +943,65 @@ fun CamsScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(bottom = if (showAudioBar) 92.dp else 20.dp),
+                .padding(bottom = if (showAudioBar) 68.dp else 20.dp),
         )
+    }
+}
+
+@Composable
+private fun CompactMasterSwitch(
+    checked: Boolean,
+    busy: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalPcColors.current
+    val thumbOffset by animateDpAsState(
+        targetValue = if (checked) 19.dp else 3.dp,
+        label = "masterSwitchThumb",
+    )
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .size(width = 46.dp, height = 40.dp)
+            .clip(CircleShape)
+            .semantics { contentDescription = if (checked) "Cat cams on" else "Cat cams off" }
+            .toggleable(
+                value = checked,
+                enabled = !busy,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
+            ),
+    ) {
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(16.dp),
+                strokeWidth = 2.dp,
+                color = colors.textDim,
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .width(38.dp)
+                    .height(22.dp)
+                    .clip(CircleShape)
+                    .background(if (checked) colors.okSoft else colors.surfaceRaised)
+                    .border(
+                        width = 0.5.dp,
+                        color = if (checked) colors.ok.copy(alpha = 0.45f) else colors.hairline,
+                        shape = CircleShape,
+                    ),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .offset(x = thumbOffset)
+                        .size(16.dp)
+                        .clip(CircleShape)
+                        .background(if (checked) colors.ok else colors.textFaint),
+                )
+            }
+        }
     }
 }
 
@@ -1089,11 +1092,13 @@ private fun ListenTalkBar(
     talkSeconds: Long,
     onToggleListen: () -> Unit,
     onTalkPressDown: () -> Boolean,
-    onTalkRelease: (pressDurationMs: Long, wasAlreadyOn: Boolean) -> Unit,
+    onTalkRelease: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
     val view = LocalView.current
+    val currentOnTalkPressDown by rememberUpdatedState(onTalkPressDown)
+    val currentOnTalkRelease by rememberUpdatedState(onTalkRelease)
 
     Column(
         modifier = modifier
@@ -1105,163 +1110,147 @@ private fun ListenTalkBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = PcDimens.ScreenPad, vertical = PcDimens.Space3),
+                .padding(horizontal = PcDimens.ScreenPad, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Listen button
-            val listenVisual = when {
-                !listenOn -> AudioBtnState.OFF
-                earState.phase == LinkPhase.LIVE -> AudioBtnState.ON
-                earState.phase == LinkPhase.ERROR -> AudioBtnState.BLOCKED
-                else -> AudioBtnState.BUSY
-            }
-            AudioActionTile(
-                visual = listenVisual,
-                icon = if (listenOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
-                title = if (listenOn) "Listening" else "Listen",
-                subtitle = when {
-                    !listenOn -> "Mic off"
-                    earState.phase == LinkPhase.LIVE -> null
-                    earState.phase == LinkPhase.ERROR -> earState.error ?: "Failed"
-                    else -> "Connecting…"
-                },
-                onClick = onToggleListen,
-                modifier = Modifier.weight(1f),
-            )
+            // Compact Listen (speaker audio) toggle
+            val listenBusy = listenOn && earState.phase != LinkPhase.LIVE && earState.phase != LinkPhase.ERROR
+            val listenLive = listenOn && earState.phase == LinkPhase.LIVE
+            val listenErr = listenOn && earState.phase == LinkPhase.ERROR
 
-            // Talk button (hold to talk, or quick tap <400ms to latch)
-            val talkLive = talkState.phase == LinkPhase.LIVE
-            val talkVisual = when {
-                talkMode == TalkMode.OFF -> AudioBtnState.OFF
-                talkLive -> AudioBtnState.TALKING
-                else -> AudioBtnState.BUSY
+            val listenBg = when {
+                listenLive -> colors.okSoft
+                listenErr -> colors.warnSoft
+                else -> colors.surface
             }
-            val talkTimer = if (talkMode == TalkMode.OFF) {
-                null
-            } else {
+            val listenBorder = when {
+                listenLive -> colors.ok.copy(alpha = 0.4f)
+                listenErr -> colors.warn.copy(alpha = 0.4f)
+                else -> colors.hairline
+            }
+            val listenFg = when {
+                listenLive -> colors.ok
+                listenErr -> colors.warn
+                else -> colors.textDim
+            }
+            val listenLabel = when {
+                !listenOn -> "Listen"
+                listenLive -> "Listening"
+                listenErr -> "Audio error"
+                else -> "Connecting…"
+            }
+
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(listenBg)
+                    .border(0.5.dp, listenBorder, RoundedCornerShape(12.dp))
+                    .clickable(onClick = onToggleListen)
+                    .padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            ) {
+                if (listenBusy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = listenFg,
+                    )
+                } else {
+                    Icon(
+                        imageVector = if (listenOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
+                        contentDescription = null,
+                        tint = listenFg,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Text(
+                    text = listenLabel,
+                    color = if (listenLive || listenErr) listenFg else colors.text,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            // Compact Hold-to-Talk press-and-hold mic control
+            val talkActive = talkMode != TalkMode.OFF
+            val talkLive = talkActive && talkState.phase == LinkPhase.LIVE
+            val talkBusy = talkActive && !talkLive
+            val talkTimer = if (talkActive) {
                 val m = talkSeconds / 60
                 val s = talkSeconds % 60
                 "$m:${s.toString().padStart(2, '0')}"
+            } else {
+                null
             }
-            AudioActionTile(
-                visual = talkVisual,
-                icon = if (talkMode == TalkMode.OFF) Icons.Filled.MicOff else Icons.Filled.Mic,
-                title = when {
-                    talkMode == TalkMode.OFF -> "Talk"
-                    talkLive -> if (talkMode == TalkMode.LATCHED) "Talking · latched" else "Talking"
-                    else -> "Connecting…"
-                },
-                subtitle = talkTimer,
+
+            val talkBg = when {
+                talkLive -> colors.bad
+                talkBusy -> colors.surfaceRaised
+                else -> colors.surface
+            }
+            val talkBorder = if (talkLive) Color.Transparent else colors.hairline
+            val talkIconTint = when {
+                talkLive -> colors.onMedia
+                else -> colors.textDim
+            }
+            val talkTextColor = if (talkLive) colors.onMedia else colors.text
+            val talkLabel = when {
+                !talkActive -> "Hold to talk"
+                talkLive -> if (talkTimer != null) "Talking · $talkTimer" else "Talking"
+                else -> "Connecting…"
+            }
+
+            Row(
                 modifier = Modifier
-                    .weight(1f)
-                    .pointerInput(talkMode) {
+                    .weight(1.2f)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(talkBg)
+                    .border(0.5.dp, talkBorder, RoundedCornerShape(12.dp))
+                    .pointerInput(Unit) {
                         awaitEachGesture {
                             awaitFirstDown(requireUnconsumed = false)
-                            val wasAlreadyOn = talkMode != TalkMode.OFF
-                            val startMs = System.currentTimeMillis()
-                            val started = onTalkPressDown()
+                            val started = currentOnTalkPressDown()
                             if (started) {
                                 view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                             }
                             waitForUpOrCancellation()
-                            val elapsed = System.currentTimeMillis() - startMs
-                            if (wasAlreadyOn || started) {
-                                onTalkRelease(elapsed, wasAlreadyOn)
+                            if (started) {
+                                currentOnTalkRelease()
                             }
                         }
-                    },
-            )
-        }
-    }
-}
-
-private enum class AudioBtnState { OFF, ON, BUSY, TALKING, BLOCKED }
-
-@Composable
-private fun AudioActionTile(
-    visual: AudioBtnState,
-    icon: ImageVector,
-    title: String,
-    subtitle: String?,
-    onClick: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
-) {
-    val colors = LocalPcColors.current
-    val bg = when (visual) {
-        AudioBtnState.TALKING -> colors.bad
-        AudioBtnState.ON -> colors.okSoft
-        AudioBtnState.BLOCKED -> colors.warnSoft
-        else -> colors.surface
-    }
-    val iconBg = when (visual) {
-        AudioBtnState.TALKING -> colors.onMedia
-        AudioBtnState.ON -> colors.ok
-        else -> colors.surfaceRaised
-    }
-    val iconFg = when (visual) {
-        AudioBtnState.TALKING -> colors.bad
-        AudioBtnState.ON -> colors.onAccent
-        else -> colors.textDim
-    }
-    val titleColor = if (visual == AudioBtnState.TALKING) colors.onMedia else colors.text
-    val subColor = when (visual) {
-        AudioBtnState.TALKING -> colors.onMediaDim
-        AudioBtnState.ON -> colors.ok
-        else -> colors.textDim
-    }
-    val borderColor = if (visual == AudioBtnState.OFF || visual == AudioBtnState.BUSY) {
-        colors.hairline
-    } else {
-        Color.Transparent
-    }
-
-    Row(
-        modifier = modifier
-            .height(58.dp)
-            .clip(RoundedCornerShape(PcDimens.RadiusSm))
-            .background(bg)
-            .border(0.5.dp, borderColor, RoundedCornerShape(PcDimens.RadiusSm))
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(38.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(iconBg),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (visual == AudioBtnState.BUSY) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    strokeWidth = 2.dp,
-                    color = iconFg,
-                )
-            } else {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = iconFg,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                color = titleColor,
-                fontSize = 14.5.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (!subtitle.isNullOrBlank()) {
+                    }
+                    .padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            ) {
+                if (talkBusy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = talkIconTint,
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Filled.Mic,
+                        contentDescription = null,
+                        tint = talkIconTint,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
                 Text(
-                    text = subtitle,
-                    color = subColor,
-                    style = TabularNumStyle.copy(fontSize = 12.sp),
+                    text = talkLabel,
+                    color = talkTextColor,
+                    style = TabularNumStyle.copy(
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.Medium,
+                    ),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -1422,31 +1411,4 @@ private fun parseVideoDimensions(sizeStr: String?): Pair<Int, Int> {
     val w = match.groupValues[1].toIntOrNull() ?: return 16 to 9
     val h = match.groupValues[2].toIntOrNull() ?: return 16 to 9
     return if (w > 0 && h > 0) w to h else 16 to 9
-}
-
-private fun buildDetectorLine(det: DetectorState?, loaded: Boolean): String {
-    if (det == null) return if (loaded) "Detector offline" else "Connecting to detector…"
-    var bestTs = 0.0
-    var bestName: String? = null
-    for ((k, info) in det.cams) {
-        val ts = info.lastSeenTs ?: continue
-        if (ts > bestTs) {
-            bestTs = ts
-            bestName = CamsConfig.NAMES[k] ?: info.name ?: k
-        }
-    }
-    if (bestName == null && det.lastAlert != null && det.lastAlert.ts > 0.0) {
-        bestTs = det.lastAlert.ts
-        bestName = CamsConfig.NAMES[det.lastAlert.cam] ?: det.lastAlert.name ?: det.lastAlert.cam
-    }
-    if (bestName == null) return "No cats yet"
-    val mins = floor((System.currentTimeMillis() / 1000.0 - bestTs) / 60.0).toInt()
-    val agoStr = when {
-        mins < 1 -> "just now"
-        mins < 60 -> "$mins min ago"
-        mins < 24 * 60 -> "${mins / 60} h ago"
-        mins < 48 * 60 -> "yesterday"
-        else -> "${mins / (24 * 60)} days ago"
-    }
-    return "Cat seen $agoStr · $bestName"
 }

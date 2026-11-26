@@ -130,7 +130,6 @@ fun ChatMessageItem(
     onOpenUrl: (String) -> Unit,
     onLongPress: (ChatMessage) -> Unit,
     onReply: (ChatMessage) -> Unit,
-    onCopy: (String) -> Unit,
     onCopyCode: (String) -> Unit,
     onRetry: (ChatMessage) -> Unit,
     onSteer: (ChatMessage) -> Unit,
@@ -181,10 +180,8 @@ fun ChatMessageItem(
     val replyRef = remember(msg.replyTo) { msg.replyRef() }
     val attachments = msg.attachments.orEmpty()
     val hasText = msg.text.isNotBlank()
-    val isSettled = !msg.isPending && !msg.optimistic
     val canOpenActions = !msg.isPending && (msg.isUser || msg.isError || hasText || attachments.isNotEmpty())
     val canSwipeReply = remember(msg) { ChatLogic.isReplyableMessage(msg) }
-    val canShowCopy = !msg.isUser && isSettled && !msg.isError && hasText
 
     val triggerLongPress: (() -> Unit)? = if (canOpenActions) {
         { onLongPress(msg) }
@@ -465,14 +462,6 @@ fun ChatMessageItem(
                                 )
                             }
                         }
-                    }
-
-                    if (canShowCopy) {
-                        AssistantFooterActions(
-                            msgId = msg.id,
-                            text = msg.text,
-                            onCopy = onCopy,
-                        )
                     }
                 }
             }
@@ -902,7 +891,7 @@ private fun MarkdownTextBlock(
 ) {
     val colors = LocalPcColors.current
     val textColor = if (muted) colors.textDim else colors.text
-    val bulletColor = if (muted) colors.textFaint else colors.accent
+    val bulletColor = if (muted) colors.textFaint else colors.textDim
     val inlineCodeBg = if (isUser) colors.bg else colors.surfaceRaised
     val lineHeight = if (isUser) 21.sp else 22.5.sp
     val blocks = remember(text) { parseMarkdownBlocks(text) }
@@ -1800,47 +1789,6 @@ private fun LinkPreviewCard(
                         .border(0.5.dp, colors.hairline, RoundedCornerShape(8.dp)),
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun AssistantFooterActions(
-    msgId: String,
-    text: String,
-    onCopy: (String) -> Unit,
-) {
-    val colors = LocalPcColors.current
-    var justCopied by remember(msgId) { mutableStateOf(false) }
-
-    LaunchedEffect(justCopied) {
-        if (justCopied) {
-            delay(1500L)
-            justCopied = false
-        }
-    }
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier.padding(top = 2.dp),
-    ) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .size(28.dp)
-                .clip(CircleShape)
-                .clickable {
-                    onCopy(text)
-                    justCopied = true
-                },
-        ) {
-            Icon(
-                imageVector = if (justCopied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
-                contentDescription = if (justCopied) "Copied message" else "Copy message",
-                tint = if (justCopied) colors.accent else colors.textFaint,
-                modifier = Modifier.size(15.dp),
-            )
         }
     }
 }

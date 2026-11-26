@@ -25,6 +25,7 @@ import com.neekhar.pccontrol.core.theme.PcDimens
 import com.neekhar.pccontrol.core.ui.PcScreenHeader
 import com.neekhar.pccontrol.core.ui.PcSegmentOption
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
+import com.neekhar.pccontrol.core.ui.PcTone
 import kotlinx.coroutines.launch
 
 fun resolveSystemTab(raw: String?): SystemTab = when (raw?.lowercase()) {

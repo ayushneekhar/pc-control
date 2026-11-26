@@ -435,7 +435,7 @@ fun ChatScreen(
 
             // Floating jump-to-bottom pill with unread badge
             val showJumpPill = !isNearBottom && listItems.isNotEmpty()
-            AnimatedVisibility(
+            androidx.compose.animation.AnimatedVisibility(
                 visible = showJumpPill,
                 enter = fadeIn() + scaleIn(initialScale = 0.85f),
                 exit = fadeOut() + scaleOut(targetScale = 0.85f),
@@ -487,7 +487,7 @@ fun ChatScreen(
             }
 
             // Transient Copy / Save toast pill
-            AnimatedVisibility(
+            androidx.compose.animation.AnimatedVisibility(
                 visible = toastText != null,
                 enter = fadeIn(),
                 exit = fadeOut(),

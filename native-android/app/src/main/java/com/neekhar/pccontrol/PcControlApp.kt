@@ -145,7 +145,7 @@ class AppContainer(
                 argv = request.argv,
                 timeout = request.timeout,
                 reason = request.reason,
-                snapSha256 = request.snapSha256,
+                snapSha256 = request.snapSha256.orEmpty(),
             )
             return when (val out = biometricSigner.approveRoot(activity, rootDecision, approvalReq)) {
                 is RootSignOutcome.Signed -> SignOutcome.Signed(out.signatureBase64)
@@ -258,10 +258,9 @@ class AppContainer(
                     .getOrNull()?.release
                     ?: ApkRelease(
                         versionName = "latest",
-                        versionCode = currentVersionCode().toLong() + 1L,
+                        versionCode = currentVersionCode() + 1,
                         sha256 = "",
                         size = 0L,
-                        built = 0L,
                         downloadUrl = apkUrl,
                     )
                 val targetUrl = release.downloadUrl?.takeIf { it.isNotBlank() } ?: apkUrl
@@ -272,7 +271,7 @@ class AppContainer(
                             runCatching { appContext.startActivity(launch.settingsIntent) }
                         }
                         is InstallLaunchResult.Failed -> {
-                            Log.w("PcControlApp", "APK install launch failed: ${launch.reason}")
+                            Log.w("PcControlApp", "APK install launch failed: ${launch.message}")
                         }
                     }
                 }.onFailure { err ->

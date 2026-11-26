@@ -77,7 +77,7 @@ import kotlin.math.floor
 import kotlin.math.roundToInt
 
 /**
- * Music tab (`cam-music`, `/music/api/*`): YouTube URL or search play on the laptop speakers,
+ * Music tab (`cam-music`, `/music/api/...`): YouTube URL or search play on the laptop speakers,
  * now-playing transport (pause/resume/stop/loop), debounced speaker volume & mute control,
  * up-next queue management, and recent tracks history.
  * Ported from `src/screens/cams/MusicTab.tsx`.

@@ -926,7 +926,7 @@ fun PcConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
     confirmLabel: String = "Confirm",
-    dismissLabel: String = "Cancel",
+    dismissLabel: String? = "Cancel",
     confirmVariant: PcButtonVariant = PcButtonVariant.Primary,
     confirmBusy: Boolean = false,
 ) {
@@ -961,13 +961,15 @@ fun PcConfirmDialog(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
             ) {
-                PcButton(
-                    label = dismissLabel,
-                    onClick = onDismiss,
-                    variant = PcButtonVariant.Subtle,
-                    enabled = !confirmBusy,
-                    modifier = Modifier.weight(1f),
-                )
+                if (!dismissLabel.isNullOrBlank()) {
+                    PcButton(
+                        label = dismissLabel,
+                        onClick = onDismiss,
+                        variant = PcButtonVariant.Subtle,
+                        enabled = !confirmBusy,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
                 PcButton(
                     label = confirmLabel,
                     onClick = onConfirm,

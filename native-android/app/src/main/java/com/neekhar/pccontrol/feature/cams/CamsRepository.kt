@@ -31,7 +31,7 @@ private data class PtzPresetsEnvelope(val presets: List<PtzPreset> = emptyList()
  * - `/detect/state`, `/detect/toggle`, `/detect/sightings`, `/pc/api/catdetect/snaps`
  * - `/ptz/move`, `/ptz/stop`, `/ptz/preset`
  * - `/rec/<cam>/index.json`
- * - `/music/api/*`
+ * - `/music/api/...`
  */
 class CamsRepository(
     val apiClient: PcApiClient,

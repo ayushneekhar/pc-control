@@ -38,7 +38,7 @@ sealed interface ChatEventStreamItem {
 }
 
 /**
- * Data layer for PC Control Agent Chat (`/pc/api/chat/*`).
+ * Data layer for PC Control Agent Chat (`/pc/api/chat/...`).
  * Handles HTTP requests, SSE live streaming with exponential backoff, attachment uploads,
  * SSRF-safe OG link previews (with bounded TTL LRU cache), model/effort sync, and [LocalCache].
  */

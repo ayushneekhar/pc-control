@@ -3777,6 +3777,27 @@ def kbd_lock_set(body, run_fn=None):
     return 200, kbd_lock_status(run_fn=run_fn)
 
 
+SEERR_NATIVE_FILTERS = (
+    "all", "pending", "approved", "processing", "available",
+    "unavailable", "failed", "deleted", "completed",
+)
+SEERR_LOCAL_FILTERS = ("partial", "grabbing", "requested", "declined", "blocklisted")
+SEERR_ALL_FILTERS = set(SEERR_NATIVE_FILTERS) | set(SEERR_LOCAL_FILTERS)
+_SEERR_CERT_COUNTRIES = ("US", "IN", "GB", "CA", "AU")
+_SEERR_MOVIE_CREW_JOBS = (
+    "Director", "Screenplay", "Writer", "Story",
+    "Director of Photography", "Original Music Composer",
+)
+_SEERR_TV_CREW_JOBS = ("Creator", "Showrunner", "Executive Producer", "Director")
+_SEERR_REQ_STATUS_MAP = {
+    1: "pending",
+    2: "approved",
+    3: "declined",
+    4: "failed",
+    5: "completed",
+}
+
+
 class SeerrClient:
     """Thin authenticated proxy to the local Seerr API + IMDb/TMDB/Letterboxd link resolver."""
 
@@ -3784,7 +3805,7 @@ class SeerrClient:
         self.url = url.rstrip("/")
         self.settings_file = settings_file
         self._lock = threading.Lock()
-        self._meta_cache = {}  # (media_type, tmdb_id) -> {title, year, poster}
+        self._meta_cache = {}  # (media_type, tmdb_id) -> {title, year, poster, collection}
 
     def _api_key(self):
         with open(self.settings_file) as f:
@@ -3838,6 +3859,22 @@ class SeerrClient:
         m = re.match(r"^(\d{4})", str(date_str or ""))
         return int(m.group(1)) if m else None
 
+    @staticmethod
+    def _vote_avg(val):
+        try:
+            f = float(val)
+            return round(f, 1) if f > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _pos_int(val):
+        try:
+            n = int(val)
+            return n if n > 0 else None
+        except (TypeError, ValueError):
+            return None
+
     def _extract_collection(self, d):
         col = d.get("collection") or d.get("belongs_to_collection")
         if not isinstance(col, dict):
@@ -3874,7 +3911,7 @@ class SeerrClient:
             return None
         title = x.get("title") or x.get("name") or x.get("originalTitle") or x.get("originalName") or "Untitled"
         year = self._year(x.get("releaseDate") or x.get("firstAirDate"))
-        return {
+        item = {
             "id": int(x.get("id") or 0),
             "mediaType": mtype,
             "title": clip(title, 160),
@@ -3883,6 +3920,226 @@ class SeerrClient:
             "overview": clip(x.get("overview") or "", 240),
             "status": self._media_status(x.get("mediaInfo")),
         }
+        va = self._vote_avg(x.get("voteAverage"))
+        if va is not None:
+            item["voteAverage"] = va
+        return item
+
+    @staticmethod
+    def _extract_certification(d, media_type):
+        if media_type == "movie":
+            results = (d.get("releases") or {}).get("results") or []
+            by_country = {}
+            for entry in results:
+                if not isinstance(entry, dict):
+                    continue
+                cc = str(entry.get("iso_3166_1") or "").upper()
+                rdates = entry.get("release_dates") or []
+                theatrical = None
+                fallback = None
+                for rd in rdates:
+                    if not isinstance(rd, dict):
+                        continue
+                    cert = str(rd.get("certification") or "").strip()
+                    if not cert:
+                        continue
+                    if rd.get("type") == 3 and theatrical is None:
+                        theatrical = cert
+                    if fallback is None:
+                        fallback = cert
+                chosen = theatrical or fallback
+                if chosen and cc not in by_country:
+                    by_country[cc] = chosen
+            for cc in _SEERR_CERT_COUNTRIES:
+                if cc in by_country:
+                    return by_country[cc]
+            return next(iter(by_country.values()), None)
+        results = (d.get("contentRatings") or {}).get("results") or []
+        by_country = {}
+        for entry in results:
+            if not isinstance(entry, dict):
+                continue
+            cc = str(entry.get("iso_3166_1") or "").upper()
+            rating = str(entry.get("rating") or "").strip()
+            if rating and cc not in by_country:
+                by_country[cc] = rating
+        for cc in _SEERR_CERT_COUNTRIES:
+            if cc in by_country:
+                return by_country[cc]
+        return next(iter(by_country.values()), None)
+
+    def _fetch_remote_ratings(self, media_type, tid):
+        if media_type == "movie":
+            try:
+                return self._req("GET", f"/movie/{tid}/ratingscombined", timeout=6)
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    return None
+                try:
+                    return self._req("GET", f"/movie/{tid}/ratings", timeout=6)
+                except Exception:
+                    return None
+            except Exception:
+                return None
+        try:
+            return self._req("GET", f"/tv/{tid}/ratings", timeout=6)
+        except Exception:
+            return None
+
+    def _build_ratings(self, d, remote):
+        ratings = {}
+        va = self._vote_avg(d.get("voteAverage"))
+        vc = self._pos_int(d.get("voteCount"))
+        if va is not None:
+            ratings["tmdb"] = {"score": va, "count": vc or 0}
+        if isinstance(remote, dict):
+            rt_raw = remote.get("rt") if isinstance(remote.get("rt"), dict) else (
+                remote if ("criticsScore" in remote or "audienceScore" in remote) else None
+            )
+            if isinstance(rt_raw, dict):
+                cs = rt_raw.get("criticsScore")
+                aus = rt_raw.get("audienceScore")
+                if cs is not None or aus is not None:
+                    rt_out = {}
+                    if cs is not None:
+                        try:
+                            rt_out["criticsScore"] = int(round(float(cs)))
+                        except (TypeError, ValueError):
+                            pass
+                    if rt_raw.get("criticsRating"):
+                        rt_out["criticsRating"] = str(rt_raw["criticsRating"])
+                    if aus is not None:
+                        try:
+                            rt_out["audienceScore"] = int(round(float(aus)))
+                        except (TypeError, ValueError):
+                            pass
+                    if rt_raw.get("audienceRating"):
+                        rt_out["audienceRating"] = str(rt_raw["audienceRating"])
+                    if rt_raw.get("url"):
+                        rt_out["url"] = str(rt_raw["url"])
+                    if rt_out:
+                        ratings["rt"] = rt_out
+            imdb_raw = remote.get("imdb")
+            if isinstance(imdb_raw, dict) and imdb_raw.get("criticsScore") is not None:
+                sc = self._vote_avg(imdb_raw.get("criticsScore"))
+                if sc is not None:
+                    imdb_out = {"score": sc}
+                    cnt = self._pos_int(imdb_raw.get("criticsScoreCount"))
+                    if cnt is not None:
+                        imdb_out["count"] = cnt
+                    if imdb_raw.get("url"):
+                        imdb_out["url"] = str(imdb_raw["url"])
+                    ratings["imdb"] = imdb_out
+        return ratings
+
+    def _extract_cast_and_crew(self, d, media_type):
+        credits_raw = d.get("credits") if isinstance(d.get("credits"), dict) else {}
+        cast = []
+        seen_cast = set()
+        for c in credits_raw.get("cast") or []:
+            if not isinstance(c, dict):
+                continue
+            pid = self._pos_int(c.get("id"))
+            name = str(c.get("name") or "").strip()
+            if not pid or not name or pid in seen_cast:
+                continue
+            seen_cast.add(pid)
+            cast.append({
+                "id": pid,
+                "name": clip(name, 100),
+                "character": clip(str(c.get("character") or "").strip(), 120),
+                "profilePath": self._poster(c.get("profilePath") or c.get("profile_path"), "w185"),
+            })
+            if len(cast) >= 20:
+                break
+
+        priority_jobs = _SEERR_MOVIE_CREW_JOBS if media_type == "movie" else _SEERR_TV_CREW_JOBS
+        job_rank = {job: idx for idx, job in enumerate(priority_jobs)}
+        crew_by_id = {}
+
+        def _add_crew(pid, name, job, dept, ppath, rank):
+            if not pid or not name:
+                return
+            if pid not in crew_by_id:
+                crew_by_id[pid] = {
+                    "id": pid,
+                    "name": clip(name, 100),
+                    "jobs": [job],
+                    "department": dept,
+                    "profilePath": self._poster(ppath, "w185"),
+                    "rank": rank,
+                }
+            else:
+                entry = crew_by_id[pid]
+                if job not in entry["jobs"]:
+                    entry["jobs"].append(job)
+                if rank < entry["rank"]:
+                    entry["rank"] = rank
+                if not entry["profilePath"] and ppath:
+                    entry["profilePath"] = self._poster(ppath, "w185")
+
+        if media_type == "tv":
+            for creator in d.get("createdBy") or []:
+                if not isinstance(creator, dict):
+                    continue
+                _add_crew(
+                    self._pos_int(creator.get("id")),
+                    str(creator.get("name") or "").strip(),
+                    "Creator",
+                    "Directing",
+                    creator.get("profilePath") or creator.get("profile_path"),
+                    0,
+                )
+
+        for c in credits_raw.get("crew") or []:
+            if not isinstance(c, dict):
+                continue
+            job = str(c.get("job") or "").strip()
+            if job not in job_rank:
+                continue
+            _add_crew(
+                self._pos_int(c.get("id")),
+                str(c.get("name") or "").strip(),
+                job,
+                str(c.get("department") or "").strip(),
+                c.get("profilePath") or c.get("profile_path"),
+                job_rank[job],
+            )
+
+        sorted_crew = sorted(crew_by_id.values(), key=lambda x: x["rank"])[:8]
+        crew = [
+            {
+                "id": entry["id"],
+                "name": entry["name"],
+                "job": clip(", ".join(sorted(entry["jobs"], key=lambda j: job_rank.get(j, 99))[:3]), 100),
+                "department": entry["department"],
+                "profilePath": entry["profilePath"],
+            }
+            for entry in sorted_crew
+        ]
+        return cast, crew
+
+    def _fetch_recommendations(self, media_type, tid):
+        try:
+            data = self._req("GET", f"/{media_type}/{tid}/recommendations?page=1", timeout=6)
+        except Exception:
+            return []
+        out = []
+        seen = set()
+        for x in (data.get("results") or []):
+            if not isinstance(x, dict):
+                continue
+            item = self._normalize_item(x, forced_type=x.get("mediaType") or media_type)
+            if not item or not item["id"]:
+                continue
+            key = (item["mediaType"], item["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+            if len(out) >= 12:
+                break
+        return out
 
     def _discover_collections(self, query, items):
         seen_ids = {item["id"] for item in items if item.get("mediaType") == "collection"}
@@ -3968,15 +4225,111 @@ class SeerrClient:
                 raise ValueError("bad id")
         except (TypeError, ValueError):
             return 400, {"error": "invalid tmdb id"}
-        try:
-            d = self._req("GET", f"/{media_type}/{tid}")
-        except urllib.error.HTTPError as e:
-            return (404 if e.code == 404 else 502), {"error": f"Seerr HTTP {e.code}"}
-        except (OSError, ValueError) as e:
-            return 502, {"error": clip(f"Seerr details failed: {e}", 240)}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            f_detail = pool.submit(self._req, "GET", f"/{media_type}/{tid}")
+            f_ratings = pool.submit(self._fetch_remote_ratings, media_type, tid)
+            f_recs = pool.submit(self._fetch_recommendations, media_type, tid)
+            try:
+                d = f_detail.result()
+            except urllib.error.HTTPError as e:
+                return (404 if e.code == 404 else 502), {"error": f"Seerr HTTP {e.code}"}
+            except (OSError, ValueError) as e:
+                return 502, {"error": clip(f"Seerr details failed: {e}", 240)}
+            remote_ratings = f_ratings.result()
+            recommendations = f_recs.result()
+
+        if not isinstance(d, dict):
+            return 404, {"error": "not found"}
         item = self._normalize_item(d, forced_type=media_type)
         if not item:
             return 404, {"error": "not found"}
+
+        # Full overview + rich metadata
+        item["overview"] = clip(d.get("overview") or "", 4000)
+        item["backdrop"] = self._poster(d.get("backdropPath"), "w780")
+        orig = str(d.get("originalTitle") or d.get("originalName") or "").strip()
+        item["originalTitle"] = clip(orig, 160) if orig else None
+        tagline = str(d.get("tagline") or "").strip()
+        item["tagline"] = clip(tagline, 300) if tagline else None
+        item["releaseDate"] = (d.get("releaseDate") or d.get("firstAirDate") or None)
+        if media_type == "tv":
+            item["lastAirDate"] = d.get("lastAirDate") or None
+        if media_type == "movie":
+            item["runtime"] = self._pos_int(d.get("runtime"))
+        else:
+            ert = [self._pos_int(x) for x in (d.get("episodeRunTime") or [])]
+            ert = [x for x in ert if x]
+            last_ep_rt = self._pos_int((d.get("lastEpisodeToAir") or {}).get("runtime")) if isinstance(d.get("lastEpisodeToAir"), dict) else None
+            item["runtime"] = ert[0] if ert else last_ep_rt
+        item["mediaStatus"] = str(d.get("status") or "").strip() or None
+        item["genres"] = [
+            clip(g["name"], 60)
+            for g in (d.get("genres") or [])
+            if isinstance(g, dict) and g.get("name")
+        ]
+        item["certification"] = self._extract_certification(d, media_type)
+        item["spokenLanguages"] = [
+            clip(str(lang.get("english_name") or lang.get("name")), 60)
+            for lang in (d.get("spokenLanguages") or [])
+            if isinstance(lang, dict) and (lang.get("english_name") or lang.get("name"))
+        ][:6]
+        item["countries"] = [
+            clip(str(c.get("name") or c.get("iso_3166_1")), 60)
+            for c in (d.get("productionCountries") or [])
+            if isinstance(c, dict) and (c.get("name") or c.get("iso_3166_1"))
+        ][:6]
+        networks = [
+            clip(str(n.get("name")), 80)
+            for n in (d.get("networks") or [])
+            if isinstance(n, dict) and n.get("name")
+        ][:5]
+        companies = [
+            clip(str(c.get("name")), 80)
+            for c in (d.get("productionCompanies") or [])
+            if isinstance(c, dict) and c.get("name")
+        ][:5]
+        item["studios"] = companies if media_type == "movie" else (networks or companies)
+        if media_type == "tv":
+            item["networks"] = networks
+            item["numberOfSeasons"] = self._pos_int(d.get("numberOfSeasons"))
+            item["numberOfEpisodes"] = self._pos_int(d.get("numberOfEpisodes"))
+        else:
+            item["budget"] = self._pos_int(d.get("budget"))
+            item["revenue"] = self._pos_int(d.get("revenue"))
+
+        imdb_id = d.get("imdbId") or (d.get("externalIds") or {}).get("imdbId")
+        item["imdbId"] = str(imdb_id).strip() if imdb_id else None
+        media_info = d.get("mediaInfo") if isinstance(d.get("mediaInfo"), dict) else {}
+        item["mediaUrl"] = media_info.get("mediaUrl") or None
+        item["voteAverage"] = self._vote_avg(d.get("voteAverage"))
+        item["voteCount"] = self._pos_int(d.get("voteCount"))
+        item["ratings"] = self._build_ratings(d, remote_ratings)
+        cast, crew = self._extract_cast_and_crew(d, media_type)
+        item["cast"] = cast
+        item["crew"] = crew
+        item["recommendations"] = recommendations
+
+        media_reqs = []
+        for req in media_info.get("requests") or []:
+            if not isinstance(req, dict):
+                continue
+            req_by = req.get("requestedBy") or {}
+            who = req_by.get("displayName") or req_by.get("username") or req_by.get("jellyfinUsername") or ""
+            media_reqs.append({
+                "id": int(req.get("id") or 0),
+                "requestStatus": _SEERR_REQ_STATUS_MAP.get(req.get("status"), "unknown"),
+                "requestedBy": clip(who, 60),
+                "createdAt": req.get("createdAt") or "",
+                "seasons": [
+                    s.get("seasonNumber")
+                    for s in (req.get("seasons") or [])
+                    if isinstance(s, dict) and isinstance(s.get("seasonNumber"), int)
+                ],
+            })
+        if media_reqs:
+            item["requests"] = media_reqs
+
         col = self._extract_collection(d) if media_type == "movie" else None
         if col:
             item["collection"] = col
@@ -3987,7 +4340,7 @@ class SeerrClient:
         if media_type == "tv":
             info_seasons = {
                 s.get("seasonNumber"): s.get("status")
-                for s in ((d.get("mediaInfo") or {}).get("seasons") or [])
+                for s in (media_info.get("seasons") or [])
                 if isinstance(s, dict)
             }
             seasons = []
@@ -4006,14 +4359,191 @@ class SeerrClient:
                     "requested" if st_code in (2, 3) else
                     "none"
                 )
-                seasons.append({
+                season_obj = {
                     "seasonNumber": sn,
                     "name": clip(s.get("name") or f"Season {sn}", 80),
                     "episodeCount": int(s.get("episodeCount") or 0),
                     "status": s_status,
-                })
+                }
+                if s.get("airDate"):
+                    season_obj["airDate"] = s.get("airDate")
+                if s.get("posterPath"):
+                    season_obj["poster"] = self._poster(s.get("posterPath"))
+                if s.get("overview"):
+                    season_obj["overview"] = clip(s.get("overview"), 400)
+                seasons.append(season_obj)
             item["seasons"] = seasons
         return 200, item
+
+    def person(self, person_id):
+        try:
+            pid = int(person_id)
+            if pid <= 0:
+                raise ValueError("bad id")
+        except (TypeError, ValueError):
+            return 400, {"error": "invalid person id"}
+
+        def _fetch_credits():
+            try:
+                return self._req("GET", f"/person/{pid}/combined_credits", timeout=10)
+            except Exception:
+                return {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            f_person = pool.submit(self._req, "GET", f"/person/{pid}", None, 10)
+            f_credits = pool.submit(_fetch_credits)
+            try:
+                p = f_person.result()
+            except urllib.error.HTTPError as e:
+                return (404 if e.code == 404 else 502), {"error": f"Seerr HTTP {e.code}"}
+            except (OSError, ValueError) as e:
+                return 502, {"error": clip(f"Seerr person failed: {e}", 240)}
+            raw_credits = f_credits.result()
+
+        if not isinstance(p, dict) or not p.get("id"):
+            return 404, {"error": "not found"}
+
+        known_dept = str(p.get("knownForDepartment") or "").strip() or None
+        merged = {}
+
+        def _ingest(entries, is_cast):
+            for c in entries or []:
+                if not isinstance(c, dict):
+                    continue
+                mtype = c.get("mediaType")
+                if mtype not in ("movie", "tv"):
+                    continue
+                mid = self._pos_int(c.get("id"))
+                if not mid:
+                    continue
+                title = c.get("title") or c.get("name") or c.get("originalTitle") or c.get("originalName") or ""
+                if not title:
+                    continue
+                rel = str(c.get("releaseDate") or c.get("firstAirDate") or "").strip() or None
+                key = (mtype, mid)
+                entry = merged.get(key)
+                if entry is None:
+                    entry = {
+                        "id": mid,
+                        "mediaType": mtype,
+                        "title": clip(title, 160),
+                        "releaseDate": rel,
+                        "year": self._year(rel),
+                        "poster": self._poster(c.get("posterPath")),
+                        "characters": [],
+                        "jobs": [],
+                        "isCast": False,
+                        "isCrew": False,
+                        "voteAverage": self._vote_avg(c.get("voteAverage")),
+                        "voteCount": self._pos_int(c.get("voteCount")) or 0,
+                        "popularity": float(c.get("popularity") or 0.0),
+                        "status": self._media_status(c.get("mediaInfo")),
+                        "episodeCount": self._pos_int(c.get("episodeCount")),
+                    }
+                    merged[key] = entry
+                else:
+                    if not entry["poster"] and c.get("posterPath"):
+                        entry["poster"] = self._poster(c.get("posterPath"))
+                    if not entry["releaseDate"] and rel:
+                        entry["releaseDate"] = rel
+                        entry["year"] = self._year(rel)
+                    if entry["status"] == "none" and c.get("mediaInfo"):
+                        entry["status"] = self._media_status(c.get("mediaInfo"))
+                    vc = self._pos_int(c.get("voteCount")) or 0
+                    if vc > entry["voteCount"]:
+                        entry["voteCount"] = vc
+                        entry["voteAverage"] = self._vote_avg(c.get("voteAverage"))
+                    pop = float(c.get("popularity") or 0.0)
+                    if pop > entry["popularity"]:
+                        entry["popularity"] = pop
+                if is_cast:
+                    entry["isCast"] = True
+                    ch = str(c.get("character") or "").strip()
+                    if ch and ch not in entry["characters"]:
+                        entry["characters"].append(ch)
+                else:
+                    entry["isCrew"] = True
+                    jb = str(c.get("job") or "").strip()
+                    if jb and jb not in entry["jobs"]:
+                        entry["jobs"].append(jb)
+
+        if isinstance(raw_credits, dict):
+            _ingest(raw_credits.get("cast"), True)
+            _ingest(raw_credits.get("crew"), False)
+
+        credits_list = []
+        cast_count = 0
+        crew_count = 0
+        _job_prio = {
+            "Director": 0, "Creator": 1, "Showrunner": 2, "Writer": 3,
+            "Screenplay": 4, "Story": 5, "Executive Producer": 6, "Producer": 7,
+            "Director of Photography": 8, "Original Music Composer": 9,
+        }
+        _self_re = re.compile(r"^(?:self|himself|herself)(?:\b|\s|[-–(])", re.I)
+        for entry in merged.values():
+            if entry["isCast"]:
+                cast_count += 1
+            if entry["isCrew"]:
+                crew_count += 1
+            sorted_jobs = sorted(entry["jobs"], key=lambda j: (_job_prio.get(j, 50), j))
+            character = clip(", ".join(entry["characters"][:2]), 120) or None
+            job = clip(", ".join(sorted_jobs[:2]), 120) or None
+            if known_dept and known_dept != "Acting" and job:
+                role = job
+            else:
+                role = character or job or ""
+            is_self_tv = (
+                entry["isCast"]
+                and not entry["isCrew"]
+                and entry["mediaType"] == "tv"
+                and (not entry["characters"] or all(_self_re.match(ch) for ch in entry["characters"]))
+            )
+            notability = entry["popularity"] + min(entry["voteCount"], 25000) / 250.0
+            sort_key = (
+                0 if is_self_tv else 1,
+                1 if entry["poster"] else 0,
+                round(notability, 2),
+                entry["releaseDate"] or "",
+            )
+            item_out = {
+                "id": entry["id"],
+                "mediaType": entry["mediaType"],
+                "title": entry["title"],
+                "year": entry["year"],
+                "releaseDate": entry["releaseDate"],
+                "poster": entry["poster"],
+                "character": character,
+                "job": job,
+                "role": role,
+                "isCast": entry["isCast"],
+                "isCrew": entry["isCrew"],
+                "voteAverage": entry["voteAverage"],
+                "voteCount": entry["voteCount"] or None,
+                "popularity": round(entry["popularity"], 2),
+                "status": entry["status"],
+            }
+            if entry["episodeCount"]:
+                item_out["episodeCount"] = entry["episodeCount"]
+            credits_list.append((sort_key, item_out))
+
+        credits_list.sort(key=lambda pair: pair[0], reverse=True)
+        credits_out = [item for _, item in credits_list[:120]]
+
+        return 200, {
+            "id": int(p.get("id") or pid),
+            "name": clip(str(p.get("name") or f"Person #{pid}"), 120),
+            "biography": clip(str(p.get("biography") or "").strip(), 6000),
+            "birthday": p.get("birthday") or None,
+            "deathday": p.get("deathday") or None,
+            "placeOfBirth": clip(str(p.get("placeOfBirth") or "").strip(), 160) or None,
+            "knownForDepartment": known_dept,
+            "profilePath": self._poster(p.get("profilePath") or p.get("profile_path"), "w300"),
+            "imdbId": str(p.get("imdbId")).strip() if p.get("imdbId") else None,
+            "alsoKnownAs": [clip(str(a), 100) for a in (p.get("alsoKnownAs") or []) if a][:6],
+            "credits": credits_out,
+            "castCount": cast_count,
+            "crewCount": crew_count,
+        }
 
     def collection(self, collection_id):
         try:
@@ -4055,50 +4585,96 @@ class SeerrClient:
         with self._lock:
             if key in self._meta_cache:
                 return self._meta_cache[key]
-        code, d = self.details(media_type, tmdb_id)
-        if code == 200:
-            return {
-                "title": d["title"], "year": d["year"], "poster": d["poster"],
-                "collection": d.get("collection"),
-            }
+        try:
+            d = self._req("GET", f"/{media_type}/{int(tmdb_id)}", timeout=8)
+            item = self._normalize_item(d, forced_type=media_type) if isinstance(d, dict) else None
+            if item:
+                col = self._extract_collection(d) if media_type == "movie" else None
+                meta = {
+                    "title": item["title"], "year": item["year"], "poster": item["poster"],
+                    "collection": col,
+                }
+                with self._lock:
+                    self._meta_cache[key] = meta
+                return meta
+        except Exception:
+            pass
         return {"title": f"TMDB #{tmdb_id}", "year": None, "poster": None, "collection": None}
 
-    def requests(self, take=25):
+    @staticmethod
+    def _normalize_request_status(r, media):
+        m_st = media.get("status")
+        dl = media.get("downloadStatus") or []
+        r_st = r.get("status")
+        if m_st == 5:
+            return "available"
+        if m_st == 7:
+            return "deleted"
+        if m_st == 6:
+            return "blocklisted"
+        if dl:
+            return "grabbing"
+        if m_st == 4:
+            return "partial"
+        if r_st == 3:
+            return "declined"
+        if r_st == 4:
+            return "failed"
+        if r_st == 1:
+            return "pending"
+        return "requested"
+
+    def requests(self, take=50, status_filter="all"):
+        flt = str(status_filter or "all").strip().lower() or "all"
+        if flt not in SEERR_ALL_FILTERS:
+            return 400, {"error": f"invalid filter: {flt}"}
+        take = max(1, min(100, int(take or 50)))
+        if flt == "all":
+            qs = f"take={take}&sort=added"
+        elif flt in SEERR_NATIVE_FILTERS:
+            qs = f"take={take}&sort=added&filter={urllib.parse.quote(flt)}"
+        else:
+            qs = f"take={max(take, 100)}&sort=added"
         try:
-            data = self._req("GET", f"/request?take={take}&sort=added")
+            data = self._req("GET", f"/request?{qs}")
         except (OSError, ValueError) as e:
             return 502, {"error": clip(f"Seerr requests failed: {e}", 240)}
+
+        raw_results = [r for r in (data.get("results") or []) if isinstance(r, dict)]
+        # Warm uncached metadata in parallel so first load stays fast
+        to_warm = []
+        seen_warm = set()
+        with self._lock:
+            cached_keys = set(self._meta_cache.keys())
+        for r in raw_results:
+            media = r.get("media") or {}
+            mtype = r.get("type") or media.get("mediaType")
+            tid = media.get("tmdbId")
+            if mtype in ("movie", "tv") and isinstance(tid, int):
+                k = (mtype, tid)
+                if k not in cached_keys and k not in seen_warm:
+                    seen_warm.add(k)
+                    to_warm.append(k)
+        if len(to_warm) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+                list(pool.map(lambda pair: self._meta(pair[0], pair[1]), to_warm))
+
         out = []
-        for r in data.get("results") or []:
-            if not isinstance(r, dict):
-                continue
+        for r in raw_results:
             media = r.get("media") or {}
             mtype = r.get("type") or media.get("mediaType")
             tid = media.get("tmdbId")
             if mtype not in ("movie", "tv") or not isinstance(tid, int):
                 continue
             meta = self._meta(mtype, tid)
-            m_st = media.get("status")
-            dl = media.get("downloadStatus") or []
-            if m_st == 5:
-                status = "available"
-            elif m_st == 7:
-                status = "deleted"
-            elif m_st == 6:
-                status = "blocklisted"
-            elif dl:
-                status = "grabbing"
-            elif m_st == 4:
-                status = "partial"
-            elif r.get("status") == 3:
-                status = "declined"
-            elif r.get("status") == 4:
-                status = "failed"
-            else:
-                status = "requested"
+            status = self._normalize_request_status(r, media)
             req_by = r.get("requestedBy") or {}
             who = req_by.get("displayName") or req_by.get("username") or req_by.get("jellyfinUsername") or ""
-            seasons = [s.get("seasonNumber") for s in (r.get("seasons") or []) if isinstance(s, dict) and isinstance(s.get("seasonNumber"), int)]
+            seasons = [
+                s.get("seasonNumber")
+                for s in (r.get("seasons") or [])
+                if isinstance(s, dict) and isinstance(s.get("seasonNumber"), int)
+            ]
             out.append({
                 "id": int(r.get("id") or 0),
                 "tmdbId": tid,
@@ -4107,11 +4683,46 @@ class SeerrClient:
                 "year": meta["year"],
                 "poster": meta["poster"],
                 "status": status,
+                "requestStatus": _SEERR_REQ_STATUS_MAP.get(r.get("status"), "unknown"),
                 "seasons": seasons,
                 "requestedBy": clip(who, 60),
                 "createdAt": r.get("createdAt") or "",
             })
-        return 200, {"requests": out}
+
+        counts = None
+        if flt == "all":
+            page_info = data.get("pageInfo") if isinstance(data.get("pageInfo"), dict) else {}
+            total = int(page_info.get("results")) if isinstance(page_info.get("results"), int) else len(out)
+            counts = {
+                "all": total,
+                "pending": 0,
+                "processing": 0,
+                "available": 0,
+                "partial": 0,
+                "failed": 0,
+                "deleted": 0,
+                "declined": 0,
+                "blocklisted": 0,
+                "grabbing": 0,
+                "requested": 0,
+            }
+            for item in out:
+                st = item["status"]
+                if st in counts:
+                    counts[st] += 1
+                if st in ("requested", "grabbing"):
+                    counts["processing"] += 1
+        elif flt in SEERR_LOCAL_FILTERS:
+            out = [item for item in out if item["status"] == flt]
+            total = len(out)
+        else:
+            page_info = data.get("pageInfo") if isinstance(data.get("pageInfo"), dict) else {}
+            total = int(page_info.get("results")) if isinstance(page_info.get("results"), int) else len(out)
+
+        res = {"requests": out, "filter": flt, "total": total}
+        if counts is not None:
+            res["counts"] = counts
+        return 200, res
 
     def create_request(self, body):
         mtype = str(body.get("mediaType") or "").strip().lower()
@@ -4265,8 +4876,16 @@ def route_round4_get(path, qs):
         return SEERR.details(qs.get("type", [""])[0], qs.get("id", [""])[0])
     if path == "/api/seerr/collection":
         return SEERR.collection(qs.get("id", [""])[0])
+    if path == "/api/seerr/person":
+        return SEERR.person(qs.get("id", [""])[0])
     if path == "/api/seerr/requests":
-        return SEERR.requests()
+        flt = (qs.get("filter") or ["all"])[0]
+        take_raw = (qs.get("take") or [""])[0]
+        try:
+            take = int(take_raw) if take_raw else 50
+        except ValueError:
+            return 400, {"error": "invalid take"}
+        return SEERR.requests(take=take, status_filter=flt)
     return None
 
 

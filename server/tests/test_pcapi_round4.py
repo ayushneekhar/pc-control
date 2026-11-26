@@ -204,8 +204,63 @@ class FakeSeerrAndT3Handler(BaseHTTPRequestHandler):
                 {"id": 999, "mediaType": "person", "name": "Nolan"},
             ]})
         if self.path == "/api/v1/movie/27205":
-            return self.reply(200, {"id": 27205, "title": "Inception", "releaseDate": "2010-07-15",
-                                    "posterPath": "/inc.jpg", "overview": "Dreams", "mediaInfo": {"status": 5}})
+            return self.reply(200, {
+                "id": 27205,
+                "title": "Inception",
+                "originalTitle": "Inception",
+                "tagline": "Your mind is the scene of the crime.",
+                "releaseDate": "2010-07-15",
+                "runtime": 148,
+                "status": "Released",
+                "backdropPath": "/inc-bg.jpg",
+                "posterPath": "/inc.jpg",
+                "overview": "Dreams " * 60,
+                "voteAverage": 8.372,
+                "voteCount": 40829,
+                "budget": 160000000,
+                "revenue": 839030630,
+                "imdbId": "tt1375666",
+                "genres": [{"id": 28, "name": "Action"}, {"id": 878, "name": "Science Fiction"}],
+                "spokenLanguages": [{"english_name": "English", "name": "English"}, {"english_name": "French", "name": "français"}],
+                "productionCountries": [{"iso_3166_1": "US", "name": "United States"}],
+                "productionCompanies": [{"id": 174, "name": "Warner Bros. Pictures"}],
+                "releases": {
+                    "results": [
+                        {"iso_3166_1": "GB", "release_dates": [{"certification": "12A", "type": 3}]},
+                        {"iso_3166_1": "US", "release_dates": [{"certification": "", "type": 1}, {"certification": "PG-13", "type": 3}]},
+                    ]
+                },
+                "credits": {
+                    "cast": [
+                        {"id": 6193, "name": "Leonardo DiCaprio", "character": "Dom Cobb", "profilePath": "/leo.jpg"},
+                        {"id": 6193, "name": "Leonardo DiCaprio", "character": "Duplicate", "profilePath": "/leo.jpg"},
+                        {"id": 24045, "name": "Joseph Gordon-Levitt", "character": "Arthur", "profilePath": "/jgl.jpg"},
+                    ],
+                    "crew": [
+                        {"id": 525, "name": "Christopher Nolan", "job": "Writer", "department": "Writing", "profilePath": "/nolan.jpg"},
+                        {"id": 525, "name": "Christopher Nolan", "job": "Director", "department": "Directing", "profilePath": "/nolan.jpg"},
+                        {"id": 947, "name": "Hans Zimmer", "job": "Original Music Composer", "department": "Sound", "profilePath": "/zimmer.jpg"},
+                    ],
+                },
+                "mediaInfo": {
+                    "status": 5,
+                    "mediaUrl": "https://jellyfin.example/item/1",
+                    "requests": [
+                        {"id": 22, "status": 5, "createdAt": "2026-11-21T07:34:13.000Z", "requestedBy": {"displayName": "Ayush"}, "seasons": []},
+                    ],
+                },
+            })
+        if self.path == "/api/v1/movie/27205/ratingscombined":
+            return self.reply(200, {
+                "rt": {"criticsRating": "Certified Fresh", "criticsScore": 86, "audienceRating": "Upright", "audienceScore": 91, "url": "https://rt.example/inception"},
+                "imdb": {"criticsScore": 8.8, "criticsScoreCount": 2891347, "url": "https://imdb.example/tt1375666"},
+            })
+        if self.path == "/api/v1/movie/27205/recommendations?page=1":
+            return self.reply(200, {"results": [
+                {"id": 157336, "mediaType": "movie", "title": "Interstellar", "releaseDate": "2014-11-05", "posterPath": "/inter.jpg", "voteAverage": 8.45, "mediaInfo": {"status": 5}},
+            ]})
+        if self.path == "/api/v1/movie/4553/ratings":
+            return self.reply(200, {"criticsRating": "Fresh", "criticsScore": 77, "audienceScore": 83})
         if self.path in ("/api/v1/movie/425", "/api/v1/movie/950", "/api/v1/movie/8355", "/api/v1/movie/57800"):
             mid = int(self.path.rsplit("/", 1)[1])
             titles = {
@@ -242,16 +297,96 @@ class FakeSeerrAndT3Handler(BaseHTTPRequestHandler):
             })
         if self.path == "/api/v1/tv/1396":
             return self.reply(200, {
-                "id": 1396, "name": "Breaking Bad", "firstAirDate": "2008-01-20", "posterPath": "/bb.jpg",
+                "id": 1396,
+                "name": "Breaking Bad",
+                "originalName": "Breaking Bad",
+                "tagline": "Change the equation.",
+                "firstAirDate": "2008-01-20",
+                "lastAirDate": "2013-09-29",
+                "status": "Ended",
+                "episodeRunTime": [47],
+                "numberOfSeasons": 5,
+                "numberOfEpisodes": 62,
+                "voteAverage": 8.96,
+                "voteCount": 19184,
+                "backdropPath": "/bb-bg.jpg",
+                "posterPath": "/bb.jpg",
+                "overview": "Chemistry teacher turns to crime.",
+                "genres": [{"id": 18, "name": "Drama"}, {"id": 80, "name": "Crime"}],
+                "networks": [{"id": 174, "name": "AMC"}],
+                "externalIds": {"imdbId": "tt0903747"},
+                "contentRatings": {"results": [{"iso_3166_1": "US", "rating": "TV-MA"}]},
+                "createdBy": [{"id": 66633, "name": "Vince Gilligan", "profile_path": "/vg.jpg"}],
+                "credits": {
+                    "cast": [{"id": 17419, "name": "Bryan Cranston", "character": "Walter White", "profilePath": "/bc.jpg"}],
+                    "crew": [{"id": 66633, "name": "Vince Gilligan", "job": "Executive Producer", "department": "Production", "profilePath": "/vg.jpg"}],
+                },
                 "seasons": [
                     {"seasonNumber": 0, "name": "Specials", "episodeCount": 5},
-                    {"seasonNumber": 1, "name": "Season 1", "episodeCount": 7},
-                    {"seasonNumber": 2, "name": "Season 2", "episodeCount": 13},
+                    {"seasonNumber": 1, "name": "Season 1", "episodeCount": 7, "airDate": "2008-01-20"},
+                    {"seasonNumber": 2, "name": "Season 2", "episodeCount": 13, "airDate": "2009-03-08"},
                 ],
                 "mediaInfo": {"status": 4, "seasons": [{"seasonNumber": 1, "status": 5}]},
             })
+        if self.path == "/api/v1/tv/1396/ratings":
+            return self.reply(200, {"criticsRating": "Fresh", "criticsScore": 96, "audienceRating": "Upright", "audienceScore": 97})
+        if self.path == "/api/v1/person/6193":
+            return self.reply(200, {
+                "id": 6193,
+                "name": "Leonardo DiCaprio",
+                "biography": "American actor and film producer.",
+                "birthday": "1974-11-11",
+                "deathday": None,
+                "placeOfBirth": "Los Angeles, California, USA",
+                "knownForDepartment": "Acting",
+                "profilePath": "/leo.jpg",
+                "imdbId": "nm0000138",
+                "alsoKnownAs": ["Leo DiCaprio"],
+            })
+        if self.path == "/api/v1/person/6193/combined_credits":
+            return self.reply(200, {
+                "cast": [
+                    {
+                        "id": 27205, "mediaType": "movie", "title": "Inception", "releaseDate": "2010-07-15",
+                        "posterPath": "/inc.jpg", "character": "Dom Cobb", "voteAverage": 8.4, "voteCount": 40000,
+                        "popularity": 80.0, "mediaInfo": {"status": 5},
+                    },
+                    {
+                        "id": 1667, "mediaType": "tv", "name": "Saturday Night Live", "firstAirDate": "1975-10-11",
+                        "posterPath": "/snl.jpg", "character": "Self - Guest", "voteAverage": 6.9, "voteCount": 500,
+                        "popularity": 200.0,
+                    },
+                ],
+                "crew": [
+                    {
+                        "id": 27205, "mediaType": "movie", "title": "Inception", "releaseDate": "2010-07-15",
+                        "posterPath": "/inc.jpg", "job": "Producer", "department": "Production", "voteAverage": 8.4,
+                        "voteCount": 40000, "popularity": 80.0,
+                    },
+                    {
+                        "id": 10316, "mediaType": "movie", "title": "The Ides of March", "releaseDate": "2011-10-07",
+                        "posterPath": "/ides.jpg", "job": "Executive Producer", "department": "Production",
+                        "voteAverage": 6.7, "voteCount": 2800, "popularity": 12.0,
+                    },
+                ],
+            })
+        if self.path == "/api/v1/person/525":
+            return self.reply(200, {
+                "id": 525, "name": "Christopher Nolan", "biography": "Filmmaker.",
+                "knownForDepartment": "Directing", "profilePath": "/nolan.jpg",
+            })
+        if self.path == "/api/v1/person/525/combined_credits":
+            return self.reply(200, {
+                "cast": [],
+                "crew": [
+                    {"id": 27205, "mediaType": "movie", "title": "Inception", "releaseDate": "2010-07-15",
+                     "posterPath": "/inc.jpg", "job": "Producer", "voteAverage": 8.4, "voteCount": 40000, "popularity": 90.0},
+                    {"id": 27205, "mediaType": "movie", "title": "Inception", "releaseDate": "2010-07-15",
+                     "posterPath": "/inc.jpg", "job": "Director", "voteAverage": 8.4, "voteCount": 40000, "popularity": 90.0},
+                ],
+            })
         if self.path.startswith("/api/v1/request"):
-            return self.reply(200, {"results": [
+            all_reqs = [
                 {
                     "id": 10, "status": 2, "type": "movie", "createdAt": "2026-11-23T10:00:00.000Z",
                     "media": {"tmdbId": 27205, "mediaType": "movie", "status": 3, "downloadStatus": [{"title": "x"}]},
@@ -272,7 +407,17 @@ class FakeSeerrAndT3Handler(BaseHTTPRequestHandler):
                     "media": {"tmdbId": 950, "mediaType": "movie", "status": 2, "downloadStatus": []},
                     "seasons": [], "requestedBy": {"displayName": "Ayush"},
                 },
-            ]})
+            ]
+            if "filter=deleted" in self.path:
+                filtered = [r for r in all_reqs if r["media"]["status"] == 7]
+                return self.reply(200, {"pageInfo": {"results": len(filtered)}, "results": filtered})
+            if "filter=failed" in self.path:
+                filtered = [r for r in all_reqs if r["status"] == 4]
+                return self.reply(200, {"pageInfo": {"results": len(filtered)}, "results": filtered})
+            if "filter=processing" in self.path:
+                filtered = [r for r in all_reqs if r["media"]["status"] == 3]
+                return self.reply(200, {"pageInfo": {"results": len(filtered)}, "results": filtered})
+            return self.reply(200, {"pageInfo": {"results": len(all_reqs)}, "results": all_reqs})
         self.reply(404, {"error": "not found"})
 
     def do_POST(self):
@@ -404,6 +549,148 @@ class SeerrArrJellyfinTests(unittest.TestCase):
         with mock.patch.object(pcapi, "SEERR", c):
             code, routed = pcapi.route_round4_get("/api/seerr/collection", {"id": ["8354"]})
             self.assertEqual((code, routed["id"]), (200, 8354))
+
+    def test_seerr_enriched_details_ratings_cast_crew_and_recs(self):
+        c = pcapi.SeerrClient(url=self.base, settings_file=self.seerr_conf)
+
+        # Enriched movie details
+        code, mov = c.details("movie", 27205)
+        self.assertEqual(code, 200)
+        self.assertEqual(mov["title"], "Inception")
+        self.assertEqual(mov["tagline"], "Your mind is the scene of the crime.")
+        self.assertGreater(len(mov["overview"]), 240)
+        self.assertEqual(mov["backdrop"], "https://image.tmdb.org/t/p/w780/inc-bg.jpg")
+        self.assertEqual(mov["runtime"], 148)
+        self.assertEqual(mov["mediaStatus"], "Released")
+        self.assertEqual(mov["certification"], "PG-13")
+        self.assertEqual(mov["genres"], ["Action", "Science Fiction"])
+        self.assertEqual(mov["spokenLanguages"], ["English", "French"])
+        self.assertEqual(mov["countries"], ["United States"])
+        self.assertEqual(mov["studios"], ["Warner Bros. Pictures"])
+        self.assertEqual(mov["budget"], 160000000)
+        self.assertEqual(mov["revenue"], 839030630)
+        self.assertEqual(mov["imdbId"], "tt1375666")
+        self.assertEqual(mov["mediaUrl"], "https://jellyfin.example/item/1")
+        # Ratings combined: TMDB + RT + IMDb
+        self.assertEqual(mov["ratings"]["tmdb"], {"score": 8.4, "count": 40829})
+        self.assertEqual(mov["ratings"]["rt"]["criticsScore"], 86)
+        self.assertEqual(mov["ratings"]["rt"]["audienceScore"], 91)
+        self.assertEqual(mov["ratings"]["imdb"]["score"], 8.8)
+        self.assertEqual(mov["ratings"]["imdb"]["count"], 2891347)
+        # Cast deduplicated by person id
+        self.assertEqual([m["id"] for m in mov["cast"]], [6193, 24045])
+        self.assertEqual(mov["cast"][0]["character"], "Dom Cobb")
+        self.assertEqual(mov["cast"][0]["profilePath"], "https://image.tmdb.org/t/p/w185/leo.jpg")
+        # Crew merged & ordered with Director first
+        self.assertEqual(mov["crew"][0]["name"], "Christopher Nolan")
+        self.assertEqual(mov["crew"][0]["job"], "Director, Writer")
+        self.assertEqual(mov["crew"][1]["name"], "Hans Zimmer")
+        # Recommendations + existing requests
+        self.assertEqual(len(mov["recommendations"]), 1)
+        self.assertEqual(mov["recommendations"][0]["title"], "Interstellar")
+        self.assertEqual(mov["recommendations"][0]["status"], "available")
+        self.assertEqual(mov["recommendations"][0]["voteAverage"], 8.4)
+        self.assertEqual(mov["requests"][0]["requestedBy"], "Ayush")
+
+        # Fallback to /movie/{id}/ratings when /ratingscombined 404s
+        code, mach = c.details("movie", 4553)
+        self.assertEqual(code, 200)
+        self.assertEqual(mach["ratings"]["rt"]["criticsScore"], 77)
+        self.assertNotIn("imdb", mach["ratings"])
+
+        # Enriched TV details with ratings, creator profile_path, contentRating, seasons
+        code, tv = c.details("tv", 1396)
+        self.assertEqual(code, 200)
+        self.assertEqual(tv["certification"], "TV-MA")
+        self.assertEqual(tv["runtime"], 47)
+        self.assertEqual(tv["numberOfSeasons"], 5)
+        self.assertEqual(tv["numberOfEpisodes"], 62)
+        self.assertEqual(tv["networks"], ["AMC"])
+        self.assertEqual(tv["imdbId"], "tt0903747")
+        self.assertEqual(tv["ratings"]["tmdb"]["score"], 9.0)
+        self.assertEqual(tv["ratings"]["rt"]["criticsScore"], 96)
+        self.assertEqual(tv["crew"][0]["name"], "Vince Gilligan")
+        self.assertEqual(tv["crew"][0]["job"], "Creator, Executive Producer")
+        self.assertEqual(tv["crew"][0]["profilePath"], "https://image.tmdb.org/t/p/w185/vg.jpg")
+        self.assertEqual(tv["seasons"][0]["airDate"], "2008-01-20")
+
+    def test_seerr_person_endpoint_and_filmography(self):
+        c = pcapi.SeerrClient(url=self.base, settings_file=self.seerr_conf)
+
+        code, p = c.person(6193)
+        self.assertEqual(code, 200)
+        self.assertEqual(p["name"], "Leonardo DiCaprio")
+        self.assertEqual(p["birthday"], "1974-11-11")
+        self.assertEqual(p["placeOfBirth"], "Los Angeles, California, USA")
+        self.assertEqual(p["knownForDepartment"], "Acting")
+        self.assertEqual(p["profilePath"], "https://image.tmdb.org/t/p/w300/leo.jpg")
+        self.assertEqual(p["imdbId"], "nm0000138")
+        # Inception cast + crew merged into one entry; talk-show Self ranked below scripted titles
+        self.assertEqual([x["id"] for x in p["credits"]], [27205, 10316, 1667])
+        inc = p["credits"][0]
+        self.assertTrue(inc["isCast"] and inc["isCrew"])
+        self.assertEqual(inc["character"], "Dom Cobb")
+        self.assertEqual(inc["job"], "Producer")
+        self.assertEqual(inc["role"], "Dom Cobb")
+        self.assertEqual(inc["status"], "available")
+
+        # Director prioritizes Director over Producer in role
+        code, nolan = c.person(525)
+        self.assertEqual(code, 200)
+        self.assertEqual(nolan["credits"][0]["job"], "Director, Producer")
+        self.assertEqual(nolan["credits"][0]["role"], "Director, Producer")
+
+        # Validation + 404 + route wiring
+        self.assertEqual(c.person("bad")[0], 400)
+        self.assertEqual(c.person(0)[0], 400)
+        self.assertEqual(c.person(999999)[0], 404)
+        with mock.patch.object(pcapi, "SEERR", c):
+            code, routed = pcapi.route_round4_get("/api/seerr/person", {"id": ["6193"]})
+            self.assertEqual((code, routed["name"]), (200, "Leonardo DiCaprio"))
+
+    def test_seerr_requests_status_filtering_and_counts(self):
+        c = pcapi.SeerrClient(url=self.base, settings_file=self.seerr_conf)
+
+        # Default all returns accurate counts and does not hit ratings/recommendations during _meta
+        FakeSeerrAndT3Handler.log.clear()
+        code, res = c.requests()
+        self.assertEqual(code, 200)
+        self.assertEqual(res["filter"], "all")
+        self.assertEqual(res["total"], 4)
+        self.assertEqual(res["counts"]["all"], 4)
+        self.assertEqual(res["counts"]["grabbing"], 1)
+        self.assertEqual(res["counts"]["processing"], 1)
+        self.assertEqual(res["counts"]["deleted"], 1)
+        self.assertEqual(res["counts"]["blocklisted"], 1)
+        self.assertEqual(res["counts"]["failed"], 1)
+        paths = [p for _, p, _ in FakeSeerrAndT3Handler.log]
+        self.assertFalse(any("ratings" in p or "recommendations" in p for p in paths))
+
+        # Native Seerr filter forwarded to upstream
+        FakeSeerrAndT3Handler.log.clear()
+        code, deleted = c.requests(status_filter="deleted")
+        self.assertEqual(code, 200)
+        self.assertEqual(deleted["filter"], "deleted")
+        self.assertEqual([r["id"] for r in deleted["requests"]], [11])
+        self.assertTrue(any("filter=deleted" in p for _, p, _ in FakeSeerrAndT3Handler.log))
+
+        # Local-only filter (blocklisted / grabbing) filters locally
+        code, bl = c.requests(status_filter="blocklisted")
+        self.assertEqual(code, 200)
+        self.assertEqual([r["id"] for r in bl["requests"]], [12])
+
+        code, grab = c.requests(status_filter="grabbing")
+        self.assertEqual(code, 200)
+        self.assertEqual([r["id"] for r in grab["requests"]], [10])
+
+        # Invalid filter rejected
+        self.assertEqual(c.requests(status_filter="bogus")[0], 400)
+
+        # Route wiring for /api/seerr/requests with filter and take
+        with mock.patch.object(pcapi, "SEERR", c):
+            code, routed = pcapi.route_round4_get("/api/seerr/requests", {"filter": ["failed"], "take": ["20"]})
+            self.assertEqual((code, [r["id"] for r in routed["requests"]]), (200, [13]))
+            self.assertEqual(pcapi.route_round4_get("/api/seerr/requests", {"take": ["abc"]})[0], 400)
 
     def test_arr_retry_and_jellyfin_refresh(self):
         with mock.patch.object(pcapi, "ARR", {"radarr": ("radarr", self.base, self.arr_xml)}):

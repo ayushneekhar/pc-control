@@ -31,6 +31,8 @@ import ChatScreen from './src/screens/ChatScreen';
 import DownloadsScreen from './src/screens/DownloadsScreen';
 import RootScreen from './src/screens/RootScreen';
 import RoutesScreen from './src/screens/RoutesScreen';
+import SeerrDetailScreen from './src/screens/SeerrDetailScreen';
+import SeerrPersonScreen from './src/screens/SeerrPersonScreen';
 import SeerrScreen from './src/screens/SeerrScreen';
 import ServiceDetailScreen from './src/screens/ServiceDetailScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
@@ -86,6 +88,8 @@ const linking: LinkingOptions<any> = {
       Cams: 'cams',
       Downloads: 'downloads',
       Seerr: 'seerr',
+      SeerrPerson: 'seerr/person/:id',
+      SeerrDetail: 'seerr/:mediaType/:id',
       Space: 'space',
       ServiceDetail: 'service/:unit',
       AgentSettings: 'agent-settings',
@@ -157,6 +161,8 @@ export default function App() {
             <Stack.Screen name="UsageAccountDetail" component={UsageAccountDetailScreen} />
             <Stack.Screen name="Downloads" component={DownloadsScreen} />
             <Stack.Screen name="Seerr" component={SeerrScreen} />
+            <Stack.Screen name="SeerrDetail" component={SeerrDetailScreen} />
+            <Stack.Screen name="SeerrPerson" component={SeerrPersonScreen} />
             <Stack.Screen name="Space" component={SpaceScreen} />
             <Stack.Screen name="ServiceDetail" component={ServiceDetailScreen} />
             <Stack.Screen

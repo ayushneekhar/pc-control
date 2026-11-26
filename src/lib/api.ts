@@ -453,23 +453,78 @@ export type SeerrStatus =
   | 'partial'
   | 'grabbing'
   | 'requested'
+  | 'pending'
   | 'declined'
   | 'deleted'
   | 'blocklisted'
   | 'failed'
   | 'none';
 
+export type SeerrRequestFilter =
+  | 'all'
+  | 'pending'
+  | 'processing'
+  | 'available'
+  | 'partial'
+  | 'failed'
+  | 'deleted'
+  | 'approved'
+  | 'unavailable'
+  | 'completed'
+  | 'grabbing'
+  | 'requested'
+  | 'declined'
+  | 'blocklisted';
+
 export type SeerrSeason = {
   seasonNumber: number;
   name: string;
   episodeCount: number;
   status: SeerrStatus;
+  airDate?: string;
+  poster?: string | null;
+  overview?: string;
 };
 
 export type SeerrCollectionRef = {
   id: number;
   name: string;
   poster: string | null;
+};
+
+export type SeerrRatings = {
+  tmdb?: { score: number; count: number };
+  rt?: {
+    criticsScore?: number;
+    criticsRating?: string;
+    audienceScore?: number;
+    audienceRating?: string;
+    url?: string;
+  };
+  imdb?: { score: number; count?: number; url?: string };
+};
+
+export type SeerrCastMember = {
+  id: number;
+  name: string;
+  character: string;
+  profilePath: string | null;
+};
+
+export type SeerrCrewMember = {
+  id: number;
+  name: string;
+  job: string;
+  department?: string;
+  profilePath: string | null;
+};
+
+export type SeerrMediaRequestRef = {
+  id: number;
+  requestStatus: string;
+  requestedBy: string;
+  createdAt: string;
+  seasons: number[];
 };
 
 export type SeerrItem = {
@@ -480,8 +535,69 @@ export type SeerrItem = {
   poster: string | null;
   overview: string;
   status: SeerrStatus;
+  voteAverage?: number | null;
+  voteCount?: number | null;
+  backdrop?: string | null;
+  originalTitle?: string | null;
+  tagline?: string | null;
+  releaseDate?: string | null;
+  lastAirDate?: string | null;
+  runtime?: number | null;
+  mediaStatus?: string | null;
+  genres?: string[];
+  certification?: string | null;
+  spokenLanguages?: string[];
+  countries?: string[];
+  studios?: string[];
+  networks?: string[];
+  budget?: number | null;
+  revenue?: number | null;
+  numberOfSeasons?: number | null;
+  numberOfEpisodes?: number | null;
+  imdbId?: string | null;
+  mediaUrl?: string | null;
+  ratings?: SeerrRatings;
+  cast?: SeerrCastMember[];
+  crew?: SeerrCrewMember[];
+  recommendations?: SeerrItem[];
+  requests?: SeerrMediaRequestRef[];
   seasons?: SeerrSeason[];
   collection?: SeerrCollectionRef | null;
+};
+
+export type SeerrPersonCredit = {
+  id: number;
+  mediaType: 'movie' | 'tv';
+  title: string;
+  year: number | null;
+  releaseDate: string | null;
+  poster: string | null;
+  character: string | null;
+  job: string | null;
+  role: string;
+  isCast: boolean;
+  isCrew: boolean;
+  voteAverage: number | null;
+  voteCount: number | null;
+  popularity: number;
+  status: SeerrStatus;
+  episodeCount?: number;
+};
+
+export type SeerrPerson = {
+  id: number;
+  name: string;
+  biography: string;
+  birthday: string | null;
+  deathday: string | null;
+  placeOfBirth: string | null;
+  knownForDepartment: string | null;
+  profilePath: string | null;
+  imdbId: string | null;
+  alsoKnownAs: string[];
+  credits: SeerrPersonCredit[];
+  castCount: number;
+  crewCount: number;
 };
 
 export type SeerrCollection = {
@@ -501,9 +617,17 @@ export type SeerrRequestItem = {
   year: number | null;
   poster: string | null;
   status: SeerrStatus;
+  requestStatus?: string;
   seasons: number[];
   requestedBy: string;
   createdAt: string;
+};
+
+export type SeerrRequestsResponse = {
+  requests: SeerrRequestItem[];
+  filter?: string;
+  total?: number;
+  counts?: Record<string, number>;
 };
 
 export const searchSeerr = (q: string) =>
@@ -512,7 +636,15 @@ export const getSeerrDetails = (type: 'movie' | 'tv', id: number) =>
   get<SeerrItem>(`/pc/api/seerr/details?type=${type}&id=${id}`, 15000);
 export const getSeerrCollection = (id: number) =>
   get<SeerrCollection>(`/pc/api/seerr/collection?id=${id}`, 15000);
-export const getSeerrRequests = () => get<{ requests: SeerrRequestItem[] }>('/pc/api/seerr/requests', 15000);
+export const getSeerrPerson = (id: number) =>
+  get<SeerrPerson>(`/pc/api/seerr/person?id=${id}`, 15000);
+export const getSeerrRequests = (filter: SeerrRequestFilter = 'all', take = 50) => {
+  const qs = new URLSearchParams();
+  if (filter && filter !== 'all') qs.set('filter', filter);
+  if (take !== 50) qs.set('take', String(take));
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return get<SeerrRequestsResponse>(`/pc/api/seerr/requests${suffix}`, 15000);
+};
 export const createSeerrRequest = (mediaType: 'movie' | 'tv', mediaId: number, seasons?: number[] | 'all') =>
   post<{ ok: boolean; id?: number; status?: number }>(
     '/pc/api/seerr/request',

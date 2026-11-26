@@ -39,6 +39,8 @@ GET  /pc/api/agent/usage[?refresh=1]  per-account usage across harnesses (via ai
 GET  /pc/api/agent/settings           Claude & Gemini model, effort, account/instance, auto-rotate & options
 POST /pc/api/agent/settings           update Claude and/or Gemini agent settings
 POST /pc/api/agent/reset              start a fresh agent conversation via ~/remote-pc/bin/agent-reset
+GET  /pc/api/agentview/state          {enabled, state, web_reachable, services}: Agentview capture.state + web probe
+POST /pc/api/agentview/toggle         {enabled: bool}: atomically toggle capture.state and sync agentview-web.service
 GET  /pc/api/keyring                  {locked: bool, rdp: <gnome-remote-desktop active state>}
 POST /pc/api/keyring/unlock           {password}: unlock GNOME login keyring via --stdin and restart RDP
 POST /pc/api/downloads/started        {hash?, title?}: "a download just started" (the Qwen bot calls it): wakes the
@@ -61,7 +63,7 @@ pc-api is NOT a security boundary for root: it runs as the agent's user, so it i
 by rootd. Only the phone's signature releases a command. The tailnet identity check below just keeps
 other tailnet nodes/users away from the service controls.
 """
-import base64, concurrent.futures, datetime, glob, hashlib, ipaddress, json, os, queue, secrets, re, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse
+import base64, concurrent.futures, datetime, glob, hashlib, ipaddress, json, os, queue, secrets, re, socket, stat, struct, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -2656,6 +2658,346 @@ def read_catdetect_snap(raw_filename, snaps_dir=None):
         return 404, {"error": "snapshot not found"}
 
 
+# ---------------------------------------------------------------- Agentview master switch (/pc/api/agentview/*)
+
+AGENTVIEW_STATE_FILE = os.environ.get(
+    "PCAPI_AGENTVIEW_STATE",
+    os.path.join(HOME, "tools", "agentview", "state", "capture.state"),
+)
+AGENTVIEW_RULES_FILE = os.environ.get(
+    "PCAPI_AGENTVIEW_RULES",
+    os.path.join(HOME, "tools", "agentview", "rules.json"),
+)
+AGENTVIEW_WEB_URL = os.environ.get(
+    "PCAPI_AGENTVIEW_WEB_URL",
+    "http://127.0.0.1:1991/agentview/api/state",
+)
+AGENTVIEW_WEB_UNIT = "agentview-web.service"
+AGENTVIEW_SYSTEM_UNITS = (
+    ("agentview-front", "agentview-front.service"),
+    ("agentview-agentproxy", "agentview-agentproxy.service"),
+    ("agentview-agentproxy-watch.timer", "agentview-agentproxy-watch.timer"),
+)
+AGENTVIEW_USER_UNITS = (
+    ("agentview-mitm", "agentview-mitm.service"),
+    ("agentview-web", "agentview-web.service"),
+)
+
+
+class AgentViewManager:
+    """Master switch for the entire Agentview stack via capture.state + agentview-web.service sync."""
+
+    def __init__(
+        self,
+        state_file=None,
+        rules_file=None,
+        web_url=None,
+        run_fn=None,
+        probe_fn=None,
+        sleep_fn=None,
+        monotonic_fn=None,
+        start_timeout=6.0,
+        stop_timeout=4.0,
+        poll_interval=0.25,
+    ):
+        self.state_file = state_file
+        self.rules_file = rules_file
+        self.web_url = web_url
+        self.run_fn = run_fn
+        self.probe_fn = probe_fn
+        self.sleep_fn = sleep_fn
+        self.monotonic_fn = monotonic_fn
+        self.start_timeout = float(start_timeout)
+        self.stop_timeout = float(stop_timeout)
+        self.poll_interval = float(poll_interval)
+        self.lock = threading.Lock()
+
+    def _state_file(self):
+        return os.path.expanduser(self.state_file if self.state_file is not None else AGENTVIEW_STATE_FILE)
+
+    def _rules_file(self):
+        if self.rules_file is not None:
+            return os.path.expanduser(self.rules_file)
+        # Do not touch the real ~/tools/agentview/rules.json when state_file is overridden (e.g. unit tests).
+        if self.state_file is not None:
+            return None
+        return os.path.expanduser(AGENTVIEW_RULES_FILE)
+
+    def _web_url(self):
+        return self.web_url if self.web_url is not None else AGENTVIEW_WEB_URL
+
+    def _now(self):
+        return (self.monotonic_fn or time.monotonic)()
+
+    def _sleep(self, secs):
+        if secs > 0:
+            (self.sleep_fn or time.sleep)(secs)
+
+    def _run(self, argv, timeout=10):
+        fn = self.run_fn or subprocess.run
+        return fn(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+
+    def _read_capture_state(self):
+        path = self._state_file()
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return "off"
+        except OSError:
+            return "off"
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > 64:
+                return "off"
+            with os.fdopen(fd, "rb") as f:
+                fd = -1
+                raw = f.read(64)
+        except OSError:
+            return "off"
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        text = raw.decode("utf-8", "replace").strip()
+        return "on" if text == "on" else "off"
+
+    def _write_capture_state(self, enabled):
+        target = os.path.abspath(self._state_file())
+        parent = os.path.dirname(target)
+        if os.path.lexists(parent):
+            pst = os.lstat(parent)
+            if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+                raise ValueError("capture.state parent directory is a symlink or not a directory")
+        else:
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+
+        prev_st = None
+        if os.path.lexists(target):
+            prev_st = os.lstat(target)
+            if stat.S_ISLNK(prev_st.st_mode) or not stat.S_ISREG(prev_st.st_mode):
+                raise ValueError("capture.state must be a regular file, not a symlink")
+
+        payload = b"on\n" if enabled else b"off\n"
+        fd, tmp = tempfile.mkstemp(prefix=".capture.state.", dir=parent)
+        try:
+            os.fchmod(fd, 0o600)
+            if prev_st is not None and os.geteuid() == 0:
+                os.fchown(fd, prev_st.st_uid, prev_st.st_gid)
+            with os.fdopen(fd, "wb") as f:
+                fd = -1
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            if os.path.lexists(target):
+                cur_st = os.lstat(target)
+                if stat.S_ISLNK(cur_st.st_mode) or not stat.S_ISREG(cur_st.st_mode):
+                    raise ValueError("capture.state must be a regular file, not a symlink")
+            os.replace(tmp, target)
+            tmp = None
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        try:
+            dfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+
+    def _sync_rules_enabled(self, enabled):
+        """Best-effort sync of rules.json's top-level enabled flag so agentview-web doesn't revert capture.state."""
+        rules_path = self._rules_file()
+        if not rules_path:
+            return
+        target = os.path.abspath(rules_path)
+        parent = os.path.dirname(target)
+        try:
+            if not os.path.lexists(target):
+                return
+            prev_st = os.lstat(target)
+            if stat.S_ISLNK(prev_st.st_mode) or not stat.S_ISREG(prev_st.st_mode):
+                return
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                with os.fdopen(fd, "r", encoding="utf-8") as f:
+                    fd = -1
+                    data = json.load(f)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            if not isinstance(data, dict) or data.get("enabled") is enabled:
+                return
+            data["enabled"] = enabled
+            raw = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+            wfd, tmp = tempfile.mkstemp(prefix=".rules.json.", dir=parent)
+            try:
+                mode = stat.S_IMODE(prev_st.st_mode) or 0o600
+                os.fchmod(wfd, mode)
+                if os.geteuid() == 0:
+                    os.fchown(wfd, prev_st.st_uid, prev_st.st_gid)
+                with os.fdopen(wfd, "wb") as f:
+                    wfd = -1
+                    f.write(raw)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, target)
+                tmp = None
+            finally:
+                if wfd >= 0:
+                    try:
+                        os.close(wfd)
+                    except OSError:
+                        pass
+                if tmp is not None:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    def _probe_web(self, timeout=1.0):
+        url = self._web_url()
+        if self.probe_fn is not None:
+            try:
+                return bool(self.probe_fn(url, timeout))
+            except Exception:
+                return False
+        req = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return 200 <= getattr(resp, "status", 200) < 300
+        except Exception:
+            return False
+
+    def _query_units(self, units, user=False):
+        out = {key: "unknown" for key, _ in units}
+        if not units:
+            return out
+        cmd = ["systemctl"]
+        if user:
+            cmd.append("--user")
+        cmd.append("is-active")
+        cmd.extend(unit for _, unit in units)
+        try:
+            r = self._run(cmd, timeout=2)
+            lines = [ln.strip() for ln in (r.stdout or "").splitlines()]
+        except Exception:
+            return out
+        for (key, _), val in zip(units, lines):
+            if val:
+                out[key] = val
+        return out
+
+    def _services_status(self):
+        out = self._query_units(AGENTVIEW_SYSTEM_UNITS, user=False)
+        out.update(self._query_units(AGENTVIEW_USER_UNITS, user=True))
+        return out
+
+    def _systemctl_web(self, action):
+        try:
+            self._run(["systemctl", "--user", action, AGENTVIEW_WEB_UNIT], timeout=10)
+        except Exception:
+            pass
+
+    def status(self):
+        with self.lock:
+            state = self._read_capture_state()
+        return {
+            "enabled": state == "on",
+            "state": state,
+            "web_reachable": self._probe_web(timeout=1.0),
+            "services": self._services_status(),
+        }
+
+    def toggle(self, enabled):
+        if not isinstance(enabled, bool):
+            return 400, {"error": "enabled must be true or false"}
+        with self.lock:
+            self._sync_rules_enabled(enabled)
+            try:
+                self._write_capture_state(enabled)
+            except Exception as e:
+                return 500, {"error": clip(f"failed to write capture.state: {e}", 240)}
+
+            start = self._now()
+            if enabled:
+                deadline = start + self.start_timeout
+                fallback_at = start + min(1.0, self.start_timeout / 2.0)
+                tried_systemctl = False
+                reachable = False
+                while True:
+                    reachable = self._probe_web(timeout=1.0)
+                    if reachable:
+                        break
+                    now = self._now()
+                    if not tried_systemctl and now >= fallback_at:
+                        tried_systemctl = True
+                        self._systemctl_web("start")
+                        reachable = self._probe_web(timeout=1.0)
+                        if reachable:
+                            break
+                        now = self._now()
+                    if now >= deadline:
+                        if not tried_systemctl:
+                            tried_systemctl = True
+                            self._systemctl_web("start")
+                            reachable = self._probe_web(timeout=1.0)
+                        break
+                    self._sleep(min(self.poll_interval, max(0.0, deadline - now)))
+                return 200, {
+                    "enabled": True,
+                    "state": "on",
+                    "web_reachable": reachable,
+                    "services": self._services_status(),
+                }
+            else:
+                deadline = start + self.stop_timeout
+                fallback_at = start + min(1.0, self.stop_timeout / 2.0)
+                tried_systemctl = False
+                reachable = True
+                while True:
+                    reachable = self._probe_web(timeout=1.0)
+                    if not reachable:
+                        break
+                    now = self._now()
+                    if not tried_systemctl and now >= fallback_at:
+                        tried_systemctl = True
+                        self._systemctl_web("stop")
+                        reachable = self._probe_web(timeout=1.0)
+                        if not reachable:
+                            break
+                        now = self._now()
+                    if now >= deadline:
+                        if not tried_systemctl:
+                            tried_systemctl = True
+                            self._systemctl_web("stop")
+                            reachable = self._probe_web(timeout=1.0)
+                        break
+                    self._sleep(min(self.poll_interval, max(0.0, deadline - now)))
+                return 200, {
+                    "enabled": False,
+                    "state": "off",
+                    "web_reachable": reachable,
+                    "services": self._services_status(),
+                }
+
+
+AGENTVIEW = AgentViewManager()
+
+
 # ---------------------------------------------------------------- GNOME keyring unlock (/pc/api/keyring*)
 
 KEYRING_UNLOCK_BIN = os.environ.get("PCAPI_KEYRING_UNLOCK", os.path.join(HOME, "remote-pc", "bin", "keyring-unlock"))
@@ -5061,6 +5403,8 @@ class H(BaseHTTPRequestHandler):
                 if code != 200:
                     return self.send_json(code, res)
                 return self.send_bytes(res, "image/jpeg", cache_control="public, max-age=86400")
+            if path == "/api/agentview/state":
+                return self.send_json(200, AGENTVIEW.status())
             if path == "/api/keyring":
                 try:
                     return self.send_json(200, KEYRING.status())
@@ -5159,6 +5503,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*agent_reset())
             if path == "/api/catcam":
                 return self.send_json(*CATCAM.set_enabled(b.get("enabled")))
+            if path == "/api/agentview/toggle":
+                return self.send_json(*AGENTVIEW.toggle(b.get("enabled")))
             if path == "/api/keyring/unlock":
                 pw = b.get("password")
                 b.clear()

@@ -21,6 +21,13 @@ export type AgentRule = {
 
 export type AgentState = { enabled: boolean; rules: AgentRule[] };
 
+export type AgentViewMasterState = {
+  enabled: boolean;
+  state: 'on' | 'off';
+  web_reachable: boolean;
+  services?: Record<string, string>;
+};
+
 export type AgentUrl = {
   url: string;
   host: string;

@@ -1,10 +1,27 @@
 // agentview: local HTTPS proxy that rewrites what AI agents see on websites.
 // The laptop serves the JSON API behind tailscale at /agentview/api (see the agentview README).
 import { get, request } from './api';
-import type { AgentAction, AgentRule, AgentState, AgentUrl, FromUrl, Original } from './agentviewRules';
+import type {
+  AgentAction,
+  AgentRule,
+  AgentState,
+  AgentUrl,
+  AgentViewMasterState,
+  FromUrl,
+  Original,
+} from './agentviewRules';
 
 const BASE = '/agentview/api';
+const PC_BASE = '/pc/api/agentview';
 const WRITE_HEADERS = { 'X-Requested-With': 'pc-control' };
+
+export function getAgentMasterState() {
+  return get<AgentViewMasterState>(`${PC_BASE}/state`);
+}
+
+export function toggleAgentMaster(enabled: boolean) {
+  return request<AgentViewMasterState>('POST', `${PC_BASE}/toggle`, { enabled }, 15000);
+}
 
 export function getAgentState() {
   return get<AgentState>(`${BASE}/state`);

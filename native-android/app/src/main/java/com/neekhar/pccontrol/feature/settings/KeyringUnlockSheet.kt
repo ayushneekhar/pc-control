@@ -30,6 +30,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -105,7 +106,7 @@ fun KeyringUnlockSheet(
                 Icon(
                     imageVector = if (mode == KeyringSheetMode.SAVE_PASSWORD) Icons.Filled.Fingerprint else Icons.Filled.LockOpen,
                     contentDescription = null,
-                    tint = colors.accent,
+                    tint = colors.textDim,
                     modifier = Modifier.size(22.dp),
                 )
                 Text(
@@ -166,9 +167,11 @@ fun KeyringUnlockSheet(
                         enabled = !busy,
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = colors.bg,
-                            checkedTrackColor = colors.accent,
-                            uncheckedThumbColor = colors.textFaint,
+                            checkedTrackColor = colors.text,
+                            checkedBorderColor = Color.Transparent,
+                            uncheckedThumbColor = colors.textDim,
                             uncheckedTrackColor = colors.surfaceRaised,
+                            uncheckedBorderColor = colors.hairline,
                         ),
                     )
                 }

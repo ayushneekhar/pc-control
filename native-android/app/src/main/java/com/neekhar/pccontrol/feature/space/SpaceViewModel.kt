@@ -470,6 +470,26 @@ class SpaceViewModel(
         _uiState.update { it.copy(confirmAction = action) }
     }
 
+    fun selectOnlyLocalAndConfirm(id: String, action: SpaceConfirmAction) {
+        if (id in _uiState.value.lockedLocalIds) return
+        _uiState.update {
+            it.copy(
+                selectedLocalIds = setOf(id),
+                confirmAction = action,
+            )
+        }
+    }
+
+    fun selectOnlyDriveAndConfirm(relPath: String, action: SpaceConfirmAction) {
+        if (relPath in _uiState.value.lockedDrivePaths) return
+        _uiState.update {
+            it.copy(
+                selectedDrivePaths = setOf(relPath),
+                confirmAction = action,
+            )
+        }
+    }
+
     fun dismissConfirm() {
         if (_uiState.value.isBusyAction) return
         _uiState.update { it.copy(confirmAction = null) }

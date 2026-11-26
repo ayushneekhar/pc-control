@@ -40,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -97,19 +98,23 @@ fun AgentRuleScreen(
     val title = if (state.rule != null) "Edit rule" else "New rule"
     val subtitle = if (state.ruleUrl.isNotBlank()) "${split.host}${split.path}" else "Agent view"
 
-    LazyColumn(
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(colors.bg),
-        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item(key = "header") {
-            PcScreenHeader(
-                title = title,
-                onBack = onBack,
-            )
-        }
+        PcScreenHeader(
+            title = title,
+            onBack = onBack,
+        )
+
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
 
         if (state.ruleUrl.isNotBlank()) {
             item(key = "url_card") {
@@ -207,9 +212,11 @@ fun AgentRuleScreen(
                                 onCheckedChange = { v -> viewModel.updateDraft { it.copy(enabled = v) } },
                                 colors = SwitchDefaults.colors(
                                     checkedThumbColor = colors.bg,
-                                    checkedTrackColor = colors.accent,
-                                    uncheckedThumbColor = colors.textFaint,
+                                    checkedTrackColor = colors.text,
+                                    checkedBorderColor = Color.Transparent,
+                                    uncheckedThumbColor = colors.textDim,
                                     uncheckedTrackColor = colors.surfaceRaised,
+                                    uncheckedBorderColor = colors.hairline,
                                 ),
                             )
                         }
@@ -408,9 +415,11 @@ fun AgentRuleScreen(
                                                     },
                                                     colors = SwitchDefaults.colors(
                                                         checkedThumbColor = colors.bg,
-                                                        checkedTrackColor = colors.accent,
-                                                        uncheckedThumbColor = colors.textFaint,
+                                                        checkedTrackColor = colors.text,
+                                                        checkedBorderColor = Color.Transparent,
+                                                        uncheckedThumbColor = colors.textDim,
                                                         uncheckedTrackColor = colors.surfaceRaised,
+                                                        uncheckedBorderColor = colors.hairline,
                                                     ),
                                                 )
                                                 IconButton(
@@ -564,7 +573,8 @@ fun AgentRuleScreen(
         }
 
         item(key = "bottom_pad") {
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+        }
         }
     }
 

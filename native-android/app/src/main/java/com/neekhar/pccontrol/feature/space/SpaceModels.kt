@@ -47,10 +47,14 @@ data class SpaceCandidate(
     @SerialName("unwatched_users") val unwatchedUsers: List<String> = emptyList(),
     @SerialName("warn_unwatched") val warnUnwatched: Boolean = false,
     val monitored: Boolean = false,
+    val poster: String? = null,
+    @SerialName("poster_url") val posterUrl: String? = null,
+    @SerialName("poster_path") val posterPath: String? = null,
 ) {
     val isMovie: Boolean get() = kind == "movie"
     val isSeason: Boolean get() = kind == "season"
     val isWatched: Boolean get() = watched ?: (watchedCount > 0)
+    val resolvedPosterUrl: String? get() = resolveSpacePosterUrl(poster, posterUrl, posterPath)
 }
 
 @Serializable
@@ -119,9 +123,13 @@ data class DriveItem(
     @SerialName("season_number") val seasonNumber: Int? = null,
     @SerialName("tmdb_id") val tmdbId: Int? = null,
     @SerialName("offloaded_at") val offloadedAt: Long? = null,
+    val poster: String? = null,
+    @SerialName("poster_url") val posterUrl: String? = null,
+    @SerialName("poster_path") val posterPath: String? = null,
 ) {
     val isMovie: Boolean get() = kind == "movie"
     val isSeason: Boolean get() = kind == "season"
+    val resolvedPosterUrl: String? get() = resolveSpacePosterUrl(poster, posterUrl, posterPath)
 }
 
 @Serializable

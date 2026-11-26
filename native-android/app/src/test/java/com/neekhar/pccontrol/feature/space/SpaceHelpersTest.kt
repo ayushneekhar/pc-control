@@ -401,4 +401,28 @@ class SpaceHelpersTest {
         assertEquals("2h 5m", formatDuration(7500L))
         assertEquals("1d 2h", formatDuration(93600L))
     }
+
+    @Test
+    fun resolveSpacePosterUrl_handlesFullUrlsTmdbPathsAndMissingValues() {
+        assertEquals(
+            "https://image.tmdb.org/t/p/w300/abc.jpg",
+            resolveSpacePosterUrl(poster = "https://image.tmdb.org/t/p/w300/abc.jpg"),
+        )
+        assertEquals(
+            "https://image.tmdb.org/t/p/w185/xyz.jpg",
+            resolveSpacePosterUrl(posterPath = "/xyz.jpg"),
+        )
+        assertEquals(
+            "http://example.com/poster.png",
+            resolveSpacePosterUrl(posterUrl = "http://example.com/poster.png"),
+        )
+        assertNull(resolveSpacePosterUrl(poster = "  ", posterUrl = null, posterPath = "invalid"))
+
+        val candidateWithPoster = sampleCandidates[0].copy(posterPath = "/inception.jpg")
+        assertEquals("https://image.tmdb.org/t/p/w185/inception.jpg", candidateWithPoster.resolvedPosterUrl)
+        assertNull(sampleCandidates[0].resolvedPosterUrl)
+
+        val driveWithPoster = sampleDriveItems[0].copy(poster = "https://image.tmdb.org/t/p/w300/inc.jpg")
+        assertEquals("https://image.tmdb.org/t/p/w300/inc.jpg", driveWithPoster.resolvedPosterUrl)
+    }
 }

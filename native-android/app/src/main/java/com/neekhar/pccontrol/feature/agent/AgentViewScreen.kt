@@ -48,6 +48,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -112,86 +113,92 @@ fun AgentViewScreen(
         }
     }
 
-    PullToRefreshBox(
-        isRefreshing = state.isRefreshing,
-        onRefresh = viewModel::refresh,
+    val headerStatus = when {
+        state.error != null -> "Offline"
+        master != null && master.enabled && !master.webReachable -> "Web UI offline"
+        else -> null
+    }
+
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(colors.bg),
     ) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+        PcScreenHeader(
+            title = "Agent view",
+            statusText = headerStatus,
+            statusColor = if (state.error != null) colors.bad else colors.warn,
+            onBack = onBack,
+        )
+
+        PullToRefreshBox(
+            isRefreshing = state.isRefreshing,
+            onRefresh = viewModel::refresh,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
         ) {
-            item(key = "header") {
-                val headerStatus = when {
-                    state.error != null -> "Offline"
-                    master != null && master.enabled && !master.webReachable -> "Web UI offline"
-                    else -> null
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (!state.error.isNullOrBlank()) {
+                    item(key = "err") {
+                        PcErrorBanner(message = state.error!!)
+                    }
                 }
-                PcScreenHeader(
-                    title = "Agent view",
-                    statusText = headerStatus,
-                    statusColor = if (state.error != null) colors.bad else colors.warn,
-                    onBack = onBack,
-                )
-            }
 
-            if (!state.error.isNullOrBlank()) {
-                item(key = "err") {
-                    PcErrorBanner(message = state.error!!)
-                }
-            }
-
-            // Master capture toggle card
-            item(key = "master") {
-                PcCard {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.SmartToy,
-                                contentDescription = null,
-                                tint = if (isActive) colors.accent else colors.textDim,
-                                modifier = Modifier.size(22.dp),
-                            )
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "Agent view",
-                                    color = colors.text,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.SemiBold,
+                // Master capture toggle card
+                item(key = "master") {
+                    PcCard {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.SmartToy,
+                                    contentDescription = null,
+                                    tint = colors.textDim,
+                                    modifier = Modifier.size(20.dp),
                                 )
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    PcStatusDot(color = dotColor)
-                                    Text(text = cardStatusText, color = colors.textDim, fontSize = 13.sp)
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Agent view",
+                                        color = colors.text,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        PcStatusDot(color = dotColor, size = 6.dp)
+                                        Text(text = cardStatusText, color = colors.textFaint, fontSize = 12.5.sp)
+                                    }
                                 }
-                            }
-                            if (state.switching) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = colors.textDim,
+                                if (state.switching) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = colors.textDim,
+                                    )
+                                }
+                                Switch(
+                                    checked = displayEnabled,
+                                    onCheckedChange = viewModel::toggleMaster,
+                                    enabled = master != null && !state.switching,
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = colors.bg,
+                                        checkedTrackColor = colors.text,
+                                        checkedBorderColor = Color.Transparent,
+                                        uncheckedThumbColor = colors.textDim,
+                                        uncheckedTrackColor = colors.surfaceRaised,
+                                        uncheckedBorderColor = colors.hairline,
+                                    ),
                                 )
                             }
-                            Switch(
-                                checked = displayEnabled,
-                                onCheckedChange = viewModel::toggleMaster,
-                                enabled = master != null && !state.switching,
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = colors.bg,
-                                    checkedTrackColor = colors.accent,
-                                    uncheckedThumbColor = colors.textFaint,
-                                    uncheckedTrackColor = colors.surfaceRaised,
-                                ),
-                            )
-                        }
 
                         if (isOff) {
                             HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
@@ -423,9 +430,11 @@ fun AgentViewScreen(
                                                 onCheckedChange = { v -> viewModel.toggleRuleEnabled(rule, v) },
                                                 colors = SwitchDefaults.colors(
                                                     checkedThumbColor = colors.bg,
-                                                    checkedTrackColor = colors.accent,
-                                                    uncheckedThumbColor = colors.textFaint,
+                                                    checkedTrackColor = colors.text,
+                                                    checkedBorderColor = Color.Transparent,
+                                                    uncheckedThumbColor = colors.textDim,
                                                     uncheckedTrackColor = colors.surfaceRaised,
+                                                    uncheckedBorderColor = colors.hairline,
                                                 ),
                                             )
                                         }
@@ -476,8 +485,9 @@ fun AgentViewScreen(
             }
 
             item(key = "bottom_pad") {
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(12.dp))
             }
+        }
         }
     }
 

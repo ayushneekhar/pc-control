@@ -6,6 +6,7 @@ import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.storage.AppPrefs
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -129,20 +130,25 @@ class SettingsViewModel(
     fun refreshAll() {
         viewModelScope.launch {
             _uiState.update { it.copy(isRefreshing = true) }
-            launch { testConnection() }
-            launch { loadAgentSummary() }
-            launch { loadVpn() }
-            launch { loadKbdLock() }
-            launch { loadKeyring() }
-            launch { loadNotifSettings() }
-            launch { loadPushDiagnostics() }
-            launch { checkForApkUpdate() }
-            _uiState.update {
-                it.copy(
-                    crashReports = platform.loadCrashReports(),
-                    keyringHasSaved = platform.keyringHasSaved(),
-                    isRefreshing = false,
-                )
+            try {
+                coroutineScope {
+                    launch { testConnectionSuspend() }
+                    launch { loadAgentSummary() }
+                    launch { loadVpn() }
+                    launch { loadKbdLock() }
+                    launch { loadKeyring() }
+                    launch { loadNotifSettings() }
+                    launch { loadPushDiagnostics() }
+                    launch { checkForApkUpdateSuspend() }
+                }
+            } finally {
+                _uiState.update {
+                    it.copy(
+                        crashReports = platform.loadCrashReports(),
+                        keyringHasSaved = platform.keyringHasSaved(),
+                        isRefreshing = false,
+                    )
+                }
             }
         }
     }
@@ -193,28 +199,32 @@ class SettingsViewModel(
 
     fun testConnection() {
         viewModelScope.launch {
-            _uiState.update { it.copy(connectionTesting = true, connectionError = null) }
-            val infoRes = api.getJson<ServerInfo>("/pc/api/info")
-            val whoRes = api.getJson<WhoAmIResponse>("/pc/api/whoami")
-            when (infoRes) {
-                is ApiResult.Success -> {
-                    val login = (whoRes as? ApiResult.Success)?.data?.login
-                    _uiState.update {
-                        it.copy(
-                            serverInfo = infoRes.data,
-                            whoAmI = login,
-                            connectionTesting = false,
-                            connectionError = null,
-                        )
-                    }
+            testConnectionSuspend()
+        }
+    }
+
+    private suspend fun testConnectionSuspend() {
+        _uiState.update { it.copy(connectionTesting = true, connectionError = null) }
+        val infoRes = api.getJson<ServerInfo>("/pc/api/info")
+        val whoRes = api.getJson<WhoAmIResponse>("/pc/api/whoami")
+        when (infoRes) {
+            is ApiResult.Success -> {
+                val login = (whoRes as? ApiResult.Success)?.data?.login
+                _uiState.update {
+                    it.copy(
+                        serverInfo = infoRes.data,
+                        whoAmI = login,
+                        connectionTesting = false,
+                        connectionError = null,
+                    )
                 }
-                is ApiResult.Error -> {
-                    _uiState.update {
-                        it.copy(
-                            connectionTesting = false,
-                            connectionError = infoRes.message,
-                        )
-                    }
+            }
+            is ApiResult.Error -> {
+                _uiState.update {
+                    it.copy(
+                        connectionTesting = false,
+                        connectionError = infoRes.message,
+                    )
                 }
             }
         }
@@ -514,19 +524,23 @@ class SettingsViewModel(
 
     fun checkForApkUpdate() {
         viewModelScope.launch {
-            _uiState.update { it.copy(updateChecking = true, updateError = null) }
-            val result = withContext(Dispatchers.IO) {
-                fetchApkReleaseJson(GITHUB_VERSION_URL)
-                    ?: fetchApkReleaseJson("${api.baseUrl}/pc/api/apk/version.json")
+            checkForApkUpdateSuspend()
+        }
+    }
+
+    private suspend fun checkForApkUpdateSuspend() {
+        _uiState.update { it.copy(updateChecking = true, updateError = null) }
+        val result = withContext(Dispatchers.IO) {
+            fetchApkReleaseJson(GITHUB_VERSION_URL)
+                ?: fetchApkReleaseJson("${api.baseUrl}/pc/api/apk/version.json")
+        }
+        if (result != null) {
+            _uiState.update {
+                it.copy(latestRelease = result, updateChecking = false, updateError = null)
             }
-            if (result != null) {
-                _uiState.update {
-                    it.copy(latestRelease = result, updateChecking = false, updateError = null)
-                }
-            } else {
-                _uiState.update {
-                    it.copy(updateChecking = false, updateError = "Could not check GitHub Releases for updates.")
-                }
+        } else {
+            _uiState.update {
+                it.copy(updateChecking = false, updateError = "Could not check GitHub Releases for updates.")
             }
         }
     }

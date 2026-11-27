@@ -10,8 +10,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Fingerprint
-import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.rounded.Fingerprint
+import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -23,13 +23,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
@@ -54,6 +53,7 @@ fun KeyringUnlockSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     var password by remember { mutableStateOf("") }
     var saveOnPhone by remember { mutableStateOf(false) }
 
@@ -88,7 +88,7 @@ fun KeyringUnlockSheet(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Icon(
-                    imageVector = if (mode == KeyringSheetMode.SAVE_PASSWORD) Icons.Filled.Fingerprint else Icons.Filled.LockOpen,
+                    imageVector = if (mode == KeyringSheetMode.SAVE_PASSWORD) Icons.Rounded.Fingerprint else Icons.Rounded.LockOpen,
                     contentDescription = null,
                     tint = colors.textDim,
                     modifier = Modifier.size(22.dp),
@@ -96,8 +96,7 @@ fun KeyringUnlockSheet(
                 Text(
                     text = if (mode == KeyringSheetMode.SAVE_PASSWORD) "Save keyring password" else "Unlock keyring",
                     color = colors.text,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = type.collapsedTitle,
                 )
             }
 
@@ -108,8 +107,7 @@ fun KeyringUnlockSheet(
                     "Enter your laptop login keyring password to unlock GNOME keyring and restart RDP."
                 },
                 color = colors.textDim,
-                fontSize = 13.5.sp,
-                lineHeight = 19.sp,
+                style = type.body,
             )
 
             PcCompactTextField(
@@ -136,13 +134,12 @@ fun KeyringUnlockSheet(
                         Text(
                             text = "Save on this phone",
                             color = colors.text,
-                            fontSize = 14.5.sp,
-                            fontWeight = FontWeight.Medium,
+                            style = type.cardTitle,
                         )
                         Text(
                             text = "Encrypted with your fingerprint for future reboots",
                             color = colors.textFaint,
-                            fontSize = 12.sp,
+                            style = type.caption,
                         )
                     }
                     PcSwitch(

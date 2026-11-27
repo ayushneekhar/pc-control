@@ -7,9 +7,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -17,15 +20,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccessTime
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.DonutLarge
-import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.PersonOff
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Speed
-import androidx.compose.material.icons.filled.TrendingUp
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.automirrored.rounded.TrendingUp
+import androidx.compose.material.icons.rounded.AccessTime
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.DonutLarge
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.PersonOff
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -41,15 +44,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.MonoTextStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
@@ -70,6 +75,7 @@ fun UsageAccountDetailScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
     LaunchedEffect(Unit) {
@@ -95,6 +101,7 @@ fun UsageAccountDetailScreen(
     }
 
     val listState = rememberLazyListState()
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
     PcScaffold(
         title = "Account",
@@ -102,118 +109,130 @@ fun UsageAccountDetailScreen(
         statusColor = if (summary?.account?.error != null) colors.bad else null,
         onBack = onBack,
         listState = listState,
+        applyNavigationBarPadding = false,
     ) {
-        PullToRefreshBox(
-            isRefreshing = state.isRefreshing || state.usageLoading,
-            onRefresh = { viewModel.loadUsage(force = true) },
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            LazyColumn(
-                state = listState,
+        Box(modifier = Modifier.fillMaxSize()) {
+            PullToRefreshBox(
+                isRefreshing = state.isRefreshing || state.usageLoading,
+                onRefresh = { viewModel.loadUsage(force = true) },
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                if (!state.usageError.isNullOrBlank()) {
-                    item(key = "err") {
-                        PcErrorBanner(message = state.usageError!!)
-                    }
-                }
-
-                if (summary == null) {
-                    item(key = "empty") {
-                        PcCard {
-                            PcEmptyState(
-                                icon = Icons.Filled.PersonOff,
-                                title = "Account not found",
-                                body = "Pull down to refresh usage data from your PC.",
-                            )
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 32.dp + navBottom),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    if (!state.usageError.isNullOrBlank()) {
+                        item(key = "err") {
+                            PcErrorBanner(message = state.usageError!!)
                         }
                     }
-                } else {
-                    val acc = summary.account
-                    val (statusLabel, statusFg, statusBg) = when {
-                        !acc.signedIn -> Triple("Not signed in", colors.textFaint, colors.surfaceRaised)
-                        !acc.error.isNullOrBlank() -> Triple("Error", colors.bad, colors.badSoft)
-                        else -> Triple("Signed in", colors.textDim, colors.surfaceRaised)
-                    }
 
-                    item(key = "hero") {
-                        PcCard {
-                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
-                                    ProviderUsageIcon(
-                                        key = summary.providerKey,
-                                        tint = colors.textDim,
-                                        modifier = Modifier.size(22.dp),
-                                    )
-                                    Text(
-                                        text = acc.label,
-                                        color = colors.text,
-                                        fontSize = 19.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    if (summary.poolSize > 1) {
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(999.dp))
-                                                .background(colors.surfaceRaised)
-                                                .padding(horizontal = 9.dp, vertical = 4.dp),
-                                        ) {
-                                            Text(
-                                                text = "#${summary.poolIndex} of ${summary.poolSize}",
-                                                color = colors.textDim,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                style = TabularNumStyle,
-                                            )
-                                        }
-                                    }
-                                }
-
-                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    if (!acc.email.isNullOrBlank()) {
-                                        Text(text = acc.email, color = colors.text, fontSize = 14.sp)
-                                    }
-                                    Text(text = summary.providerSubtitle, color = colors.textDim, fontSize = 12.5.sp)
-                                }
-
-                                PcPill(text = statusLabel, color = statusFg, backgroundColor = statusBg)
+                    if (summary == null) {
+                        item(key = "empty") {
+                            PcCard {
+                                PcEmptyState(
+                                    icon = Icons.Rounded.PersonOff,
+                                    title = "Account not found",
+                                    body = "Pull down to refresh usage data from your PC.",
+                                )
                             }
                         }
-                    }
-
-                    if (!acc.error.isNullOrBlank()) {
-                        item(key = "acc_error") {
-                            PcErrorBanner(message = acc.error)
+                    } else {
+                        val acc = summary.account
+                        val (statusLabel, statusFg, statusBg) = when {
+                            !acc.signedIn -> Triple("Not signed in", colors.textFaint, colors.surfaceRaised)
+                            !acc.error.isNullOrBlank() -> Triple("Error", colors.bad, colors.badSoft)
+                            else -> Triple("Signed in", colors.textDim, colors.surfaceRaised)
                         }
-                    }
 
-                    items(count = windows.size, key = { "win_${windows[it].windowKey.wireValue}" }) { idx ->
-                        WindowDetailCard(detail = windows[idx])
-                    }
-
-                    item(key = "sec_info") {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            PcSectionLabel(label = "Account info")
+                        item(key = "hero") {
                             PcCard {
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    AccountKvRow("Status", statusLabel, valueColor = statusFg)
-                                    AccountKvRow("Email", acc.email ?: "—")
-                                    AccountKvRow("Instance ID", acc.id, mono = true)
-                                    AccountKvRow("Last updated", UsageSummary.formatUpdatedAgo(state.usage?.ts, nowMs))
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    ) {
+                                        ProviderUsageIcon(
+                                            key = summary.providerKey,
+                                            tint = colors.textDim,
+                                            modifier = Modifier.size(22.dp),
+                                        )
+                                        Text(
+                                            text = acc.label,
+                                            color = colors.text,
+                                            style = type.collapsedTitle,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        if (summary.poolSize > 1) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(999.dp))
+                                                    .background(colors.surfaceRaised)
+                                                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                                            ) {
+                                                Text(
+                                                    text = "#${summary.poolIndex} of ${summary.poolSize}",
+                                                    color = colors.textDim,
+                                                    style = type.micro.tabular(),
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        if (!acc.email.isNullOrBlank()) {
+                                            Text(text = acc.email, color = colors.text, style = type.body)
+                                        }
+                                        Text(text = summary.providerSubtitle, color = colors.textDim, style = type.caption)
+                                    }
+
+                                    PcPill(text = statusLabel, color = statusFg, backgroundColor = statusBg)
+                                }
+                            }
+                        }
+
+                        if (!acc.error.isNullOrBlank()) {
+                            item(key = "acc_error") {
+                                PcErrorBanner(message = acc.error)
+                            }
+                        }
+
+                        items(count = windows.size, key = { "win_${windows[it].windowKey.wireValue}" }) { idx ->
+                            WindowDetailCard(detail = windows[idx])
+                        }
+
+                        item(key = "sec_info") {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                PcSectionLabel(label = "Account info")
+                                PcCard {
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        AccountKvRow("Status", statusLabel, valueColor = statusFg)
+                                        AccountKvRow("Email", acc.email ?: "—")
+                                        AccountKvRow("Instance ID", acc.id, mono = true)
+                                        AccountKvRow("Last updated", UsageSummary.formatUpdatedAgo(state.usage?.ts, nowMs))
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(navBottom + 20.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(Color.Transparent, colors.bg),
+                        ),
+                    ),
+            )
         }
     }
 }
@@ -221,6 +240,7 @@ fun UsageAccountDetailScreen(
 @Composable
 private fun WindowDetailCard(detail: AccountWindowDetail) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val palette = usageSegmentColors(detail.state, detail.remainingPct)
     val evenPaceText = remember(detail) { formatEvenPaceText(detail) }
 
@@ -234,8 +254,7 @@ private fun WindowDetailCard(detail: AccountWindowDetail) {
                 Text(
                     text = detail.headerTitle,
                     color = colors.text,
-                    fontSize = 14.5.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                 )
                 if (detail.paceStatus != null) {
                     val (fg, bg) = when (detail.paceStatus) {
@@ -260,32 +279,29 @@ private fun WindowDetailCard(detail: AccountWindowDetail) {
                             Text(
                                 text = "${detail.remainingPct.roundToInt()}%",
                                 color = palette.pctFg,
-                                fontSize = 32.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                style = TabularNumStyle,
+                                style = type.metricHero.copy(fontSize = 32.sp, lineHeight = 38.sp),
                             )
                             Text(
                                 text = "left",
                                 color = colors.textDim,
-                                fontSize = 14.5.sp,
+                                style = type.body,
                                 modifier = Modifier.padding(bottom = 5.dp),
                             )
                         }
                         Text(
                             text = "${(detail.usedPct ?: 0.0).roundToInt()}% used",
                             color = colors.textFaint,
-                            fontSize = 13.sp,
-                            style = TabularNumStyle,
+                            style = type.caption.tabular(),
                         )
                     }
                     detail.state == AccountWindowRowState.SIGNED_OUT -> {
-                        Text(text = "Not signed in", color = colors.textFaint, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                        Text(text = "Not signed in", color = colors.textFaint, style = type.cardTitle)
                     }
                     detail.state == AccountWindowRowState.ERROR -> {
-                        Text(text = "Unavailable", color = colors.bad, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                        Text(text = "Unavailable", color = colors.bad, style = type.cardTitle)
                     }
                     else -> {
-                        Text(text = "—", color = colors.textFaint, fontSize = 16.sp)
+                        Text(text = "—", color = colors.textFaint, style = type.cardTitle)
                     }
                 }
             }
@@ -304,21 +320,21 @@ private fun WindowDetailCard(detail: AccountWindowDetail) {
                         !detail.resetDateTimeLabel.isNullOrBlank() -> {
                             val suffix = detail.countdownLabel?.let { " (in $it)" } ?: ""
                             DetailInfoLine(
-                                icon = Icons.Filled.AccessTime,
+                                icon = Icons.Rounded.AccessTime,
                                 text = "Resets ${detail.resetDateTimeLabel}$suffix",
                                 textColor = colors.text,
                             )
                         }
                         detail.isFullIdle -> {
                             DetailInfoLine(
-                                icon = Icons.Filled.CheckCircle,
+                                icon = Icons.Rounded.CheckCircle,
                                 text = "Quota full · no active cooldown",
                                 textColor = colors.textDim,
                             )
                         }
                         else -> {
                             DetailInfoLine(
-                                icon = Icons.Filled.AccessTime,
+                                icon = Icons.Rounded.AccessTime,
                                 text = "Reset time unavailable",
                                 textColor = colors.textFaint,
                             )
@@ -326,19 +342,19 @@ private fun WindowDetailCard(detail: AccountWindowDetail) {
                     }
 
                     if (evenPaceText != null) {
-                        DetailInfoLine(icon = Icons.Filled.Speed, text = evenPaceText)
+                        DetailInfoLine(icon = Icons.Rounded.Speed, text = evenPaceText)
                     }
 
                     if (detail.poolRestorePct != null) {
                         DetailInfoLine(
-                            icon = Icons.Filled.Refresh,
+                            icon = Icons.Rounded.Refresh,
                             text = "Restores +${detail.poolRestorePct}% of the ${detail.activePoolSize}-account pool on reset",
                         )
                     }
 
                     if (detail.poolSharePct != null) {
                         DetailInfoLine(
-                            icon = Icons.Filled.DonutLarge,
+                            icon = Icons.Rounded.DonutLarge,
                             text = "Contributes ${detail.poolSharePct}% of current pool",
                         )
                     }
@@ -346,9 +362,9 @@ private fun WindowDetailCard(detail: AccountWindowDetail) {
                     val proj = detail.projection
                     if (proj != null) {
                         val (icon, tint) = when (proj) {
-                            is AccountWindowProjection.Exhausted -> Icons.Filled.ErrorOutline to colors.bad
-                            is AccountWindowProjection.RunsOut -> Icons.Filled.Warning to colors.warn
-                            is AccountWindowProjection.Headroom -> Icons.Filled.TrendingUp to colors.textDim
+                            is AccountWindowProjection.Exhausted -> Icons.Rounded.ErrorOutline to colors.bad
+                            is AccountWindowProjection.RunsOut -> Icons.Rounded.Warning to colors.warn
+                            is AccountWindowProjection.Headroom -> Icons.AutoMirrored.Rounded.TrendingUp to colors.textDim
                         }
                         DetailInfoLine(
                             icon = icon,
@@ -382,6 +398,7 @@ private fun DetailInfoLine(
     textColor: Color = LocalPcColors.current.textDim,
     iconColor: Color = LocalPcColors.current.textFaint,
 ) {
+    val type = LocalPcType.current
     Row(
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -397,9 +414,7 @@ private fun DetailInfoLine(
         Text(
             text = text,
             color = textColor,
-            fontSize = 13.sp,
-            lineHeight = 18.sp,
-            style = TabularNumStyle,
+            style = type.caption.tabular(),
         )
     }
 }
@@ -412,22 +427,24 @@ private fun AccountKvRow(
     mono: Boolean = false,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(text = label, color = colors.textDim, fontSize = 13.sp)
+        Text(text = label, color = colors.textDim, style = type.caption)
         Spacer(modifier = Modifier.width(12.dp))
         Text(
             text = value,
             color = valueColor,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
+            style = if (mono) {
+                MonoTextStyle.tabular().copy(fontWeight = FontWeight.Medium)
+            } else {
+                type.caption.tabular().copy(fontWeight = FontWeight.Medium)
+            },
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            style = TabularNumStyle,
         )
     }
 }

@@ -425,4 +425,57 @@ class SpaceHelpersTest {
         val driveWithPoster = sampleDriveItems[0].copy(poster = "https://image.tmdb.org/t/p/w300/inc.jpg")
         assertEquals("https://image.tmdb.org/t/p/w300/inc.jpg", driveWithPoster.resolvedPosterUrl)
     }
+
+    @Test
+    fun formatSpaceCountLabel_labelsMoviesShowsAndItemsClearly() {
+        assertEquals("1 movie", formatSpaceCountLabel(SpaceTab.MOVIES, SpaceFilter.ALL, 1))
+        assertEquals("11 movies", formatSpaceCountLabel(SpaceTab.MOVIES, SpaceFilter.ALL, 11))
+        assertEquals("1 show", formatSpaceCountLabel(SpaceTab.TV_SHOWS, SpaceFilter.ALL, 1))
+        assertEquals("4 shows", formatSpaceCountLabel(SpaceTab.TV_SHOWS, SpaceFilter.ALL, 4))
+        assertEquals("11 items", formatSpaceCountLabel(SpaceTab.OFFLOADED, SpaceFilter.ALL, 11))
+        assertEquals("1 item", formatSpaceCountLabel(SpaceTab.OFFLOADED, SpaceFilter.ALL, 1))
+        assertEquals("3 movies", formatSpaceCountLabel(SpaceTab.OFFLOADED, SpaceFilter.MOVIE, 3))
+        assertEquals("2 shows", formatSpaceCountLabel(SpaceTab.OFFLOADED, SpaceFilter.SEASON, 2))
+    }
+
+    @Test
+    fun spacePosterCacheKey_andPickBestSeerrPoster_matchAccurately() {
+        assertEquals("tmdb:movie:27205", spacePosterCacheKey("movie", "Inception", 2010, tmdbId = 27205))
+        assertEquals("title:tv:severance:2022", spacePosterCacheKey("season", "Severance", 2022, tmdbId = null))
+        assertEquals(
+            sampleCandidates[2].posterCacheKey,
+            sampleCandidates[3].posterCacheKey,
+        )
+
+        val hits = listOf(
+            SpacePosterLookupHit(
+                id = 1,
+                mediaType = "tv",
+                title = "Inception",
+                year = 2010,
+                poster = "https://image.tmdb.org/t/p/w300/wrong_tv.jpg",
+            ),
+            SpacePosterLookupHit(
+                id = 2,
+                mediaType = "movie",
+                title = "Inception",
+                year = 2010,
+                poster = "https://image.tmdb.org/t/p/w300/correct_movie.jpg",
+            ),
+            SpacePosterLookupHit(
+                id = 3,
+                mediaType = "movie",
+                title = "Inception: The Cobol Job",
+                year = 2010,
+                poster = "https://image.tmdb.org/t/p/w300/spin_off.jpg",
+            ),
+        )
+        assertEquals(
+            "https://image.tmdb.org/t/p/w300/correct_movie.jpg",
+            pickBestSeerrPoster(hits, kind = "movie", title = "Inception", year = 2010),
+        )
+        assertNull(
+            pickBestSeerrPoster(hits, kind = "movie", title = "Completely Unrelated", year = 2020),
+        )
+    }
 }

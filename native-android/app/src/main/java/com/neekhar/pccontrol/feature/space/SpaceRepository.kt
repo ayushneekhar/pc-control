@@ -6,7 +6,10 @@ import com.neekhar.pccontrol.core.network.SseMessage
 import com.neekhar.pccontrol.core.storage.LocalCache
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 
 sealed interface SpaceJobsStreamUpdate {
     data object Connected : SpaceJobsStreamUpdate
@@ -22,6 +25,7 @@ class SpaceRepository(
         const val CACHE_KEY_WATCHED = "space:overview"
         const val CACHE_KEY_ALL = "space:overview:all"
         const val CACHE_KEY_DRIVE = "space:drive"
+        const val CACHE_KEY_POSTERS = "space:posters:v1"
         const val SSE_JOBS_PATH = "/pc/api/space/jobs/stream"
 
         private const val GET_SPACE_TIMEOUT_MS = 30_000L
@@ -30,8 +34,75 @@ class SpaceRepository(
         private const val ENQUEUE_TIMEOUT_MS = 30_000L
         private const val DELETE_DRIVE_TIMEOUT_MS = 120_000L
         private const val CANCEL_JOB_TIMEOUT_MS = 15_000L
+        private const val POSTER_LOOKUP_TIMEOUT_MS = 8_000L
+        private const val MAX_CACHED_POSTERS = 400
         private const val SSE_INITIAL_RETRY_MS = 1_500L
         private const val SSE_MAX_RETRY_MS = 15_000L
+    }
+
+    private val posterCache = ConcurrentHashMap<String, String>()
+    private val missedPosterKeys = ConcurrentHashMap.newKeySet<String>()
+    @Volatile
+    private var postersLoadedFromDisk = false
+
+    fun getCachedPosters(): Map<String, String> {
+        ensurePostersLoaded()
+        return posterCache.toMap()
+    }
+
+    /**
+     * Resolves a real TMDB poster URL via Seerr (`/pc/api/seerr/details` when a TMDB ID is known,
+     * falling back to `/pc/api/seerr/search` by title + year). Results are cached in memory and
+     * persisted in [LocalCache] so subsequent opens render thumbnails immediately.
+     */
+    suspend fun resolvePoster(
+        kind: String,
+        title: String,
+        year: Int? = null,
+        tmdbId: Int? = null,
+    ): Pair<String, String>? {
+        ensurePostersLoaded()
+        val key = spacePosterCacheKey(kind = kind, title = title, year = year, tmdbId = tmdbId)
+        posterCache[key]?.let { return key to it }
+        if (key in missedPosterKeys) return null
+
+        val mediaType = if (kind == "season" || kind == "tv") "tv" else "movie"
+        var resolved: String? = null
+
+        if (tmdbId != null && tmdbId > 0) {
+            val res = api.getJson<SpacePosterDetailsResponse>(
+                pathOrUrl = "/pc/api/seerr/details?type=$mediaType&id=$tmdbId",
+                timeoutMs = POSTER_LOOKUP_TIMEOUT_MS,
+            )
+            if (res is ApiResult.Success) {
+                resolved = resolveSpacePosterUrl(poster = res.data.poster)
+            }
+        }
+
+        if (resolved == null && title.isNotBlank()) {
+            val encoded = URLEncoder.encode(title.trim(), "UTF-8")
+            val res = api.getJson<SpacePosterSearchResponse>(
+                pathOrUrl = "/pc/api/seerr/search?q=$encoded",
+                timeoutMs = POSTER_LOOKUP_TIMEOUT_MS,
+            )
+            if (res is ApiResult.Success) {
+                resolved = pickBestSeerrPoster(
+                    hits = res.data.results,
+                    kind = kind,
+                    title = title,
+                    year = year,
+                )
+            }
+        }
+
+        if (resolved != null) {
+            posterCache[key] = resolved
+            saveCachedPosters()
+            return key to resolved
+        }
+
+        missedPosterKeys.add(key)
+        return null
     }
 
     suspend fun getSpace(scope: SpaceScope = SpaceScope.WATCHED): ApiResult<SpaceResponse> {
@@ -155,6 +226,35 @@ class SpaceRepository(
         val localCache = cache ?: return
         runCatching {
             localCache.putString(CACHE_KEY_DRIVE, api.json.encodeToString(DriveStatusResponse.serializer(), data))
+        }
+    }
+
+    private fun ensurePostersLoaded() {
+        if (postersLoadedFromDisk) return
+        synchronized(this) {
+            if (postersLoadedFromDisk) return
+            val raw = cache?.getString(CACHE_KEY_POSTERS)
+            if (!raw.isNullOrBlank()) {
+                runCatching {
+                    val serializer = MapSerializer(String.serializer(), String.serializer())
+                    val map = api.json.decodeFromString(serializer, raw)
+                    posterCache.putAll(map)
+                }
+            }
+            postersLoadedFromDisk = true
+        }
+    }
+
+    private fun saveCachedPosters() {
+        val localCache = cache ?: return
+        runCatching {
+            val snapshot = if (posterCache.size > MAX_CACHED_POSTERS) {
+                posterCache.entries.take(MAX_CACHED_POSTERS).associate { it.key to it.value }
+            } else {
+                posterCache.toMap()
+            }
+            val serializer = MapSerializer(String.serializer(), String.serializer())
+            localCache.putString(CACHE_KEY_POSTERS, api.json.encodeToString(serializer, snapshot))
         }
     }
 }

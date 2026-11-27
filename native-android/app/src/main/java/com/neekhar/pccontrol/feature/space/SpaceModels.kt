@@ -47,6 +47,7 @@ data class SpaceCandidate(
     @SerialName("unwatched_users") val unwatchedUsers: List<String> = emptyList(),
     @SerialName("warn_unwatched") val warnUnwatched: Boolean = false,
     val monitored: Boolean = false,
+    @SerialName("tmdb_id") val tmdbId: Int? = null,
     val poster: String? = null,
     @SerialName("poster_url") val posterUrl: String? = null,
     @SerialName("poster_path") val posterPath: String? = null,
@@ -55,6 +56,7 @@ data class SpaceCandidate(
     val isSeason: Boolean get() = kind == "season"
     val isWatched: Boolean get() = watched ?: (watchedCount > 0)
     val resolvedPosterUrl: String? get() = resolveSpacePosterUrl(poster, posterUrl, posterPath)
+    val posterCacheKey: String get() = spacePosterCacheKey(kind = kind, title = title, year = year, tmdbId = tmdbId)
 }
 
 @Serializable
@@ -130,6 +132,7 @@ data class DriveItem(
     val isMovie: Boolean get() = kind == "movie"
     val isSeason: Boolean get() = kind == "season"
     val resolvedPosterUrl: String? get() = resolveSpacePosterUrl(poster, posterUrl, posterPath)
+    val posterCacheKey: String get() = spacePosterCacheKey(kind = kind, title = title, year = year, tmdbId = tmdbId)
 }
 
 @Serializable
@@ -219,4 +222,23 @@ data class CancelSpaceJobResponse(
 data class SpaceJobsSsePayload(
     val jobs: List<TransferJob>? = null,
     val ts: Long? = null,
+)
+
+@Serializable
+data class SpacePosterLookupHit(
+    val id: Int = 0,
+    val mediaType: String = "",
+    val title: String = "",
+    val year: Int? = null,
+    val poster: String? = null,
+)
+
+@Serializable
+data class SpacePosterSearchResponse(
+    val results: List<SpacePosterLookupHit> = emptyList(),
+)
+
+@Serializable
+data class SpacePosterDetailsResponse(
+    val poster: String? = null,
 )

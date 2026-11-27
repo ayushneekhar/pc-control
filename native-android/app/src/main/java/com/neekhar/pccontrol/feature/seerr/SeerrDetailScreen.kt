@@ -34,20 +34,20 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CheckBox
-import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.Tv
-import androidx.compose.material.icons.filled.Verified
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CheckBox
+import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Group
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.Tv
+import androidx.compose.material.icons.rounded.Verified
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
 import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
@@ -95,6 +96,7 @@ fun SeerrDetailScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val context = LocalContext.current
     val item = state.item
     val hasBackdrop = !item?.backdrop.isNullOrBlank()
@@ -162,7 +164,7 @@ fun SeerrDetailScreen(
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                                 contentDescription = "Back",
                                 tint = colors.onMedia,
                                 modifier = Modifier.size(20.dp),
@@ -174,29 +176,28 @@ fun SeerrDetailScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .statusBarsPadding()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                            .padding(horizontal = 4.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
+                                .size(48.dp)
                                 .clip(CircleShape)
                                 .clickable(onClick = onBack),
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                                 contentDescription = "Back",
                                 tint = colors.text,
-                                modifier = Modifier.size(22.dp),
+                                modifier = Modifier.size(24.dp),
                             )
                         }
                         Text(
                             text = if (state.isTv) "TV show" else "Movie",
                             color = colors.textDim,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
+                            style = type.body.copy(fontWeight = FontWeight.Medium),
                         )
                     }
                 }
@@ -328,7 +329,7 @@ fun SeerrDetailScreen(
                                 },
                                 onClick = viewModel::requestMovie,
                                 variant = PcButtonVariant.Primary,
-                                icon = Icons.Filled.Add,
+                                icon = Icons.Rounded.Add,
                                 busy = state.submitting,
                                 enabled = !state.loading && !state.submitting,
                                 modifier = Modifier.fillMaxWidth(),
@@ -343,7 +344,7 @@ fun SeerrDetailScreen(
                                 },
                                 onClick = viewModel::openSeasonSheet,
                                 variant = PcButtonVariant.Primary,
-                                icon = Icons.Filled.Add,
+                                icon = Icons.Rounded.Add,
                                 busy = state.submitting,
                                 enabled = !state.loading && !state.submitting,
                                 modifier = Modifier.fillMaxWidth(),
@@ -354,7 +355,7 @@ fun SeerrDetailScreen(
                                 label = "Open in Jellyfin",
                                 onClick = { openExternalUrl(item.mediaUrl) },
                                 variant = PcButtonVariant.Subtle,
-                                icon = Icons.Filled.PlayArrow,
+                                icon = Icons.Rounded.PlayArrow,
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }
@@ -384,7 +385,7 @@ fun SeerrDetailScreen(
                                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Filled.Schedule,
+                                            imageVector = Icons.Rounded.Schedule,
                                             contentDescription = null,
                                             tint = colors.textFaint,
                                             modifier = Modifier.size(15.dp),
@@ -535,9 +536,9 @@ fun SeerrDetailScreen(
                                                 SeerrStatusPill(status = season.status)
                                                 Icon(
                                                     imageVector = if (checked) {
-                                                        Icons.Filled.CheckBox
+                                                        Icons.Rounded.CheckBox
                                                     } else {
-                                                        Icons.Filled.CheckBoxOutlineBlank
+                                                        Icons.Rounded.CheckBoxOutlineBlank
                                                     },
                                                     contentDescription = null,
                                                     tint = if (checked) colors.accent else colors.textFaint,
@@ -597,7 +598,7 @@ fun SeerrDetailScreen(
                                     )
                                 }
                                 Icon(
-                                    imageVector = Icons.Filled.ChevronRight,
+                                    imageVector = Icons.Rounded.ChevronRight,
                                     contentDescription = null,
                                     tint = colors.textFaint,
                                     modifier = Modifier.size(20.dp),
@@ -874,7 +875,7 @@ private fun SeerrRatingsStrip(
                     sub = SeerrHelpers.formatCompactCount(tmdb.count) ?: "/ 10",
                     fg = colors.text,
                     bg = colors.surfaceRaised,
-                    icon = Icons.Filled.Star,
+                    icon = Icons.Rounded.Star,
                 ),
             )
         }
@@ -887,7 +888,7 @@ private fun SeerrRatingsStrip(
                     sub = SeerrHelpers.formatCompactCount(imdb.count) ?: "/ 10",
                     fg = colors.warn,
                     bg = colors.warnSoft,
-                    icon = Icons.Filled.Star,
+                    icon = Icons.Rounded.Star,
                 ),
             )
         }
@@ -901,7 +902,7 @@ private fun SeerrRatingsStrip(
                     sub = ratings.rt.criticsRating ?: if (fresh) "Fresh" else "Rotten",
                     fg = if (fresh) colors.ok else colors.bad,
                     bg = if (fresh) colors.okSoft else colors.badSoft,
-                    icon = if (fresh) Icons.Filled.Verified else Icons.Filled.Warning,
+                    icon = if (fresh) Icons.Rounded.Verified else Icons.Rounded.Warning,
                 ),
             )
         }
@@ -915,7 +916,7 @@ private fun SeerrRatingsStrip(
                     sub = ratings.rt.audienceRating,
                     fg = if (good) colors.ok else colors.bad,
                     bg = if (good) colors.okSoft else colors.badSoft,
-                    icon = Icons.Filled.Group,
+                    icon = Icons.Rounded.Group,
                 ),
             )
         }
@@ -1001,7 +1002,7 @@ private fun SeerrCastCard(
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = Icons.Filled.Person,
+                imageVector = Icons.Rounded.Person,
                 contentDescription = null,
                 tint = colors.textFaint,
                 modifier = Modifier.size(32.dp),
@@ -1062,7 +1063,7 @@ private fun SeerrRecommendationCard(
                 .background(colors.surfaceRaised),
         ) {
             Icon(
-                imageVector = if (item.isTv) Icons.Filled.Tv else Icons.Filled.Movie,
+                imageVector = if (item.isTv) Icons.Rounded.Tv else Icons.Rounded.Movie,
                 contentDescription = null,
                 tint = colors.textFaint,
                 modifier = Modifier
@@ -1218,9 +1219,9 @@ private fun SeerrSeasonPickerSheet(
                                     SeerrStatusPill(status = season.status)
                                     Icon(
                                         imageVector = if (checked) {
-                                            Icons.Filled.CheckBox
+                                            Icons.Rounded.CheckBox
                                         } else {
-                                            Icons.Filled.CheckBoxOutlineBlank
+                                            Icons.Rounded.CheckBoxOutlineBlank
                                         },
                                         contentDescription = null,
                                         tint = if (checked) colors.accent else colors.textFaint,
@@ -1252,7 +1253,7 @@ private fun SeerrSeasonPickerSheet(
                     },
                     onClick = onSubmit,
                     variant = PcButtonVariant.Primary,
-                    icon = Icons.Filled.Add,
+                    icon = Icons.Rounded.Add,
                     busy = submitting,
                     enabled = !submitting && selectedSeasons.isNotEmpty(),
                     modifier = Modifier.weight(1f),

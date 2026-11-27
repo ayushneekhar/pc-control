@@ -19,13 +19,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.CollectionsBookmark
-import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.CollectionsBookmark
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -40,10 +40,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
@@ -95,9 +95,9 @@ fun SeerrPoster(
     val colors = LocalPcColors.current
     val shape = RoundedCornerShape(size.radius)
     val fallbackIcon = when (mediaType) {
-        "collection" -> Icons.Filled.CollectionsBookmark
-        "tv" -> Icons.Filled.Tv
-        else -> Icons.Filled.Movie
+        "collection" -> Icons.Rounded.CollectionsBookmark
+        "tv" -> Icons.Rounded.Tv
+        else -> Icons.Rounded.Movie
     }
 
     Box(
@@ -139,7 +139,7 @@ fun SeerrPersonAvatar(
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            imageVector = Icons.Filled.Person,
+            imageVector = Icons.Rounded.Person,
             contentDescription = null,
             tint = colors.textFaint,
             modifier = Modifier.size(size * 0.52f),
@@ -177,13 +177,14 @@ fun SeerrRatingInline(
 ) {
     val formatted = SeerrHelpers.formatVoteAverage(voteAverage) ?: return
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         Icon(
-            imageVector = Icons.Filled.Star,
+            imageVector = Icons.Rounded.Star,
             contentDescription = null,
             tint = colors.warn,
             modifier = Modifier.size(12.dp),
@@ -191,10 +192,7 @@ fun SeerrRatingInline(
         Text(
             text = formatted,
             color = colors.textDim,
-            style = TabularNumStyle.copy(
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-            ),
+            style = type.caption.tabular().copy(fontWeight = FontWeight.Medium),
         )
     }
 }
@@ -254,6 +252,7 @@ fun SeerrCollectionSheet(
 ) {
     if (!state.visible) return
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val collection = state.collection
     val parts = collection?.parts.orEmpty()
     val missingParts = SeerrHelpers.collectionMissingParts(collection)
@@ -286,8 +285,7 @@ fun SeerrCollectionSheet(
                     Text(
                         text = title,
                         color = colors.text,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        style = type.collapsedTitle,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -300,10 +298,7 @@ fun SeerrCollectionSheet(
                             Text(
                                 text = summary,
                                 color = colors.textDim,
-                                style = TabularNumStyle.copy(
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                ),
+                                style = type.caption.tabular().copy(fontWeight = FontWeight.Medium),
                             )
                         }
                     }
@@ -314,8 +309,7 @@ fun SeerrCollectionSheet(
                 Text(
                     text = collection!!.overview,
                     color = colors.textDim,
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp,
+                    style = type.caption,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -370,8 +364,7 @@ fun SeerrCollectionSheet(
                                     Text(
                                         text = movie.title,
                                         color = colors.text,
-                                        fontSize = 14.5.sp,
-                                        fontWeight = FontWeight.SemiBold,
+                                        style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis,
                                     )
@@ -382,7 +375,7 @@ fun SeerrCollectionSheet(
                                         Text(
                                             text = movie.year?.toString() ?: "TBA",
                                             color = colors.textFaint,
-                                            style = TabularNumStyle.copy(fontSize = 12.sp),
+                                            style = type.caption.tabular(),
                                         )
                                         SeerrStatusPill(status = movie.status)
                                     }
@@ -398,7 +391,7 @@ fun SeerrCollectionSheet(
                                     )
                                 } else {
                                     Icon(
-                                        imageVector = Icons.Filled.ChevronRight,
+                                        imageVector = Icons.Rounded.ChevronRight,
                                         contentDescription = null,
                                         tint = colors.textFaint,
                                         modifier = Modifier.size(20.dp),
@@ -428,7 +421,7 @@ fun SeerrCollectionSheet(
                         label = "Request all missing (${missingParts.size})",
                         onClick = onRequestAllMissing,
                         variant = PcButtonVariant.Primary,
-                        icon = Icons.Filled.Add,
+                        icon = Icons.Rounded.Add,
                         busy = state.batchSubmitting,
                         enabled = !state.loading && !state.batchSubmitting,
                         modifier = Modifier.weight(1f),
@@ -448,6 +441,7 @@ fun SeerrFilterChip(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         modifier = modifier
             .height(34.dp)
@@ -466,18 +460,16 @@ fun SeerrFilterChip(
         Text(
             text = label,
             color = if (selected) colors.accent else colors.textDim,
-            fontSize = 13.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            style = type.caption.copy(
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            ),
             maxLines = 1,
         )
         if (count != null) {
             Text(
                 text = count.toString(),
                 color = if (selected) colors.accent else colors.textFaint,
-                style = TabularNumStyle.copy(
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                ),
+                style = type.micro.tabular(),
                 maxLines = 1,
             )
         }

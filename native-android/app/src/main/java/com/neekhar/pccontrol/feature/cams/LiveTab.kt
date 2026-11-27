@@ -7,10 +7,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -22,22 +22,23 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.VolumeOff
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ControlCamera
-import androidx.compose.material.icons.filled.Hd
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.VideocamOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ControlCamera
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.FullscreenExit
+import androidx.compose.material.icons.rounded.Hd
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.VideocamOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -49,15 +50,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -68,6 +65,7 @@ import coil3.compose.AsyncImage
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.MonoTextStyle
 import com.neekhar.pccontrol.core.theme.PcDimens
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -134,11 +132,14 @@ fun LiveTab(
                 onTogglePtz = onTogglePtzOpen,
                 onPtzStart = onPtzStart,
                 onPtzStop = onPtzStop,
+                modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
             )
 
             val others = CamsConfig.CAMS.filter { it != heroCam }
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = PcDimens.ScreenPad),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 others.forEach { cam ->
@@ -170,6 +171,7 @@ fun LiveTab(
             StreamTelemetryLine(
                 state = mainFeed.state,
                 hdDecoder = if (heroCam == CamId.CAT3 && cat3Hd) hardwareCaps.h265?.name else null,
+                modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
             )
 
             if (heroCam == CamId.CAT3) {
@@ -201,6 +203,7 @@ fun LiveTab(
                     onTogglePtz = onTogglePtzOpen,
                     onPtzStart = onPtzStart,
                     onPtzStop = onPtzStop,
+                    modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
                 )
             }
 
@@ -282,6 +285,7 @@ private fun LiveCamCard(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val context = LocalContext.current
     val state = feed.state
     var firstFrameRendered by remember(feed.camId, feed.videoTrack) { mutableStateOf(false) }
@@ -314,9 +318,6 @@ private fun LiveCamCard(
             .aspectRatio(16f / 9f)
             .clip(shape)
             .background(colors.media)
-            .then(
-                if (compact) Modifier.border(0.5.dp, colors.hairline, shape) else Modifier,
-            )
     }
 
     Box(modifier = cardModifier) {
@@ -379,7 +380,7 @@ private fun LiveCamCard(
             ) {
                 if (state.phase == LinkPhase.ERROR) {
                     Icon(
-                        imageVector = Icons.Filled.VideocamOff,
+                        imageVector = Icons.Rounded.VideocamOff,
                         contentDescription = null,
                         tint = colors.onMediaDim,
                         modifier = Modifier.size(28.dp),
@@ -399,19 +400,25 @@ private fun LiveCamCard(
                         else -> if (state.attempt > 1) "Reconnecting…" else "Connecting…"
                     },
                     color = colors.onMediaDim,
-                    fontSize = 13.sp,
+                    style = type.caption,
                     textAlign = TextAlign.Center,
                 )
             }
         }
 
-        // Minimal top-left camera label (compact status dot + shadowed name, no noisy fps/codec clutter)
+        // Top-left camera label pill chip (crisp over bright/white walls on both hero and small tiles)
         Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(horizontal = if (compact) 8.dp else 12.dp, vertical = if (compact) 6.dp else 10.dp),
+                .padding(if (compact) 6.dp else 10.dp)
+                .clip(CircleShape)
+                .background(colors.mediaChip)
+                .padding(
+                    horizontal = if (compact) 7.dp else 9.dp,
+                    vertical = if (compact) 3.dp else 4.dp,
+                ),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(if (compact) 5.dp else 6.dp),
         ) {
             val dotTone = when {
                 videoLive -> PcTone.Ok
@@ -421,16 +428,12 @@ private fun LiveCamCard(
             PcStatusDot(tone = dotTone, size = 6.dp)
             Text(
                 text = feed.camId.displayName,
-                color = Color.White,
-                style = TextStyle(
-                    fontSize = if (compact) 11.5.sp else 13.5.sp,
-                    fontWeight = FontWeight.Medium,
-                    shadow = Shadow(
-                        color = Color.Black.copy(alpha = 0.75f),
-                        offset = Offset(0f, 1f),
-                        blurRadius = 4f,
-                    ),
-                ),
+                color = colors.onMedia,
+                style = if (compact) {
+                    type.micro.copy(color = colors.onMedia, fontWeight = FontWeight.Medium)
+                } else {
+                    type.caption.copy(color = colors.onMedia, fontWeight = FontWeight.Medium)
+                },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -457,19 +460,19 @@ private fun LiveCamCard(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 OverlayToggleChip(
-                    icon = if (camMicOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
+                    icon = if (camMicOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.AutoMirrored.Rounded.VolumeOff,
                     contentDescription = if (camMicOn) "Cam mic on" else "Cam mic off",
                     active = camMicOn,
                     onClick = onToggleCamMic,
                 )
                 OverlayToggleChip(
-                    icon = Icons.Filled.Hd,
+                    icon = Icons.Rounded.Hd,
                     contentDescription = if (cat3Hd) "HD on" else "HD off",
                     active = cat3Hd,
                     onClick = onToggleCat3Hd,
                 )
                 OverlayToggleChip(
-                    icon = Icons.Filled.ControlCamera,
+                    icon = Icons.Rounded.ControlCamera,
                     contentDescription = "Pan / tilt",
                     active = ptzOpen,
                     onClick = onTogglePtz,
@@ -498,6 +501,7 @@ private fun BorderlessOverlayIconButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val colors = LocalPcColors.current
     Box(
         modifier = modifier
             .size(40.dp)
@@ -508,7 +512,7 @@ private fun BorderlessOverlayIconButton(
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = Color.Black.copy(alpha = 0.55f),
+            tint = colors.media.copy(alpha = 0.55f),
             modifier = Modifier
                 .offset(x = 0.5.dp, y = 1.dp)
                 .size(22.dp),
@@ -516,7 +520,7 @@ private fun BorderlessOverlayIconButton(
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = Color.White,
+            tint = colors.onMedia,
             modifier = Modifier.size(22.dp),
         )
     }
@@ -578,7 +582,7 @@ fun PtzControlPad(
     ) {
         PtzDirButton(
             dir = "up",
-            icon = Icons.Filled.KeyboardArrowUp,
+            icon = Icons.Rounded.KeyboardArrowUp,
             cellSize = cell,
             active = activeDir == "up",
             onPress = {
@@ -594,7 +598,7 @@ fun PtzControlPad(
         )
         PtzDirButton(
             dir = "down",
-            icon = Icons.Filled.KeyboardArrowDown,
+            icon = Icons.Rounded.KeyboardArrowDown,
             cellSize = cell,
             active = activeDir == "down",
             onPress = {
@@ -610,7 +614,7 @@ fun PtzControlPad(
         )
         PtzDirButton(
             dir = "left",
-            icon = Icons.Filled.KeyboardArrowLeft,
+            icon = Icons.Rounded.KeyboardArrowLeft,
             cellSize = cell,
             active = activeDir == "left",
             onPress = {
@@ -626,7 +630,7 @@ fun PtzControlPad(
         )
         PtzDirButton(
             dir = "right",
-            icon = Icons.Filled.KeyboardArrowRight,
+            icon = Icons.Rounded.KeyboardArrowRight,
             cellSize = cell,
             active = activeDir == "right",
             onPress = {
@@ -651,7 +655,7 @@ fun PtzControlPad(
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = Icons.Filled.Close,
+                imageVector = Icons.Rounded.Close,
                 contentDescription = "Close pan / tilt",
                 tint = colors.onMedia,
                 modifier = Modifier.size(cell * 0.4f),
@@ -704,82 +708,113 @@ private fun PtzPresetsSection(
     onPtzStop: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Column(verticalArrangement = Arrangement.spacedBy(PcDimens.Space2)) {
-        PcSectionLabel(label = "Food bowl PTZ presets", icon = Icons.Filled.ControlCamera)
-        PcCard {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
-            ) {
-                presets.forEach { preset ->
-                    val busy = activePresetId == preset.id
-                    Row(
-                        modifier = Modifier
-                            .height(36.dp)
-                            .clip(CircleShape)
-                            .background(if (busy) colors.accentSoft else colors.surfaceRaised)
-                            .clickable(enabled = activePresetId == null) { onRunPreset(preset) }
-                            .padding(horizontal = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        if (busy) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(13.dp),
-                                strokeWidth = 1.8.dp,
-                                color = colors.accent,
-                            )
-                        }
-                        Text(
-                            text = preset.label,
-                            color = if (busy) colors.accent else colors.text,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
+        PcSectionLabel(
+            label = "Food bowl PTZ presets",
+            icon = Icons.Rounded.ControlCamera,
+            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+        )
+        LazyRow(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = PcDimens.ScreenPad),
+            horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+        ) {
+            items(presets, key = { it.id }) { preset ->
+                val busy = activePresetId == preset.id
+                Row(
+                    modifier = Modifier
+                        .height(38.dp)
+                        .clip(CircleShape)
+                        .background(if (busy) colors.accentSoft else colors.surface)
+                        .clickable(enabled = activePresetId == null) { onRunPreset(preset) }
+                        .padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (busy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(13.dp),
+                            strokeWidth = 1.8.dp,
+                            color = colors.accent,
                         )
                     }
+                    Text(
+                        text = preset.label,
+                        color = if (busy) colors.accent else colors.text,
+                        style = type.caption.copy(fontWeight = FontWeight.Medium),
+                    )
                 }
             }
-            Spacer(modifier = Modifier.height(PcDimens.Space3))
-            Row(
+        }
+        PcCard(
+            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+            contentPadding = PaddingValues(12.dp),
+        ) {
+            Column(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+                verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
             ) {
-                listOf(
-                    "left" to Icons.Filled.KeyboardArrowLeft,
-                    "up" to Icons.Filled.KeyboardArrowUp,
-                    "down" to Icons.Filled.KeyboardArrowDown,
-                    "right" to Icons.Filled.KeyboardArrowRight,
-                ).forEach { (dir, icon) ->
-                    var held by remember { mutableStateOf(false) }
-                    val view = LocalView.current
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+                ) {
+                    Spacer(modifier = Modifier.weight(1f))
+                    PtzHoldDirectionButton(
+                        dir = "up",
+                        icon = Icons.Rounded.KeyboardArrowUp,
+                        onPtzStart = onPtzStart,
+                        onPtzStop = onPtzStop,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    PtzHoldDirectionButton(
+                        dir = "left",
+                        icon = Icons.Rounded.KeyboardArrowLeft,
+                        onPtzStart = onPtzStart,
+                        onPtzStop = onPtzStop,
+                        modifier = Modifier.weight(1f),
+                    )
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .height(40.dp)
-                            .clip(RoundedCornerShape(PcDimens.RadiusSm))
-                            .background(if (held) colors.accent else colors.surfaceRaised)
-                            .pointerInput(dir) {
-                                awaitEachGesture {
-                                    awaitFirstDown(requireUnconsumed = false)
-                                    view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                                    held = true
-                                    onPtzStart(dir)
-                                    waitForUpOrCancellation()
-                                    held = false
-                                    onPtzStop()
-                                }
-                            },
+                            .height(46.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(
-                            imageVector = icon,
-                            contentDescription = "Pan $dir",
-                            tint = if (held) colors.onAccent else colors.text,
-                            modifier = Modifier.size(22.dp),
+                        Text(
+                            text = "Hold to pan",
+                            color = colors.textFaint,
+                            style = type.micro,
+                            maxLines = 1,
                         )
                     }
+                    PtzHoldDirectionButton(
+                        dir = "right",
+                        icon = Icons.Rounded.KeyboardArrowRight,
+                        onPtzStart = onPtzStart,
+                        onPtzStop = onPtzStop,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+                ) {
+                    Spacer(modifier = Modifier.weight(1f))
+                    PtzHoldDirectionButton(
+                        dir = "down",
+                        icon = Icons.Rounded.KeyboardArrowDown,
+                        onPtzStart = onPtzStart,
+                        onPtzStop = onPtzStop,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
                 }
             }
         }
@@ -787,9 +822,49 @@ private fun PtzPresetsSection(
 }
 
 @Composable
+private fun PtzHoldDirectionButton(
+    dir: String,
+    icon: ImageVector,
+    onPtzStart: (String) -> Unit,
+    onPtzStop: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalPcColors.current
+    val view = LocalView.current
+    var held by remember { mutableStateOf(false) }
+
+    Box(
+        modifier = modifier
+            .height(46.dp)
+            .clip(RoundedCornerShape(PcDimens.RadiusSm))
+            .background(if (held) colors.accent else colors.surfaceRaised)
+            .pointerInput(dir) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    held = true
+                    onPtzStart(dir)
+                    waitForUpOrCancellation()
+                    held = false
+                    onPtzStop()
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = "Pan $dir",
+            tint = if (held) colors.onAccent else colors.text,
+            modifier = Modifier.size(24.dp),
+        )
+    }
+}
+
+@Composable
 private fun StreamTelemetryLine(
     state: LinkState,
     hdDecoder: String?,
+    modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
     val parts = buildList {
@@ -806,5 +881,6 @@ private fun StreamTelemetryLine(
         style = MonoTextStyle.copy(fontSize = 11.5.sp, lineHeight = 16.sp),
         maxLines = 2,
         overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
     )
 }

@@ -64,25 +64,23 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.neekhar.pccontrol.core.theme.LocalPcColors
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.ProviderBrandIcon
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -114,7 +112,7 @@ fun ChatComposer(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
-    val onAccent = if (colors.accent.luminance() > 0.4f) Color.Black else Color.White
+    val type = LocalPcType.current
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
@@ -261,8 +259,7 @@ fun ChatComposer(
                     Text(
                         text = "Replying to ${ChatLogic.replySenderLabel(replyTo)}",
                         color = colors.accent,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        style = type.caption.copy(fontWeight = FontWeight.SemiBold),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -270,7 +267,7 @@ fun ChatComposer(
                         Text(
                             text = replyTo.text,
                             color = colors.textDim,
-                            fontSize = 12.5.sp,
+                            style = type.caption,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -314,14 +311,13 @@ fun ChatComposer(
                 Text(
                     text = "Editing",
                     color = colors.accent,
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = type.caption.copy(fontWeight = FontWeight.SemiBold),
                 )
                 if (editingState.previewText.isNotBlank()) {
                     Text(
                         text = "· ${editingState.previewText}",
                         color = colors.textFaint,
-                        fontSize = 12.5.sp,
+                        style = type.caption,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
@@ -410,12 +406,7 @@ fun ChatComposer(
                 BasicTextField(
                     state = textFieldState,
                     enabled = !sending,
-                    textStyle = TextStyle(
-                        color = colors.text,
-                        fontSize = 15.sp,
-                        lineHeight = 21.sp,
-                        fontWeight = FontWeight.Normal,
-                    ),
+                    textStyle = type.body.copy(color = colors.text),
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.Sentences,
                     ),
@@ -432,8 +423,7 @@ fun ChatComposer(
                                 Text(
                                     text = placeholder,
                                     color = colors.textFaint,
-                                    fontSize = 15.sp,
-                                    lineHeight = 21.sp,
+                                    style = type.body,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
@@ -528,7 +518,7 @@ fun ChatComposer(
                                 Icon(
                                     imageVector = Icons.Rounded.ArrowUpward,
                                     contentDescription = if (running) "Queue message" else "Send message",
-                                    tint = if (canSend) onAccent else colors.textFaint,
+                                    tint = if (canSend) colors.onAccent else colors.textFaint,
                                     modifier = Modifier.size(19.dp),
                                 )
                             }
@@ -555,6 +545,7 @@ fun PendingAttachmentsOverlay(
 ) {
     if (pendingAttachments.isEmpty() && uploadingCount <= 0) return
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -606,7 +597,7 @@ fun PendingAttachmentsOverlay(
                 Text(
                     text = if (uploadingCount > 1) "Uploading $uploadingCount…" else "Uploading…",
                     color = colors.textDim,
-                    fontSize = 12.5.sp,
+                    style = type.caption,
                 )
             }
         }
@@ -676,6 +667,7 @@ private fun PendingFileChip(
     onRemove: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -697,16 +689,14 @@ private fun PendingFileChip(
             Text(
                 text = attachment.name,
                 color = colors.text,
-                fontSize = 12.5.sp,
-                fontWeight = FontWeight.Medium,
+                style = type.caption.copy(fontWeight = FontWeight.Medium),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = ChatLogic.formatAttachmentSize(attachment.sizeBytes),
-                style = TabularNumStyle,
+                style = type.micro.tabular(),
                 color = colors.textFaint,
-                fontSize = 11.sp,
                 maxLines = 1,
             )
         }

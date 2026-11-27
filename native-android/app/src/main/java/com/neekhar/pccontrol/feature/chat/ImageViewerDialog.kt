@@ -9,6 +9,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -56,7 +57,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
@@ -66,6 +66,7 @@ import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -85,6 +86,7 @@ fun ImageViewerDialog(
     onMessage: (String) -> Unit = {},
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -140,7 +142,7 @@ fun ImageViewerDialog(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black),
+                .background(colors.media),
         ) {
             // Interactive pinch-to-zoom + pan + double-tap canvas
             Box(
@@ -268,20 +270,20 @@ fun ImageViewerDialog(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xCC141414))
+                            .background(colors.mediaChip)
+                            .border(0.5.dp, colors.mediaChipBorder, RoundedCornerShape(12.dp))
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.BrokenImage,
                             contentDescription = null,
-                            tint = Color(0xFFA8A8A8),
+                            tint = colors.onMediaDim,
                             modifier = Modifier.size(20.dp),
                         )
                         Text(
                             text = "Could not load image",
-                            color = Color(0xFFF5F5F5),
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
+                            color = colors.onMedia,
+                            style = type.body.copy(fontWeight = FontWeight.Medium),
                         )
                     }
                 }
@@ -293,15 +295,14 @@ fun ImageViewerDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.TopCenter)
-                    .background(Color(0xB3000000))
+                    .background(colors.overlay)
                     .statusBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 10.dp),
             ) {
                 Text(
                     text = image.name.ifBlank { "Image" },
-                    color = Color(0xFFF5F5F5),
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
+                    color = colors.onMedia,
+                    style = type.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -312,12 +313,13 @@ fun ImageViewerDialog(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFF1F1F1F)),
+                        .background(colors.mediaChip)
+                        .border(0.5.dp, colors.mediaChipBorder, CircleShape),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
                         contentDescription = "Close image viewer",
-                        tint = Color(0xFFF5F5F5),
+                        tint = colors.onMedia,
                         modifier = Modifier.size(20.dp),
                     )
                 }
@@ -330,7 +332,7 @@ fun ImageViewerDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
-                    .background(Color(0xB3000000))
+                    .background(colors.overlay)
                     .navigationBarsPadding()
                     .padding(horizontal = 18.dp, vertical = 12.dp),
             ) {
@@ -341,7 +343,7 @@ fun ImageViewerDialog(
                         saved -> "Saved"
                         else -> "Save"
                     },
-                    tint = if (saved) colors.accent else Color(0xFFF5F5F5),
+                    tint = if (saved) colors.accent else colors.onMedia,
                     enabled = !saving,
                     onClick = {
                         saving = true
@@ -367,7 +369,7 @@ fun ImageViewerDialog(
                     ViewerActionPill(
                         icon = Icons.Rounded.Share,
                         label = "Share",
-                        tint = Color(0xFFF5F5F5),
+                        tint = colors.onMedia,
                         onClick = {
                             val shareIntent = Intent(Intent.ACTION_SEND).apply {
                                 type = "text/plain"
@@ -382,7 +384,7 @@ fun ImageViewerDialog(
                     ViewerActionPill(
                         icon = Icons.Rounded.OpenInNew,
                         label = "Open",
-                        tint = Color(0xFFF5F5F5),
+                        tint = colors.onMedia,
                         onClick = { onOpenExternalUrl(actionUrl) },
                     )
                 }
@@ -399,12 +401,15 @@ private fun ViewerActionPill(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier
             .clip(RoundedCornerShape(999.dp))
-            .background(Color(0xFF1F1F1F))
+            .background(colors.mediaChip)
+            .border(0.5.dp, colors.mediaChipBorder, RoundedCornerShape(999.dp))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 9.dp),
     ) {
@@ -417,8 +422,7 @@ private fun ViewerActionPill(
         Text(
             text = label,
             color = tint,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
+            style = type.caption.copy(fontWeight = FontWeight.Medium),
         )
     }
 }

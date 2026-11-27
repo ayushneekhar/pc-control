@@ -11,7 +11,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -25,37 +24,27 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.VolumeOff
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.VideocamOff
-import androidx.compose.material.icons.filled.ViewAgenda
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
+import androidx.compose.material.icons.rounded.Dashboard
+import androidx.compose.material.icons.rounded.Headphones
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.PowerSettingsNew
+import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material.icons.rounded.VideocamOff
+import androidx.compose.material.icons.rounded.ViewAgenda
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -77,17 +66,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -98,12 +84,14 @@ import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.storage.AppPrefs
 import com.neekhar.pccontrol.core.storage.LocalCache
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.PcDimens
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSegmentOption
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
 import com.neekhar.pccontrol.core.ui.PcStatusDot
@@ -587,7 +575,6 @@ fun CamsScreen(
     }
 
     val showAudioBar = !inReplayFullscreen && stackActive && (activeTab == CamsTab.LIVE || listenOn || talkMode != TalkMode.OFF)
-    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val units = catCamState?.units?.values.orEmpty()
     val runningUnits = units.count { it == "active" }
     val masterStatusText = when {
@@ -602,82 +589,39 @@ fun CamsScreen(
         else -> PcTone.Faint
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.bg),
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            // Top bar with Back + title + Live layout toggle + compact master switch + overflow menu
+    PcScaffold(
+        title = if (inReplayFullscreen) null else "Cat cams",
+        statusText = masterStatusText,
+        statusTone = masterDotTone,
+        showStatusDot = !masterStatusText.isNullOrBlank(),
+        onBack = if (inReplayFullscreen) null else onBack,
+        applyStatusBarPadding = !inReplayFullscreen,
+        applyNavigationBarPadding = !inReplayFullscreen,
+        showStatusBarScrim = !inReplayFullscreen,
+        actions = {
             if (!inReplayFullscreen) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(colors.bg)
-                    .statusBarsPadding()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = colors.text,
-                    )
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Cat cams",
-                        color = colors.text,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                    )
-                    if (!masterStatusText.isNullOrBlank()) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        ) {
-                            PcStatusDot(tone = masterDotTone, size = 6.dp)
-                            Text(
-                                text = masterStatusText,
-                                color = colors.textDim,
-                                style = TabularNumStyle.copy(fontSize = 12.sp),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                }
-
                 // Toggle between Hero + thumbnail strip (default) and stacked grid
                 if (stackActive && activeTab == CamsTab.LIVE) {
                     IconButton(
                         onClick = { stackedLayout = !stackedLayout },
-                        modifier = Modifier.size(40.dp),
+                        modifier = Modifier.size(48.dp),
                     ) {
                         Icon(
-                            imageVector = if (stackedLayout) Icons.Filled.Dashboard else Icons.Filled.ViewAgenda,
+                            imageVector = if (stackedLayout) Icons.Rounded.Dashboard else Icons.Rounded.ViewAgenda,
                             contentDescription = if (stackedLayout) "Switch to hero view" else "Switch to stacked view",
                             tint = if (stackedLayout) colors.accent else colors.textDim,
-                            modifier = Modifier.size(20.dp),
+                            modifier = Modifier.size(21.dp),
                         )
                     }
                 }
 
-                // Compact, understated master power switch
-                CompactMasterSwitch(
-                    checked = catCamEnabled,
-                    busy = catCamBusy,
-                    onCheckedChange = { toggleMasterCatCams(it) },
-                )
-
                 Box {
-                    IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(40.dp)) {
+                    IconButton(
+                        onClick = { menuExpanded = true },
+                        modifier = Modifier.size(48.dp),
+                    ) {
                         Icon(
-                            imageVector = Icons.Filled.MoreVert,
+                            imageVector = Icons.Rounded.MoreVert,
                             contentDescription = "More options",
                             tint = colors.text,
                         )
@@ -690,15 +634,16 @@ fun CamsScreen(
                         DropdownMenuItem(
                             text = {
                                 Text(
-                                    text = if (catCamEnabled) "Turn cat cams off" else "Turn cat cams on",
-                                    color = colors.text,
+                                    text = if (catCamEnabled) "Turn cams off" else "Turn cams on",
+                                    color = if (catCamBusy) colors.textFaint else colors.text,
                                 )
                             },
+                            enabled = !catCamBusy,
                             leadingIcon = {
                                 Icon(
-                                    imageVector = Icons.Filled.PowerSettingsNew,
+                                    imageVector = Icons.Rounded.PowerSettingsNew,
                                     contentDescription = null,
-                                    tint = colors.textDim,
+                                    tint = if (catCamEnabled) colors.bad else colors.accent,
                                 )
                             },
                             onClick = {
@@ -710,7 +655,7 @@ fun CamsScreen(
                             text = { Text("Open web page", color = colors.text) },
                             leadingIcon = {
                                 Icon(
-                                    imageVector = Icons.Filled.Language,
+                                    imageVector = Icons.Rounded.Language,
                                     contentDescription = null,
                                     tint = colors.textDim,
                                 )
@@ -735,7 +680,7 @@ fun CamsScreen(
                             },
                             leadingIcon = {
                                 Icon(
-                                    imageVector = Icons.Filled.Shield,
+                                    imageVector = Icons.Rounded.Shield,
                                     contentDescription = null,
                                     tint = colors.textDim,
                                 )
@@ -754,9 +699,38 @@ fun CamsScreen(
                     }
                 }
             }
-
+        },
+        bottomBar = {
+            if (showAudioBar) {
+                val talkSeconds = if (talkStartedAtMs > 0L) max(0L, (nowMs - talkStartedAtMs) / 1000L) else 0L
+                ListenTalkBar(
+                    listenOn = listenOn,
+                    earState = earState,
+                    talkMode = talkMode,
+                    talkState = talkState,
+                    talkSeconds = talkSeconds,
+                    onToggleListen = { listenOn = !listenOn },
+                    onTalkPressDown = {
+                        if (!hasMicPermission()) {
+                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            false
+                        } else {
+                            talkStartedAtMs = System.currentTimeMillis()
+                            nowMs = talkStartedAtMs
+                            talkMode = TalkMode.HELD
+                            true
+                        }
+                    },
+                    onTalkRelease = {
+                        talkMode = TalkMode.OFF
+                    },
+                )
+            }
+        },
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
             // Segmented tab bar (Live / Replay / Detections / Music)
-            if (stackActive) {
+            if (!inReplayFullscreen && stackActive) {
                 PcSegmentedControl(
                     options = listOf(
                         PcSegmentOption(CamsTab.LIVE, "Live"),
@@ -772,233 +746,195 @@ fun CamsScreen(
                     modifier = Modifier.padding(
                         start = PcDimens.ScreenPad,
                         end = PcDimens.ScreenPad,
-                        bottom = 10.dp,
+                        top = 4.dp,
+                        bottom = 8.dp,
                     ),
                 )
             }
-            HorizontalDivider(thickness = 0.5.dp, color = colors.hairline)
-            } // end !inReplayFullscreen
 
-            // Main body
-            when {
-                !stackActive -> {
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .verticalScroll(rememberScrollState())
-                            .padding(
-                                start = PcDimens.ScreenPad,
-                                end = PcDimens.ScreenPad,
-                                top = PcDimens.Space4,
-                                bottom = PcDimens.Space4 + navBottom,
-                            ),
-                        verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
-                    ) {
-                        MasterPowerOffCard(
-                            enabled = catCamEnabled,
-                            busy = catCamBusy,
-                            statusText = masterStatusText ?: "Off",
-                            dotTone = masterDotTone,
-                            error = catCamError,
-                            onToggle = { toggleMasterCatCams(it) },
-                        )
-                    }
-                }
-
-                activeTab == CamsTab.REPLAY -> {
-                    ReplayTab(
-                        visible = isForeground,
-                        hevcOk = hardwareCaps.replayHevcSupported,
-                        dataSource = repository,
-                        okHttpClient = apiClient.okHttpClient,
-                        target = replayTarget,
-                        fullscreen = replayFullscreen,
-                        isInPip = false,
-                        bottomInset = (if (showAudioBar) 76.dp else 28.dp) + navBottom,
-                        onPlayingChange = { replayPlaying = it },
-                        onToggleFullscreen = { replayFullscreen = !replayFullscreen },
-                        onTargetConsumed = { replayTarget = null },
-                        onToast = { msg, actLabel, act ->
-                            showToast(msg, if (act != null) 4500L else 2800L, actLabel, act)
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-
-                activeTab == CamsTab.DETECTIONS -> {
-                    DetectionsTab(
-                        visible = isForeground,
-                        repository = repository,
-                        bottomInset = (if (showAudioBar) 72.dp else 16.dp) + navBottom,
-                        onJumpToReplay = { cam, tsMs ->
-                            val parsed = ReplayMath.parseSightingTarget(cam, tsMs)
-                            if (parsed != null) {
-                                replayTarget = parsed
-                                activeTab = CamsTab.REPLAY
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-
-                else -> {
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .verticalScroll(rememberScrollState())
-                            .padding(
-                                start = PcDimens.ScreenPad,
-                                end = PcDimens.ScreenPad,
-                                top = PcDimens.Space3,
-                                bottom = (if (showAudioBar) 76.dp else 28.dp) + navBottom,
-                            ),
-                        verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
-                    ) {
-                        if (catCamError != null) {
-                            PcErrorBanner(
-                                title = "Cat cams",
-                                message = catCamError,
-                                tone = PcTone.Bad,
-                            )
-                        }
-
-                        when (activeTab) {
-                            CamsTab.LIVE -> {
-                                LiveTab(
-                                    feeds = feeds,
-                                    snapshotBaseUrl = apiClient.baseUrl,
-                                    heroCam = heroCam,
-                                    stackedLayout = stackedLayout,
-                                    cat3Hd = cat3Hd,
-                                    hardwareCaps = hardwareCaps,
-                                    camMicOn = camMicOn,
-                                    ptzOpen = ptzOpen,
-                                    ptzPresets = ptzPresets,
-                                    activePresetId = activePresetId,
-                                    onSelectHero = { cam ->
-                                        heroCam = cam
-                                        stackedLayout = false
-                                        scope.launch { prefs.setLastSelectedCam(cam.id) }
-                                    },
-                                    onToggleCat3Hd = ::toggleCat3Hd,
-                                    onToggleCamMic = { camMicOn = !camMicOn },
-                                    onTogglePtzOpen = { ptzOpen = !ptzOpen },
-                                    onPtzStart = ::startPtz,
-                                    onPtzStop = ::stopPtz,
-                                    onRunPtzPreset = ::runPtzPreset,
-                                    onEnterFullscreen = { fullscreenCam = it },
-                                )
-                            }
-
-                            CamsTab.MUSIC -> {
-                                MusicTab(
-                                    visible = isForeground,
-                                    repository = repository,
-                                    sharedUrl = pendingSharedUrl,
-                                    onSharedConsumed = { pendingSharedUrl = null },
-                                    onToast = { showToast(it) },
-                                )
-                            }
-
-                            CamsTab.REPLAY,
-                            CamsTab.DETECTIONS,
-                            -> Unit
-                        }
-                    }
-                }
-            }
-        }
-
-        // Bottom slim Listen / Hold-to-Talk bar
-        if (showAudioBar) {
-            val talkSeconds = if (talkStartedAtMs > 0L) max(0L, (nowMs - talkStartedAtMs) / 1000L) else 0L
-            ListenTalkBar(
-                listenOn = listenOn,
-                earState = earState,
-                talkMode = talkMode,
-                talkState = talkState,
-                talkSeconds = talkSeconds,
-                onToggleListen = { listenOn = !listenOn },
-                onTalkPressDown = {
-                    if (!hasMicPermission()) {
-                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        false
-                    } else {
-                        talkStartedAtMs = System.currentTimeMillis()
-                        nowMs = talkStartedAtMs
-                        talkMode = TalkMode.HELD
-                        true
-                    }
-                },
-                onTalkRelease = {
-                    talkMode = TalkMode.OFF
-                },
-                modifier = Modifier.align(Alignment.BottomCenter),
-            )
-        }
-
-        // Floating toast banner
-        CamsToastBanner(
-            toast = toast,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = if (showAudioBar) 68.dp else 20.dp),
-        )
-    }
-}
-
-@Composable
-private fun CompactMasterSwitch(
-    checked: Boolean,
-    busy: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val colors = LocalPcColors.current
-    val thumbOffset by animateDpAsState(
-        targetValue = if (checked) 19.dp else 3.dp,
-        label = "masterSwitchThumb",
-    )
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = modifier
-            .size(width = 46.dp, height = 40.dp)
-            .clip(CircleShape)
-            .semantics { contentDescription = if (checked) "Cat cams on" else "Cat cams off" }
-            .toggleable(
-                value = checked,
-                enabled = !busy,
-                role = Role.Switch,
-                onValueChange = onCheckedChange,
-            ),
-    ) {
-        if (busy) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(16.dp),
-                strokeWidth = 2.dp,
-                color = colors.textDim,
-            )
-        } else {
+            // Main body with seamless top & bottom vertical fades (no hard hairlines)
             Box(
                 modifier = Modifier
-                    .width(38.dp)
-                    .height(22.dp)
-                    .clip(CircleShape)
-                    .background(if (checked) colors.okSoft else colors.surfaceRaised)
-                    .border(
-                        width = 0.5.dp,
-                        color = if (checked) colors.ok.copy(alpha = 0.45f) else colors.hairline,
-                        shape = CircleShape,
-                    ),
-                contentAlignment = Alignment.CenterStart,
+                    .weight(1f)
+                    .fillMaxWidth(),
             ) {
-                Box(
+                when {
+                    !stackActive -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(
+                                    start = PcDimens.ScreenPad,
+                                    end = PcDimens.ScreenPad,
+                                    top = PcDimens.Space4,
+                                    bottom = PcDimens.Space6,
+                                ),
+                            verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
+                        ) {
+                            MasterPowerOffCard(
+                                enabled = catCamEnabled,
+                                busy = catCamBusy,
+                                statusText = masterStatusText ?: "Off",
+                                dotTone = masterDotTone,
+                                error = catCamError,
+                                onToggle = { toggleMasterCatCams(it) },
+                            )
+                        }
+                    }
+
+                    activeTab == CamsTab.REPLAY -> {
+                        ReplayTab(
+                            visible = isForeground,
+                            hevcOk = hardwareCaps.replayHevcSupported,
+                            dataSource = repository,
+                            okHttpClient = apiClient.okHttpClient,
+                            target = replayTarget,
+                            fullscreen = replayFullscreen,
+                            isInPip = false,
+                            bottomInset = 24.dp,
+                            onPlayingChange = { replayPlaying = it },
+                            onToggleFullscreen = { replayFullscreen = !replayFullscreen },
+                            onTargetConsumed = { replayTarget = null },
+                            onToast = { msg, actLabel, act ->
+                                showToast(msg, if (act != null) 4500L else 2800L, actLabel, act)
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+
+                    activeTab == CamsTab.DETECTIONS -> {
+                        DetectionsTab(
+                            visible = isForeground,
+                            repository = repository,
+                            bottomInset = 20.dp,
+                            onJumpToReplay = { cam, tsMs ->
+                                val parsed = ReplayMath.parseSightingTarget(cam, tsMs)
+                                if (parsed != null) {
+                                    replayTarget = parsed
+                                    activeTab = CamsTab.REPLAY
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+
+                    activeTab == CamsTab.LIVE -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(
+                                    top = PcDimens.Space3,
+                                    bottom = 20.dp,
+                                ),
+                            verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
+                        ) {
+                            if (catCamError != null) {
+                                Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                    PcErrorBanner(
+                                        title = "Cat cams",
+                                        message = catCamError,
+                                        tone = PcTone.Bad,
+                                    )
+                                }
+                            }
+
+                            LiveTab(
+                                feeds = feeds,
+                                snapshotBaseUrl = apiClient.baseUrl,
+                                heroCam = heroCam,
+                                stackedLayout = stackedLayout,
+                                cat3Hd = cat3Hd,
+                                hardwareCaps = hardwareCaps,
+                                camMicOn = camMicOn,
+                                ptzOpen = ptzOpen,
+                                ptzPresets = ptzPresets,
+                                activePresetId = activePresetId,
+                                onSelectHero = { cam ->
+                                    heroCam = cam
+                                    stackedLayout = false
+                                    scope.launch { prefs.setLastSelectedCam(cam.id) }
+                                },
+                                onToggleCat3Hd = ::toggleCat3Hd,
+                                onToggleCamMic = { camMicOn = !camMicOn },
+                                onTogglePtzOpen = { ptzOpen = !ptzOpen },
+                                onPtzStart = ::startPtz,
+                                onPtzStop = ::stopPtz,
+                                onRunPtzPreset = ::runPtzPreset,
+                                onEnterFullscreen = { fullscreenCam = it },
+                            )
+                        }
+                    }
+
+                    activeTab == CamsTab.MUSIC -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(
+                                    start = PcDimens.ScreenPad,
+                                    end = PcDimens.ScreenPad,
+                                    top = PcDimens.Space3,
+                                    bottom = 24.dp,
+                                ),
+                            verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
+                        ) {
+                            if (catCamError != null) {
+                                PcErrorBanner(
+                                    title = "Cat cams",
+                                    message = catCamError,
+                                    tone = PcTone.Bad,
+                                )
+                            }
+
+                            MusicTab(
+                                visible = isForeground,
+                                repository = repository,
+                                sharedUrl = pendingSharedUrl,
+                                onSharedConsumed = { pendingSharedUrl = null },
+                                onToast = { showToast(it) },
+                            )
+                        }
+                    }
+                }
+
+                // Seamless top vertical fade under the segmented tabs
+                if (!inReplayFullscreen && stackActive) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .height(14.dp)
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(colors.bg, Color.Transparent),
+                                ),
+                            ),
+                    )
+                }
+
+                // Seamless bottom vertical fade above the Listen / Hold-to-Talk bar
+                if (showAudioBar) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(20.dp)
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(Color.Transparent, colors.bg),
+                                ),
+                            ),
+                    )
+                }
+
+                // Floating toast banner
+                CamsToastBanner(
+                    toast = toast,
                     modifier = Modifier
-                        .offset(x = thumbOffset)
-                        .size(16.dp)
-                        .clip(CircleShape)
-                        .background(if (checked) colors.ok else colors.textFaint),
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 12.dp),
                 )
             }
         }
@@ -1015,6 +951,7 @@ private fun MasterPowerOffCard(
     onToggle: (Boolean) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     PcCard {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1022,7 +959,7 @@ private fun MasterPowerOffCard(
             horizontalArrangement = Arrangement.spacedBy(PcDimens.Space3),
         ) {
             Icon(
-                imageVector = if (enabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                imageVector = if (enabled) Icons.Rounded.Videocam else Icons.Rounded.VideocamOff,
                 contentDescription = null,
                 tint = if (enabled && !busy) colors.accent else colors.textDim,
                 modifier = Modifier.size(22.dp),
@@ -1031,8 +968,7 @@ private fun MasterPowerOffCard(
                 Text(
                     text = "Cat cams",
                     color = colors.text,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
                 )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -1042,7 +978,7 @@ private fun MasterPowerOffCard(
                     Text(
                         text = statusText,
                         color = colors.textDim,
-                        style = TabularNumStyle.copy(fontSize = 13.sp),
+                        style = type.caption.tabular(),
                     )
                 }
             }
@@ -1072,8 +1008,7 @@ private fun MasterPowerOffCard(
                 "Live cameras, recording, cat detector, and music are stopped. Turn on to reconnect."
             },
             color = colors.textDim,
-            fontSize = 13.5.sp,
-            lineHeight = 19.sp,
+            style = type.body,
         )
 
         if (!error.isNullOrBlank()) {
@@ -1096,165 +1031,155 @@ private fun ListenTalkBar(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val view = LocalView.current
     val currentOnTalkPressDown by rememberUpdatedState(onTalkPressDown)
     val currentOnTalkRelease by rememberUpdatedState(onTalkRelease)
 
-    Column(
+    Row(
         modifier = modifier
             .fillMaxWidth()
             .background(colors.bg)
-            .navigationBarsPadding(),
+            .padding(horizontal = PcDimens.ScreenPad, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        HorizontalDivider(thickness = 0.5.dp, color = colors.hairline)
+        // Compact Listen (room audio) toggle
+        val listenBusy = listenOn && earState.phase != LinkPhase.LIVE && earState.phase != LinkPhase.ERROR
+        val listenLive = listenOn && earState.phase == LinkPhase.LIVE
+        val listenErr = listenOn && earState.phase == LinkPhase.ERROR
+
+        val listenBg = when {
+            listenLive -> colors.okSoft
+            listenErr -> colors.warnSoft
+            else -> colors.surface
+        }
+        val listenBorder = when {
+            listenLive -> colors.ok.copy(alpha = 0.4f)
+            listenErr -> colors.warn.copy(alpha = 0.4f)
+            else -> colors.hairline
+        }
+        val listenFg = when {
+            listenLive -> colors.ok
+            listenErr -> colors.warn
+            else -> colors.textDim
+        }
+        val listenLabel = when {
+            !listenOn -> "Listen"
+            listenLive -> "Listening"
+            listenErr -> "Audio error"
+            else -> "Connecting…"
+        }
+
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = PcDimens.ScreenPad, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                .weight(1f)
+                .height(44.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(listenBg)
+                .border(0.5.dp, listenBorder, RoundedCornerShape(12.dp))
+                .clickable(onClick = onToggleListen)
+                .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         ) {
-            // Compact Listen (speaker audio) toggle
-            val listenBusy = listenOn && earState.phase != LinkPhase.LIVE && earState.phase != LinkPhase.ERROR
-            val listenLive = listenOn && earState.phase == LinkPhase.LIVE
-            val listenErr = listenOn && earState.phase == LinkPhase.ERROR
-
-            val listenBg = when {
-                listenLive -> colors.okSoft
-                listenErr -> colors.warnSoft
-                else -> colors.surface
-            }
-            val listenBorder = when {
-                listenLive -> colors.ok.copy(alpha = 0.4f)
-                listenErr -> colors.warn.copy(alpha = 0.4f)
-                else -> colors.hairline
-            }
-            val listenFg = when {
-                listenLive -> colors.ok
-                listenErr -> colors.warn
-                else -> colors.textDim
-            }
-            val listenLabel = when {
-                !listenOn -> "Listen"
-                listenLive -> "Listening"
-                listenErr -> "Audio error"
-                else -> "Connecting…"
-            }
-
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(44.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(listenBg)
-                    .border(0.5.dp, listenBorder, RoundedCornerShape(12.dp))
-                    .clickable(onClick = onToggleListen)
-                    .padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-            ) {
-                if (listenBusy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = listenFg,
-                    )
-                } else {
-                    Icon(
-                        imageVector = if (listenOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
-                        contentDescription = null,
-                        tint = listenFg,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-                Text(
-                    text = listenLabel,
-                    color = if (listenLive || listenErr) listenFg else colors.text,
-                    fontSize = 13.5.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+            if (listenBusy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = listenFg,
+                )
+            } else {
+                Icon(
+                    imageVector = if (listenOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.Rounded.Headphones,
+                    contentDescription = null,
+                    tint = listenFg,
+                    modifier = Modifier.size(18.dp),
                 )
             }
+            Text(
+                text = listenLabel,
+                color = if (listenLive || listenErr) listenFg else colors.text,
+                style = type.body.copy(fontWeight = FontWeight.Medium),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
 
-            // Compact Hold-to-Talk press-and-hold mic control
-            val talkActive = talkMode != TalkMode.OFF
-            val talkLive = talkActive && talkState.phase == LinkPhase.LIVE
-            val talkBusy = talkActive && !talkLive
-            val talkTimer = if (talkActive) {
-                val m = talkSeconds / 60
-                val s = talkSeconds % 60
-                "$m:${s.toString().padStart(2, '0')}"
-            } else {
-                null
-            }
+        // Compact Hold-to-Talk press-and-hold mic control
+        val talkActive = talkMode != TalkMode.OFF
+        val talkLive = talkActive && talkState.phase == LinkPhase.LIVE
+        val talkBusy = talkActive && !talkLive
+        val talkTimer = if (talkActive) {
+            val m = talkSeconds / 60
+            val s = talkSeconds % 60
+            "$m:${s.toString().padStart(2, '0')}"
+        } else {
+            null
+        }
 
-            val talkBg = when {
-                talkLive -> colors.bad
-                talkBusy -> colors.surfaceRaised
-                else -> colors.surface
-            }
-            val talkBorder = if (talkLive) Color.Transparent else colors.hairline
-            val talkIconTint = when {
-                talkLive -> colors.onMedia
-                else -> colors.textDim
-            }
-            val talkTextColor = if (talkLive) colors.onMedia else colors.text
-            val talkLabel = when {
-                !talkActive -> "Hold to talk"
-                talkLive -> if (talkTimer != null) "Talking · $talkTimer" else "Talking"
-                else -> "Connecting…"
-            }
+        val talkBg = when {
+            talkLive -> colors.bad
+            talkBusy -> colors.surfaceRaised
+            else -> colors.surface
+        }
+        val talkBorder = if (talkLive) Color.Transparent else colors.hairline
+        val talkIconTint = when {
+            talkLive -> colors.onMedia
+            else -> colors.textDim
+        }
+        val talkTextColor = if (talkLive) colors.onMedia else colors.text
+        val talkLabel = when {
+            !talkActive -> "Hold to talk"
+            talkLive -> if (talkTimer != null) "Talking · $talkTimer" else "Talking"
+            else -> "Connecting…"
+        }
 
-            Row(
-                modifier = Modifier
-                    .weight(1.2f)
-                    .height(44.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(talkBg)
-                    .border(0.5.dp, talkBorder, RoundedCornerShape(12.dp))
-                    .pointerInput(Unit) {
-                        awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false)
-                            val started = currentOnTalkPressDown()
-                            if (started) {
-                                view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                            }
-                            waitForUpOrCancellation()
-                            if (started) {
-                                currentOnTalkRelease()
-                            }
+        Row(
+            modifier = Modifier
+                .weight(1.2f)
+                .height(44.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(talkBg)
+                .border(0.5.dp, talkBorder, RoundedCornerShape(12.dp))
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        val started = currentOnTalkPressDown()
+                        if (started) {
+                            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        }
+                        waitForUpOrCancellation()
+                        if (started) {
+                            currentOnTalkRelease()
                         }
                     }
-                    .padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-            ) {
-                if (talkBusy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = talkIconTint,
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Filled.Mic,
-                        contentDescription = null,
-                        tint = talkIconTint,
-                        modifier = Modifier.size(18.dp),
-                    )
                 }
-                Text(
-                    text = talkLabel,
-                    color = talkTextColor,
-                    style = TabularNumStyle.copy(
-                        fontSize = 13.5.sp,
-                        fontWeight = FontWeight.Medium,
-                    ),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        ) {
+            if (talkBusy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = talkIconTint,
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Rounded.Mic,
+                    contentDescription = null,
+                    tint = talkIconTint,
+                    modifier = Modifier.size(18.dp),
                 )
             }
+            Text(
+                text = talkLabel,
+                color = talkTextColor,
+                style = type.body.tabular().copy(fontWeight = FontWeight.Medium),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -1265,6 +1190,7 @@ private fun CamsToastBanner(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     AnimatedVisibility(
         visible = toast != null,
         enter = fadeIn(),
@@ -1283,7 +1209,7 @@ private fun CamsToastBanner(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Icon(
-                imageVector = Icons.Filled.Info,
+                imageVector = Icons.Rounded.Info,
                 contentDescription = null,
                 tint = colors.accent,
                 modifier = Modifier.size(18.dp),
@@ -1291,7 +1217,7 @@ private fun CamsToastBanner(
             Text(
                 text = current.message,
                 color = colors.text,
-                fontSize = 13.5.sp,
+                style = type.caption,
                 modifier = Modifier.weight(1f, fill = false),
             )
             if (current.actionLabel != null && current.action != null) {

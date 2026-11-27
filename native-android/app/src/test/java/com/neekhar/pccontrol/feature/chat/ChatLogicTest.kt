@@ -556,4 +556,41 @@ class ChatLogicTest {
             ChatLogic.parseInlineTokens("2 * 3 * 4 = 24"),
         )
     }
+
+    @Test
+    fun parseActivityStepTokens_formatsInlineCodeAndHandlesTruncatedBackticks() {
+        assertEquals(
+            listOf(
+                InlineToken.Text("running "),
+                InlineToken.Code("set -e"),
+            ),
+            ChatLogic.parseActivityStepTokens("running `set -e`"),
+        )
+
+        assertEquals(
+            listOf(
+                InlineToken.Text("running "),
+                InlineToken.Code("rm -rf /tmp/light-screens"),
+            ),
+            ChatLogic.parseActivityStepTokens("running `rm -rf /tmp/light-screens`"),
+        )
+
+        // Server-truncated command with unclosed trailing backtick never leaves raw backticks
+        assertEquals(
+            listOf(
+                InlineToken.Text("running "),
+                InlineToken.Code("set -e; curl -sS http://localhost:8080…"),
+            ),
+            ChatLogic.parseActivityStepTokens("running `set -e; curl -sS http://localhost:8080…"),
+        )
+
+        // Markdown link inside activity step flattens cleanly to readable text/code
+        assertEquals(
+            listOf(
+                InlineToken.Text("Inspecting "),
+                InlineToken.Code("LiveTab.kt"),
+            ),
+            ChatLogic.parseActivityStepTokens("Inspecting [`LiveTab.kt`](https://example.com/LiveTab.kt)"),
+        )
+    }
 }

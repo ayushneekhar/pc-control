@@ -3,39 +3,34 @@ package com.neekhar.pccontrol.feature.seerr
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cancel
-import androidx.compose.material.icons.filled.CollectionsBookmark
-import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.rounded.Cancel
+import androidx.compose.material.icons.rounded.CollectionsBookmark
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -51,7 +46,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -60,11 +54,13 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.PcDimens
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcTone
 
@@ -78,57 +74,55 @@ fun SeerrScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val keyboard = LocalSoftwareKeyboardController.current
+    val listState = rememberLazyListState()
 
-    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(colors.bg)
-            .statusBarsPadding(),
+    PcScaffold(
+        modifier = modifier,
+        title = "Seerr",
+        statusText = if (!state.error.isNullOrBlank()) "Offline" else null,
+        statusTone = PcTone.Bad,
+        showStatusDot = !state.error.isNullOrBlank(),
+        onBack = onBack,
+        listState = listState,
     ) {
-        PcScreenHeader(
-            title = "Seerr",
-            statusText = if (!state.error.isNullOrBlank()) "Offline" else null,
-            statusTone = PcTone.Bad,
-            showStatusDot = !state.error.isNullOrBlank(),
-            onBack = onBack,
-        )
-
         PullToRefreshBox(
             isRefreshing = state.refreshing,
             onRefresh = { viewModel.refresh() },
             modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
-                    start = 18.dp,
-                    end = 18.dp,
                     top = 4.dp,
-                    bottom = 32.dp + navBottom,
+                    bottom = 32.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (!state.error.isNullOrBlank()) {
                     item(key = "error") {
-                        PcErrorBanner(title = "Seerr", message = state.error)
+                        Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                            PcErrorBanner(title = "Seerr", message = state.error)
+                        }
                     }
                 }
 
                 // Native search bar with 3-char debounce + immediate IME search
                 item(key = "search_bar") {
-                    SeerrSearchBar(
-                        query = state.query,
-                        searching = state.searching,
-                        onQueryChange = viewModel::onQueryChange,
-                        onSearchSubmit = {
-                            keyboard?.hide()
-                            viewModel.submitSearch()
-                        },
-                        onClear = viewModel::clearSearch,
-                    )
+                    Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                        SeerrSearchBar(
+                            query = state.query,
+                            searching = state.searching,
+                            onQueryChange = viewModel::onQueryChange,
+                            onSearchSubmit = {
+                                keyboard?.hide()
+                                viewModel.submitSearch()
+                            },
+                            onClear = viewModel::clearSearch,
+                        )
+                    }
                 }
 
                 if (state.searchResults != null) {
@@ -136,45 +130,49 @@ fun SeerrScreen(
                     val filtered = state.filteredSearchResults
 
                     if (allResults.isNotEmpty()) {
+                        val visibleSearchFilters = SeerrSearchMediaFilter.entries.mapNotNull { filter ->
+                            val count = when (filter) {
+                                SeerrSearchMediaFilter.ALL -> allResults.size
+                                SeerrSearchMediaFilter.MOVIE -> allResults.count { it.isMovie }
+                                SeerrSearchMediaFilter.TV -> allResults.count { it.isTv }
+                                SeerrSearchMediaFilter.COLLECTION -> allResults.count { it.isCollection }
+                            }
+                            if (filter == SeerrSearchMediaFilter.ALL || count > 0) filter to count else null
+                        }
                         item(key = "search_filters") {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
+                            LazyRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = PcDimens.ScreenPad),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                SeerrSearchMediaFilter.entries.forEach { filter ->
-                                    val count = when (filter) {
-                                        SeerrSearchMediaFilter.ALL -> allResults.size
-                                        SeerrSearchMediaFilter.MOVIE -> allResults.count { it.isMovie }
-                                        SeerrSearchMediaFilter.TV -> allResults.count { it.isTv }
-                                        SeerrSearchMediaFilter.COLLECTION -> allResults.count { it.isCollection }
-                                    }
-                                    if (filter == SeerrSearchMediaFilter.ALL || count > 0) {
-                                        SeerrFilterChip(
-                                            label = filter.label,
-                                            count = count,
-                                            selected = state.searchMediaFilter == filter,
-                                            onClick = { viewModel.selectSearchMediaFilter(filter) },
-                                        )
-                                    }
+                                items(visibleSearchFilters, key = { it.first.name }) { (filter, count) ->
+                                    SeerrFilterChip(
+                                        label = filter.label,
+                                        count = count,
+                                        selected = state.searchMediaFilter == filter,
+                                        onClick = { viewModel.selectSearchMediaFilter(filter) },
+                                    )
                                 }
                             }
                         }
                     }
 
                     item(key = "results_header") {
-                        PcSectionLabel(label = "Results")
+                        Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                            PcSectionLabel(label = "Results")
+                        }
                     }
 
                     if (filtered.isEmpty()) {
                         item(key = "no_matches") {
-                            PcCard(modifier = Modifier.fillMaxWidth()) {
-                                PcEmptyState(
-                                    icon = Icons.Filled.Search,
-                                    title = "No matches",
-                                    body = "Try a different title or media filter",
-                                )
+                            Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                PcCard(modifier = Modifier.fillMaxWidth()) {
+                                    PcEmptyState(
+                                        icon = Icons.Rounded.Search,
+                                        title = "No matches",
+                                        body = "Try a different title or media filter",
+                                    )
+                                }
                             }
                         }
                     } else {
@@ -186,7 +184,9 @@ fun SeerrScreen(
                             },
                         ) { rowItems ->
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = PcDimens.ScreenPad),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
                                 for (item in rowItems) {
@@ -209,17 +209,21 @@ fun SeerrScreen(
                         }
                     }
                 } else {
-                    // Horizontal poster carousel of recent requests when viewing All
+                    // Edge-to-edge horizontal poster carousel of recent requests when viewing All
                     val recentWithPosters = state.requests
                         ?.filter { !it.poster.isNullOrBlank() }
                         ?.take(12)
                         .orEmpty()
                     if (state.statusFilter == SeerrRequestFilter.ALL && recentWithPosters.isNotEmpty()) {
                         item(key = "recent_carousel_header") {
-                            PcSectionLabel(label = "Recent activity")
+                            Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                PcSectionLabel(label = "Recent activity")
+                            }
                         }
                         item(key = "recent_carousel") {
                             LazyRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = PcDimens.ScreenPad),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
                                 items(
@@ -241,15 +245,14 @@ fun SeerrScreen(
                         }
                     }
 
-                    // Status filter chips
+                    // Edge-to-edge status filter chips
                     item(key = "status_filters") {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = PcDimens.ScreenPad),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            state.visibleFilterTabs.forEach { tab ->
+                            items(state.visibleFilterTabs, key = { it.wire }) { tab ->
                                 SeerrFilterChip(
                                     label = tab.label,
                                     count = state.counts?.get(tab.wire),
@@ -267,48 +270,54 @@ fun SeerrScreen(
                         } else {
                             "${state.statusFilter.label} requests"
                         }
-                        PcSectionLabel(
-                            label = sectionTitle,
-                            trailing = {
-                                when {
-                                    state.loadingFilter -> {
-                                        CircularProgressIndicator(
-                                            color = colors.accent,
-                                            strokeWidth = 2.dp,
-                                            modifier = Modifier.size(16.dp),
-                                        )
+                        Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                            PcSectionLabel(
+                                label = sectionTitle,
+                                trailing = {
+                                    when {
+                                        state.loadingFilter -> {
+                                            CircularProgressIndicator(
+                                                color = colors.accent,
+                                                strokeWidth = 2.dp,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                        }
+                                        state.requests != null -> {
+                                            Text(
+                                                text = state.requests!!.size.toString(),
+                                                color = colors.textFaint,
+                                                style = type.caption.tabular(),
+                                            )
+                                        }
                                     }
-                                    state.requests != null -> {
-                                        Text(
-                                            text = state.requests!!.size.toString(),
-                                            color = colors.textFaint,
-                                            style = TabularNumStyle.copy(fontSize = 12.sp),
-                                        )
-                                    }
-                                }
-                            },
-                        )
+                                },
+                            )
+                        }
                     }
 
                     val requests = state.requests
                     when {
                         requests == null -> {
                             items(3, key = { "skel_$it" }) {
-                                SeerrRowSkeleton()
+                                Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                    SeerrRowSkeleton()
+                                }
                             }
                         }
                         requests.isEmpty() -> {
                             item(key = "empty_requests") {
-                                PcCard(modifier = Modifier.fillMaxWidth()) {
-                                    PcEmptyState(
-                                        icon = Icons.Filled.Movie,
-                                        title = if (state.statusFilter == SeerrRequestFilter.ALL) {
-                                            "No requests yet"
-                                        } else {
-                                            "No ${state.statusFilter.label.lowercase()} requests"
-                                        },
-                                        body = "Search above to request movies, TV shows, or collections",
-                                    )
+                                Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                    PcCard(modifier = Modifier.fillMaxWidth()) {
+                                        PcEmptyState(
+                                            icon = Icons.Rounded.Movie,
+                                            title = if (state.statusFilter == SeerrRequestFilter.ALL) {
+                                                "No requests yet"
+                                            } else {
+                                                "No ${state.statusFilter.label.lowercase()} requests"
+                                            },
+                                            body = "Search above to request movies, TV shows, or collections",
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -317,17 +326,19 @@ fun SeerrScreen(
                                 items = requests,
                                 key = { "req:${it.id}" },
                             ) { req ->
-                                SeerrRequestRow(
-                                    request = req,
-                                    dimmed = state.loadingFilter,
-                                    onClick = {
-                                        onOpenDetail(
-                                            req.mediaType,
-                                            req.tmdbId,
-                                            req.toSeedItem(),
-                                        )
-                                    },
-                                )
+                                Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                    SeerrRequestRow(
+                                        request = req,
+                                        dimmed = state.loadingFilter,
+                                        onClick = {
+                                            onOpenDetail(
+                                                req.mediaType,
+                                                req.tmdbId,
+                                                req.toSeedItem(),
+                                            )
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
@@ -357,6 +368,7 @@ private fun SeerrSearchBar(
     onClear: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -369,7 +381,7 @@ private fun SeerrSearchBar(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Icon(
-            imageVector = Icons.Filled.Search,
+            imageVector = Icons.Rounded.Search,
             contentDescription = null,
             tint = colors.textFaint,
             modifier = Modifier.size(20.dp),
@@ -382,7 +394,7 @@ private fun SeerrSearchBar(
                 Text(
                     text = "Search movies, TV, or collections",
                     color = colors.textFaint,
-                    fontSize = 15.sp,
+                    style = type.body,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -392,11 +404,7 @@ private fun SeerrSearchBar(
                 onValueChange = onQueryChange,
                 singleLine = true,
                 cursorBrush = SolidColor(colors.accent),
-                textStyle = TextStyle(
-                    color = colors.text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Normal,
-                ),
+                textStyle = type.body.copy(color = colors.text),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { onSearchSubmit() }),
                 modifier = Modifier.fillMaxWidth(),
@@ -416,7 +424,7 @@ private fun SeerrSearchBar(
                     modifier = Modifier.size(28.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.Cancel,
+                        imageVector = Icons.Rounded.Cancel,
                         contentDescription = "Clear search",
                         tint = colors.textFaint,
                         modifier = Modifier.size(18.dp),
@@ -434,11 +442,12 @@ private fun SeerrPosterGridCard(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val badge = if (item.isCollection) null else SeerrHelpers.statusBadge(item.status)
     val fallbackIcon = when {
-        item.isCollection -> Icons.Filled.CollectionsBookmark
-        item.isTv -> Icons.Filled.Tv
-        else -> Icons.Filled.Movie
+        item.isCollection -> Icons.Rounded.CollectionsBookmark
+        item.isTv -> Icons.Rounded.Tv
+        else -> Icons.Rounded.Movie
     }
     val subLine = buildList {
         item.year?.let { add(it.toString()) }
@@ -486,8 +495,7 @@ private fun SeerrPosterGridCard(
                     Text(
                         text = "Collection",
                         color = colors.textDim,
-                        fontSize = 9.5.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = type.micro.copy(fontSize = 9.5.sp),
                         maxLines = 1,
                     )
                 }
@@ -513,8 +521,7 @@ private fun SeerrPosterGridCard(
                     Text(
                         text = badge.label,
                         color = colors.onMedia,
-                        fontSize = 9.5.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = type.micro.copy(fontSize = 9.5.sp),
                         maxLines = 1,
                     )
                 }
@@ -527,9 +534,7 @@ private fun SeerrPosterGridCard(
             Text(
                 text = item.title,
                 color = colors.text,
-                fontSize = 12.5.sp,
-                lineHeight = 16.sp,
-                fontWeight = FontWeight.Medium,
+                style = type.caption.copy(fontWeight = FontWeight.Medium, lineHeight = 16.sp),
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -537,7 +542,7 @@ private fun SeerrPosterGridCard(
                 Text(
                     text = subLine,
                     color = colors.textFaint,
-                    style = TabularNumStyle.copy(fontSize = 11.sp),
+                    style = type.micro.tabular(),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -552,6 +557,7 @@ private fun SeerrRecentPosterCard(
     onClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val badge = SeerrHelpers.statusBadge(request.status)
     Column(
         modifier = Modifier
@@ -575,7 +581,7 @@ private fun SeerrRecentPosterCard(
                 )
             } else {
                 Icon(
-                    imageVector = if (request.mediaType == "tv") Icons.Filled.Tv else Icons.Filled.Movie,
+                    imageVector = if (request.mediaType == "tv") Icons.Rounded.Tv else Icons.Rounded.Movie,
                     contentDescription = null,
                     tint = colors.textFaint,
                     modifier = Modifier
@@ -605,8 +611,7 @@ private fun SeerrRecentPosterCard(
                     Text(
                         text = badge.label,
                         color = colors.onMedia,
-                        fontSize = 9.5.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = type.micro.copy(fontSize = 9.5.sp),
                         maxLines = 1,
                     )
                 }
@@ -619,8 +624,7 @@ private fun SeerrRecentPosterCard(
             Text(
                 text = request.title,
                 color = colors.text,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
+                style = type.caption.copy(fontWeight = FontWeight.Medium),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -628,7 +632,7 @@ private fun SeerrRecentPosterCard(
                 text = request.year?.toString()
                     ?: if (request.mediaType == "tv") "TV" else "Movie",
                 color = colors.textFaint,
-                style = TabularNumStyle.copy(fontSize = 11.sp),
+                style = type.micro.tabular(),
                 maxLines = 1,
             )
         }
@@ -642,6 +646,7 @@ private fun SeerrRequestRow(
     onClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val seasonTag = SeerrHelpers.formatSeasonTag(request.mediaType, request.seasons)
     val age = SeerrHelpers.formatIsoAge(request.createdAt)
     val metaLine = buildList {
@@ -673,15 +678,14 @@ private fun SeerrRequestRow(
                 Text(
                     text = request.title,
                     color = colors.text,
-                    fontSize = 14.5.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = metaLine,
                     color = colors.textFaint,
-                    style = TabularNumStyle.copy(fontSize = 12.sp),
+                    style = type.caption.tabular(),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )

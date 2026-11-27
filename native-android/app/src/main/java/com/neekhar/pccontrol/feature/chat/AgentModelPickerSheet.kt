@@ -40,6 +40,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.ProviderBrandIcon
@@ -59,6 +60,7 @@ fun AgentModelPickerSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
 
     PcBottomSheet(
         onDismissRequest = onDismiss,
@@ -82,8 +84,7 @@ fun AgentModelPickerSheet(
                     Text(
                         text = "Model & effort",
                         color = colors.text,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        style = type.collapsedTitle,
                     )
                     if (applying) {
                         CircularProgressIndicator(

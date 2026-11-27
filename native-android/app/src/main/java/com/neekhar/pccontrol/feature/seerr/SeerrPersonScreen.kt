@@ -10,28 +10,25 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Sort
-import androidx.compose.material.icons.filled.Cake
-import androidx.compose.material.icons.filled.CalendarToday
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.automirrored.rounded.Sort
+import androidx.compose.material.icons.rounded.Cake
+import androidx.compose.material.icons.rounded.CalendarToday
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.LocationOn
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -52,12 +49,14 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.PcDimens
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcPill
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcSegmentOption
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
@@ -73,7 +72,9 @@ fun SeerrPersonScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val person = state.person
+    val listState = rememberLazyListState()
 
     val age = remember(person?.birthday, person?.deathday) {
         SeerrHelpers.computeAge(person?.birthday, person?.deathday)
@@ -82,43 +83,41 @@ fun SeerrPersonScreen(
     val deathStr = remember(person?.deathday) { SeerrHelpers.formatDate(person?.deathday) }
     val bio = person?.biography?.trim().orEmpty()
 
-    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(colors.bg)
-            .statusBarsPadding(),
+    PcScaffold(
+        modifier = modifier,
+        title = state.displayName,
+        onBack = onBack,
+        listState = listState,
     ) {
-        PcScreenHeader(
-            title = state.displayName,
-            onBack = onBack,
-        )
-
         PullToRefreshBox(
             isRefreshing = state.refreshing,
             onRefresh = { viewModel.refresh() },
             modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
-                    start = 18.dp,
-                    end = 18.dp,
                     top = 4.dp,
-                    bottom = 36.dp + navBottom,
+                    bottom = 36.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (!state.error.isNullOrBlank()) {
                     item(key = "error") {
-                        PcErrorBanner(title = "Seerr", message = state.error)
+                        Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                            PcErrorBanner(title = "Seerr", message = state.error)
+                        }
                     }
                 }
 
                 // Profile Summary Card
                 item(key = "profile") {
-                    PcCard(modifier = Modifier.fillMaxWidth()) {
+                    PcCard(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = PcDimens.ScreenPad),
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -132,7 +131,7 @@ fun SeerrPersonScreen(
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Icon(
-                                    imageVector = Icons.Filled.Person,
+                                    imageVector = Icons.Rounded.Person,
                                     contentDescription = null,
                                     tint = colors.textFaint,
                                     modifier = Modifier.size(38.dp),
@@ -161,14 +160,14 @@ fun SeerrPersonScreen(
                                         Text(
                                             text = "${state.credits.size} ${if (state.credits.size == 1) "credit" else "credits"}",
                                             color = colors.textFaint,
-                                            style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                                            style = type.caption.tabular(),
                                         )
                                     }
                                 }
 
                                 if (birthStr != null) {
                                     PersonMetaRow(
-                                        icon = Icons.Filled.Cake,
+                                        icon = Icons.Rounded.Cake,
                                         text = buildString {
                                             append(birthStr)
                                             if (age != null && deathStr == null) append(" ($age)")
@@ -177,7 +176,7 @@ fun SeerrPersonScreen(
                                 }
                                 if (deathStr != null) {
                                     PersonMetaRow(
-                                        icon = Icons.Filled.CalendarToday,
+                                        icon = Icons.Rounded.CalendarToday,
                                         text = buildString {
                                             append("Died $deathStr")
                                             if (age != null) append(" (aged $age)")
@@ -186,7 +185,7 @@ fun SeerrPersonScreen(
                                 }
                                 if (!person?.placeOfBirth.isNullOrBlank()) {
                                     PersonMetaRow(
-                                        icon = Icons.Filled.LocationOn,
+                                        icon = Icons.Rounded.LocationOn,
                                         text = person!!.placeOfBirth!!,
                                     )
                                 }
@@ -215,15 +214,17 @@ fun SeerrPersonScreen(
                 // Biography
                 if (bio.isNotEmpty()) {
                     item(key = "biography") {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
                             PcSectionLabel(label = "Biography")
                             PcCard(modifier = Modifier.fillMaxWidth()) {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Text(
                                         text = bio,
                                         color = colors.textDim,
-                                        fontSize = 14.sp,
-                                        lineHeight = 21.sp,
+                                        style = type.body,
                                         maxLines = if (state.bioExpanded) Int.MAX_VALUE else 5,
                                         overflow = TextOverflow.Ellipsis,
                                     )
@@ -231,8 +232,7 @@ fun SeerrPersonScreen(
                                         Text(
                                             text = if (state.bioExpanded) "Show less" else "Read more",
                                             color = colors.accent,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Medium,
+                                            style = type.caption.copy(fontWeight = FontWeight.Medium),
                                             modifier = Modifier
                                                 .clip(RoundedCornerShape(6.dp))
                                                 .clickable(onClick = viewModel::toggleBioExpanded)
@@ -245,13 +245,17 @@ fun SeerrPersonScreen(
                     }
                 }
 
-                // Known For horizontal strip
+                // Edge-to-edge Known For horizontal poster carousel
                 if (state.knownFor.isNotEmpty()) {
                     item(key = "known_for_header") {
-                        PcSectionLabel(label = "Known for")
+                        Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                            PcSectionLabel(label = "Known for")
+                        }
                     }
                     item(key = "known_for_row") {
                         LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = PcDimens.ScreenPad),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             items(
@@ -272,36 +276,37 @@ fun SeerrPersonScreen(
                 // Filmography section
                 if (person != null) {
                     item(key = "filmography_header") {
-                        PcSectionLabel(
-                            label = "Filmography (${state.filteredCredits.size})",
-                            trailing = if (state.credits.size > 1) {
-                                {
-                                    Row(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .clickable(onClick = viewModel::toggleSortMode)
-                                            .padding(horizontal = 6.dp, vertical = 4.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.Sort,
-                                            contentDescription = "Sort",
-                                            tint = colors.accent,
-                                            modifier = Modifier.size(15.dp),
-                                        )
-                                        Text(
-                                            text = state.sortMode.label,
-                                            color = colors.accent,
-                                            fontSize = 12.5.sp,
-                                            fontWeight = FontWeight.Medium,
-                                        )
+                        Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                            PcSectionLabel(
+                                label = "Filmography (${state.filteredCredits.size})",
+                                trailing = if (state.credits.size > 1) {
+                                    {
+                                        Row(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable(onClick = viewModel::toggleSortMode)
+                                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Rounded.Sort,
+                                                contentDescription = "Sort",
+                                                tint = colors.accent,
+                                                modifier = Modifier.size(15.dp),
+                                            )
+                                            Text(
+                                                text = state.sortMode.label,
+                                                color = colors.accent,
+                                                style = type.caption.copy(fontWeight = FontWeight.Medium),
+                                            )
+                                        }
                                     }
-                                }
-                            } else {
-                                null
-                            },
-                        )
+                                } else {
+                                    null
+                                },
+                            )
+                        }
                     }
 
                     item(key = "filmography_segmented") {
@@ -313,15 +318,21 @@ fun SeerrPersonScreen(
                             ),
                             selected = state.mediaFilter,
                             onSelect = viewModel::selectMediaFilter,
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = PcDimens.ScreenPad),
                         )
                     }
 
                     if (state.filteredCredits.isEmpty()) {
                         item(key = "empty_credits") {
-                            PcCard(modifier = Modifier.fillMaxWidth()) {
+                            PcCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = PcDimens.ScreenPad),
+                            ) {
                                 PcEmptyState(
-                                    icon = Icons.Filled.Movie,
+                                    icon = Icons.Rounded.Movie,
                                     title = "No credits in this category",
                                 )
                             }
@@ -331,12 +342,14 @@ fun SeerrPersonScreen(
                             items = state.filteredCredits,
                             key = { "credit:${it.mediaType}:${it.id}" },
                         ) { credit ->
-                            PersonCreditRow(
-                                credit = credit,
-                                onClick = {
-                                    onOpenDetail(credit.mediaType, credit.id, credit.toSeedItem())
-                                },
-                            )
+                            Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                PersonCreditRow(
+                                    credit = credit,
+                                    onClick = {
+                                        onOpenDetail(credit.mediaType, credit.id, credit.toSeedItem())
+                                    },
+                                )
+                            }
                         }
                     }
                 }
@@ -351,6 +364,7 @@ private fun PersonMetaRow(
     text: String,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -366,7 +380,7 @@ private fun PersonMetaRow(
         Text(
             text = text,
             color = colors.textDim,
-            style = TabularNumStyle.copy(fontSize = 13.sp),
+            style = type.caption.tabular(),
         )
     }
 }
@@ -377,6 +391,7 @@ private fun PersonKnownForCard(
     onClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val badge = SeerrHelpers.statusBadge(credit.status)
     Column(
         modifier = Modifier
@@ -391,7 +406,7 @@ private fun PersonKnownForCard(
                 .background(colors.surfaceRaised),
         ) {
             Icon(
-                imageVector = if (credit.mediaType == "tv") Icons.Filled.Tv else Icons.Filled.Movie,
+                imageVector = if (credit.mediaType == "tv") Icons.Rounded.Tv else Icons.Rounded.Movie,
                 contentDescription = null,
                 tint = colors.textFaint,
                 modifier = Modifier
@@ -419,8 +434,7 @@ private fun PersonKnownForCard(
                     Text(
                         text = badge.label,
                         color = colors.onMedia,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = type.micro.copy(fontSize = 10.sp),
                         maxLines = 1,
                     )
                 }
@@ -433,8 +447,7 @@ private fun PersonKnownForCard(
             Text(
                 text = credit.title,
                 color = colors.text,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = type.caption.copy(fontWeight = FontWeight.SemiBold),
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -442,7 +455,7 @@ private fun PersonKnownForCard(
                 Text(
                     text = year.toString(),
                     color = colors.textFaint,
-                    style = TabularNumStyle.copy(fontSize = 11.sp),
+                    style = type.micro.tabular(),
                 )
             }
         }
@@ -456,6 +469,7 @@ private fun PersonCreditRow(
     onClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     PcCard(
         onClick = onClick,
         contentPadding = PaddingValues(12.dp),
@@ -477,8 +491,7 @@ private fun PersonCreditRow(
                 Text(
                     text = credit.title,
                     color = colors.text,
-                    fontSize = 14.5.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -486,7 +499,7 @@ private fun PersonCreditRow(
                     Text(
                         text = credit.role,
                         color = colors.textDim,
-                        fontSize = 12.5.sp,
+                        style = type.caption,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -503,7 +516,7 @@ private fun PersonCreditRow(
                         Text(
                             text = year.toString(),
                             color = colors.textFaint,
-                            style = TabularNumStyle.copy(fontSize = 12.sp),
+                            style = type.caption.tabular(),
                         )
                     }
                     SeerrRatingInline(voteAverage = credit.voteAverage)
@@ -511,7 +524,7 @@ private fun PersonCreditRow(
                 }
             }
             Icon(
-                imageVector = Icons.Filled.ChevronRight,
+                imageVector = Icons.Rounded.ChevronRight,
                 contentDescription = null,
                 tint = colors.textFaint,
                 modifier = Modifier.size(20.dp),

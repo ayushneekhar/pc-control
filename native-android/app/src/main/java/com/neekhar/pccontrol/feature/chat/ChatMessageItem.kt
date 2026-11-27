@@ -213,8 +213,9 @@ fun ChatMessageItem(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     val bubbleMaxWidth = maxWidth * 0.82f
+                    val hasImageAttachments = attachments.any { it.isImage }
                     Column(
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(if (hasImageAttachments) 8.dp else 6.dp),
                         modifier = Modifier
                             .widthIn(min = 44.dp, max = bubbleMaxWidth)
                             .clip(UserBubbleShape)
@@ -241,7 +242,7 @@ fun ChatMessageItem(
                                 onClick = {},
                                 onLongClick = triggerLongPress,
                             )
-                            .padding(horizontal = 13.dp, vertical = 9.dp),
+                            .padding(if (hasImageAttachments) 8.dp else 12.dp),
                     ) {
                         if (replyRef != null) {
                             ReplyQuoteBlock(
@@ -260,24 +261,33 @@ fun ChatMessageItem(
                             )
                         }
                         if (hasText) {
-                            MarkdownMessageBody(
-                                text = msg.text,
-                                isUser = true,
-                                muted = isQueued,
-                                resolveAttachmentSource = resolveAttachmentSource,
-                                onOpenUrl = onOpenUrl,
-                                onCopyCode = onCopyCode,
-                                onPressImage = onPressImage,
-                                onLongPress = triggerLongPress,
-                            )
-                            if (previewUrl != null && !ChatLogic.isT3ThreadWebUrl(previewUrl)) {
-                                linkPreviews[previewUrl]?.let { preview ->
-                                    LinkPreviewCard(
-                                        preview = preview,
-                                        fallbackUrl = previewUrl,
-                                        isUser = true,
-                                        onOpenUrl = onOpenUrl,
-                                    )
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = if (hasImageAttachments) {
+                                    Modifier.padding(start = 4.dp, end = 4.dp, bottom = 2.dp)
+                                } else {
+                                    Modifier
+                                },
+                            ) {
+                                MarkdownMessageBody(
+                                    text = msg.text,
+                                    isUser = true,
+                                    muted = isQueued,
+                                    resolveAttachmentSource = resolveAttachmentSource,
+                                    onOpenUrl = onOpenUrl,
+                                    onCopyCode = onCopyCode,
+                                    onPressImage = onPressImage,
+                                    onLongPress = triggerLongPress,
+                                )
+                                if (previewUrl != null && !ChatLogic.isT3ThreadWebUrl(previewUrl)) {
+                                    linkPreviews[previewUrl]?.let { preview ->
+                                        LinkPreviewCard(
+                                            preview = preview,
+                                            fallbackUrl = previewUrl,
+                                            isUser = true,
+                                            onOpenUrl = onOpenUrl,
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -583,11 +593,11 @@ fun LiveStreamingActivityCard(
     var expanded by remember { mutableStateOf(false) }
     val steps = progress?.steps.orEmpty()
     val currentStep = ChatLogic.currentProgressStepText(progress)
-    val stepAnnotated = remember(currentStep, colors.surfaceRaised) {
+    val stepAnnotated = remember(currentStep) {
         buildActivityStepAnnotatedString(
             raw = currentStep,
             textColor = null,
-            codeBg = colors.surfaceRaised.copy(alpha = 0.65f),
+            codeColor = Color.Unspecified,
             codeFontSize = 12.5.sp,
         )
     }
@@ -725,11 +735,12 @@ private fun ProgressStepTimeline(steps: List<ChatProgressStep>) {
                 .padding(start = 10.dp, top = 2.dp, bottom = 2.dp),
         ) {
             for (step in steps) {
-                val stepAnnotated = remember(step.text, colors.textDim, colors.surfaceRaised) {
+                val stepCodeColor = colors.text.copy(alpha = 0.78f)
+                val stepAnnotated = remember(step.text, colors.textDim, stepCodeColor) {
                     buildActivityStepAnnotatedString(
                         raw = step.text,
                         textColor = colors.textDim,
-                        codeBg = colors.surfaceRaised,
+                        codeColor = stepCodeColor,
                         codeFontSize = 11.5.sp,
                     )
                 }
@@ -757,7 +768,7 @@ private fun ProgressStepTimeline(steps: List<ChatProgressStep>) {
 private fun buildActivityStepAnnotatedString(
     raw: String,
     textColor: Color?,
-    codeBg: Color,
+    codeColor: Color,
     codeFontSize: TextUnit,
 ): AnnotatedString {
     val tokens = ChatLogic.parseActivityStepTokens(raw)
@@ -767,7 +778,8 @@ private fun buildActivityStepAnnotatedString(
                 appendInlineTokens(
                     tokens = tokens,
                     accentColor = textColor,
-                    codeBg = codeBg,
+                    codeBg = Color.Transparent,
+                    codeColor = codeColor,
                     codeFontSize = codeFontSize,
                     onOpenUrl = {},
                 )
@@ -776,7 +788,8 @@ private fun buildActivityStepAnnotatedString(
             appendInlineTokens(
                 tokens = tokens,
                 accentColor = Color.Unspecified,
-                codeBg = codeBg,
+                codeBg = Color.Transparent,
+                codeColor = codeColor,
                 codeFontSize = codeFontSize,
                 onOpenUrl = {},
             )
@@ -1127,6 +1140,7 @@ private fun AnnotatedString.Builder.appendInlineTokens(
     tokens: List<InlineToken>,
     accentColor: Color,
     codeBg: Color,
+    codeColor: Color = Color.Unspecified,
     codeFontSize: TextUnit = 13.sp,
     initialLastChar: Char? = null,
     followingChar: Char? = null,
@@ -1147,6 +1161,7 @@ private fun AnnotatedString.Builder.appendInlineTokens(
                         tokens = tok.children,
                         accentColor = accentColor,
                         codeBg = codeBg,
+                        codeColor = codeColor,
                         codeFontSize = codeFontSize,
                         initialLastChar = lastChar,
                         followingChar = nextChar,
@@ -1161,6 +1176,7 @@ private fun AnnotatedString.Builder.appendInlineTokens(
                         tokens = tok.children,
                         accentColor = accentColor,
                         codeBg = codeBg,
+                        codeColor = codeColor,
                         codeFontSize = codeFontSize,
                         initialLastChar = lastChar,
                         followingChar = nextChar,
@@ -1175,6 +1191,7 @@ private fun AnnotatedString.Builder.appendInlineTokens(
                         tokens = tok.children,
                         accentColor = accentColor,
                         codeBg = codeBg,
+                        codeColor = codeColor,
                         codeFontSize = codeFontSize,
                         initialLastChar = lastChar,
                         followingChar = nextChar,
@@ -1184,20 +1201,26 @@ private fun AnnotatedString.Builder.appendInlineTokens(
             }
 
             is InlineToken.Code -> {
-                if (lastChar?.isWhitespace() == false) {
+                val hasPillBg = codeBg != Color.Transparent && codeBg != Color.Unspecified
+                if (hasPillBg && lastChar?.isWhitespace() == false) {
                     append(INLINE_CODE_OUTER_GAP)
                 }
                 withStyle(
                     SpanStyle(
-                        background = codeBg,
+                        color = codeColor,
+                        background = if (hasPillBg) codeBg else Color.Unspecified,
                         fontFamily = PcMonoFontFamily,
                         fontSize = codeFontSize,
                         letterSpacing = 0.sp,
                     )
                 ) {
-                    append("$INLINE_CODE_INNER_PAD${tok.code}$INLINE_CODE_INNER_PAD")
+                    if (hasPillBg) {
+                        append("$INLINE_CODE_INNER_PAD${tok.code}$INLINE_CODE_INNER_PAD")
+                    } else {
+                        append(tok.code)
+                    }
                 }
-                if (nextChar != null && !nextChar.isWhitespace()) {
+                if (hasPillBg && nextChar != null && !nextChar.isWhitespace()) {
                     append(INLINE_CODE_OUTER_GAP)
                     lastChar = INLINE_CODE_OUTER_GAP[0]
                 } else {
@@ -1224,6 +1247,7 @@ private fun AnnotatedString.Builder.appendInlineTokens(
                             tokens = tok.children,
                             accentColor = accentColor,
                             codeBg = codeBg,
+                            codeColor = codeColor,
                             codeFontSize = codeFontSize,
                             initialLastChar = lastChar,
                             followingChar = nextChar,
@@ -1236,6 +1260,7 @@ private fun AnnotatedString.Builder.appendInlineTokens(
                             tokens = tok.children,
                             accentColor = accentColor,
                             codeBg = codeBg,
+                            codeColor = codeColor,
                             codeFontSize = codeFontSize,
                             initialLastChar = lastChar,
                             followingChar = nextChar,
@@ -1652,6 +1677,7 @@ private fun MessageAttachmentGrid(
                                     .build()
                             }
                             val single = images.size == 1
+                            val thumbShape = RoundedCornerShape(if (isUser) 11.dp else 12.dp)
                             AsyncImage(
                                 model = req,
                                 contentDescription = img.name,
@@ -1661,9 +1687,9 @@ private fun MessageAttachmentGrid(
                                         if (single) Modifier.size(width = 220.dp, height = 165.dp)
                                         else Modifier.size(112.dp)
                                     )
-                                    .clip(RoundedCornerShape(12.dp))
+                                    .clip(thumbShape)
                                     .background(surfaceBg)
-                                    .border(0.5.dp, colors.hairline, RoundedCornerShape(12.dp))
+                                    .border(0.5.dp, colors.hairline, thumbShape)
                                     .combinedClickable(
                                         onClick = {
                                             onPressImage(

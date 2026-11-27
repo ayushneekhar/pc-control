@@ -372,7 +372,7 @@ fun ImageViewerDialog(
                         tint = colors.onMedia,
                         onClick = {
                             val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
+                                this.type = "text/plain"
                                 putExtra(Intent.EXTRA_SUBJECT, image.name)
                                 putExtra(Intent.EXTRA_TEXT, actionUrl)
                             }

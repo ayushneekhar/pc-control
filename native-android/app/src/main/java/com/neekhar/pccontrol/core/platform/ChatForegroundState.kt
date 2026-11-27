@@ -1,5 +1,6 @@
 package com.neekhar.pccontrol.core.platform
 
+import android.content.Context
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -29,6 +30,17 @@ object ChatForegroundState {
       field = value
       _visible.value = value
     }
+
+  /**
+   * Marks whether Chat is foregrounded and immediately clears all active Chat notifications
+   * in the shade whenever Chat enters the foreground.
+   */
+  fun setForeground(ctx: Context, isVisible: Boolean) {
+    visible = isVisible
+    if (isVisible) {
+      PcNotifier.clearAllChatNotifications(ctx.applicationContext)
+    }
+  }
 
   private val _pushEvents = MutableSharedFlow<ChatPushEvent>(extraBufferCapacity = 32)
   val pushEvents: SharedFlow<ChatPushEvent> = _pushEvents.asSharedFlow()

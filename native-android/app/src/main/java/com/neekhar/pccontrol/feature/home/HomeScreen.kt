@@ -6,9 +6,11 @@ import android.net.Uri
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -52,7 +54,10 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -60,6 +65,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -98,7 +104,14 @@ import com.neekhar.pccontrol.core.ui.PcStatItem
 import com.neekhar.pccontrol.core.ui.PcStatStrip
 import com.neekhar.pccontrol.core.ui.PcStatusDot
 import com.neekhar.pccontrol.core.ui.PcTone
+import com.neekhar.pccontrol.feature.cams.LinkKind
+import com.neekhar.pccontrol.feature.cams.WebRtcCamLink
+import com.neekhar.pccontrol.feature.cams.WebRtcLivePlayer
+import com.neekhar.pccontrol.feature.cams.WebRtcRuntime
 import com.neekhar.pccontrol.feature.system.ServiceHelpers
+import kotlinx.coroutines.flow.MutableStateFlow
+import okhttp3.OkHttpClient
+import org.webrtc.VideoTrack
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToInt
@@ -123,14 +136,21 @@ fun HomeScreen(
     viewModel: HomeViewModel = viewModel(factory = HomeViewModel.factory(api, cache)),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    var isResumed by remember { mutableStateOf(false) }
 
     LifecycleResumeEffect(viewModel) {
+        isResumed = true
         viewModel.onResume()
-        onPauseOrDispose { viewModel.onPause() }
+        onPauseOrDispose {
+            isResumed = false
+            viewModel.onPause()
+        }
     }
 
     HomeScreenContent(
         state = state,
+        okHttpClient = api.okHttpClient,
+        isResumed = isResumed,
         onRefresh = { viewModel.refresh(isPullToRefresh = true) },
         onEnableCatCams = viewModel::enableCatCams,
         onOpenVitals = onOpenVitals,
@@ -162,12 +182,27 @@ fun HomeScreenContent(
     onOpenSettings: () -> Unit,
     onUnlockKeyring: () -> Unit,
     modifier: Modifier = Modifier,
+    okHttpClient: OkHttpClient? = null,
+    isResumed: Boolean = false,
 ) {
     val colors = LocalPcColors.current
     val type = LocalPcType.current
     val context = LocalContext.current
     val pullState = rememberPullToRefreshState()
     val listState = rememberLazyListState()
+    val isCamerasVisible by remember(listState) {
+        derivedStateOf {
+            val visible = listState.layoutInfo.visibleItemsInfo
+            visible.isEmpty() || visible.any { it.key == "cameras" }
+        }
+    }
+    val heroLiveEnabled = isResumed &&
+        isCamerasVisible &&
+        state.catCamEnabled &&
+        !state.catCamBusy &&
+        !state.isOffline &&
+        state.baseUrl.isNotBlank() &&
+        okHttpClient != null
 
     val homeTitle = remember(state.info?.host, state.baseUrl) {
         formatHomeTitle(state.info?.host, fallbackUrl = state.baseUrl)
@@ -343,6 +378,8 @@ fun HomeScreenContent(
                             CamerasMosaicCard(
                                 baseUrl = state.baseUrl,
                                 tick = state.camTick,
+                                okHttpClient = okHttpClient,
+                                heroLiveEnabled = heroLiveEnabled,
                                 detectState = state.detectState,
                                 latestSighting = state.latestSighting,
                                 onClick = { onOpenCams(null) },
@@ -513,6 +550,8 @@ private fun NeedsAttentionRow(
 private fun CamerasMosaicCard(
     baseUrl: String,
     tick: Long,
+    okHttpClient: OkHttpClient?,
+    heroLiveEnabled: Boolean,
     detectState: DetectState?,
     latestSighting: CatSighting?,
     onClick: () -> Unit,
@@ -533,10 +572,12 @@ private fun CamerasMosaicCard(
                 .background(colors.media),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            CameraSnapshotTile(
+            CameraHeroLiveTile(
                 cam = HOME_CAMS[0],
                 baseUrl = baseUrl,
                 tick = tick,
+                okHttpClient = okHttpClient,
+                liveEnabled = heroLiveEnabled,
                 onLoadState = { loaded -> loadedCams[HOME_CAMS[0].id] = loaded },
                 modifier = Modifier
                     .weight(2f)
@@ -599,6 +640,183 @@ private fun CamerasMosaicCard(
                 },
                 color = colors.textDim,
                 style = type.caption,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CameraHeroLiveTile(
+    cam: CamDefinition,
+    baseUrl: String,
+    tick: Long,
+    okHttpClient: OkHttpClient?,
+    liveEnabled: Boolean,
+    onLoadState: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val context = LocalContext.current
+    val safeMode = remember(context) { WebRtcRuntime.isSafeMode(context) }
+    val activeSrc = if (liveEnabled && !safeMode && okHttpClient != null && baseUrl.isNotBlank()) {
+        cam.id
+    } else {
+        null
+    }
+
+    // Lifecycle- & visibility-aware muted WebRTC video stream (recvonly video, no audio).
+    // Tears down PeerConnection immediately when Home pauses, tab switches, or scrolls off-screen.
+    val idleTrack = remember { MutableStateFlow<VideoTrack?>(null) }
+    val link = remember(activeSrc, baseUrl, okHttpClient) {
+        if (activeSrc == null || okHttpClient == null) {
+            null
+        } else {
+            WebRtcCamLink(
+                context = context,
+                okHttpClient = okHttpClient,
+                baseUrl = baseUrl,
+                src = activeSrc,
+                kind = LinkKind.VIDEO,
+            )
+        }
+    }
+
+    DisposableEffect(link) {
+        link?.start()
+        onDispose { link?.stop() }
+    }
+
+    val rawVideoTrack by (link?.videoTrack ?: idleTrack).collectAsState()
+    val videoTrack = if (activeSrc != null) rawVideoTrack else null
+    var firstFrameRendered by remember(cam.id, videoTrack) { mutableStateOf(false) }
+    val videoLive = videoTrack != null && firstFrameRendered
+
+    var lastPainter by remember(cam.id) { mutableStateOf(homeCamLastPainters[cam.id]) }
+    var failed by remember(cam.id) { mutableStateOf(false) }
+
+    LaunchedEffect(cam.id, lastPainter, videoLive) {
+        if (videoLive || lastPainter != null) {
+            onLoadState(true)
+        }
+    }
+
+    // Keep refreshing JPEG fallback while waiting for first WebRTC frame (or in safe mode);
+    // freeze JPEG polling once WebRTC video is actively rendering frames.
+    var snapshotTick by remember(cam.id) { mutableStateOf(tick) }
+    if (!videoLive) {
+        snapshotTick = tick
+    }
+
+    val url = remember(baseUrl, cam.id, snapshotTick) {
+        if (baseUrl.isBlank()) null else "$baseUrl/api/frame.jpeg?src=${cam.id}&t=$snapshotTick"
+    }
+
+    val request = remember(url, context) {
+        url?.let {
+            ImageRequest.Builder(context)
+                .data(it)
+                .memoryCachePolicy(CachePolicy.DISABLED)
+                .diskCachePolicy(CachePolicy.DISABLED)
+                .crossfade(false)
+                .build()
+        }
+    }
+
+    val snapshotOverlayAlpha by animateFloatAsState(
+        targetValue = if (videoLive) 0f else 1f,
+        animationSpec = tween(durationMillis = 160),
+        label = "home_hero_snapshot_fade",
+    )
+
+    Box(
+        modifier = modifier
+            .background(colors.media)
+            .clip(RoundedCornerShape(0.dp)),
+    ) {
+        val cached = lastPainter
+        if (cached != null) {
+            Image(
+                painter = cached,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else if (!videoLive) {
+            if (failed || request == null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF161616)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.VideocamOff,
+                        contentDescription = null,
+                        tint = colors.onMediaDim,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            } else {
+                CameraTileShimmer(modifier = Modifier.fillMaxSize())
+            }
+        }
+
+        if (videoTrack != null) {
+            WebRtcLivePlayer(
+                videoTrack = videoTrack,
+                zoomable = true,
+                onFirstFrameRendered = { firstFrameRendered = true },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        if (request != null && snapshotOverlayAlpha > 0.01f) {
+            AsyncImage(
+                model = request,
+                contentDescription = cam.name,
+                contentScale = ContentScale.Crop,
+                placeholder = cached,
+                error = cached,
+                onSuccess = { result ->
+                    homeCamLastPainters[cam.id] = result.painter
+                    lastPainter = result.painter
+                    failed = false
+                    onLoadState(true)
+                },
+                onError = {
+                    if (lastPainter == null && !videoLive) {
+                        failed = true
+                        onLoadState(false)
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .alpha(snapshotOverlayAlpha),
+            )
+        }
+
+        // Dark pill label always sits above both live frames and snapshot placeholders
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(6.dp)
+                .clip(CircleShape)
+                .background(colors.mediaChip)
+                .border(0.5.dp, colors.mediaChipBorder, CircleShape)
+                .padding(horizontal = 7.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (videoLive) {
+                PcStatusDot(tone = PcTone.Ok, size = 5.dp)
+            }
+            Text(
+                text = cam.name,
+                color = colors.onMedia,
+                style = type.micro,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

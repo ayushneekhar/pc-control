@@ -20,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.neekhar.pccontrol.core.platform.PcNotifier
 import com.neekhar.pccontrol.core.platform.ShareIntentParser
 import com.neekhar.pccontrol.core.platform.SharePayload
 import com.neekhar.pccontrol.core.theme.PcControlTheme
@@ -166,6 +167,9 @@ class MainActivity : FragmentActivity() {
 
     private fun consumeIntent(intent: Intent?) {
         if (intent == null) return
+        if (PcNotifier.isChatDeepLink(intent)) {
+            PcNotifier.clearAllChatNotifications(applicationContext)
+        }
         when (intent.action) {
             Intent.ACTION_VIEW -> {
                 val raw = intent.dataString ?: return

@@ -3,7 +3,9 @@ package com.neekhar.pccontrol.navigation
 import android.content.Context
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
@@ -43,11 +45,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.GridView
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.rounded.ChatBubble
-import androidx.compose.material.icons.rounded.Dashboard
+import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -55,6 +62,7 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,6 +74,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -144,15 +153,16 @@ import kotlin.reflect.KClass
  */
 enum class PcBottomTab(
     val label: String,
-    val icon: ImageVector,
+    val unselectedIcon: ImageVector,
+    val selectedIcon: ImageVector,
     val route: PcRoute,
     val routeClass: KClass<out PcRoute>,
 ) {
-    Home("Home", Icons.Rounded.Home, PcRoute.Home, PcRoute.Home::class),
-    System("System", Icons.Rounded.Dashboard, PcRoute.System(), PcRoute.System::class),
-    Chat("Chat", Icons.Rounded.ChatBubble, PcRoute.Chat, PcRoute.Chat::class),
-    Root("Root", Icons.Rounded.Security, PcRoute.Root(), PcRoute.Root::class),
-    Settings("Settings", Icons.Rounded.Settings, PcRoute.Settings, PcRoute.Settings::class),
+    Home("Home", Icons.Outlined.Home, Icons.Rounded.Home, PcRoute.Home, PcRoute.Home::class),
+    System("System", Icons.Outlined.GridView, Icons.Rounded.GridView, PcRoute.System(), PcRoute.System::class),
+    Chat("Chat", Icons.Outlined.ChatBubbleOutline, Icons.Rounded.ChatBubble, PcRoute.Chat, PcRoute.Chat::class),
+    Root("Root", Icons.Outlined.Shield, Icons.Rounded.Shield, PcRoute.Root(), PcRoute.Root::class),
+    Settings("Settings", Icons.Outlined.Settings, Icons.Rounded.Settings, PcRoute.Settings, PcRoute.Settings::class),
 }
 
 /**
@@ -885,6 +895,21 @@ fun PcBottomNavBar(
                 ),
                 label = "bottomNavPillOffset",
             )
+            val pillScaleX = remember { Animatable(1f) }
+            var previousSelectedIndex by remember { mutableIntStateOf(selectedIndex) }
+            LaunchedEffect(selectedIndex) {
+                if (selectedIndex >= 0 && previousSelectedIndex >= 0 && selectedIndex != previousSelectedIndex) {
+                    pillScaleX.snapTo(0.72f)
+                    pillScaleX.animateTo(
+                        targetValue = 1f,
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                            stiffness = Spring.StiffnessMediumLow,
+                        ),
+                    )
+                }
+                previousSelectedIndex = selectedIndex
+            }
 
             if (selectedIndex >= 0) {
                 Box(
@@ -892,6 +917,7 @@ fun PcBottomNavBar(
                         .offset { IntOffset(animatedPillOffset.roundToPx(), 0) }
                         .width(pillWidth)
                         .height(pillHeight)
+                        .graphicsLayer { scaleX = pillScaleX.value }
                         .clip(CircleShape)
                         .background(colors.accentSoft),
                 )
@@ -905,6 +931,34 @@ fun PcBottomNavBar(
                     val selected = isSelected(tab)
                     val badge = badgeFor(tab)
                     val interactionSource = remember { MutableInteractionSource() }
+                    val iconScale = remember { Animatable(1f) }
+                    var wasSelected by remember { mutableStateOf(selected) }
+                    LaunchedEffect(selected) {
+                        if (selected && !wasSelected) {
+                            iconScale.snapTo(1f)
+                            iconScale.animateTo(
+                                targetValue = 0.88f,
+                                animationSpec = tween(durationMillis = 60, easing = FastOutLinearInEasing),
+                            )
+                            iconScale.animateTo(
+                                targetValue = 1.12f,
+                                animationSpec = tween(durationMillis = 90, easing = LinearOutSlowInEasing),
+                            )
+                            iconScale.animateTo(
+                                targetValue = 1f,
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                                    stiffness = Spring.StiffnessMedium,
+                                ),
+                            )
+                        } else if (!selected && wasSelected) {
+                            iconScale.animateTo(
+                                targetValue = 1f,
+                                animationSpec = tween(durationMillis = 120),
+                            )
+                        }
+                        wasSelected = selected
+                    }
                     val iconTint by animateColorAsState(
                         targetValue = if (selected) colors.accent else colors.textFaint,
                         animationSpec = tween(durationMillis = 180),
@@ -942,12 +996,22 @@ fun PcBottomNavBar(
                                     ),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Icon(
-                                    imageVector = tab.icon,
-                                    contentDescription = tab.label,
-                                    tint = iconTint,
-                                    modifier = Modifier.size(24.dp),
-                                )
+                                Crossfade(
+                                    targetState = selected,
+                                    animationSpec = tween(durationMillis = 160),
+                                    label = "bottomNavIconCrossfade",
+                                    modifier = Modifier.graphicsLayer {
+                                        scaleX = iconScale.value
+                                        scaleY = iconScale.value
+                                    },
+                                ) { isTabSelected ->
+                                    Icon(
+                                        imageVector = if (isTabSelected) tab.selectedIcon else tab.unselectedIcon,
+                                        contentDescription = tab.label,
+                                        tint = iconTint,
+                                        modifier = Modifier.size(24.dp),
+                                    )
+                                }
                             }
                             if (badge != null && badge > 0) {
                                 Box(

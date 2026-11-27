@@ -40,6 +40,7 @@ object PcNotifier {
   const val CH_RESULTS = "root_results"
   const val CH_MESSAGES = "messages"
   const val CH_CHAT = "cat_chat"
+  const val CHANNEL_CHAT = CH_CHAT
   const val CH_KEYRING = "cat_keyring"
   const val CH_CATS = "cat_cats"
   const val CH_SYSTEM = "cat_system"
@@ -331,10 +332,14 @@ object PcNotifier {
   }
 
   /** Cancels every active chat notification without touching root approvals or live downloads. */
+  fun clearAllChatNotifications(ctx: Context): Int = clearChatNotifications(ctx)
+
+  /** Cancels every active chat notification without touching root approvals or live downloads. */
   fun clearChatNotifications(ctx: Context): Int {
     val nm = ctx.getSystemService(NotificationManager::class.java) ?: return 0
+    val active = runCatching { nm.activeNotifications }.getOrNull() ?: return 0
     var cleared = 0
-    for (sbn in nm.activeNotifications) {
+    for (sbn in active) {
       val notif = sbn.notification ?: continue
       val ch = notif.channelId
       if (ch == CH_REQUESTS || ch == CH_RESULTS) continue
@@ -342,9 +347,10 @@ object PcNotifier {
       val isChat = ch == CH_CHAT ||
         sbn.tag?.startsWith(TAG_CHAT_PREFIX) == true ||
         notif.extras?.getString(EXTRA_CATEGORY) == "chat" ||
+        notif.category == Notification.CATEGORY_MESSAGE ||
         (ch == CH_MESSAGES && sbn.id == ID_MESSAGE && isLegacyChatTitle(title))
       if (isChat) {
-        nm.cancel(sbn.tag, sbn.id)
+        runCatching { nm.cancel(sbn.tag, sbn.id) }
         cleared++
       }
     }
@@ -355,8 +361,10 @@ object PcNotifier {
     if (title.isNullOrBlank()) return false
     return title == "Gemini" ||
       title == "Claude" ||
+      title == "Antigravity" ||
       title.startsWith("Gemini ·") ||
-      title.startsWith("Claude ·")
+      title.startsWith("Claude ·") ||
+      title.startsWith("Antigravity ·")
   }
 
   /** Returns true when an intent targets `pccontrol://chat`. */

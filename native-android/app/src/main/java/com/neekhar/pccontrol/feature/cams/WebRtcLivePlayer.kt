@@ -184,6 +184,7 @@ internal class LiveTextureView(
     private val eglRenderer = SurfaceEglRenderer("PcLive")
     private var initialized = false
     private var currentSurface: SurfaceTexture? = null
+    @Volatile
     private var eglSurfaceFor: SurfaceTexture? = null
     @Volatile
     private var notifiedFirstFrame = false
@@ -240,7 +241,7 @@ internal class LiveTextureView(
     override fun onFrame(frame: VideoFrame) {
         if (initialized) {
             eglRenderer.onFrame(frame)
-            if (!notifiedFirstFrame) {
+            if (!notifiedFirstFrame && eglSurfaceFor != null) {
                 notifiedFirstFrame = true
                 post { onFirstFrame?.invoke() }
             }

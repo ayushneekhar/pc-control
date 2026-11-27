@@ -66,11 +66,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -151,7 +152,7 @@ fun ChatScreen(
         }
 
         fun setVisible(visible: Boolean) {
-            ChatForegroundState.visible = visible
+            ChatForegroundState.setForeground(context, visible)
             ChatForegroundState.onPush = if (visible) pushCallback else null
             viewModel.setForeground(visible)
         }
@@ -178,28 +179,41 @@ fun ChatScreen(
         }
     }
 
-    val totalLazyItems = listItems.size + if (state.hasMore) 1 else 0
+    var isManualJumpingToBottom by remember { mutableStateOf(false) }
 
-    suspend fun scrollToAbsoluteBottom(animated: Boolean) {
+    suspend fun scrollToAbsoluteBottom(animated: Boolean, manual: Boolean = false) {
         val currentState = viewModel.uiState.value
-        val count = currentState.listItems.size + if (currentState.hasMore) 1 else 0
-        if (count <= 0) return
-        val targetIndex = count - 1
-        if (animated) {
-            listState.animateScrollToItem(index = targetIndex, scrollOffset = Int.MAX_VALUE)
-        } else {
-            listState.scrollToItem(index = targetIndex, scrollOffset = Int.MAX_VALUE)
+        if (currentState.listItems.isEmpty()) return
+        // LazyColumn items: optional __load_earlier__ + listItems + trailing bottom_anchor
+        val count = currentState.listItems.size + (if (currentState.hasMore) 1 else 0) + 1
+        val targetIndex = (count - 1).coerceAtLeast(0)
+        if (manual) {
+            isManualJumpingToBottom = true
+        }
+        try {
+            if (animated) {
+                listState.animateScrollToItem(index = targetIndex)
+            } else {
+                listState.scrollToItem(index = targetIndex)
+            }
+        } finally {
+            if (manual) {
+                isManualJumpingToBottom = false
+            }
         }
     }
 
     // Track whether list is near bottom for sticky auto-scroll and unread pill visibility
-    val isNearBottom by remember(totalLazyItems) {
+    val isNearBottom by remember {
         derivedStateOf {
-            if (totalLazyItems <= 0) return@derivedStateOf true
             val layoutInfo = listState.layoutInfo
+            if (layoutInfo.totalItemsCount <= 0) return@derivedStateOf true
+            if (!listState.canScrollForward) return@derivedStateOf true
             val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
             val lastIdx = (layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
-            lastVisible.index >= lastIdx - 1
+            if (lastVisible.index >= lastIdx) return@derivedStateOf true
+            lastVisible.index == lastIdx - 1 &&
+                (lastVisible.offset + lastVisible.size) <= (layoutInfo.viewportEndOffset + 120)
         }
     }
 
@@ -212,14 +226,14 @@ fun ChatScreen(
         if (listItems.isNotEmpty() && !hasInitialScrolled) {
             hasInitialScrolled = true
             scrollToAbsoluteBottom(animated = false)
-        } else if (listItems.isNotEmpty() && isNearBottom) {
+        } else if (listItems.isNotEmpty() && isNearBottom && !isManualJumpingToBottom) {
             scrollToAbsoluteBottom(animated = true)
         }
     }
 
     // Keep live shimmer/activity steps anchored at bottom when near bottom
     LaunchedEffect(state.activeProgress?.steps?.size) {
-        if (listItems.isNotEmpty() && isNearBottom) {
+        if (listItems.isNotEmpty() && isNearBottom && !isManualJumpingToBottom) {
             scrollToAbsoluteBottom(animated = true)
         }
     }
@@ -229,9 +243,11 @@ fun ChatScreen(
         viewModel.events.collect { ev ->
             when (ev) {
                 is ChatUiEvent.ScrollToBottom -> {
-                    // Yield one composition frame so newly appended optimistic messages & shimmer are laid out
-                    withFrameNanos { }
-                    scrollToAbsoluteBottom(animated = ev.animated)
+                    if (!isManualJumpingToBottom) {
+                        // Yield one composition frame so newly appended optimistic messages & shimmer are laid out
+                        withFrameNanos { }
+                        scrollToAbsoluteBottom(animated = ev.animated)
+                    }
                 }
 
                 is ChatUiEvent.ScrollToMessageIndex -> {
@@ -266,45 +282,50 @@ fun ChatScreen(
     val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val topOverlayBarHeight = 44.dp
     val hasFloatingAttachments = state.pendingAttachments.isNotEmpty() || state.uploadingCount > 0
+    val density = LocalDensity.current
+    var composerHeightDp by remember { mutableStateOf(76.dp) }
+    val overlayClearance = (composerHeightDp - 4.dp).coerceAtLeast(0.dp)
 
-    Column(
+    // Full-bleed chat container: messages extend visibly behind the translucent floating composer pill,
+    // and imePadding() lifts the floating composer cleanly flush above the soft keyboard.
+    Box(
         modifier = modifier
             .fillMaxSize()
             .background(colors.bg)
             .imePadding(),
     ) {
-        // Main messages viewport extending cleanly up to the top safe area + floating overlays
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-        ) {
-            when {
-                state.loadingInitial && listItems.isEmpty() -> {
-                    ChatSkeletonPlaceholder(
-                        modifier = Modifier.padding(top = statusBarTop + topOverlayBarHeight),
-                    )
-                }
+        when {
+            state.loadingInitial && listItems.isEmpty() -> {
+                ChatSkeletonPlaceholder(
+                    modifier = Modifier.padding(
+                        top = statusBarTop + topOverlayBarHeight,
+                        bottom = composerHeightDp,
+                    ),
+                )
+            }
 
-                listItems.isEmpty() -> {
-                    ChatEmptyState(
-                        engine = state.engine,
-                        modifier = Modifier.padding(top = statusBarTop + topOverlayBarHeight),
-                    )
-                }
+            listItems.isEmpty() -> {
+                ChatEmptyState(
+                    engine = state.engine,
+                    modifier = Modifier.padding(
+                        top = statusBarTop + topOverlayBarHeight,
+                        bottom = composerHeightDp,
+                    ),
+                )
+            }
 
-                else -> {
-                    LazyColumn(
-                        state = listState,
-                        contentPadding = PaddingValues(
-                            start = 18.dp,
-                            end = 18.dp,
-                            top = statusBarTop + 56.dp,
-                            bottom = if (hasFloatingAttachments) 92.dp else 22.dp,
-                        ),
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
-                        modifier = Modifier.fillMaxSize(),
-                    ) {
+            else -> {
+                LazyColumn(
+                    state = listState,
+                    contentPadding = PaddingValues(
+                        start = 18.dp,
+                        end = 18.dp,
+                        top = statusBarTop + 56.dp,
+                        bottom = (composerHeightDp - 8.dp).coerceAtLeast(0.dp) + if (hasFloatingAttachments) 76.dp else 0.dp,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
                         if (state.hasMore) {
                             item(key = "__load_earlier__") {
                                 Box(
@@ -380,6 +401,10 @@ fun ChatScreen(
                                     previewImage = img
                                 },
                             )
+                        }
+
+                        item(key = "bottom_anchor") {
+                            Spacer(modifier = Modifier.height(1.dp))
                         }
                     }
                 }
@@ -512,20 +537,7 @@ fun ChatScreen(
                 }
             }
 
-            // Seamless flipped vertical fade above the composer so messages dissolve smoothly
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .height(22.dp)
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(Color.Transparent, colors.bg),
-                        ),
-                    ),
-            )
-
-            // Floating transparent attachment preview strip above composer
+            // Floating transparent attachment preview strip above the floating composer
             if (hasFloatingAttachments) {
                 PendingAttachmentsOverlay(
                     pendingAttachments = state.pendingAttachments,
@@ -539,7 +551,7 @@ fun ChatScreen(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .fillMaxWidth()
-                        .padding(start = 14.dp, end = 14.dp, bottom = 8.dp),
+                        .padding(start = 14.dp, end = 14.dp, bottom = overlayClearance),
                 )
             }
 
@@ -551,7 +563,10 @@ fun ChatScreen(
                 exit = fadeOut() + scaleOut(targetScale = 0.85f),
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = if (hasFloatingAttachments) 82.dp else 12.dp),
+                    .padding(
+                        end = 16.dp,
+                        bottom = overlayClearance + if (hasFloatingAttachments) 72.dp else 4.dp,
+                    ),
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -565,10 +580,12 @@ fun ChatScreen(
                             shape = RoundedCornerShape(999.dp),
                         )
                         .clickable {
-                            scope.launch {
-                                scrollToAbsoluteBottom(animated = true)
+                            if (!isManualJumpingToBottom) {
+                                viewModel.onNearBottomChanged(true)
+                                scope.launch {
+                                    scrollToAbsoluteBottom(animated = true, manual = true)
+                                }
                             }
-                            viewModel.onNearBottomChanged(true)
                         }
                         .padding(
                             horizontal = if (state.unreadCount > 0) 12.dp else 9.dp,
@@ -598,7 +615,7 @@ fun ChatScreen(
                 exit = fadeOut(),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = if (hasFloatingAttachments) 82.dp else 12.dp),
+                    .padding(bottom = overlayClearance + if (hasFloatingAttachments) 72.dp else 4.dp),
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -622,37 +639,41 @@ fun ChatScreen(
                     )
                 }
             }
-        }
 
-        // Native Composer
-        ChatComposer(
-            draft = state.draft,
-            engine = state.engine,
-            modelChipLabel = state.modelChipLabel,
-            running = state.running,
-            sending = state.sending,
-            canSend = state.canSend,
-            pendingAttachmentsCount = state.pendingAttachments.size,
-            uploadingCount = state.uploadingCount,
-            replyTo = state.replyTo,
-            editingState = state.editingState,
-            focusTrigger = focusTrigger,
-            onDraftChange = viewModel::onDraftChanged,
-            onSend = viewModel::sendCurrentDraft,
-            onStopGeneration = viewModel::stopGeneration,
-            onOpenModelPicker = {
-                keyboard?.hide()
-                viewModel.clearApplyModelError()
-                showModelPicker = true
-                if (state.agentSettings == null) {
-                    viewModel.refreshAgentSettings()
-                }
-            },
-            onPickFiles = viewModel::uploadFiles,
-            onCancelReply = viewModel::cancelReply,
-            onCancelEdit = viewModel::cancelEdit,
-            onError = { msg -> viewModel.notifyCopied(msg) },
-        )
+            // Translucent floating Composer pill overlaid at the bottom with soft gradient fade
+            ChatComposer(
+                draft = state.draft,
+                engine = state.engine,
+                modelChipLabel = state.modelChipLabel,
+                running = state.running,
+                sending = state.sending,
+                canSend = state.canSend,
+                pendingAttachmentsCount = state.pendingAttachments.size,
+                uploadingCount = state.uploadingCount,
+                replyTo = state.replyTo,
+                editingState = state.editingState,
+                focusTrigger = focusTrigger,
+                onDraftChange = viewModel::onDraftChanged,
+                onSend = viewModel::sendCurrentDraft,
+                onStopGeneration = viewModel::stopGeneration,
+                onOpenModelPicker = {
+                    keyboard?.hide()
+                    viewModel.clearApplyModelError()
+                    showModelPicker = true
+                    if (state.agentSettings == null) {
+                        viewModel.refreshAgentSettings()
+                    }
+                },
+                onPickFiles = viewModel::uploadFiles,
+                onCancelReply = viewModel::cancelReply,
+                onCancelEdit = viewModel::cancelEdit,
+                onError = { msg -> viewModel.notifyCopied(msg) },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .onSizeChanged { size ->
+                        composerHeightDp = with(density) { size.height.toDp() }
+                    },
+            )
     }
 
     // Unified Model & Effort Picker Sheet

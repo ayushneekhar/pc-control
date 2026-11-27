@@ -17,6 +17,7 @@ import androidx.compose.foundation.content.consume
 import androidx.compose.foundation.content.contentReceiver
 import androidx.compose.foundation.content.hasMediaType
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -62,6 +63,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -227,13 +229,23 @@ fun ChatComposer(
 
     val canAddAttachment = !sending && (pendingAttachmentsCount + uploadingCount) < MAX_ATTACHMENTS
     val showStopAction = running && draft.isBlank() && pendingAttachmentsCount == 0 && !sending
+    val glassSurface = colors.surface.copy(alpha = if (colors.isDark) 0.80f else 0.88f)
+    val glassBorder = if (colors.isDark) Color.White.copy(alpha = 0.12f) else colors.hairline
+    val innerButtonBg = colors.surfaceRaised.copy(alpha = if (colors.isDark) 0.82f else 0.90f)
+    val pillTapInteraction = remember { MutableInteractionSource() }
 
     Column(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = modifier
             .fillMaxWidth()
-            .background(colors.bg)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .background(
+                Brush.verticalGradient(
+                    0.00f to Color.Transparent,
+                    0.48f to colors.bg.copy(alpha = 0.72f),
+                    1.00f to colors.bg,
+                ),
+            )
+            .padding(start = 14.dp, end = 14.dp, top = 16.dp, bottom = 8.dp),
     ) {
         // Reply-to quote bar
         if (replyTo != null) {
@@ -241,9 +253,9 @@ fun ChatComposer(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(colors.surface)
-                    .border(0.5.dp, colors.hairline, RoundedCornerShape(12.dp)),
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(glassSurface)
+                    .border(0.75.dp, glassBorder, RoundedCornerShape(14.dp)),
             ) {
                 Box(
                     modifier = Modifier
@@ -301,9 +313,9 @@ fun ChatComposer(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(colors.surface)
-                    .border(0.5.dp, colors.accent.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(glassSurface)
+                    .border(0.75.dp, colors.accent.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
                     .padding(start = 12.dp, end = 2.dp),
             ) {
                 Icon(
@@ -346,19 +358,25 @@ fun ChatComposer(
             }
         }
 
-        // Single-row composer pill: + on left | expanding multiline input | provider icon | Send/Stop (bottom-aligned)
+        // Translucent floating glass composer pill: + on left | expanding multiline input | provider icon | Send/Stop
         Row(
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(26.dp))
-                .background(colors.surface)
+                .background(glassSurface)
                 .border(
-                    width = if (editingState != null) 1.dp else 0.5.dp,
-                    color = if (editingState != null) colors.accent else colors.hairline,
+                    width = if (editingState != null) 1.dp else 0.75.dp,
+                    color = if (editingState != null) colors.accent else glassBorder,
                     shape = RoundedCornerShape(26.dp),
                 )
+                .clickable(
+                    interactionSource = pillTapInteraction,
+                    indication = null,
+                ) {
+                    runCatching { focusRequester.requestFocus() }
+                }
                 .padding(horizontal = 4.dp, vertical = 4.dp),
         ) {
             // Direct attach button: tap = Photo Picker, long-press = File Picker (44dp touch target)
@@ -388,7 +406,7 @@ fun ChatComposer(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
-                        .background(colors.surfaceRaised),
+                        .background(innerButtonBg),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Add,
@@ -455,7 +473,7 @@ fun ChatComposer(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
-                        .background(colors.surfaceRaised),
+                        .background(innerButtonBg),
                 ) {
                     ProviderBrandIcon(
                         isClaude = engine != ChatEngines.GEMINI,
@@ -509,7 +527,7 @@ fun ChatComposer(
                             modifier = Modifier
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(if (canSend) colors.accent else colors.surfaceRaised),
+                                .background(if (canSend) colors.accent else innerButtonBg),
                         ) {
                             if (sending) {
                                 CircularProgressIndicator(

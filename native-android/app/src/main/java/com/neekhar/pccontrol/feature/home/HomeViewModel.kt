@@ -259,7 +259,7 @@ class HomeViewModel(
     }
 
     companion object {
-        private const val CAM_REFRESH_MS = 3_000L
+        private const val CAM_REFRESH_MS = 1_500L
         private const val CACHE_INFO = "home:info"
         private const val CACHE_VITALS = "home:vitals"
         private const val CACHE_HEALTH = "health:report"

@@ -11,6 +11,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -44,7 +45,6 @@ import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Reply
@@ -77,6 +77,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -100,6 +101,7 @@ import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
+import com.neekhar.pccontrol.R
 import com.neekhar.pccontrol.core.platform.MarkdownStripper
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
@@ -1791,11 +1793,13 @@ private fun T3ThreadLinkChip(
             .clickable(onClick = onClick)
             .padding(horizontal = 11.dp, vertical = 8.dp),
     ) {
-        Icon(
-            imageVector = Icons.Rounded.Link,
+        Image(
+            painter = painterResource(id = R.drawable.ic_brand_t3code),
             contentDescription = null,
-            tint = colors.accent,
-            modifier = Modifier.size(16.dp),
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(20.dp)
+                .clip(RoundedCornerShape(5.dp)),
         )
         Text(
             text = label,

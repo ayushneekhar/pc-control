@@ -42,6 +42,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -135,17 +137,31 @@ fun AgentViewScreen(
         onBack = onBack,
         listState = listState,
         applyNavigationBarPadding = false,
-    ) {
+    ) { innerPadding ->
+        val topPad = innerPadding.calculateTopPadding()
+        val pullState = rememberPullToRefreshState()
         Box(modifier = Modifier.fillMaxSize()) {
             PullToRefreshBox(
                 isRefreshing = state.isRefreshing,
                 onRefresh = viewModel::refresh,
+                state = pullState,
+                indicator = {
+                    PullToRefreshDefaults.Indicator(
+                        state = pullState,
+                        isRefreshing = state.isRefreshing,
+                        containerColor = colors.surfaceRaised,
+                        color = colors.accent,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = topPad),
+                    )
+                },
                 modifier = Modifier.fillMaxSize(),
             ) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 32.dp + navBottom),
+                    contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = topPad, bottom = 32.dp + navBottom),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     if (!state.error.isNullOrBlank()) {

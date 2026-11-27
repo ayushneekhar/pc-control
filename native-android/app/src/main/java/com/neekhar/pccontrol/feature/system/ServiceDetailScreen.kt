@@ -144,12 +144,18 @@ fun ServiceDetailScreenContent(
         onBack = onBack,
         listState = listState,
         modifier = modifier,
-    ) {
+    ) { innerPadding ->
+        val topPad = innerPadding.calculateTopPadding()
         if (state.unit.isBlank()) {
             PcErrorBanner(
                 title = "No service selected",
                 tone = PcTone.Bad,
-                modifier = Modifier.padding(horizontal = PcDimens.ScreenPad, vertical = 4.dp),
+                modifier = Modifier.padding(
+                    start = PcDimens.ScreenPad,
+                    end = PcDimens.ScreenPad,
+                    top = topPad,
+                    bottom = 4.dp,
+                ),
             )
         } else {
             LazyColumn(
@@ -158,7 +164,7 @@ fun ServiceDetailScreenContent(
                 contentPadding = PaddingValues(
                     start = PcDimens.ScreenPad,
                     end = PcDimens.ScreenPad,
-                    top = 4.dp,
+                    top = topPad,
                     bottom = PcDimens.Space8,
                 ),
                 verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),

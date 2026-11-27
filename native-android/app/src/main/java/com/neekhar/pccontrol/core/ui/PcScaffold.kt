@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.defaultMinSize
@@ -304,87 +303,93 @@ private fun PcScaffoldTopBar(
     val statusHeight = lerpDp(18.dp, 0.dp, statusProgress)
     val statusAlpha = (1f - statusProgress).coerceIn(0f, 1f)
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    0.00f to containerColor,
-                    0.65f to containerColor,
-                    0.85f to containerColor.copy(alpha = 0.5f),
-                    1.00f to Color.Transparent,
-                ),
-            )
-            .then(if (applyStatusBarPadding) Modifier.statusBarsPadding() else Modifier),
-    ) {
-        Row(
+    Column(modifier = modifier.fillMaxWidth()) {
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .defaultMinSize(minHeight = 52.dp)
-                .padding(
-                    start = if (onBack != null) 4.dp else PcDimens.ScreenPad,
-                    end = PcDimens.ScreenPad,
-                    top = topPad,
-                ),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                .background(containerColor)
+                .then(if (applyStatusBarPadding) Modifier.statusBarsPadding() else Modifier),
         ) {
-            if (onBack != null) {
-                IconButton(
-                    onClick = onBack,
-                    modifier = Modifier.size(48.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                        contentDescription = "Back",
-                        tint = colors.text,
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
-            }
-
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.Center,
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 52.dp)
+                    .padding(
+                        start = if (onBack != null) 4.dp else PcDimens.ScreenPad,
+                        end = PcDimens.ScreenPad,
+                        top = topPad,
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                if (!statusText.isNullOrEmpty() && statusHeight > 0.5.dp) {
-                    Row(
-                        modifier = Modifier
-                            .height(statusHeight)
-                            .graphicsLayer { alpha = statusAlpha },
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                if (onBack != null) {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.size(48.dp),
                     ) {
-                        if (statusColor != null) {
-                            PcStatusDot(color = statusColor, size = 7.dp)
-                        } else if (showStatusDot) {
-                            PcStatusDot(tone = statusTone, size = 7.dp)
-                        }
-                        Text(
-                            text = statusText,
-                            style = type.caption.tabular(),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = "Back",
+                            tint = colors.text,
+                            modifier = Modifier.size(24.dp),
                         )
                     }
                 }
-                Text(
-                    text = title,
-                    color = colors.text,
-                    style = titleStyle,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    if (!statusText.isNullOrEmpty() && statusHeight > 0.5.dp) {
+                        Row(
+                            modifier = Modifier
+                                .height(statusHeight)
+                                .graphicsLayer { alpha = statusAlpha },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            if (statusColor != null) {
+                                PcStatusDot(color = statusColor, size = 7.dp)
+                            } else if (showStatusDot) {
+                                PcStatusDot(tone = statusTone, size = 7.dp)
+                            }
+                            Text(
+                                text = statusText,
+                                style = type.caption.tabular(),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    Text(
+                        text = title,
+                        color = colors.text,
+                        style = titleStyle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    content = actions,
                 )
             }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                content = actions,
-            )
         }
 
         // Soft bottom fade tail so scrolling cards dissolve smoothly behind the title
-        Spacer(modifier = Modifier.height(HEADER_FADE_TAIL_DP))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(HEADER_FADE_TAIL_DP)
+                .background(
+                    Brush.verticalGradient(
+                        0.00f to containerColor,
+                        0.50f to containerColor.copy(alpha = 0.5f),
+                        1.00f to Color.Transparent,
+                    ),
+                ),
+        )
     }
 }

@@ -71,12 +71,17 @@ fun ConnectionSettingsScreen(
         onBack = onBack,
         listState = listState,
         applyNavigationBarPadding = false,
-    ) {
+    ) { innerPadding ->
         Box(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 28.dp + navBottom),
+                contentPadding = PaddingValues(
+                    start = 18.dp,
+                    end = 18.dp,
+                    top = innerPadding.calculateTopPadding(),
+                    bottom = 28.dp + navBottom,
+                ),
                 verticalArrangement = Arrangement.spacedBy(24.dp),
             ) {
                 item(key = "sec_endpoints") {

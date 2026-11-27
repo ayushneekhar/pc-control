@@ -115,7 +115,8 @@ fun RootScreen(
         statusColor = statusDotColor,
         listState = listState,
         applyNavigationBarPadding = false,
-    ) {
+    ) { innerPadding ->
+        val topPad = innerPadding.calculateTopPadding()
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
             onRefresh = viewModel::refresh,
@@ -126,7 +127,9 @@ fun RootScreen(
                     isRefreshing = state.isRefreshing,
                     containerColor = colors.surfaceRaised,
                     color = colors.accent,
-                    modifier = Modifier.align(Alignment.TopCenter),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = topPad),
                 )
             },
             modifier = Modifier.fillMaxSize(),
@@ -134,7 +137,7 @@ fun RootScreen(
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(top = 4.dp, bottom = PcDimens.Space8),
+                contentPadding = PaddingValues(top = topPad, bottom = PcDimens.Space8),
                 verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
             ) {
                 if (state.rootdState == RootdState.NOT_INSTALLED) {

@@ -35,13 +35,8 @@ import com.neekhar.pccontrol.core.theme.LocalPcColors
 import kotlin.math.max
 import kotlin.math.min
 
-val VITALS_BAR_TRACK_DARK = Color(0xFF2C2C2C)
-
 @Composable
-fun vitalsProgressTrackColor(): Color {
-    val colors = LocalPcColors.current
-    return if (colors.isDark) VITALS_BAR_TRACK_DARK else colors.surfaceRaised
-}
+fun vitalsProgressTrackColor(): Color = LocalPcColors.current.meterTrack
 
 fun vitalsProgressFraction(percent: Double): Float {
     if (!percent.isFinite() || percent <= 0.0) return 0f

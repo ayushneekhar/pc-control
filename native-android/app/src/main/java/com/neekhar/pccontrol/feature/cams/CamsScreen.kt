@@ -727,8 +727,12 @@ fun CamsScreen(
                 )
             }
         },
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = innerPadding.calculateTopPadding()),
+        ) {
             // Segmented tab bar (Live / Replay / Detections / Music)
             if (!inReplayFullscreen && stackActive) {
                 PcSegmentedControl(
@@ -746,7 +750,6 @@ fun CamsScreen(
                     modifier = Modifier.padding(
                         start = PcDimens.ScreenPad,
                         end = PcDimens.ScreenPad,
-                        top = 4.dp,
                         bottom = 8.dp,
                     ),
                 )

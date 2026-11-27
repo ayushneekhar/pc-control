@@ -104,8 +104,12 @@ fun SystemScreen(
         listState = activeListState,
         applyNavigationBarPadding = false,
         modifier = modifier,
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = innerPadding.calculateTopPadding()),
+        ) {
             PcSegmentedControl(
                 options = segmentOptions,
                 selected = currentTab,
@@ -117,7 +121,6 @@ fun SystemScreen(
                 modifier = Modifier.padding(
                     start = PcDimens.ScreenPad,
                     end = PcDimens.ScreenPad,
-                    top = 4.dp,
                     bottom = 12.dp,
                 ),
             )
@@ -182,13 +185,14 @@ fun VitalsScreen(
         onBack = onBack,
         listState = listState,
         modifier = modifier,
-    ) {
+    ) { innerPadding ->
         VitalsTab(
             state = state,
             onToggleProcesses = viewModel::toggleProcesses,
             onProcessQueryChange = viewModel::setProcessQuery,
             onSelectSort = viewModel::selectSort,
             listState = listState,
+            topPadding = innerPadding.calculateTopPadding(),
             modifier = Modifier.fillMaxSize(),
         )
     }
@@ -227,7 +231,7 @@ fun ServicesScreen(
         onBack = onBack,
         listState = listState,
         modifier = modifier,
-    ) {
+    ) { innerPadding ->
         ServicesTab(
             state = state,
             onRefresh = viewModel::refresh,
@@ -235,6 +239,7 @@ fun ServicesScreen(
             onOpenServiceDetail = onOpenServiceDetail,
             onOpenDownloads = onOpenDownloads,
             listState = listState,
+            topPadding = innerPadding.calculateTopPadding(),
             modifier = Modifier.fillMaxSize(),
         )
     }

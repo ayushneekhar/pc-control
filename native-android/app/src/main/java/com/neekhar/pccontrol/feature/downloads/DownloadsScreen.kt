@@ -147,7 +147,8 @@ fun DownloadsScreenContent(
         showStatusDot = headerAlert != null,
         onBack = onBack,
         listState = listState,
-    ) {
+    ) { innerPadding ->
+        val topPad = innerPadding.calculateTopPadding()
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
             onRefresh = onRefresh,
@@ -158,7 +159,9 @@ fun DownloadsScreenContent(
                     isRefreshing = state.isRefreshing,
                     containerColor = colors.surfaceRaised,
                     color = colors.accent,
-                    modifier = Modifier.align(Alignment.TopCenter),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = topPad),
                 )
             },
             modifier = Modifier.fillMaxSize(),
@@ -169,6 +172,7 @@ fun DownloadsScreenContent(
                 contentPadding = PaddingValues(
                     start = PcDimens.ScreenPad,
                     end = PcDimens.ScreenPad,
+                    top = topPad,
                     bottom = PcDimens.Space8,
                 ),
                 verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),

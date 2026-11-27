@@ -43,6 +43,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
@@ -91,6 +92,7 @@ fun ServicesTab(
     onOpenDownloads: () -> Unit = {},
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
+    topPadding: Dp = 4.dp,
 ) {
     val colors = LocalPcColors.current
     val type = LocalPcType.current
@@ -129,7 +131,9 @@ fun ServicesTab(
                 isRefreshing = state.isRefreshing,
                 containerColor = colors.surfaceRaised,
                 color = colors.accent,
-                modifier = Modifier.align(Alignment.TopCenter),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = if (topPadding > 4.dp) topPadding else 0.dp),
             )
         },
         modifier = modifier
@@ -142,7 +146,7 @@ fun ServicesTab(
             contentPadding = PaddingValues(
                 start = PcDimens.ScreenPad,
                 end = PcDimens.ScreenPad,
-                top = 4.dp,
+                top = topPadding,
                 bottom = PcDimens.Space8,
             ),
             verticalArrangement = Arrangement.spacedBy(PcDimens.Space6),

@@ -135,7 +135,7 @@ fun UsageProgressBar(
     } else {
         0f
     }
-    val trackBg = if (colors.isDark) Color(0xFF2C2C2C) else Color(0xFFE0E0E0)
+    val trackBg = colors.meterTrack
     val tickColor = colors.text
 
     Canvas(
@@ -724,7 +724,7 @@ private fun OpenCodeUsageCard(acc: AgentUsageAccount) {
 @Composable
 fun UsageSkeletonCard(segments: Int = 4) {
     val colors = LocalPcColors.current
-    val trackBg = if (colors.isDark) Color(0xFF2C2C2C) else Color(0xFFE0E0E0)
+    val trackBg = colors.meterTrack
     PcCard {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(

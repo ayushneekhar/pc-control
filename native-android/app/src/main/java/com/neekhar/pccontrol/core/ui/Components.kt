@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -37,7 +36,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -48,7 +46,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Switch
@@ -945,86 +942,6 @@ fun PcStatusRing(
             contentDescription = null,
             tint = fg,
             modifier = Modifier.size(18.dp),
-        )
-    }
-}
-
-/**
- * Screen header per DESIGN.md:
- * 30sp SemiBold (-0.5sp tracking), left-aligned under an optional 12.5sp status line with 7.dp dot.
- */
-@Composable
-fun PcScreenHeader(
-    title: String,
-    modifier: Modifier = Modifier,
-    statusText: String? = null,
-    statusTone: PcTone = PcTone.Faint,
-    statusColor: Color? = null,
-    showStatusDot: Boolean = false,
-    onBack: (() -> Unit)? = null,
-    actions: @Composable RowScope.() -> Unit = {},
-) {
-    val colors = PcTheme.colors
-    val type = PcTheme.type
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(
-                start = if (onBack != null) 4.dp else PcDimens.ScreenPad,
-                end = PcDimens.ScreenPad,
-                top = PcDimens.Space4,
-                bottom = PcDimens.Space4,
-            ),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        if (onBack != null) {
-            IconButton(
-                onClick = onBack,
-                modifier = Modifier.size(48.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                    contentDescription = "Back",
-                    tint = colors.text,
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-        }
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            if (!statusText.isNullOrEmpty()) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    if (statusColor != null) {
-                        PcStatusDot(color = statusColor, size = 7.dp)
-                    } else if (showStatusDot) {
-                        PcStatusDot(tone = statusTone, size = 7.dp)
-                    }
-                    Text(
-                        text = statusText,
-                        style = type.caption.tabular(),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            Text(
-                text = title,
-                color = colors.text,
-                style = type.screenTitle,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            content = actions,
         )
     }
 }

@@ -34,6 +34,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -110,17 +112,31 @@ fun UsageAccountDetailScreen(
         onBack = onBack,
         listState = listState,
         applyNavigationBarPadding = false,
-    ) {
+    ) { innerPadding ->
+        val topPad = innerPadding.calculateTopPadding()
+        val pullState = rememberPullToRefreshState()
         Box(modifier = Modifier.fillMaxSize()) {
             PullToRefreshBox(
                 isRefreshing = state.isRefreshing || state.usageLoading,
                 onRefresh = { viewModel.loadUsage(force = true) },
+                state = pullState,
+                indicator = {
+                    PullToRefreshDefaults.Indicator(
+                        state = pullState,
+                        isRefreshing = state.isRefreshing || state.usageLoading,
+                        containerColor = colors.surfaceRaised,
+                        color = colors.accent,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = topPad),
+                    )
+                },
                 modifier = Modifier.fillMaxSize(),
             ) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 32.dp + navBottom),
+                    contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = topPad, bottom = 32.dp + navBottom),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     if (!state.usageError.isNullOrBlank()) {

@@ -55,6 +55,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
@@ -100,6 +101,7 @@ fun VitalsTab(
     onSelectSort: (ProcessSortKey) -> Unit,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
+    topPadding: Dp = 4.dp,
 ) {
     val colors = LocalPcColors.current
     val type = LocalPcType.current
@@ -113,7 +115,7 @@ fun VitalsTab(
         contentPadding = PaddingValues(
             start = PcDimens.ScreenPad,
             end = PcDimens.ScreenPad,
-            top = 4.dp,
+            top = topPadding,
             bottom = PcDimens.Space8,
         ),
         verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),

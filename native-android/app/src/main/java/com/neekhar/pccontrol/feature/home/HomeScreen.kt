@@ -197,7 +197,8 @@ fun HomeScreenContent(
         listState = listState,
         applyNavigationBarPadding = false,
         modifier = modifier,
-    ) {
+    ) { innerPadding ->
+        val topPad = innerPadding.calculateTopPadding()
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
             onRefresh = onRefresh,
@@ -208,7 +209,9 @@ fun HomeScreenContent(
                     isRefreshing = state.isRefreshing,
                     containerColor = colors.surfaceRaised,
                     color = colors.accent,
-                    modifier = Modifier.align(Alignment.TopCenter),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = topPad),
                 )
             },
             modifier = Modifier.fillMaxSize(),
@@ -216,7 +219,7 @@ fun HomeScreenContent(
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(top = 4.dp, bottom = PcDimens.Space8),
+                contentPadding = PaddingValues(top = topPad, bottom = PcDimens.Space8),
                 verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
                 // Offline banner

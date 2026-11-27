@@ -37,6 +37,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -86,17 +88,31 @@ fun SeerrScreen(
         showStatusDot = !state.error.isNullOrBlank(),
         onBack = onBack,
         listState = listState,
-    ) {
+    ) { innerPadding ->
+        val topPad = innerPadding.calculateTopPadding()
+        val pullState = rememberPullToRefreshState()
         PullToRefreshBox(
             isRefreshing = state.refreshing,
             onRefresh = { viewModel.refresh() },
+            state = pullState,
+            indicator = {
+                PullToRefreshDefaults.Indicator(
+                    state = pullState,
+                    isRefreshing = state.refreshing,
+                    containerColor = colors.surfaceRaised,
+                    color = colors.accent,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = topPad),
+                )
+            },
             modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
-                    top = 4.dp,
+                    top = topPad,
                     bottom = 32.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(12.dp),

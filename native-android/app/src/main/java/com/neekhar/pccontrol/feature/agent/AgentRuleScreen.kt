@@ -110,12 +110,17 @@ fun AgentRuleScreen(
         onBack = onBack,
         listState = listState,
         applyNavigationBarPadding = false,
-    ) {
+    ) { innerPadding ->
         Box(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 32.dp + navBottom),
+                contentPadding = PaddingValues(
+                    start = 18.dp,
+                    end = 18.dp,
+                    top = innerPadding.calculateTopPadding(),
+                    bottom = 32.dp + navBottom,
+                ),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (state.ruleUrl.isNotBlank()) {

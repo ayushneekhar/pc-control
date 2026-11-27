@@ -1,5 +1,8 @@
 package com.neekhar.pccontrol.core.platform
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,6 +11,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 class ApkUpdaterTest {
 
@@ -307,5 +311,185 @@ class ApkUpdaterTest {
     } finally {
       tmp.delete()
     }
+  }
+
+  @Test
+  fun isDownloadBusy_trueOnlyForDownloadingAndVerifying() {
+    val rel = ApkRelease(versionName = "2.1.1", versionCode = 28)
+    assertTrue(ApkUpdateLogic.isDownloadBusy(ApkUpdateState.Downloading(rel, 100L, 1000L, 0.1f)))
+    assertTrue(ApkUpdateLogic.isDownloadBusy(ApkUpdateState.Verifying(rel)))
+    assertFalse(ApkUpdateLogic.isDownloadBusy(ApkUpdateState.Idle))
+    assertFalse(ApkUpdateLogic.isDownloadBusy(ApkUpdateState.Checking))
+    assertFalse(ApkUpdateLogic.isDownloadBusy(ApkUpdateState.UpdateAvailable(rel, false, GITHUB_APK_URL)))
+    assertFalse(ApkUpdateLogic.isDownloadBusy(ApkUpdateState.ReadyToInstall(rel, File("/tmp/a.apk"))))
+    assertFalse(ApkUpdateLogic.isDownloadBusy(ApkUpdateState.Error("boom")))
+  }
+
+  @Test
+  fun installCoordinator_singleFlightIgnoresDuplicateTapsDuringDownloadAndVerify() = runBlocking {
+    val rel = ApkRelease(versionName = "2.1.1", versionCode = 28)
+    val state = MutableStateFlow<ApkUpdateState>(ApkUpdateState.Idle)
+    val downloadStarted = CompletableDeferred<Unit>()
+    val allowFinish = CompletableDeferred<Unit>()
+    val downloadCalls = AtomicInteger(0)
+    val installCalls = AtomicInteger(0)
+    val fakeApk = File("/tmp/pc-control-2.1.1.apk")
+
+    val coordinator = ApkInstallCoordinator(
+      currentState = { state.value },
+      setError = { state.value = ApkUpdateState.Error(it) },
+      resolveRelease = { url -> rel to url },
+      download = { r, _ ->
+        downloadCalls.incrementAndGet()
+        state.value = ApkUpdateState.Downloading(r, 1024L, 2048L, 0.5f)
+        downloadStarted.complete(Unit)
+        allowFinish.await()
+        state.value = ApkUpdateState.ReadyToInstall(r, fakeApk)
+        Result.success(fakeApk)
+      },
+      launchInstall = {
+        installCalls.incrementAndGet()
+        InstallActionResult.Launched
+      },
+      isFilePresent = { true },
+    )
+
+    val first = async { coordinator.startOrInstall(GITHUB_APK_URL) }
+    downloadStarted.await()
+
+    // Duplicate tap while Downloading must be ignored.
+    assertFalse(coordinator.startOrInstall(GITHUB_APK_URL))
+    // Duplicate tap while Verifying must also be ignored.
+    state.value = ApkUpdateState.Verifying(rel)
+    assertFalse(coordinator.startOrInstall(GITHUB_APK_URL))
+
+    allowFinish.complete(Unit)
+    assertTrue(first.await())
+    assertEquals(1, downloadCalls.get())
+    assertEquals(1, installCalls.get())
+  }
+
+  @Test
+  fun installCoordinator_readyToInstallLaunchesDirectlyWithoutRedownloading() = runBlocking {
+    val rel = ApkRelease(versionName = "2.1.1", versionCode = 28)
+    val fakeApk = File("/tmp/pc-control-2.1.1.apk")
+    val state = MutableStateFlow<ApkUpdateState>(ApkUpdateState.ReadyToInstall(rel, fakeApk))
+    var downloadCalled = false
+    var installedFile: File? = null
+
+    val coordinator = ApkInstallCoordinator(
+      currentState = { state.value },
+      setError = { state.value = ApkUpdateState.Error(it) },
+      resolveRelease = { error("should not re-resolve") },
+      download = { _, _ ->
+        downloadCalled = true
+        Result.success(fakeApk)
+      },
+      launchInstall = { file ->
+        installedFile = file
+        InstallActionResult.Launched
+      },
+      isFilePresent = { true },
+    )
+
+    assertTrue(coordinator.startOrInstall(GITHUB_APK_URL))
+    assertFalse(downloadCalled)
+    assertEquals(fakeApk, installedFile)
+  }
+
+  @Test
+  fun installCoordinator_readyToInstallWithMissingFileRedownloads() = runBlocking {
+    val rel = ApkRelease(versionName = "2.1.1", versionCode = 28)
+    val staleApk = File("/tmp/missing.apk")
+    val freshApk = File("/tmp/fresh.apk")
+    val state = MutableStateFlow<ApkUpdateState>(ApkUpdateState.ReadyToInstall(rel, staleApk))
+    var downloadCalls = 0
+    var installedFile: File? = null
+
+    val coordinator = ApkInstallCoordinator(
+      currentState = { state.value },
+      setError = { state.value = ApkUpdateState.Error(it) },
+      resolveRelease = { url -> rel to url },
+      download = { r, _ ->
+        downloadCalls++
+        state.value = ApkUpdateState.ReadyToInstall(r, freshApk)
+        Result.success(freshApk)
+      },
+      launchInstall = { file ->
+        installedFile = file
+        InstallActionResult.Launched
+      },
+      isFilePresent = { it == freshApk },
+    )
+
+    assertTrue(coordinator.startOrInstall(GITHUB_APK_URL))
+    assertEquals(1, downloadCalls)
+    assertEquals(freshApk, installedFile)
+  }
+
+  @Test
+  fun installCoordinator_setsErrorOnInstallLaunchFailureAndAllowsRetry() = runBlocking {
+    val rel = ApkRelease(versionName = "2.1.1", versionCode = 28)
+    val fakeApk = File("/tmp/pc-control-2.1.1.apk")
+    val state = MutableStateFlow<ApkUpdateState>(ApkUpdateState.Idle)
+    var attempt = 0
+
+    val coordinator = ApkInstallCoordinator(
+      currentState = { state.value },
+      setError = { state.value = ApkUpdateState.Error(it) },
+      resolveRelease = { url -> rel to url },
+      download = { r, _ ->
+        attempt++
+        state.value = ApkUpdateState.ReadyToInstall(r, fakeApk)
+        Result.success(fakeApk)
+      },
+      launchInstall = {
+        if (attempt == 1) {
+          InstallActionResult.Failed("Package installer not found")
+        } else {
+          InstallActionResult.Launched
+        }
+      },
+      isFilePresent = { true },
+    )
+
+    assertTrue(coordinator.startOrInstall(GITHUB_APK_URL))
+    assertEquals(ApkUpdateState.Error("Package installer not found"), state.value)
+
+    // Retry after error succeeds
+    assertTrue(coordinator.startOrInstall(GITHUB_APK_URL))
+    assertEquals(2, attempt)
+    assertEquals(ApkUpdateState.ReadyToInstall(rel, fakeApk), state.value)
+  }
+
+  @Test
+  fun installCoordinator_permissionRequiredPreservesReadyStateAndSurfacesIntentErrors() = runBlocking {
+    val rel = ApkRelease(versionName = "2.1.1", versionCode = 28)
+    val fakeApk = File("/tmp/pc-control-2.1.1.apk")
+    val state = MutableStateFlow<ApkUpdateState>(ApkUpdateState.ReadyToInstall(rel, fakeApk))
+    var settingsOpened = false
+    var shouldThrow = false
+
+    val coordinator = ApkInstallCoordinator(
+      currentState = { state.value },
+      setError = { state.value = ApkUpdateState.Error(it) },
+      resolveRelease = { rel to GITHUB_APK_URL },
+      download = { _, _ -> Result.success(fakeApk) },
+      launchInstall = {
+        InstallActionResult.PermissionRequired {
+          if (shouldThrow) throw IllegalStateException("No settings activity")
+          settingsOpened = true
+        }
+      },
+      isFilePresent = { true },
+    )
+
+    assertTrue(coordinator.startOrInstall(GITHUB_APK_URL))
+    assertTrue(settingsOpened)
+    assertEquals(ApkUpdateState.ReadyToInstall(rel, fakeApk), state.value)
+
+    shouldThrow = true
+    assertTrue(coordinator.startOrInstall(GITHUB_APK_URL))
+    assertEquals(ApkUpdateState.Error("No settings activity"), state.value)
   }
 }

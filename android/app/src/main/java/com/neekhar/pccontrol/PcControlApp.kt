@@ -10,12 +10,14 @@ import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
 import com.neekhar.pccontrol.core.network.PcApiClient
+import com.neekhar.pccontrol.core.platform.ApkInstallCoordinator
 import com.neekhar.pccontrol.core.platform.ApkRelease
 import com.neekhar.pccontrol.core.platform.ApkUpdateState
 import com.neekhar.pccontrol.core.platform.ApkUpdater
 import com.neekhar.pccontrol.core.platform.BiometricSigner
 import com.neekhar.pccontrol.core.platform.BiometricStatus
 import com.neekhar.pccontrol.core.platform.CrashReporter
+import com.neekhar.pccontrol.core.platform.InstallActionResult
 import com.neekhar.pccontrol.core.platform.InstallLaunchResult
 import com.neekhar.pccontrol.core.platform.KeyringSaveResult
 import com.neekhar.pccontrol.core.platform.KeyringVault
@@ -47,7 +49,9 @@ import com.neekhar.pccontrol.feature.tvremote.TvRemoteRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -71,6 +75,48 @@ class AppContainer(
     val notifier: PcNotifier = PcNotifier
     val crashReporter: CrashReporter = CrashReporter
     val apkUpdater: ApkUpdater = ApkUpdater(context = appContext)
+
+    private val apkInstallCoordinator: ApkInstallCoordinator = ApkInstallCoordinator(
+        currentState = { apkUpdater.state.value },
+        setError = { msg ->
+            Log.w("PcControlApp", "APK update error: $msg")
+            apkUpdater.reportError(msg)
+        },
+        resolveRelease = { apkUrl ->
+            val existingRelease = when (val st = apkUpdater.state.value) {
+                is ApkUpdateState.UpdateAvailable -> st.release
+                is ApkUpdateState.ReadyToInstall -> st.release
+                else -> null
+            }
+            val release = existingRelease ?: apkUpdater.checkForUpdate(prefs.current.value.serverUrl)
+                .getOrNull()?.release
+                ?: ApkRelease(
+                    versionName = "latest",
+                    versionCode = apkUpdater.installedVersion().second.toInt() + 1,
+                    sha256 = "",
+                    size = 0L,
+                    downloadUrl = apkUrl,
+                )
+            val targetUrl = release.downloadUrl?.takeIf { it.isNotBlank() } ?: apkUrl
+            release to targetUrl
+        },
+        download = { release, targetUrl ->
+            apkUpdater.downloadUpdate(release, targetUrl)
+        },
+        launchInstall = { apkFile ->
+            withContext(Dispatchers.Main) {
+                when (val launch = apkUpdater.launchInstall(apkFile)) {
+                    is InstallLaunchResult.Launched -> InstallActionResult.Launched
+                    is InstallLaunchResult.PermissionRequired -> InstallActionResult.PermissionRequired {
+                        withContext(Dispatchers.Main) {
+                            appContext.startActivity(launch.settingsIntent)
+                        }
+                    }
+                    is InstallLaunchResult.Failed -> InstallActionResult.Failed(launch.message)
+                }
+            }
+        },
+    )
 
     // Feature repositories
     val chatRepository: ChatRepository = ChatRepository(apiClient, cache)
@@ -164,6 +210,9 @@ class AppContainer(
     fun createSettingsPlatformBridge(
         activityProvider: () -> FragmentActivity?,
     ): SettingsPlatformBridge = object : SettingsPlatformBridge {
+        override val apkUpdateState: StateFlow<ApkUpdateState>
+            get() = apkUpdater.state
+
         override fun currentVersionName(): String = apkUpdater.installedVersion().first
 
         override fun currentVersionCode(): Int = apkUpdater.installedVersion().second.toInt()
@@ -253,34 +302,7 @@ class AppContainer(
 
         override fun downloadAndInstallApk(apkUrl: String) {
             appScope.launch(Dispatchers.IO) {
-                val existingRelease = when (val st = apkUpdater.state.value) {
-                    is ApkUpdateState.UpdateAvailable -> st.release
-                    is ApkUpdateState.ReadyToInstall -> st.release
-                    else -> null
-                }
-                val release = existingRelease ?: apkUpdater.checkForUpdate(prefs.current.value.serverUrl)
-                    .getOrNull()?.release
-                    ?: ApkRelease(
-                        versionName = "latest",
-                        versionCode = currentVersionCode() + 1,
-                        sha256 = "",
-                        size = 0L,
-                        downloadUrl = apkUrl,
-                    )
-                val targetUrl = release.downloadUrl?.takeIf { it.isNotBlank() } ?: apkUrl
-                apkUpdater.downloadUpdate(release, targetUrl).onSuccess { apkFile ->
-                    when (val launch = apkUpdater.launchInstall(apkFile)) {
-                        is InstallLaunchResult.Launched -> Unit
-                        is InstallLaunchResult.PermissionRequired -> {
-                            runCatching { appContext.startActivity(launch.settingsIntent) }
-                        }
-                        is InstallLaunchResult.Failed -> {
-                            Log.w("PcControlApp", "APK install launch failed: ${launch.message}")
-                        }
-                    }
-                }.onFailure { err ->
-                    Log.w("PcControlApp", "APK download failed: ${err.message}")
-                }
+                apkInstallCoordinator.startOrInstall(apkUrl)
             }
         }
     }

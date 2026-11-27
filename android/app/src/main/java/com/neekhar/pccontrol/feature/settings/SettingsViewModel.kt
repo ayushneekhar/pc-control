@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.network.PcApiClient
+import com.neekhar.pccontrol.core.platform.ApkUpdateState
 import com.neekhar.pccontrol.core.storage.AppPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
@@ -61,6 +62,7 @@ data class SettingsUiState(
     val latestRelease: ApkReleaseInfo? = null,
     val updateChecking: Boolean = false,
     val updateError: String? = null,
+    val apkUpdateState: ApkUpdateState = ApkUpdateState.Idle,
     // Diagnostics
     val fcmDiagnostics: FcmDiagnostics = FcmDiagnostics(),
     val fcmServerRegistered: Boolean? = null,
@@ -101,6 +103,7 @@ class SettingsViewModel(
             themeMode = ThemeMode.fromId(prefs.current.value.themeMode.storageValue),
             currentVersionName = platform.currentVersionName(),
             currentVersionCode = platform.currentVersionCode(),
+            apkUpdateState = platform.apkUpdateState.value,
             fcmDiagnostics = platform.fcmDiagnostics(),
             crashReports = platform.loadCrashReports(),
         ),
@@ -122,6 +125,11 @@ class SettingsViewModel(
                         themeMode = ThemeMode.fromId(snap.themeMode.storageValue),
                     )
                 }
+            }
+        }
+        viewModelScope.launch {
+            platform.apkUpdateState.collect { updateState ->
+                _uiState.update { it.copy(apkUpdateState = updateState) }
             }
         }
         refreshAll()

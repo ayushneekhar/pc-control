@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -41,6 +42,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
@@ -55,11 +57,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.neekhar.pccontrol.core.platform.ApkUpdateState
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.MonoTextStyle
@@ -265,6 +269,7 @@ fun SettingsScreen(
                                 hasNewer = state.hasNewerApk,
                                 checking = state.updateChecking,
                                 error = state.updateError,
+                                apkUpdateState = state.apkUpdateState,
                                 onCheck = viewModel::checkForApkUpdate,
                                 onDownloadInstall = viewModel::installLatestApk,
                             )
@@ -920,22 +925,46 @@ private fun AppUpdatesListRow(
     hasNewer: Boolean,
     checking: Boolean,
     error: String?,
+    apkUpdateState: ApkUpdateState,
     onCheck: () -> Unit,
     onDownloadInstall: () -> Unit,
 ) {
     val colors = LocalPcColors.current
     val type = LocalPcType.current
-    val subtitle = when {
-        hasNewer && latestRelease != null -> "v$currentVersionName → v${latestRelease.versionName} available"
-        checking -> "Checking GitHub Releases…"
-        !error.isNullOrBlank() -> error
-        latestRelease != null -> "v$currentVersionName · Up to date"
-        else -> "v$currentVersionName ($currentVersionCode)"
+
+    val isDownloading = apkUpdateState is ApkUpdateState.Downloading
+    val isVerifying = apkUpdateState is ApkUpdateState.Verifying
+    val isReady = apkUpdateState is ApkUpdateState.ReadyToInstall
+    val isApkError = apkUpdateState is ApkUpdateState.Error
+    val isChecking = checking || apkUpdateState is ApkUpdateState.Checking
+    val isBusy = isDownloading || isVerifying || isChecking
+
+    val subtitle = when (apkUpdateState) {
+        is ApkUpdateState.Downloading -> formatApkDownloadSubtitle(apkUpdateState)
+        is ApkUpdateState.Verifying -> "Verifying SHA-256…"
+        is ApkUpdateState.ReadyToInstall -> formatApkReadySubtitle(apkUpdateState.release)
+        is ApkUpdateState.Error -> apkUpdateState.message.ifBlank { "APK update failed." }
+        is ApkUpdateState.Checking -> "Checking GitHub Releases…"
+        else -> when {
+            hasNewer && latestRelease != null -> "v$currentVersionName → v${latestRelease.versionName} available"
+            checking -> "Checking GitHub Releases…"
+            !error.isNullOrBlank() -> error
+            latestRelease != null -> "v$currentVersionName · Up to date"
+            else -> "v$currentVersionName ($currentVersionCode)"
+        }
     }
     val subtitleColor = when {
+        isApkError -> colors.bad
+        isDownloading || isVerifying || isReady -> colors.accent
         hasNewer -> colors.accent
         !error.isNullOrBlank() -> colors.bad
         else -> colors.textFaint
+    }
+
+    val rowClick: (() -> Unit)? = when {
+        isBusy -> null
+        isReady || isApkError || hasNewer -> onDownloadInstall
+        else -> onCheck
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -947,20 +976,26 @@ private fun AppUpdatesListRow(
                     text = subtitle,
                     color = subtitleColor,
                     style = type.caption.tabular(),
-                    maxLines = 1,
+                    maxLines = if (isApkError) 2 else 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             },
             trailingContent = {
                 when {
-                    checking -> CircularProgressIndicator(
+                    isBusy -> CircularProgressIndicator(
                         modifier = Modifier
                             .padding(end = 2.dp)
                             .size(16.dp),
                         strokeWidth = 2.dp,
                         color = colors.accent,
                     )
-                    hasNewer -> PcButton(
+                    isApkError -> PcButton(
+                        label = "Retry",
+                        variant = PcButtonVariant.Subtle,
+                        compact = true,
+                        onClick = onDownloadInstall,
+                    )
+                    isReady || hasNewer -> PcButton(
                         label = "Install",
                         variant = PcButtonVariant.Primary,
                         compact = true,
@@ -976,8 +1011,32 @@ private fun AppUpdatesListRow(
             },
             showChevron = false,
             showDivider = false,
-            onClick = if (!checking) (if (hasNewer) onDownloadInstall else onCheck) else null,
+            onClick = rowClick,
         )
+
+        if (apkUpdateState is ApkUpdateState.Downloading) {
+            val barModifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 52.dp, end = 16.dp, bottom = 12.dp)
+                .height(4.dp)
+                .clip(RoundedCornerShape(999.dp))
+            if (apkUpdateState.totalBytes > 0L) {
+                LinearProgressIndicator(
+                    progress = { apkUpdateState.progress.coerceIn(0f, 1f) },
+                    modifier = barModifier,
+                    color = colors.accent,
+                    trackColor = colors.surfaceRaised,
+                    strokeCap = StrokeCap.Round,
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = barModifier,
+                    color = colors.accent,
+                    trackColor = colors.surfaceRaised,
+                    strokeCap = StrokeCap.Round,
+                )
+            }
+        }
 
         val releaseNotes = latestRelease?.releaseNotes
         if (hasNewer && !releaseNotes.isNullOrBlank()) {

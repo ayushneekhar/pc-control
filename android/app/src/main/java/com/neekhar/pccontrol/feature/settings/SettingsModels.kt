@@ -1,9 +1,13 @@
 package com.neekhar.pccontrol.feature.settings
 
+import com.neekhar.pccontrol.core.platform.ApkRelease
+import com.neekhar.pccontrol.core.platform.ApkUpdateState
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.net.URI
 import java.util.Locale
+import kotlin.math.roundToInt
 
 enum class ThemeMode(val id: String, val label: String) {
     DARK("dark", "Dark"),
@@ -164,6 +168,7 @@ sealed interface VaultResult {
  * Platform bridge for biometric keyring vault, FCM diagnostics, crash logs, and APK installer.
  */
 interface SettingsPlatformBridge {
+    val apkUpdateState: StateFlow<ApkUpdateState>
     fun currentVersionName(): String
     fun currentVersionCode(): Int
     fun keyringVaultSupported(): Boolean
@@ -253,5 +258,48 @@ fun notifRoutingSummary(settings: NotifSettings?): String {
         "${activeChannels.joinToString(" · ")} · $enabledCategories/${settings.categories.size} categories"
     } else {
         activeChannels.joinToString(" · ")
+    }
+}
+
+private const val BYTES_PER_MB = 1024.0 * 1024.0
+
+/**
+ * Formats live APK download progress for the Settings "App updates" row, e.g.
+ * `"Downloading v2.1.1 · 42% (10.2 / 24.2 MB)"`.
+ */
+fun formatApkDownloadSubtitle(state: ApkUpdateState.Downloading): String {
+    val cleanVer = state.release.versionName.trim().removePrefix("v")
+    val targetLabel = if (cleanVer.isEmpty() || cleanVer.equals("latest", ignoreCase = true)) {
+        "update"
+    } else {
+        "v$cleanVer"
+    }
+    val downloaded = state.bytesDownloaded.coerceAtLeast(0L)
+    val total = state.totalBytes.coerceAtLeast(0L)
+    return when {
+        total > 0L -> {
+            val pct = (state.progress.coerceIn(0f, 1f) * 100f).roundToInt()
+            val dlMb = String.format(Locale.US, "%.1f", downloaded / BYTES_PER_MB)
+            val totalMb = String.format(Locale.US, "%.1f", total / BYTES_PER_MB)
+            "Downloading $targetLabel · $pct% ($dlMb / $totalMb MB)"
+        }
+        downloaded > 0L -> {
+            val dlMb = String.format(Locale.US, "%.1f", downloaded / BYTES_PER_MB)
+            "Downloading $targetLabel · $dlMb MB"
+        }
+        else -> "Downloading $targetLabel…"
+    }
+}
+
+/**
+ * Formats the subtitle when a downloaded APK is verified and ready to install, e.g.
+ * `"v2.1.1 ready to install"`.
+ */
+fun formatApkReadySubtitle(release: ApkRelease): String {
+    val cleanVer = release.versionName.trim().removePrefix("v")
+    return if (cleanVer.isEmpty() || cleanVer.equals("latest", ignoreCase = true)) {
+        "Update ready to install"
+    } else {
+        "v$cleanVer ready to install"
     }
 }

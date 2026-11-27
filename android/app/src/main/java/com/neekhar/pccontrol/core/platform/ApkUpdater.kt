@@ -7,10 +7,12 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
@@ -121,6 +123,81 @@ sealed interface InstallLaunchResult {
   data object Launched : InstallLaunchResult
   data class PermissionRequired(val settingsIntent: Intent) : InstallLaunchResult
   data class Failed(val message: String) : InstallLaunchResult
+}
+
+/**
+ * Pure-Kotlin install outcome used by [ApkInstallCoordinator] so state transitions and
+ * single-flight behavior can be verified directly in JVM unit tests.
+ */
+sealed interface InstallActionResult {
+  data object Launched : InstallActionResult
+  data class PermissionRequired(val openSettings: suspend () -> Unit) : InstallActionResult
+  data class Failed(val message: String) : InstallActionResult
+}
+
+/**
+ * Single-flight coordinator for the "Install" action:
+ * - Ignores duplicate taps while a download or SHA-256 verification is already in flight.
+ * - Launches the installer directly when [ApkUpdateState.ReadyToInstall] already has a valid APK on disk.
+ * - Surfaces install launch failures and settings-intent failures as [ApkUpdateState.Error].
+ * - Preserves [ApkUpdateState.ReadyToInstall] when unknown-sources permission is required so
+ *   returning from Android Settings lets the user tap Install immediately without re-downloading.
+ */
+class ApkInstallCoordinator(
+  private val currentState: () -> ApkUpdateState,
+  private val setError: (String) -> Unit,
+  private val resolveRelease: suspend (apkUrl: String) -> Pair<ApkRelease, String>,
+  private val download: suspend (ApkRelease, String) -> Result<File>,
+  private val launchInstall: suspend (File) -> InstallActionResult,
+  private val isFilePresent: (File) -> Boolean = { it.isFile },
+) {
+  private val singleFlightMutex = Mutex()
+
+  suspend fun startOrInstall(apkUrl: String): Boolean {
+    if (ApkUpdateLogic.isDownloadBusy(currentState())) return false
+    if (!singleFlightMutex.tryLock()) return false
+    try {
+      val st = currentState()
+      if (ApkUpdateLogic.isDownloadBusy(st)) return false
+
+      if (st is ApkUpdateState.ReadyToInstall && isFilePresent(st.apkFile)) {
+        dispatchInstall(st.apkFile)
+        return true
+      }
+
+      val (release, targetUrl) = resolveRelease(apkUrl)
+      val downloadResult = download(release, targetUrl)
+      downloadResult.onSuccess { apkFile ->
+        dispatchInstall(apkFile)
+      }
+      return true
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      setError(e.message ?: "APK installation failed.")
+      return true
+    } finally {
+      singleFlightMutex.unlock()
+    }
+  }
+
+  private suspend fun dispatchInstall(apkFile: File) {
+    when (val result = launchInstall(apkFile)) {
+      is InstallActionResult.Launched -> Unit
+      is InstallActionResult.PermissionRequired -> {
+        try {
+          result.openSettings()
+        } catch (e: CancellationException) {
+          throw e
+        } catch (e: Exception) {
+          setError(e.message ?: "Could not open Install unknown apps settings.")
+        }
+      }
+      is InstallActionResult.Failed -> {
+        setError(result.message)
+      }
+    }
+  }
 }
 
 /**
@@ -379,6 +456,9 @@ object ApkUpdateLogic {
     return sb.toString()
   }
 
+  fun isDownloadBusy(state: ApkUpdateState): Boolean =
+    state is ApkUpdateState.Downloading || state is ApkUpdateState.Verifying
+
   fun verifySha256(file: File, expectedSha256: String): Boolean {
     val clean = expectedSha256.trim().removePrefix("sha256:").lowercase()
     if (!SHA256_HEX_RE.matches(clean)) return false
@@ -409,9 +489,14 @@ class ApkUpdater(
   private val appCtx = context.applicationContext
   private val _state = MutableStateFlow<ApkUpdateState>(ApkUpdateState.Idle)
   val state: StateFlow<ApkUpdateState> = _state.asStateFlow()
+  private val downloadMutex = Mutex()
 
   @Volatile
   private var lastFromMirror: Boolean = false
+
+  fun reportError(message: String) {
+    _state.value = ApkUpdateState.Error(message)
+  }
 
   fun installedVersion(): Pair<String, Long> = try {
     val pi = appCtx.packageManager.getPackageInfo(appCtx.packageName, 0)
@@ -494,6 +579,9 @@ class ApkUpdater(
     release: ApkRelease,
     downloadUrl: String,
   ): Result<File> = withContext(Dispatchers.IO) {
+    if (!downloadMutex.tryLock()) {
+      return@withContext Result.failure(IllegalStateException("APK download already in progress."))
+    }
     val updatesDir = File(appCtx.cacheDir, UPDATES_SUBDIR).apply { mkdirs() }
     val safeName = "pc-control-${release.versionName}-${release.versionCode}.apk"
       .replace(Regex("[^A-Za-z0-9._-]"), "_")
@@ -521,13 +609,19 @@ class ApkUpdater(
         progress = 0f,
       )
 
+      val downloadClient = client.newBuilder()
+        .readTimeout(120, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
       val req = Request.Builder()
         .url(downloadUrl)
         .get()
         .header("Cache-Control", "no-cache")
         .build()
 
-      client.newCall(req).execute().use { resp ->
+      downloadClient.newCall(req).execute().use { resp ->
         if (!resp.isSuccessful) {
           throw IllegalStateException("APK download failed (HTTP ${resp.code})")
         }
@@ -583,11 +677,16 @@ class ApkUpdater(
 
       _state.value = ApkUpdateState.ReadyToInstall(release, targetFile)
       Result.success(targetFile)
+    } catch (e: CancellationException) {
+      partFile.delete()
+      throw e
     } catch (e: Exception) {
       partFile.delete()
       val msg = e.message ?: "APK download failed"
       _state.value = ApkUpdateState.Error(msg)
       Result.failure(e)
+    } finally {
+      downloadMutex.unlock()
     }
   }
 
@@ -616,7 +715,9 @@ class ApkUpdater(
    */
   fun launchInstall(apkFile: File): InstallLaunchResult {
     if (!apkFile.isFile) {
-      return InstallLaunchResult.Failed("Downloaded APK file is missing.")
+      val msg = "Downloaded APK file is missing."
+      _state.value = ApkUpdateState.Error(msg)
+      return InstallLaunchResult.Failed(msg)
     }
     if (!canRequestPackageInstalls()) {
       return InstallLaunchResult.PermissionRequired(createUnknownSourcesSettingsIntent())
@@ -625,7 +726,9 @@ class ApkUpdater(
       appCtx.startActivity(createInstallIntent(apkFile))
       InstallLaunchResult.Launched
     } catch (e: Exception) {
-      InstallLaunchResult.Failed(e.message ?: "Could not launch APK installer.")
+      val msg = e.message ?: "Could not launch APK installer."
+      _state.value = ApkUpdateState.Error(msg)
+      InstallLaunchResult.Failed(msg)
     }
   }
 

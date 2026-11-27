@@ -1,5 +1,7 @@
 package com.neekhar.pccontrol.feature.settings
 
+import com.neekhar.pccontrol.core.platform.ApkRelease
+import com.neekhar.pccontrol.core.platform.ApkUpdateState
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -81,5 +83,51 @@ class SettingsFormattersTest {
             ),
         )
         assertEquals("Telegram · App · 2/3 categories", notifRoutingSummary(both))
+    }
+
+    @Test
+    fun formatApkDownloadSubtitle_formatsPercentAndMegabytes() {
+        val release = ApkRelease(versionName = "2.1.1", versionCode = 28)
+        val totalBytes = (24.2 * 1024.0 * 1024.0).toLong()
+        val downloadedBytes = (10.2 * 1024.0 * 1024.0).toLong()
+        val state = ApkUpdateState.Downloading(
+            release = release,
+            bytesDownloaded = downloadedBytes,
+            totalBytes = totalBytes,
+            progress = 0.42f,
+        )
+        assertEquals("Downloading v2.1.1 · 42% (10.2 / 24.2 MB)", formatApkDownloadSubtitle(state))
+
+        val unknownTotal = ApkUpdateState.Downloading(
+            release = ApkRelease(versionName = "v2.1.1", versionCode = 28),
+            bytesDownloaded = (5.5 * 1024.0 * 1024.0).toLong(),
+            totalBytes = 0L,
+            progress = 0f,
+        )
+        assertEquals("Downloading v2.1.1 · 5.5 MB", formatApkDownloadSubtitle(unknownTotal))
+
+        val starting = ApkUpdateState.Downloading(
+            release = ApkRelease(versionName = "latest", versionCode = 28),
+            bytesDownloaded = 0L,
+            totalBytes = 0L,
+            progress = 0f,
+        )
+        assertEquals("Downloading update…", formatApkDownloadSubtitle(starting))
+    }
+
+    @Test
+    fun formatApkReadySubtitle_formatsVersionCleanly() {
+        assertEquals(
+            "v2.1.1 ready to install",
+            formatApkReadySubtitle(ApkRelease(versionName = "2.1.1", versionCode = 28)),
+        )
+        assertEquals(
+            "v2.1.1 ready to install",
+            formatApkReadySubtitle(ApkRelease(versionName = "v2.1.1", versionCode = 28)),
+        )
+        assertEquals(
+            "Update ready to install",
+            formatApkReadySubtitle(ApkRelease(versionName = "latest", versionCode = 28)),
+        )
     }
 }

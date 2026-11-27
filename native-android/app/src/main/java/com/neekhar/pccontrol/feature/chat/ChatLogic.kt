@@ -1464,10 +1464,35 @@ object ChatLogic {
      * stray or server-truncated unclosed backticks (e.g. ``running `set -e; long cmd…``)
      * so raw backtick characters are never displayed in the live activity shimmer or timeline.
      */
+    private fun closeTruncatedBacktickSpan(text: String): String {
+        var i = 0
+        while (i < text.length) {
+            if (text[i] == '`') {
+                val matched = matchCodeSpan(text, i)
+                if (matched != null) {
+                    i = matched.third
+                    continue
+                }
+                var tickEnd = i
+                while (tickEnd < text.length && text[tickEnd] == '`') tickEnd += 1
+                val openTicks = text.substring(i, tickEnd)
+                val remainder = text.substring(tickEnd)
+                return if (remainder.isNotBlank()) {
+                    val pad = if (remainder.endsWith('`')) " " else ""
+                    text + pad + openTicks
+                } else {
+                    text.substring(0, i)
+                }
+            }
+            i += 1
+        }
+        return text
+    }
+
     fun parseActivityStepTokens(raw: String): List<InlineToken> {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return emptyList()
-        val parsed = parseInlineTokens(trimmed)
+        val parsed = parseInlineTokens(closeTruncatedBacktickSpan(trimmed))
         val cleaned = mutableListOf<InlineToken>()
 
         fun appendTokens(tokens: List<InlineToken>) {

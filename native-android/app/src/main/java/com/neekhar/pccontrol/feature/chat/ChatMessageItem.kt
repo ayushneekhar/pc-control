@@ -1051,66 +1051,104 @@ private fun buildInlineAnnotatedString(
 ): AnnotatedString {
     val tokens = ChatLogic.parseInlineTokens(raw)
     return buildAnnotatedString {
-        for (tok in tokens) {
-            when (tok) {
-                is InlineToken.Text -> {
-                    withStyle(SpanStyle(color = textColor)) {
-                        append(tok.text)
-                    }
-                }
+        withStyle(SpanStyle(color = textColor)) {
+            appendInlineTokens(
+                tokens = tokens,
+                accentColor = accentColor,
+                codeBg = codeBg,
+                onOpenUrl = onOpenUrl,
+            )
+        }
+    }
+}
 
-                is InlineToken.Bold -> {
-                    withStyle(SpanStyle(color = textColor, fontWeight = FontWeight.SemiBold)) {
-                        append(tok.text)
-                    }
-                }
+private fun AnnotatedString.Builder.appendInlineTokens(
+    tokens: List<InlineToken>,
+    accentColor: Color,
+    codeBg: Color,
+    onOpenUrl: (String) -> Unit,
+) {
+    for (tok in tokens) {
+        when (tok) {
+            is InlineToken.Text -> {
+                append(tok.text)
+            }
 
-                is InlineToken.Italic -> {
-                    withStyle(SpanStyle(color = textColor, fontStyle = FontStyle.Italic)) {
-                        append(tok.text)
-                    }
+            is InlineToken.Bold -> {
+                withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
+                    appendInlineTokens(
+                        tokens = tok.children,
+                        accentColor = accentColor,
+                        codeBg = codeBg,
+                        onOpenUrl = onOpenUrl,
+                    )
                 }
+            }
 
-                is InlineToken.Strike -> {
-                    withStyle(SpanStyle(color = textColor, textDecoration = TextDecoration.LineThrough)) {
-                        append(tok.text)
-                    }
+            is InlineToken.Italic -> {
+                withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
+                    appendInlineTokens(
+                        tokens = tok.children,
+                        accentColor = accentColor,
+                        codeBg = codeBg,
+                        onOpenUrl = onOpenUrl,
+                    )
                 }
+            }
 
-                is InlineToken.Code -> {
-                    withStyle(
-                        SpanStyle(
-                            color = textColor,
-                            background = codeBg,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 13.sp,
+            is InlineToken.Strike -> {
+                withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) {
+                    appendInlineTokens(
+                        tokens = tok.children,
+                        accentColor = accentColor,
+                        codeBg = codeBg,
+                        onOpenUrl = onOpenUrl,
+                    )
+                }
+            }
+
+            is InlineToken.Code -> {
+                withStyle(
+                    SpanStyle(
+                        background = codeBg,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                    )
+                ) {
+                    append(" ${tok.code} ")
+                }
+            }
+
+            is InlineToken.Link -> {
+                val resolved = ChatLogic.resolveChatLinkUrl(tok.url)
+                if (resolved != null) {
+                    withLink(
+                        LinkAnnotation.Clickable(
+                            tag = resolved,
+                            styles = TextLinkStyles(
+                                style = SpanStyle(
+                                    color = accentColor,
+                                    textDecoration = TextDecoration.Underline,
+                                )
+                            ),
+                            linkInteractionListener = { onOpenUrl(resolved) },
                         )
                     ) {
-                        append(" ${tok.code} ")
+                        appendInlineTokens(
+                            tokens = tok.children,
+                            accentColor = accentColor,
+                            codeBg = codeBg,
+                            onOpenUrl = onOpenUrl,
+                        )
                     }
-                }
-
-                is InlineToken.Link -> {
-                    val resolved = ChatLogic.resolveChatLinkUrl(tok.url)
-                    if (resolved != null) {
-                        withLink(
-                            LinkAnnotation.Clickable(
-                                tag = resolved,
-                                styles = TextLinkStyles(
-                                    style = SpanStyle(
-                                        color = accentColor,
-                                        textDecoration = TextDecoration.Underline,
-                                    )
-                                ),
-                                linkInteractionListener = { onOpenUrl(resolved) },
-                            )
-                        ) {
-                            append(tok.label)
-                        }
-                    } else {
-                        withStyle(SpanStyle(color = accentColor)) {
-                            append(tok.label)
-                        }
+                } else {
+                    withStyle(SpanStyle(color = accentColor)) {
+                        appendInlineTokens(
+                            tokens = tok.children,
+                            accentColor = accentColor,
+                            codeBg = codeBg,
+                            onOpenUrl = onOpenUrl,
+                        )
                     }
                 }
             }
@@ -1215,20 +1253,8 @@ private fun CodeBlockCard(
 
 // ---------------------------------------------------------------- GFM Table Card
 
-private fun cellDisplayLength(raw: String): Int {
-    var total = 0
-    for (tok in ChatLogic.parseInlineTokens(raw)) {
-        total += when (tok) {
-            is InlineToken.Code -> tok.code.length
-            is InlineToken.Link -> tok.label.length
-            is InlineToken.Bold -> tok.text.length
-            is InlineToken.Italic -> tok.text.length
-            is InlineToken.Strike -> tok.text.length
-            is InlineToken.Text -> tok.text.length
-        }
-    }
-    return total
-}
+private fun cellDisplayLength(raw: String): Int =
+    ChatLogic.parseInlineTokens(raw).sumOf { it.plainText().length }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

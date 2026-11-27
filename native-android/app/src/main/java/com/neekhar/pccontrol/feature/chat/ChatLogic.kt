@@ -78,10 +78,19 @@ sealed interface MessageSegment {
 sealed interface InlineToken {
     data class Text(val text: String) : InlineToken
     data class Code(val code: String) : InlineToken
-    data class Bold(val text: String) : InlineToken
-    data class Italic(val text: String) : InlineToken
-    data class Strike(val text: String) : InlineToken
-    data class Link(val label: String, val url: String, val external: Boolean) : InlineToken
+    data class Bold(val children: List<InlineToken>) : InlineToken
+    data class Italic(val children: List<InlineToken>) : InlineToken
+    data class Strike(val children: List<InlineToken>) : InlineToken
+    data class Link(val children: List<InlineToken>, val url: String, val external: Boolean) : InlineToken
+}
+
+fun InlineToken.plainText(): String = when (this) {
+    is InlineToken.Text -> text
+    is InlineToken.Code -> code
+    is InlineToken.Bold -> children.joinToString("") { it.plainText() }
+    is InlineToken.Italic -> children.joinToString("") { it.plainText() }
+    is InlineToken.Strike -> children.joinToString("") { it.plainText() }
+    is InlineToken.Link -> children.joinToString("") { it.plainText() }
 }
 
 data class InlineImageBoxSize(
@@ -115,10 +124,9 @@ object ChatLogic {
     private val dataImageBase64Re = Regex("""^data:image/[a-z0-9.+-]+;base64,""", RegexOption.IGNORE_CASE)
     private val relativePathRe = Regex("""^/[^\s]*$""")
     private val codeFenceRe = Regex("""```(?:([a-zA-Z0-9_+#.-]+)[ \t]*\r?\n|[ \t]*\r?\n)?([\s\S]*?)```""")
-    private val inlineTokenRe = Regex(
-        """`([^`\n]+)`|\[([^\]\n]+)\]\(([a-zA-Z][a-zA-Z0-9+.-]*://(?:[^()\s]|\([^()\s]*\))+)\)|(https?://[^\s<>]+)|\*\*([^*\n]+)\*\*|~~([^~\n]+)~~|(?<!\*)\*([^*\n]+)\*(?!\*)"""
-    )
+    private val linkUrlSchemeRe = Regex("""^[a-zA-Z][a-zA-Z0-9+.-]*://""")
     private val trailingPunctRe = Regex("""[.,;:!?'"\]}]""")
+    private const val MAX_INLINE_DEPTH = 8
     private val geminiLabelRe = Regex("""^Gemini\s+[\d.]+\s+(.+)$""", RegexOption.IGNORE_CASE)
     private val orchestratorLabelRe = Regex("""^Orchestrator\b""", RegexOption.IGNORE_CASE)
     private val parenCaptureRe = Regex("""\(([^)]+)\)""")
@@ -575,8 +583,190 @@ object ChatLogic {
         return raw.substring(0, end) to raw.substring(end)
     }
 
-    /** Tokenize inline code, Markdown links, bare http(s) URLs, bold, italic, and strikethrough spans. */
-    fun parseInlineTokens(text: String): List<InlineToken> {
+    /**
+     * Starting at a backtick at [start], find the matching CommonMark code span closing backtick
+     * run of the exact same length. Returns `(contentStart, contentEnd, afterCloseIndex)` or null.
+     */
+    private fun matchCodeSpan(text: String, start: Int): Triple<Int, Int, Int>? {
+        var tickEnd = start
+        while (tickEnd < text.length && text[tickEnd] == '`') tickEnd += 1
+        val tickLen = tickEnd - start
+        if (tickLen == 0) return null
+
+        var k = tickEnd
+        while (k < text.length) {
+            if (text[k] == '`') {
+                var closeEnd = k
+                while (closeEnd < text.length && text[closeEnd] == '`') closeEnd += 1
+                if (closeEnd - k == tickLen) {
+                    return Triple(tickEnd, k, closeEnd)
+                }
+                k = closeEnd
+            } else {
+                k += 1
+            }
+        }
+        return null
+    }
+
+    private fun normalizeCodeSpanContent(raw: String): String {
+        val normalized = raw.replace("\r\n", " ").replace('\n', ' ')
+        return if (
+            normalized.length >= 2 &&
+            normalized.startsWith(' ') &&
+            normalized.endsWith(' ') &&
+            normalized.any { it != ' ' }
+        ) {
+            normalized.substring(1, normalized.length - 1)
+        } else {
+            normalized
+        }
+    }
+
+    /**
+     * Find a matching closing double delimiter (`**` or `~~`) on the same line, skipping over
+     * inline code spans. Returns `(contentEnd, afterCloseIndex)` or null.
+     */
+    private fun findClosingDoubleDelimiter(text: String, contentStart: Int, delimChar: Char): Pair<Int, Int>? {
+        var k = contentStart
+        while (k < text.length) {
+            val ch = text[k]
+            if (ch == '\n') return null
+            if (ch == '`') {
+                val code = matchCodeSpan(text, k)
+                if (code != null) {
+                    k = code.third
+                    continue
+                }
+                while (k < text.length && text[k] == '`') k += 1
+                continue
+            }
+            if (ch == delimChar) {
+                var runEnd = k
+                while (runEnd < text.length && text[runEnd] == delimChar) runEnd += 1
+                val runLen = runEnd - k
+                if (runLen >= 2) {
+                    // Use the trailing two delimiter chars so `***bold italic***` keeps `*...*` inside
+                    val closeStart = runEnd - 2
+                    if (closeStart > contentStart) {
+                        return closeStart to runEnd
+                    }
+                }
+                k = runEnd
+                continue
+            }
+            k += 1
+        }
+        return null
+    }
+
+    /**
+     * Find a matching closing single `*` on the same line, skipping over inline code spans and
+     * requiring non-whitespace flanking characters so math like `2 * 3 * 4` stays plain text.
+     */
+    private fun findClosingSingleItalic(text: String, contentStart: Int): Int? {
+        if (contentStart >= text.length || text[contentStart].isWhitespace() || text[contentStart] == '\n') {
+            return null
+        }
+        var k = contentStart
+        while (k < text.length) {
+            val ch = text[k]
+            if (ch == '\n') return null
+            if (ch == '`') {
+                val code = matchCodeSpan(text, k)
+                if (code != null) {
+                    k = code.third
+                    continue
+                }
+                while (k < text.length && text[k] == '`') k += 1
+                continue
+            }
+            if (ch == '*') {
+                var runEnd = k
+                while (runEnd < text.length && text[runEnd] == '*') runEnd += 1
+                val runLen = runEnd - k
+                if ((runLen == 1 || runLen == 3) && k > contentStart && !text[k - 1].isWhitespace()) {
+                    return runEnd - 1
+                }
+                k = runEnd
+                continue
+            }
+            k += 1
+        }
+        return null
+    }
+
+    /**
+     * Match a Markdown link `[label](scheme://url)` starting at [openBracket], respecting inline
+     * code spans and balanced brackets/parentheses. Returns `(labelRaw, url, afterCloseParen)`.
+     */
+    private fun matchMarkdownLink(text: String, openBracket: Int): Triple<String, String, Int>? {
+        var bracketDepth = 0
+        var k = openBracket
+        var closeBracket = -1
+        while (k < text.length) {
+            val ch = text[k]
+            if (ch == '\n') return null
+            if (ch == '`') {
+                val code = matchCodeSpan(text, k)
+                if (code != null) {
+                    k = code.third
+                    continue
+                }
+                while (k < text.length && text[k] == '`') k += 1
+                continue
+            }
+            if (ch == '[') {
+                bracketDepth += 1
+            } else if (ch == ']') {
+                bracketDepth -= 1
+                if (bracketDepth == 0) {
+                    closeBracket = k
+                    break
+                }
+            }
+            k += 1
+        }
+        if (closeBracket <= openBracket + 1) return null
+        if (closeBracket + 1 >= text.length || text[closeBracket + 1] != '(') return null
+
+        val urlStart = closeBracket + 2
+        var parenDepth = 0
+        var u = urlStart
+        var closeParen = -1
+        while (u < text.length) {
+            val ch = text[u]
+            if (ch.isWhitespace()) return null
+            if (ch == '(') {
+                parenDepth += 1
+            } else if (ch == ')') {
+                if (parenDepth == 0) {
+                    closeParen = u
+                    break
+                }
+                parenDepth -= 1
+            }
+            u += 1
+        }
+        if (closeParen <= urlStart) return null
+        val url = text.substring(urlStart, closeParen)
+        if (!linkUrlSchemeRe.containsMatchIn(url)) return null
+        val labelRaw = text.substring(openBracket + 1, closeBracket)
+        return Triple(labelRaw, url, closeParen + 1)
+    }
+
+    /**
+     * Tokenize inline code (including CommonMark multi-backtick spans), Markdown links, bare
+     * http(s) URLs, bold, italic, and strikethrough spans with recursive nesting.
+     */
+    fun parseInlineTokens(text: String): List<InlineToken> =
+        parseInlineTokensInternal(text = text, depth = 0, insideLink = false)
+
+    private fun parseInlineTokensInternal(
+        text: String,
+        depth: Int,
+        insideLink: Boolean,
+    ): List<InlineToken> {
         if (text.isEmpty()) return emptyList()
         val tokens = mutableListOf<InlineToken>()
 
@@ -590,70 +780,164 @@ object ChatLogic {
             }
         }
 
-        var lastIndex = 0
-        for (match in inlineTokenRe.findAll(text)) {
-            if (match.range.first > lastIndex) {
-                pushText(text.substring(lastIndex, match.range.first))
+        fun parseNested(inner: String, nestedInsideLink: Boolean = insideLink): List<InlineToken> =
+            if (depth < MAX_INLINE_DEPTH) {
+                parseInlineTokensInternal(inner, depth + 1, nestedInsideLink)
+            } else {
+                listOf(InlineToken.Text(inner))
             }
-            val gCode = match.groups[1]?.value
-            val gLinkLabel = match.groups[2]?.value
-            val gLinkUrl = match.groups[3]?.value
-            val gBareUrl = match.groups[4]?.value
-            val gBold = match.groups[5]?.value
-            val gStrike = match.groups[6]?.value
-            val gItalic = match.groups[7]?.value
 
-            when {
-                gCode != null -> tokens.add(InlineToken.Code(gCode))
-                gLinkLabel != null && gLinkUrl != null -> {
-                    tokens.add(InlineToken.Link(label = gLinkLabel, url = gLinkUrl, external = isHttpUrl(gLinkUrl)))
+        var i = 0
+        while (i < text.length) {
+            val ch = text[i]
+
+            // 1. CommonMark inline code span (`...`, ``...``, etc.) — verbatim content
+            if (ch == '`') {
+                val code = matchCodeSpan(text, i)
+                if (code != null) {
+                    val content = normalizeCodeSpanContent(text.substring(code.first, code.second))
+                    tokens.add(InlineToken.Code(content))
+                    i = code.third
+                    continue
                 }
+                var tickEnd = i
+                while (tickEnd < text.length && text[tickEnd] == '`') tickEnd += 1
+                pushText(text.substring(i, tickEnd))
+                i = tickEnd
+                continue
+            }
 
-                gBareUrl != null -> {
-                    val (cleanUrl, trailing) = trimBareUrl(gBareUrl)
-                    if (cleanUrl.isNotEmpty() && httpHostRe.containsMatchIn(cleanUrl)) {
-                        tokens.add(InlineToken.Link(label = cleanUrl, url = cleanUrl, external = true))
-                        pushText(trailing)
-                    } else {
-                        pushText(gBareUrl)
+            // 2. Markdown link `[label](url)` (non-nested inside links)
+            if (!insideLink && ch == '[') {
+                val link = matchMarkdownLink(text, i)
+                if (link != null) {
+                    val (labelRaw, url, afterClose) = link
+                    tokens.add(
+                        InlineToken.Link(
+                            children = parseNested(labelRaw, nestedInsideLink = true),
+                            url = url,
+                            external = isHttpUrl(url),
+                        )
+                    )
+                    i = afterClose
+                    continue
+                }
+            }
+
+            // 3. Bare http(s):// URL
+            if (
+                !insideLink &&
+                (ch == 'h' || ch == 'H') &&
+                (text.startsWith("http://", i, ignoreCase = true) ||
+                    text.startsWith("https://", i, ignoreCase = true))
+            ) {
+                var end = i
+                while (end < text.length && !text[end].isWhitespace() && text[end] != '<' && text[end] != '>') {
+                    end += 1
+                }
+                val rawUrl = text.substring(i, end)
+                val (cleanUrl, trailing) = trimBareUrl(rawUrl)
+                if (cleanUrl.isNotEmpty() && httpHostRe.containsMatchIn(cleanUrl)) {
+                    tokens.add(
+                        InlineToken.Link(
+                            children = listOf(InlineToken.Text(cleanUrl)),
+                            url = cleanUrl,
+                            external = true,
+                        )
+                    )
+                    pushText(trailing)
+                    i = end
+                    continue
+                }
+            }
+
+            // 4. Bold `**...**`
+            if (ch == '*' && i + 1 < text.length && text[i + 1] == '*') {
+                if (depth < MAX_INLINE_DEPTH) {
+                    val closing = findClosingDoubleDelimiter(text, i + 2, '*')
+                    if (closing != null) {
+                        val (contentEnd, afterClose) = closing
+                        tokens.add(InlineToken.Bold(parseNested(text.substring(i + 2, contentEnd))))
+                        i = afterClose
+                        continue
                     }
                 }
-
-                gBold != null -> tokens.add(InlineToken.Bold(gBold))
-                gStrike != null -> tokens.add(InlineToken.Strike(gStrike))
-                gItalic != null -> tokens.add(InlineToken.Italic(gItalic))
+                pushText("**")
+                i += 2
+                continue
             }
-            lastIndex = match.range.last + 1
+
+            // 5. Strikethrough `~~...~~`
+            if (ch == '~' && i + 1 < text.length && text[i + 1] == '~') {
+                if (depth < MAX_INLINE_DEPTH) {
+                    val closing = findClosingDoubleDelimiter(text, i + 2, '~')
+                    if (closing != null) {
+                        val (contentEnd, afterClose) = closing
+                        tokens.add(InlineToken.Strike(parseNested(text.substring(i + 2, contentEnd))))
+                        i = afterClose
+                        continue
+                    }
+                }
+                pushText("~~")
+                i += 2
+                continue
+            }
+
+            // 6. Italic `*...*`
+            if (ch == '*' && depth < MAX_INLINE_DEPTH) {
+                val closeIdx = findClosingSingleItalic(text, i + 1)
+                if (closeIdx != null) {
+                    tokens.add(InlineToken.Italic(parseNested(text.substring(i + 1, closeIdx))))
+                    i = closeIdx + 1
+                    continue
+                }
+            }
+
+            // Plain text fallback — consume up to the next potential delimiter
+            val plainStart = i
+            i += 1
+            while (i < text.length) {
+                val c = text[i]
+                if (c == '`' || c == '[' || c == '*' || c == '~' || c == 'h' || c == 'H') break
+                i += 1
+            }
+            pushText(text.substring(plainStart, i))
         }
 
-        if (lastIndex < text.length) {
-            pushText(text.substring(lastIndex))
-        }
         return tokens
+    }
+
+    private fun collectLinks(tokens: List<InlineToken>, out: MutableList<InlineToken.Link>) {
+        for (tok in tokens) {
+            when (tok) {
+                is InlineToken.Link -> out.add(tok)
+                is InlineToken.Bold -> collectLinks(tok.children, out)
+                is InlineToken.Italic -> collectLinks(tok.children, out)
+                is InlineToken.Strike -> collectLinks(tok.children, out)
+                is InlineToken.Text, is InlineToken.Code -> Unit
+            }
+        }
     }
 
     /** Return the first external http(s) URL in a message (ignoring code blocks, inline code, and standalone images). */
     fun extractPreviewUrl(text: String): String? {
         if (text.isBlank()) return null
+        val links = mutableListOf<InlineToken.Link>()
         for (seg in parseMessageSegments(text)) {
             when (seg) {
                 is MessageSegment.Text -> {
-                    for (tok in parseInlineTokens(seg.text)) {
-                        if (tok is InlineToken.Link && tok.external) {
-                            return tok.url
-                        }
-                    }
+                    links.clear()
+                    collectLinks(parseInlineTokens(seg.text), links)
+                    links.firstOrNull { it.external }?.let { return it.url }
                 }
 
                 is MessageSegment.Table -> {
                     val allRows = listOf(seg.headers) + seg.rows
                     for (row in allRows) {
                         for (cell in row) {
-                            for (tok in parseInlineTokens(cell)) {
-                                if (tok is InlineToken.Link && tok.external) {
-                                    return tok.url
-                                }
-                            }
+                            links.clear()
+                            collectLinks(parseInlineTokens(cell), links)
+                            links.firstOrNull { it.external }?.let { return it.url }
                         }
                     }
                 }
@@ -671,14 +955,17 @@ object ChatLogic {
         if (text.isBlank()) return emptyList()
         val seen = LinkedHashSet<String>()
         val results = mutableListOf<Pair<String, String>>()
+        val links = mutableListOf<InlineToken.Link>()
         for (seg in parseMessageSegments(text)) {
             if (seg !is MessageSegment.Text) continue
-            for (tok in parseInlineTokens(seg.text)) {
-                if (tok !is InlineToken.Link) continue
+            links.clear()
+            collectLinks(parseInlineTokens(seg.text), links)
+            for (tok in links) {
                 val resolved = resolveT3ThreadUrl(tok.url)
                     ?: if (isT3ThreadWebUrl(tok.url)) tok.url else null
                 if (resolved != null && seen.add(resolved)) {
-                    val label = tok.label.takeUnless { it == tok.url } ?: "Open T3 thread"
+                    val labelText = tok.plainText()
+                    val label = labelText.takeUnless { it == tok.url || it.isBlank() } ?: "Open T3 thread"
                     results.add(label to resolved)
                 }
             }

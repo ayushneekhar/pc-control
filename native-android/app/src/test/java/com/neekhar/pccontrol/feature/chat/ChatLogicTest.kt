@@ -467,4 +467,93 @@ class ChatLogicTest {
         assertEquals("1. a\n", disengaged.text)
         assertEquals(5, disengaged.selectionStart)
     }
+
+    @Test
+    fun parseInlineTokens_supportsNestedMarkdownAndMultiBacktickCodeSpans() {
+        // Bold containing inline code
+        assertEquals(
+            listOf(
+                InlineToken.Bold(
+                    listOf(
+                        InlineToken.Text("two "),
+                        InlineToken.Code("exact"),
+                        InlineToken.Text(" monthly rules"),
+                    )
+                )
+            ),
+            ChatLogic.parseInlineTokens("**two `exact` monthly rules**"),
+        )
+
+        // Bold wrapping inline code followed by plain text (e.g. heading content)
+        assertEquals(
+            listOf(
+                InlineToken.Bold(listOf(InlineToken.Code("v7.12.0"))),
+                InlineToken.Text(" (26 Nov)"),
+            ),
+            ChatLogic.parseInlineTokens("**`v7.12.0`** (26 Nov)"),
+        )
+
+        // CommonMark double-backtick inline code span preserving literal inner backticks
+        assertEquals(
+            listOf(InlineToken.Code("`code`")),
+            ChatLogic.parseInlineTokens("`` `code` ``"),
+        )
+
+        // Link containing inline code
+        assertEquals(
+            listOf(
+                InlineToken.Link(
+                    children = listOf(InlineToken.Code("link")),
+                    url = "https://example.com",
+                    external = true,
+                )
+            ),
+            ChatLogic.parseInlineTokens("[`link`](https://example.com)"),
+        )
+
+        // Code inside bold with asterisks stays verbatim and does not terminate bold prematurely
+        assertEquals(
+            listOf(
+                InlineToken.Bold(
+                    listOf(
+                        InlineToken.Text("use "),
+                        InlineToken.Code("a ** b"),
+                        InlineToken.Text(" here"),
+                    )
+                )
+            ),
+            ChatLogic.parseInlineTokens("**use `a ** b` here**"),
+        )
+
+        // Nested link inside bold is also discovered by extractPreviewUrl
+        assertEquals(
+            "https://docs.example.com",
+            ChatLogic.extractPreviewUrl("See **[`Docs`](https://docs.example.com)** now."),
+        )
+
+        // Strikethrough containing inline code and italic inside bold
+        assertEquals(
+            listOf(
+                InlineToken.Strike(
+                    listOf(
+                        InlineToken.Text("old "),
+                        InlineToken.Code("api"),
+                    )
+                ),
+                InlineToken.Text(" "),
+                InlineToken.Bold(
+                    listOf(
+                        InlineToken.Italic(listOf(InlineToken.Text("new"))),
+                    )
+                ),
+            ),
+            ChatLogic.parseInlineTokens("~~old `api`~~ ***new***"),
+        )
+
+        // Unpaired math asterisks stay plain text
+        assertEquals(
+            listOf(InlineToken.Text("2 * 3 * 4 = 24")),
+            ChatLogic.parseInlineTokens("2 * 3 * 4 = 24"),
+        )
+    }
 }

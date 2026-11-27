@@ -371,30 +371,26 @@ fun ChatScreen(
                 }
             }
 
-            // Subtle top fade scrim covering status bar + floating top-right New chat area
-            val scrimSolidHeight = statusBarTop + 36.dp
-            val scrimFadeHeight = 24.dp
-            val totalScrimHeight = scrimSolidHeight + scrimFadeHeight
-            val solidStop = if (totalScrimHeight > 0.dp) {
-                (scrimSolidHeight / totalScrimHeight).coerceIn(0f, 0.95f)
-            } else {
-                0f
-            }
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(totalScrimHeight)
-                    .background(
-                        Brush.verticalGradient(
-                            0f to colors.bg,
-                            solidStop to colors.bg,
-                            1f to Color.Transparent,
+            // Subtle top fade scrim covering only the status bar (+4dp feather) so scrolled messages stay crisp
+            val totalScrimHeight = if (statusBarTop > 0.dp) statusBarTop + 4.dp else 0.dp
+            if (totalScrimHeight > 0.dp) {
+                val solidStop = ((statusBarTop * 0.7f) / totalScrimHeight).coerceIn(0f, 0.85f)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .height(totalScrimHeight)
+                        .background(
+                            Brush.verticalGradient(
+                                0f to colors.bg,
+                                solidStop to colors.bg,
+                                1f to Color.Transparent,
+                            ),
                         ),
-                    ),
-            )
+                )
+            }
 
-            // Top floating overlay inside the status-bar fade scrim: status pill + New chat button
+            // Top floating overlay below the status bar: status pill + New chat button
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)

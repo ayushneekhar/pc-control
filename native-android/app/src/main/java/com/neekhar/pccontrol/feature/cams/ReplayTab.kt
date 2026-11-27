@@ -9,7 +9,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,20 +22,22 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CameraAlt
-import androidx.compose.material.icons.filled.ChevronLeft
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Fullscreen
-import androidx.compose.material.icons.filled.FullscreenExit
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.rounded.CameraAlt
+import androidx.compose.material.icons.rounded.ChevronLeft
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Fullscreen
+import androidx.compose.material.icons.rounded.FullscreenExit
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -268,7 +269,7 @@ fun ReplayTab(
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        imageVector = if (state.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                         contentDescription = if (state.playing) "Pause" else "Play",
                         tint = colors.onAccent,
                         modifier = Modifier.size(20.dp),
@@ -312,29 +313,28 @@ fun ReplayTab(
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
             .padding(
-                start = PcDimens.ScreenPad,
-                end = PcDimens.ScreenPad,
                 top = PcDimens.Space3,
                 bottom = bottomInset,
             ),
         verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
     ) {
         if (state.error.isNotEmpty()) {
-            PcErrorBanner(
-                title = "Recorder unavailable",
-                message = state.error,
-                tone = PcTone.Bad,
-            )
+            Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                PcErrorBanner(
+                    title = "Recorder unavailable",
+                    message = state.error,
+                    tone = PcTone.Bad,
+                )
+            }
         }
 
-        // Camera selector pills
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
+        // Camera selector pills (edge-to-edge)
+        LazyRow(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = PcDimens.ScreenPad),
             horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
         ) {
-            RecCam.ALL.forEach { cam ->
+            items(RecCam.ALL, key = { it.id }) { cam ->
                 val selected = cam == big
                 val hasFootage = (state.indices[cam]?.spans?.isNotEmpty() == true)
                 Row(
@@ -381,12 +381,15 @@ fun ReplayTab(
             onToggleFullscreen = onToggleFullscreen,
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = PcDimens.ScreenPad)
                 .aspectRatio(16f / 9f),
         )
 
         // Two synchronized secondary camera tiles
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PcDimens.ScreenPad),
             horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
         ) {
             others.forEach { cam ->
@@ -415,7 +418,9 @@ fun ReplayTab(
 
         // Clock + Zoom + Now row
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PcDimens.ScreenPad),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
         ) {
@@ -457,13 +462,16 @@ fun ReplayTab(
             )
             SmallTimelineButton(
                 label = "Now",
-                icon = Icons.Filled.SkipNext,
+                icon = Icons.Rounded.SkipNext,
                 onClick = { engine.goLive() },
             )
         }
 
         // 24 h overview strip + zoomable ribbon timeline
-        PcCard(contentPadding = PaddingValues(0.dp)) {
+        PcCard(
+            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+            contentPadding = PaddingValues(0.dp),
+        ) {
             OverviewTimelineStrip(
                 indices = state.indices,
                 visits = state.visits,
@@ -493,7 +501,9 @@ fun ReplayTab(
 
         // Transport controls: -1m, -10s, Play/Pause, +10s, +1m
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PcDimens.ScreenPad),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
@@ -508,7 +518,7 @@ fun ReplayTab(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    imageVector = if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    imageVector = if (state.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                     contentDescription = if (state.playing) "Pause" else "Play",
                     tint = colors.onAccent,
                     modifier = Modifier.size(28.dp),
@@ -520,7 +530,9 @@ fun ReplayTab(
 
         // Playback speed selector (1x / 2x / 4x / 8x / 16x) + Clip Share button
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PcDimens.ScreenPad),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
         ) {
@@ -576,7 +588,7 @@ fun ReplayTab(
                     )
                 } else {
                     Icon(
-                        imageVector = Icons.Filled.Download,
+                        imageVector = Icons.Rounded.Download,
                         contentDescription = "Save 30s clip",
                         tint = colors.text,
                         modifier = Modifier.size(17.dp),
@@ -595,12 +607,14 @@ fun ReplayTab(
         val hasPrevVisit = state.visits.any { it.start < wallTime - 6.0 }
         val hasNextVisit = state.visits.any { it.start > wallTime + 5.0 }
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PcDimens.ScreenPad),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
         ) {
             SmallTimelineButton(
-                icon = Icons.Filled.ChevronLeft,
+                icon = Icons.Rounded.ChevronLeft,
                 enabled = hasPrevVisit,
                 onClick = { engine.prevVisit() },
             )
@@ -635,21 +649,23 @@ fun ReplayTab(
                 )
             }
             SmallTimelineButton(
-                icon = Icons.Filled.ChevronRight,
+                icon = Icons.Rounded.ChevronRight,
                 enabled = hasNextVisit,
                 onClick = { engine.nextVisit() },
             )
         }
 
-        // Recent cat visits horizontal chips
+        // Recent cat visits horizontal chips (edge-to-edge)
         if (state.visits.isNotEmpty()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = PcDimens.ScreenPad),
                 horizontalArrangement = Arrangement.spacedBy(PcDimens.Space2),
             ) {
-                state.visits.asReversed().take(40).forEach { visit ->
+                items(
+                    items = state.visits.asReversed().take(40),
+                    key = { "${it.cam.id}:${it.start}" },
+                ) { visit ->
                     val current = wallTime >= visit.start - 5.0 && wallTime <= visit.end + 10.0
                     val durMin = ((visit.end - visit.start) / 60.0).roundToInt()
                     Column(
@@ -826,7 +842,7 @@ private fun ReplayVideoTile(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    imageVector = Icons.Filled.PlayArrow,
+                    imageVector = Icons.Rounded.PlayArrow,
                     contentDescription = "Paused",
                     tint = colors.onMedia,
                     modifier = Modifier.size(32.dp),
@@ -857,7 +873,7 @@ private fun ReplayVideoTile(
                         )
                     } else {
                         Icon(
-                            imageVector = Icons.Filled.CameraAlt,
+                            imageVector = Icons.Rounded.CameraAlt,
                             contentDescription = "Save frame",
                             tint = colors.onMedia,
                             modifier = Modifier.size(20.dp),
@@ -873,7 +889,7 @@ private fun ReplayVideoTile(
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = if (fullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                        imageVector = if (fullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
                         contentDescription = if (fullscreen) "Exit fullscreen" else "Fullscreen",
                         tint = colors.onMedia,
                         modifier = Modifier.size(20.dp),

@@ -49,7 +49,6 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Reply
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -68,7 +67,6 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
@@ -77,16 +75,17 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.neekhar.pccontrol.core.platform.ChatForegroundState
 import com.neekhar.pccontrol.core.theme.LocalPcColors
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcConfirmDialog
+import com.neekhar.pccontrol.core.ui.PcStatusBarScrim
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -99,7 +98,7 @@ fun ChatScreen(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
-    val onAccent = if (colors.accent.luminance() > 0.4f) Color.Black else Color.White
+    val type = LocalPcType.current
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -285,7 +284,7 @@ fun ChatScreen(
                             start = 18.dp,
                             end = 18.dp,
                             top = statusBarTop + 56.dp,
-                            bottom = if (hasFloatingAttachments) 86.dp else 14.dp,
+                            bottom = if (hasFloatingAttachments) 92.dp else 22.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                         modifier = Modifier.fillMaxSize(),
@@ -319,8 +318,7 @@ fun ChatScreen(
                                         Text(
                                             text = if (state.loadingOlder) "Loading…" else "Load earlier",
                                             color = colors.text,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Medium,
+                                            style = type.caption.copy(fontWeight = FontWeight.Medium),
                                         )
                                     }
                                 }
@@ -371,24 +369,12 @@ fun ChatScreen(
                 }
             }
 
-            // Subtle top fade scrim covering only the status bar (+4dp feather) so scrolled messages stay crisp
-            val totalScrimHeight = if (statusBarTop > 0.dp) statusBarTop + 4.dp else 0.dp
-            if (totalScrimHeight > 0.dp) {
-                val solidStop = ((statusBarTop * 0.7f) / totalScrimHeight).coerceIn(0f, 0.85f)
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .height(totalScrimHeight)
-                        .background(
-                            Brush.verticalGradient(
-                                0f to colors.bg,
-                                solidStop to colors.bg,
-                                1f to Color.Transparent,
-                            ),
-                        ),
-                )
-            }
+            // Solid status-bar band fading cleanly over 18dp below it
+            PcStatusBarScrim(
+                color = colors.bg,
+                fadeHeight = 18.dp,
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
 
             // Top floating overlay below the status bar: status pill + New chat button
             Box(
@@ -429,8 +415,7 @@ fun ChatScreen(
                             Text(
                                 text = errMsg,
                                 color = colors.bad,
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Medium,
+                                style = type.caption.copy(fontWeight = FontWeight.Medium),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false),
@@ -469,8 +454,7 @@ fun ChatScreen(
                             Text(
                                 text = "Reconnecting…",
                                 color = colors.textDim,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
+                                style = type.caption.copy(fontWeight = FontWeight.Medium),
                             )
                         }
                     }
@@ -511,6 +495,19 @@ fun ChatScreen(
                     }
                 }
             }
+
+            // Seamless flipped vertical fade above the composer so messages dissolve smoothly
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(22.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(Color.Transparent, colors.bg),
+                        ),
+                    ),
+            )
 
             // Floating transparent attachment preview strip above composer
             if (hasFloatingAttachments) {
@@ -568,16 +565,14 @@ fun ChatScreen(
                     if (state.unreadCount > 0) {
                         Text(
                             text = "${state.unreadCount}",
-                            style = TabularNumStyle,
-                            color = onAccent,
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            color = colors.onAccent,
+                            style = type.caption.tabular().copy(fontWeight = FontWeight.SemiBold),
                         )
                     }
                     Icon(
                         imageVector = Icons.Rounded.KeyboardArrowDown,
                         contentDescription = "Jump to latest message",
-                        tint = if (state.unreadCount > 0) onAccent else colors.text,
+                        tint = if (state.unreadCount > 0) colors.onAccent else colors.text,
                         modifier = Modifier.size(20.dp),
                     )
                 }
@@ -610,14 +605,11 @@ fun ChatScreen(
                     Text(
                         text = toastText.orEmpty(),
                         color = colors.text,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = type.caption.copy(fontWeight = FontWeight.Medium),
                     )
                 }
             }
         }
-
-        HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
 
         // Native Composer
         ChatComposer(
@@ -719,16 +711,14 @@ fun ChatScreen(
                 ) {
                     Text(
                         text = if (timeStr.isNotEmpty()) "$metaLabel · $timeStr" else metaLabel,
-                        style = TabularNumStyle,
+                        style = type.caption.tabular().copy(fontWeight = FontWeight.Medium),
                         color = if (target.isError) colors.bad else colors.textDim,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
                     )
                     if (preview.isNotBlank()) {
                         Text(
                             text = preview,
                             color = colors.text,
-                            fontSize = 13.5.sp,
+                            style = type.body,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -821,6 +811,7 @@ private fun ChatEmptyState(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
@@ -846,14 +837,13 @@ private fun ChatEmptyState(
         Text(
             text = "Start a conversation",
             color = colors.text,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
+            style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
         )
         Spacer(Modifier.height(4.dp))
         Text(
             text = "Ask ${ChatLogic.formatEngineLabel(engine)} anything or paste a screenshot",
             color = colors.textFaint,
-            fontSize = 13.5.sp,
+            style = type.caption,
         )
     }
 }
@@ -936,6 +926,7 @@ private fun MessageActionRow(
     onClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -964,13 +955,12 @@ private fun MessageActionRow(
             Text(
                 text = title,
                 color = colors.text,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
+                style = type.cardTitle,
             )
             Text(
                 text = subtitle,
                 color = colors.textFaint,
-                fontSize = 12.5.sp,
+                style = type.caption,
             )
         }
     }

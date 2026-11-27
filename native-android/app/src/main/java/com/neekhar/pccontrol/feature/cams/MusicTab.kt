@@ -16,16 +16,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.QueueMusic
-import androidx.compose.material.icons.automirrored.filled.VolumeOff
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -56,8 +56,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.PcDimens
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -93,6 +94,7 @@ fun MusicTab(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val scope = rememberCoroutineScope()
 
     var status by remember { mutableStateOf<MusicStatus?>(null) }
@@ -352,7 +354,7 @@ fun MusicTab(
             )
             PcButton(
                 label = "Play",
-                icon = Icons.Filled.PlayArrow,
+                icon = Icons.Rounded.PlayArrow,
                 busy = playBusy,
                 enabled = query.isNotBlank(),
                 onClick = { playLink(query, clearField = true) },
@@ -370,7 +372,7 @@ fun MusicTab(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    imageVector = Icons.Filled.Add,
+                    imageVector = Icons.Rounded.Add,
                     contentDescription = "Add to queue",
                     tint = colors.text,
                     modifier = Modifier.size(20.dp),
@@ -402,8 +404,7 @@ fun MusicTab(
                         PcTone.Accent -> colors.accent
                         else -> colors.textDim
                     },
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.caption.copy(fontWeight = FontWeight.Medium),
                 )
                 if (stateStr == "loading") {
                     CircularProgressIndicator(
@@ -419,7 +420,7 @@ fun MusicTab(
                     Text(
                         text = posText,
                         color = colors.textDim,
-                        style = TabularNumStyle.copy(fontSize = 13.sp),
+                        style = type.caption.tabular(),
                     )
                 }
             }
@@ -427,9 +428,9 @@ fun MusicTab(
             Text(
                 text = trackTitle ?: "Nothing playing",
                 color = if (trackTitle != null) colors.text else colors.textDim,
-                fontSize = 17.sp,
-                lineHeight = 22.sp,
-                fontWeight = if (trackTitle != null) FontWeight.SemiBold else FontWeight.Medium,
+                style = type.collapsedTitle.copy(
+                    fontWeight = if (trackTitle != null) FontWeight.SemiBold else FontWeight.Medium,
+                ),
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 8.dp, bottom = 10.dp),
@@ -458,7 +459,7 @@ fun MusicTab(
                 Text(
                     text = loadingNote,
                     color = colors.warn,
-                    fontSize = 13.sp,
+                    style = type.caption,
                     modifier = Modifier.padding(bottom = 8.dp),
                 )
             }
@@ -469,7 +470,7 @@ fun MusicTab(
             ) {
                 PcButton(
                     label = if (stateStr == "paused") "Resume" else "Pause",
-                    icon = if (stateStr == "paused") Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                    icon = if (stateStr == "paused") Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
                     variant = PcButtonVariant.Subtle,
                     enabled = active,
                     onClick = {
@@ -481,7 +482,7 @@ fun MusicTab(
                 )
                 PcButton(
                     label = "Stop",
-                    icon = Icons.Filled.Stop,
+                    icon = Icons.Rounded.Stop,
                     variant = PcButtonVariant.Subtle,
                     enabled = active || stateStr == "error",
                     onClick = { runCommand { repository.stopMusic() } },
@@ -489,7 +490,7 @@ fun MusicTab(
                 )
                 PcButton(
                     label = "Loop",
-                    icon = Icons.Filled.Repeat,
+                    icon = Icons.Rounded.Repeat,
                     variant = if (status?.loop == true) PcButtonVariant.Primary else PcButtonVariant.Subtle,
                     enabled = up,
                     onClick = { runCommand { repository.setMusicLoop(status?.loop != true) } },
@@ -518,7 +519,7 @@ fun MusicTab(
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        imageVector = if (muted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
                         contentDescription = if (muted) "Unmute laptop speakers" else "Mute laptop speakers",
                         tint = if (muted) colors.accent else colors.text,
                         modifier = Modifier.size(20.dp),
@@ -543,7 +544,7 @@ fun MusicTab(
                 Text(
                     text = if (hasVol || draggingVol != null) "$shownVol%" else "--",
                     color = colors.text,
-                    style = TabularNumStyle.copy(fontSize = 14.5.sp, fontWeight = FontWeight.Medium),
+                    style = type.body.tabular().copy(fontWeight = FontWeight.Medium),
                     textAlign = TextAlign.End,
                     modifier = Modifier.width(44.dp),
                 )
@@ -554,14 +555,13 @@ fun MusicTab(
         if (queue.isNotEmpty()) {
             PcSectionLabel(
                 label = "Up next (${queue.size})",
-                icon = Icons.AutoMirrored.Filled.QueueMusic,
+                icon = Icons.AutoMirrored.Rounded.QueueMusic,
                 trailing = {
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
                             text = "Play next",
                             color = colors.accent,
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.Medium,
+                            style = type.caption.copy(fontWeight = FontWeight.Medium),
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .clickable {
@@ -575,8 +575,7 @@ fun MusicTab(
                         Text(
                             text = "Clear",
                             color = colors.textDim,
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.Medium,
+                            style = type.caption.copy(fontWeight = FontWeight.Medium),
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .clickable { queue.clear() }
@@ -589,7 +588,7 @@ fun MusicTab(
                 queue.forEachIndexed { idx, item ->
                     PcListRow(
                         title = item.title,
-                        icon = Icons.Filled.SkipNext,
+                        icon = Icons.Rounded.SkipNext,
                         showDivider = idx < queue.lastIndex,
                         onClick = {
                             queue.removeAt(idx)
@@ -601,7 +600,7 @@ fun MusicTab(
                                 modifier = Modifier.size(32.dp),
                             ) {
                                 Icon(
-                                    imageVector = Icons.Filled.Close,
+                                    imageVector = Icons.Rounded.Close,
                                     contentDescription = "Remove from queue",
                                     tint = colors.textFaint,
                                     modifier = Modifier.size(16.dp),
@@ -623,7 +622,7 @@ fun MusicTab(
                         title = item.title?.takeIf { it.isNotBlank() } ?: item.url,
                         leading = {
                             Icon(
-                                imageVector = if (isCurrent) Icons.AutoMirrored.Filled.VolumeUp else Icons.Filled.PlayArrow,
+                                imageVector = if (isCurrent) Icons.AutoMirrored.Rounded.VolumeUp else Icons.Rounded.PlayArrow,
                                 contentDescription = null,
                                 tint = if (isCurrent) colors.accent else colors.textDim,
                                 modifier = Modifier.size(20.dp),
@@ -642,7 +641,7 @@ fun MusicTab(
                                     modifier = Modifier.size(32.dp),
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Filled.Add,
+                                        imageVector = Icons.Rounded.Add,
                                         contentDescription = "Add to queue",
                                         tint = colors.textDim,
                                         modifier = Modifier.size(18.dp),

@@ -71,7 +71,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -93,6 +92,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
@@ -102,7 +102,10 @@ import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.MonoTextStyle
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
@@ -138,7 +141,7 @@ fun ChatMessageItem(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
-    val isDark = colors.bg.luminance() < 0.5f
+    val type = LocalPcType.current
 
     if (msg.isSystem) {
         SystemBoundaryRow(text = msg.text, modifier = modifier)
@@ -190,8 +193,8 @@ fun ChatMessageItem(
     }
 
     if (msg.isUser) {
-        val queuedBg = if (isDark) Color(0xFF0E0E0E) else Color(0xFFE2E2E2)
-        val queuedBorder = if (isDark) Color(0xFF3D3D3D) else Color(0xFFAEAEAE)
+        val queuedBg = colors.surface
+        val queuedBorder = colors.textFaint.copy(alpha = 0.55f)
 
         SwipeableMessageRow(
             enabled = canSwipeReply,
@@ -206,11 +209,11 @@ fun ChatMessageItem(
                     contentAlignment = Alignment.CenterEnd,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    val bubbleMaxWidth = maxWidth * 0.84f
+                    val bubbleMaxWidth = maxWidth * 0.82f
                     Column(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier
-                            .widthIn(max = bubbleMaxWidth)
+                            .widthIn(min = 44.dp, max = bubbleMaxWidth)
                             .clip(UserBubbleShape)
                             .background(if (isQueued) queuedBg else colors.surfaceRaised)
                             .then(
@@ -287,14 +290,13 @@ fun ChatMessageItem(
                         Text(
                             text = "Queued",
                             color = colors.textFaint,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Normal,
+                            style = type.caption,
                         )
                         if (canSteer) {
                             Text(
                                 text = "·",
                                 color = colors.textFaint,
-                                fontSize = 12.sp,
+                                style = type.caption,
                             )
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -313,8 +315,7 @@ fun ChatMessageItem(
                                 Text(
                                     text = "Send now",
                                     color = colors.accent,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
+                                    style = type.caption.copy(fontWeight = FontWeight.Medium),
                                 )
                             }
                         }
@@ -576,9 +577,18 @@ fun LiveStreamingActivityCard(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     var expanded by remember { mutableStateOf(false) }
     val steps = progress?.steps.orEmpty()
     val currentStep = ChatLogic.currentProgressStepText(progress)
+    val stepAnnotated = remember(currentStep, colors.surfaceRaised) {
+        buildActivityStepAnnotatedString(
+            raw = currentStep,
+            textColor = null,
+            codeBg = colors.surfaceRaised.copy(alpha = 0.65f),
+            codeFontSize = 12.5.sp,
+        )
+    }
 
     val transition = rememberInfiniteTransition(label = "activityShimmer")
     val shimmerPhase by transition.animateFloat(
@@ -621,11 +631,12 @@ fun LiveStreamingActivityCard(
                     .background(colors.accent.copy(alpha = 0.65f + 0.35f * (1f - kotlin.math.abs(shimmerPhase - 0.5f).coerceIn(0f, 1f)))),
             )
             Text(
-                text = currentStep,
+                text = stepAnnotated,
                 style = TextStyle(
                     brush = shimmerBrush,
+                    fontFamily = type.body.fontFamily,
                     fontSize = 14.sp,
-                    lineHeight = 19.sp,
+                    lineHeight = 20.sp,
                     fontWeight = FontWeight.Medium,
                 ),
                 maxLines = 1,
@@ -635,9 +646,8 @@ fun LiveStreamingActivityCard(
             if (steps.isNotEmpty()) {
                 Text(
                     text = "${steps.size}",
-                    style = TabularNumStyle,
+                    style = type.micro.tabular(),
                     color = colors.textFaint,
-                    fontSize = 11.5.sp,
                     modifier = Modifier
                         .clip(RoundedCornerShape(999.dp))
                         .background(colors.surfaceRaised)
@@ -661,6 +671,7 @@ fun LiveStreamingActivityCard(
 @Composable
 private fun CompletedProgressBlock(progress: ChatProgress) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     var expanded by remember { mutableStateOf(false) }
     val summary = ChatLogic.formatProgressSummary(progress) ?: return
 
@@ -675,10 +686,8 @@ private fun CompletedProgressBlock(progress: ChatProgress) {
         ) {
             Text(
                 text = summary,
-                style = TabularNumStyle,
+                style = type.caption.tabular().copy(fontWeight = FontWeight.Medium),
                 color = colors.textFaint,
-                fontSize = 12.5.sp,
-                fontWeight = FontWeight.Medium,
             )
             Icon(
                 imageVector = if (expanded) Icons.Rounded.ExpandMore else Icons.Rounded.KeyboardArrowRight,
@@ -696,6 +705,7 @@ private fun CompletedProgressBlock(progress: ChatProgress) {
 @Composable
 private fun ProgressStepTimeline(steps: List<ChatProgressStep>) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -715,25 +725,61 @@ private fun ProgressStepTimeline(steps: List<ChatProgressStep>) {
                 .padding(start = 10.dp, top = 2.dp, bottom = 2.dp),
         ) {
             for (step in steps) {
+                val stepAnnotated = remember(step.text, colors.textDim, colors.surfaceRaised) {
+                    buildActivityStepAnnotatedString(
+                        raw = step.text,
+                        textColor = colors.textDim,
+                        codeBg = colors.surfaceRaised,
+                        codeFontSize = 11.5.sp,
+                    )
+                }
                 Row(
                     verticalAlignment = Alignment.Top,
                     horizontalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
                     Box(
                         modifier = Modifier
-                            .padding(top = 6.dp)
+                            .padding(top = 7.dp)
                             .size(4.dp)
                             .clip(CircleShape)
                             .background(colors.textFaint),
                     )
                     Text(
-                        text = step.text,
-                        color = colors.textDim,
-                        fontSize = 12.5.sp,
-                        lineHeight = 17.sp,
+                        text = stepAnnotated,
+                        style = type.caption.copy(lineHeight = 19.sp),
                     )
                 }
             }
+        }
+    }
+}
+
+private fun buildActivityStepAnnotatedString(
+    raw: String,
+    textColor: Color?,
+    codeBg: Color,
+    codeFontSize: TextUnit,
+): AnnotatedString {
+    val tokens = ChatLogic.parseActivityStepTokens(raw)
+    return buildAnnotatedString {
+        if (textColor != null) {
+            withStyle(SpanStyle(color = textColor)) {
+                appendInlineTokens(
+                    tokens = tokens,
+                    accentColor = textColor,
+                    codeBg = codeBg,
+                    codeFontSize = codeFontSize,
+                    onOpenUrl = {},
+                )
+            }
+        } else {
+            appendInlineTokens(
+                tokens = tokens,
+                accentColor = Color.Unspecified,
+                codeBg = codeBg,
+                codeFontSize = codeFontSize,
+                onOpenUrl = {},
+            )
         }
     }
 }
@@ -756,7 +802,7 @@ private fun MarkdownMessageBody(
 
     Column(
         verticalArrangement = Arrangement.spacedBy(if (segments.size > 1) 10.dp else 0.dp),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = if (isUser) Modifier else Modifier.fillMaxWidth(),
     ) {
         segments.forEach { seg ->
             when (seg) {
@@ -890,15 +936,17 @@ private fun MarkdownTextBlock(
     onOpenUrl: (String) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val textColor = if (muted) colors.textDim else colors.text
     val bulletColor = if (muted) colors.textFaint else colors.textDim
     val inlineCodeBg = if (isUser) colors.bg else colors.surfaceRaised
-    val lineHeight = if (isUser) 21.sp else 22.5.sp
+    val lineHeight = if (isUser) 22.sp else 23.5.sp
+    val bodyStyle = type.body.copy(fontSize = 15.sp, lineHeight = lineHeight)
     val blocks = remember(text) { parseMarkdownBlocks(text) }
 
     Column(
         verticalArrangement = Arrangement.spacedBy(if (isUser) 5.dp else 7.dp),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = if (isUser) Modifier else Modifier.fillMaxWidth(),
     ) {
         for (block in blocks) {
             when (block) {
@@ -919,9 +967,11 @@ private fun MarkdownTextBlock(
                             codeBg = inlineCodeBg,
                             onOpenUrl = onOpenUrl,
                         ),
-                        fontSize = fontSize,
-                        lineHeight = (fontSize.value + 6f).sp,
-                        fontWeight = weight,
+                        style = type.cardTitle.copy(
+                            fontSize = fontSize,
+                            lineHeight = (fontSize.value + 6f).sp,
+                            fontWeight = weight,
+                        ),
                     )
                 }
 
@@ -936,7 +986,7 @@ private fun MarkdownTextBlock(
                 is MdBlock.Blockquote -> {
                     Row(
                         modifier = Modifier
-                            .fillMaxWidth()
+                            .then(if (isUser) Modifier else Modifier.fillMaxWidth())
                             .height(IntrinsicSize.Min)
                             .clip(RoundedCornerShape(8.dp))
                             .background(if (isUser) colors.bg else colors.surface),
@@ -955,8 +1005,7 @@ private fun MarkdownTextBlock(
                                 codeBg = inlineCodeBg,
                                 onOpenUrl = onOpenUrl,
                             ),
-                            fontSize = 14.5.sp,
-                            lineHeight = 20.sp,
+                            style = type.body.copy(lineHeight = 21.5.sp),
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                         )
                     }
@@ -967,7 +1016,7 @@ private fun MarkdownTextBlock(
                         verticalAlignment = Alignment.Top,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier
-                            .fillMaxWidth()
+                            .then(if (isUser) Modifier else Modifier.fillMaxWidth())
                             .padding(start = (block.indent * 14).dp),
                     ) {
                         Box(
@@ -985,9 +1034,8 @@ private fun MarkdownTextBlock(
                                 codeBg = inlineCodeBg,
                                 onOpenUrl = onOpenUrl,
                             ),
-                            fontSize = 15.sp,
-                            lineHeight = lineHeight,
-                            modifier = Modifier.weight(1f),
+                            style = bodyStyle,
+                            modifier = Modifier.weight(1f, fill = !isUser),
                         )
                     }
                 }
@@ -997,16 +1045,17 @@ private fun MarkdownTextBlock(
                         verticalAlignment = Alignment.Top,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier
-                            .fillMaxWidth()
+                            .then(if (isUser) Modifier else Modifier.fillMaxWidth())
                             .padding(start = (block.indent * 14).dp),
                     ) {
                         Text(
                             text = block.marker,
-                            style = TabularNumStyle,
+                            style = type.body.tabular().copy(
+                                fontSize = 14.sp,
+                                lineHeight = lineHeight,
+                                fontWeight = FontWeight.Medium,
+                            ),
                             color = bulletColor,
-                            fontSize = 14.sp,
-                            lineHeight = lineHeight,
-                            fontWeight = FontWeight.Medium,
                             modifier = Modifier.widthIn(min = 20.dp),
                         )
                         Text(
@@ -1017,9 +1066,8 @@ private fun MarkdownTextBlock(
                                 codeBg = inlineCodeBg,
                                 onOpenUrl = onOpenUrl,
                             ),
-                            fontSize = 15.sp,
-                            lineHeight = lineHeight,
-                            modifier = Modifier.weight(1f),
+                            style = bodyStyle,
+                            modifier = Modifier.weight(1f, fill = !isUser),
                         )
                     }
                 }
@@ -1033,8 +1081,7 @@ private fun MarkdownTextBlock(
                             codeBg = inlineCodeBg,
                             onOpenUrl = onOpenUrl,
                         ),
-                        fontSize = 15.sp,
-                        lineHeight = lineHeight,
+                        style = bodyStyle,
                     )
                 }
             }
@@ -1042,11 +1089,24 @@ private fun MarkdownTextBlock(
     }
 }
 
+private const val INLINE_CODE_INNER_PAD = "\u2009" // thin space inside code highlight pill
+private const val INLINE_CODE_OUTER_GAP = "\u200A" // hair space separating pill from adjacent punctuation
+
+private fun InlineToken.firstPlainChar(): Char? = when (this) {
+    is InlineToken.Text -> text.firstOrNull()
+    is InlineToken.Code -> code.firstOrNull()
+    is InlineToken.Bold -> children.firstNotNullOfOrNull { it.firstPlainChar() }
+    is InlineToken.Italic -> children.firstNotNullOfOrNull { it.firstPlainChar() }
+    is InlineToken.Strike -> children.firstNotNullOfOrNull { it.firstPlainChar() }
+    is InlineToken.Link -> children.firstNotNullOfOrNull { it.firstPlainChar() }
+}
+
 private fun buildInlineAnnotatedString(
     raw: String,
     textColor: Color,
     accentColor: Color,
     codeBg: Color,
+    codeFontSize: TextUnit = 13.sp,
     onOpenUrl: (String) -> Unit,
 ): AnnotatedString {
     val tokens = ChatLogic.parseInlineTokens(raw)
@@ -1056,6 +1116,7 @@ private fun buildInlineAnnotatedString(
                 tokens = tokens,
                 accentColor = accentColor,
                 codeBg = codeBg,
+                codeFontSize = codeFontSize,
                 onOpenUrl = onOpenUrl,
             )
         }
@@ -1066,20 +1127,29 @@ private fun AnnotatedString.Builder.appendInlineTokens(
     tokens: List<InlineToken>,
     accentColor: Color,
     codeBg: Color,
+    codeFontSize: TextUnit = 13.sp,
+    initialLastChar: Char? = null,
+    followingChar: Char? = null,
     onOpenUrl: (String) -> Unit,
-) {
-    for (tok in tokens) {
+): Char? {
+    var lastChar = initialLastChar
+    tokens.forEachIndexed { idx, tok ->
+        val nextChar = tokens.drop(idx + 1).firstNotNullOfOrNull { it.firstPlainChar() } ?: followingChar
         when (tok) {
             is InlineToken.Text -> {
                 append(tok.text)
+                tok.text.lastOrNull()?.let { lastChar = it }
             }
 
             is InlineToken.Bold -> {
                 withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
-                    appendInlineTokens(
+                    lastChar = appendInlineTokens(
                         tokens = tok.children,
                         accentColor = accentColor,
                         codeBg = codeBg,
+                        codeFontSize = codeFontSize,
+                        initialLastChar = lastChar,
+                        followingChar = nextChar,
                         onOpenUrl = onOpenUrl,
                     )
                 }
@@ -1087,10 +1157,13 @@ private fun AnnotatedString.Builder.appendInlineTokens(
 
             is InlineToken.Italic -> {
                 withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
-                    appendInlineTokens(
+                    lastChar = appendInlineTokens(
                         tokens = tok.children,
                         accentColor = accentColor,
                         codeBg = codeBg,
+                        codeFontSize = codeFontSize,
+                        initialLastChar = lastChar,
+                        followingChar = nextChar,
                         onOpenUrl = onOpenUrl,
                     )
                 }
@@ -1098,24 +1171,36 @@ private fun AnnotatedString.Builder.appendInlineTokens(
 
             is InlineToken.Strike -> {
                 withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) {
-                    appendInlineTokens(
+                    lastChar = appendInlineTokens(
                         tokens = tok.children,
                         accentColor = accentColor,
                         codeBg = codeBg,
+                        codeFontSize = codeFontSize,
+                        initialLastChar = lastChar,
+                        followingChar = nextChar,
                         onOpenUrl = onOpenUrl,
                     )
                 }
             }
 
             is InlineToken.Code -> {
+                if (lastChar?.isWhitespace() == false) {
+                    append(INLINE_CODE_OUTER_GAP)
+                }
                 withStyle(
                     SpanStyle(
                         background = codeBg,
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 13.sp,
+                        fontSize = codeFontSize,
                     )
                 ) {
-                    append(" ${tok.code} ")
+                    append("$INLINE_CODE_INNER_PAD${tok.code}$INLINE_CODE_INNER_PAD")
+                }
+                if (nextChar != null && !nextChar.isWhitespace()) {
+                    append(INLINE_CODE_OUTER_GAP)
+                    lastChar = INLINE_CODE_OUTER_GAP[0]
+                } else {
+                    lastChar = tok.code.lastOrNull() ?: lastChar
                 }
             }
 
@@ -1134,19 +1219,25 @@ private fun AnnotatedString.Builder.appendInlineTokens(
                             linkInteractionListener = { onOpenUrl(resolved) },
                         )
                     ) {
-                        appendInlineTokens(
+                        lastChar = appendInlineTokens(
                             tokens = tok.children,
                             accentColor = accentColor,
                             codeBg = codeBg,
+                            codeFontSize = codeFontSize,
+                            initialLastChar = lastChar,
+                            followingChar = nextChar,
                             onOpenUrl = onOpenUrl,
                         )
                     }
                 } else {
                     withStyle(SpanStyle(color = accentColor)) {
-                        appendInlineTokens(
+                        lastChar = appendInlineTokens(
                             tokens = tok.children,
                             accentColor = accentColor,
                             codeBg = codeBg,
+                            codeFontSize = codeFontSize,
+                            initialLastChar = lastChar,
+                            followingChar = nextChar,
                             onOpenUrl = onOpenUrl,
                         )
                     }
@@ -1154,6 +1245,7 @@ private fun AnnotatedString.Builder.appendInlineTokens(
             }
         }
     }
+    return lastChar
 }
 
 // ---------------------------------------------------------------- Code Block Card
@@ -1243,9 +1335,10 @@ private fun CodeBlockCard(
             Text(
                 text = code,
                 color = colors.text,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.5.sp,
-                lineHeight = 18.sp,
+                style = MonoTextStyle.copy(
+                    fontSize = 12.5.sp,
+                    lineHeight = 18.sp,
+                ),
             )
         }
     }
@@ -1321,11 +1414,12 @@ private fun MarkdownTableCard(
                                 textColor = colors.text,
                                 accentColor = colors.accent,
                                 codeBg = inlineCodeBg,
+                                codeFontSize = 11.5.sp,
                                 onOpenUrl = onOpenUrl,
                             ),
                             style = TabularNumStyle.copy(
                                 fontSize = 13.sp,
-                                lineHeight = 18.sp,
+                                lineHeight = 19.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 textAlign = align.toTextAlign(),
                             ),
@@ -1360,11 +1454,12 @@ private fun MarkdownTableCard(
                                     textColor = colors.text,
                                     accentColor = colors.accent,
                                     codeBg = inlineCodeBg,
+                                    codeFontSize = 12.sp,
                                     onOpenUrl = onOpenUrl,
                                 ),
                                 style = TabularNumStyle.copy(
                                     fontSize = 13.5.sp,
-                                    lineHeight = 19.sp,
+                                    lineHeight = 20.sp,
                                     fontWeight = FontWeight.Normal,
                                     textAlign = align.toTextAlign(),
                                 ),
@@ -1423,7 +1518,7 @@ private fun MarkdownImageCard(
             .build()
     }
 
-    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+    BoxWithConstraints(modifier = if (isUser) Modifier else Modifier.fillMaxWidth()) {
         val containerDp = maxWidth.value.roundToInt().coerceAtLeast(160)
         val boxSize = remember(naturalW, naturalH, containerDp) {
             ChatLogic.computeInlineImageSize(naturalW, naturalH, containerDp, INLINE_IMAGE_MAX_HEIGHT_DP)
@@ -1635,7 +1730,7 @@ private fun ReplyQuoteBlock(
     val colors = LocalPcColors.current
     Row(
         modifier = Modifier
-            .fillMaxWidth()
+            .then(if (isUser) Modifier else Modifier.fillMaxWidth())
             .height(IntrinsicSize.Min)
             .clip(RoundedCornerShape(10.dp))
             .background(if (isUser) colors.bg else colors.surface)
@@ -1653,7 +1748,7 @@ private fun ReplyQuoteBlock(
         Column(
             verticalArrangement = Arrangement.spacedBy(1.dp),
             modifier = Modifier
-                .weight(1f)
+                .weight(1f, fill = !isUser)
                 .padding(horizontal = 9.dp, vertical = 6.dp),
         ) {
             Text(

@@ -1459,6 +1459,86 @@ object ChatLogic {
         return if (!last.isNullOrEmpty()) last else "Thinking…"
     }
 
+    /**
+     * Parse an activity/tool status line into inline Markdown tokens while cleaning up
+     * stray or server-truncated unclosed backticks (e.g. ``running `set -e; long cmd…``)
+     * so raw backtick characters are never displayed in the live activity shimmer or timeline.
+     */
+    fun parseActivityStepTokens(raw: String): List<InlineToken> {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        val parsed = parseInlineTokens(trimmed)
+        val cleaned = mutableListOf<InlineToken>()
+
+        fun appendTokens(tokens: List<InlineToken>) {
+            for (tok in tokens) {
+                when (tok) {
+                    is InlineToken.Text -> {
+                        val tickIdx = tok.text.indexOf('`')
+                        if (tickIdx < 0) {
+                            cleaned.add(tok)
+                        } else {
+                            val before = tok.text.substring(0, tickIdx)
+                            val after = tok.text.substring(tickIdx + 1).replace("`", "").trim()
+                            if (before.isNotEmpty()) {
+                                cleaned.add(InlineToken.Text(before))
+                            }
+                            if (after.isNotEmpty()) {
+                                cleaned.add(InlineToken.Code(after))
+                            }
+                        }
+                    }
+
+                    is InlineToken.Code -> {
+                        val code = tok.code.trim()
+                        if (code.isNotEmpty()) cleaned.add(InlineToken.Code(code))
+                    }
+
+                    is InlineToken.Bold -> cleaned.add(
+                        InlineToken.Bold(parseActivityStepTokensChildren(tok.children)),
+                    )
+
+                    is InlineToken.Italic -> cleaned.add(
+                        InlineToken.Italic(parseActivityStepTokensChildren(tok.children)),
+                    )
+
+                    is InlineToken.Strike -> cleaned.add(
+                        InlineToken.Strike(parseActivityStepTokensChildren(tok.children)),
+                    )
+
+                    is InlineToken.Link -> {
+                        // Flatten links in compact activity status lines to their readable label tokens
+                        appendTokens(tok.children)
+                    }
+                }
+            }
+        }
+
+        appendTokens(parsed)
+        return cleaned
+    }
+
+    private fun parseActivityStepTokensChildren(children: List<InlineToken>): List<InlineToken> =
+        children.flatMap { tok ->
+            when (tok) {
+                is InlineToken.Text -> {
+                    val tickIdx = tok.text.indexOf('`')
+                    if (tickIdx < 0) {
+                        listOf(tok)
+                    } else {
+                        buildList {
+                            val before = tok.text.substring(0, tickIdx)
+                            val after = tok.text.substring(tickIdx + 1).replace("`", "").trim()
+                            if (before.isNotEmpty()) add(InlineToken.Text(before))
+                            if (after.isNotEmpty()) add(InlineToken.Code(after))
+                        }
+                    }
+                }
+                is InlineToken.Link -> parseActivityStepTokensChildren(tok.children)
+                else -> listOf(tok)
+            }
+        }
+
     fun formatChatTime(epochSec: Double, nowMs: Long = System.currentTimeMillis()): String {
         if (!epochSec.isFinite() || epochSec <= 0.0) return ""
         val msgDate = Date((epochSec * 1000.0).toLong())

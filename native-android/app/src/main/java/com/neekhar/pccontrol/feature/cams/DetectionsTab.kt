@@ -25,11 +25,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ChevronLeft
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.rounded.ChevronLeft
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -49,6 +49,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -60,8 +62,10 @@ import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.PcDimens
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcBrandIcons
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
@@ -93,6 +97,7 @@ fun DetectionsTab(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val scope = rememberCoroutineScope()
     val baseUrl = repository.baseUrl().trimEnd('/')
 
@@ -189,125 +194,139 @@ fun DetectionsTab(
                     Text(
                         text = label,
                         color = if (active) colors.accent else colors.textDim,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = type.caption.copy(fontWeight = FontWeight.Medium),
                         maxLines = 1,
                     )
                     Text(
                         text = count.toString(),
                         color = if (active) colors.accent else colors.textFaint,
-                        style = TabularNumStyle.copy(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                        ),
+                        style = type.micro.tabular(),
                     )
                 }
             }
         }
-        HorizontalDivider(thickness = 0.5.dp, color = colors.hairline)
 
-        when {
-            error != null && snaps.isEmpty() -> {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = PcDimens.ScreenPad, vertical = PcDimens.Space4),
-                    verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
-                ) {
-                    PcErrorBanner(
-                        title = "Couldn't load detections",
-                        message = error,
-                        tone = PcTone.Bad,
-                    )
-                    PcButton(
-                        label = "Retry",
-                        variant = PcButtonVariant.Subtle,
-                        icon = Icons.Filled.Refresh,
-                        onClick = { loadSnaps(camFilter, isRefresh = false) },
-                    )
-                }
-            }
-
-            loading && snaps.isEmpty() -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+        ) {
+            when {
+                error != null && snaps.isEmpty() -> {
                     Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = PcDimens.ScreenPad, vertical = PcDimens.Space4),
+                        verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
                     ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(26.dp),
-                            strokeWidth = 2.5.dp,
-                            color = colors.accent,
+                        PcErrorBanner(
+                            title = "Couldn't load detections",
+                            message = error,
+                            tone = PcTone.Bad,
                         )
-                        Text(
-                            text = "Loading detections…",
-                            color = colors.textDim,
-                            fontSize = 14.sp,
+                        PcButton(
+                            label = "Retry",
+                            variant = PcButtonVariant.Subtle,
+                            icon = Icons.Rounded.Refresh,
+                            onClick = { loadSnaps(camFilter, isRefresh = false) },
                         )
                     }
                 }
-            }
 
-            else -> {
-                PullToRefreshBox(
-                    isRefreshing = refreshing,
-                    onRefresh = { loadSnaps(camFilter, isRefresh = true) },
-                    modifier = Modifier.fillMaxSize(),
-                ) {
-                    if (snaps.isEmpty()) {
-                        PcEmptyState(
-                            icon = PcBrandIcons.Cat,
-                            title = if (camFilter == "all") {
-                                "No saved detections yet"
-                            } else {
-                                "No detections on ${CamsConfig.camName(camFilter)}"
-                            },
-                            body = "YOLO11s cat sightings appear here automatically while Cat alerts are enabled.",
-                            modifier = Modifier.align(Alignment.Center),
-                        )
-                    } else {
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(2),
-                            contentPadding = PaddingValues(
-                                start = PcDimens.ScreenPad,
-                                end = PcDimens.ScreenPad,
-                                top = PcDimens.Space3,
-                                bottom = bottomInset + PcDimens.Space6,
-                            ),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.fillMaxSize(),
+                loading && snaps.isEmpty() -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
                         ) {
-                            if (error != null) {
-                                item(span = { GridItemSpan(2) }) {
-                                    PcErrorBanner(
-                                        title = "Refresh failed",
-                                        message = error,
-                                        tone = PcTone.Warn,
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(26.dp),
+                                strokeWidth = 2.5.dp,
+                                color = colors.accent,
+                            )
+                            Text(
+                                text = "Loading detections…",
+                                color = colors.textDim,
+                                style = type.body,
+                            )
+                        }
+                    }
+                }
+
+                else -> {
+                    PullToRefreshBox(
+                        isRefreshing = refreshing,
+                        onRefresh = { loadSnaps(camFilter, isRefresh = true) },
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        if (snaps.isEmpty()) {
+                            PcEmptyState(
+                                icon = PcBrandIcons.Cat,
+                                title = if (camFilter == "all") {
+                                    "No saved detections yet"
+                                } else {
+                                    "No detections on ${CamsConfig.camName(camFilter)}"
+                                },
+                                body = "YOLO11s cat sightings appear here automatically while Cat alerts are enabled.",
+                                modifier = Modifier.align(Alignment.Center),
+                            )
+                        } else {
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(2),
+                                contentPadding = PaddingValues(
+                                    start = PcDimens.ScreenPad,
+                                    end = PcDimens.ScreenPad,
+                                    top = PcDimens.Space3,
+                                    bottom = bottomInset + PcDimens.Space4,
+                                ),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.fillMaxSize(),
+                            ) {
+                                if (error != null) {
+                                    item(span = { GridItemSpan(2) }) {
+                                        PcErrorBanner(
+                                            title = "Refresh failed",
+                                            message = error,
+                                            tone = PcTone.Warn,
+                                        )
+                                    }
+                                }
+                                itemsIndexed(
+                                    items = snaps,
+                                    key = { _, snap -> snap.filename },
+                                ) { index, snap ->
+                                    DetectionGridTile(
+                                        snap = snap,
+                                        imageUrl = "$baseUrl${snap.url}",
+                                        nowMs = loadedAtMs,
+                                        onClick = {
+                                            viewerNowMs = System.currentTimeMillis()
+                                            selectedIdx = index
+                                        },
                                     )
                                 }
-                            }
-                            itemsIndexed(
-                                items = snaps,
-                                key = { _, snap -> snap.filename },
-                            ) { index, snap ->
-                                DetectionGridTile(
-                                    snap = snap,
-                                    imageUrl = "$baseUrl${snap.url}",
-                                    nowMs = loadedAtMs,
-                                    onClick = {
-                                        viewerNowMs = System.currentTimeMillis()
-                                        selectedIdx = index
-                                    },
-                                )
                             }
                         }
                     }
                 }
             }
+
+            // Seamless vertical fade under camera filter chips
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(14.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(colors.bg, Color.Transparent),
+                        ),
+                    ),
+            )
         }
     }
 
@@ -457,7 +476,7 @@ private fun DetectionFullScreenViewer(
             ) {
                 IconButton(onClick = onDismiss) {
                     Icon(
-                        imageVector = Icons.Filled.Close,
+                        imageVector = Icons.Rounded.Close,
                         contentDescription = "Close viewer",
                         tint = colors.onMedia,
                     )
@@ -530,7 +549,7 @@ private fun DetectionFullScreenViewer(
             ) {
                 PcButton(
                     label = "Prev",
-                    icon = Icons.Filled.ChevronLeft,
+                    icon = Icons.Rounded.ChevronLeft,
                     variant = PcButtonVariant.Subtle,
                     compact = true,
                     enabled = index > 0,
@@ -539,7 +558,7 @@ private fun DetectionFullScreenViewer(
                 if (canJumpToReplay) {
                     PcButton(
                         label = "Jump to Replay",
-                        icon = Icons.Filled.History,
+                        icon = Icons.Rounded.History,
                         variant = PcButtonVariant.Primary,
                         compact = true,
                         onClick = onJumpToReplay,
@@ -550,7 +569,7 @@ private fun DetectionFullScreenViewer(
                 }
                 PcButton(
                     label = "Next",
-                    icon = Icons.Filled.ChevronRight,
+                    icon = Icons.Rounded.ChevronRight,
                     variant = PcButtonVariant.Subtle,
                     compact = true,
                     enabled = index < total - 1,

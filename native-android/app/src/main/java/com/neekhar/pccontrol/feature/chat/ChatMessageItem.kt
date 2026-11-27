@@ -83,7 +83,6 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -101,9 +100,11 @@ import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
+import com.neekhar.pccontrol.core.platform.MarkdownStripper
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.MonoTextStyle
+import com.neekhar.pccontrol.core.theme.PcMonoFontFamily
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
 import com.neekhar.pccontrol.core.theme.tabular
 import kotlinx.coroutines.delay
@@ -408,7 +409,6 @@ fun ChatMessageItem(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
                         .combinedClickable(
                             onClick = {},
                             onLongClick = triggerLongPress,
@@ -619,7 +619,6 @@ fun LiveStreamingActivityCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier
-                .clip(RoundedCornerShape(10.dp))
                 .then(if (steps.isNotEmpty()) Modifier.clickable { expanded = !expanded } else Modifier)
                 .padding(vertical = 3.dp),
         ) {
@@ -680,7 +679,6 @@ private fun CompletedProgressBlock(progress: ChatProgress) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
                 .clickable { expanded = !expanded }
                 .padding(vertical = 2.dp),
         ) {
@@ -1190,8 +1188,9 @@ private fun AnnotatedString.Builder.appendInlineTokens(
                 withStyle(
                     SpanStyle(
                         background = codeBg,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = PcMonoFontFamily,
                         fontSize = codeFontSize,
+                        letterSpacing = 0.sp,
                     )
                 ) {
                     append("$INLINE_CODE_INNER_PAD${tok.code}$INLINE_CODE_INNER_PAD")
@@ -1286,7 +1285,7 @@ private fun CodeBlockCard(
             Text(
                 text = lang.ifBlank { "code" },
                 color = colors.textFaint,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = PcMonoFontFamily,
                 fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1759,9 +1758,12 @@ private fun ReplyQuoteBlock(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (replyRef.text.isNotBlank()) {
+            val cleanReplyText = remember(replyRef.text) {
+                MarkdownStripper.stripToSingleLine(replyRef.text).ifBlank { replyRef.text.trim() }
+            }
+            if (cleanReplyText.isNotBlank()) {
                 Text(
-                    text = replyRef.text,
+                    text = cleanReplyText,
                     color = colors.textDim,
                     fontSize = 12.5.sp,
                     lineHeight = 16.5.sp,

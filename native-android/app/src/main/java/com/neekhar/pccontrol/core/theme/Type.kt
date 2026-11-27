@@ -5,9 +5,11 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import com.neekhar.pccontrol.R
 
 /**
  * PC Control typography scale plus tabular metric and control styles.
@@ -40,9 +42,20 @@ val TabularNumStyle = TextStyle(
     fontFeatureSettings = "tnum",
 )
 
+/**
+ * Bundled JetBrains Mono font family so code blocks and inline backtick code spans always
+ * render in true monospace (even on OEM skins like Samsung OneUI that override generic monospace).
+ */
+val PcMonoFontFamily: FontFamily = FontFamily(
+    Font(R.font.jetbrains_mono_regular, FontWeight.Normal),
+    Font(R.font.jetbrains_mono_medium, FontWeight.Medium),
+    Font(R.font.jetbrains_mono_semibold, FontWeight.SemiBold),
+    Font(R.font.jetbrains_mono_semibold, FontWeight.Bold),
+)
+
 /** Monospace text style for logs, URLs, and code blocks only. */
 val MonoTextStyle = TextStyle(
-    fontFamily = FontFamily.Monospace,
+    fontFamily = PcMonoFontFamily,
     fontWeight = FontWeight.Normal,
     fontSize = 13.sp,
     lineHeight = 19.sp,

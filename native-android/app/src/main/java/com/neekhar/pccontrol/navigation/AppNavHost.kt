@@ -308,7 +308,6 @@ fun PcAppShell(
                     onOpenSeerr = { nav.navigate(PcRoute.Seerr) { launchSingleTop = true } },
                     onOpenSpace = { nav.navigate(PcRoute.Space) { launchSingleTop = true } },
                     onOpenDownloads = { nav.navigate(PcRoute.Downloads) { launchSingleTop = true } },
-                    onOpenAgentSettings = { nav.navigate(PcRoute.AgentSettings) { launchSingleTop = true } },
                     onOpenAgentView = { nav.navigate(PcRoute.AgentView) { launchSingleTop = true } },
                     onOpenSettings = { nav.navigateToTopTab(PcRoute.Settings) },
                     onUnlockKeyring = { nav.navigateToTopTab(PcRoute.Settings) },

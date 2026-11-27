@@ -41,7 +41,6 @@ import androidx.compose.material.icons.rounded.SmartDisplay
 import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SwapVert
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VideocamOff
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material.icons.rounded.WifiOff
@@ -117,7 +116,6 @@ fun HomeScreen(
     onOpenSeerr: () -> Unit,
     onOpenSpace: () -> Unit,
     onOpenDownloads: () -> Unit,
-    onOpenAgentSettings: () -> Unit,
     onOpenAgentView: () -> Unit,
     onOpenSettings: () -> Unit,
     onUnlockKeyring: () -> Unit = onOpenSettings,
@@ -141,7 +139,6 @@ fun HomeScreen(
         onOpenSeerr = onOpenSeerr,
         onOpenSpace = onOpenSpace,
         onOpenDownloads = onOpenDownloads,
-        onOpenAgentSettings = onOpenAgentSettings,
         onOpenAgentView = onOpenAgentView,
         onOpenSettings = onOpenSettings,
         onUnlockKeyring = onUnlockKeyring,
@@ -161,7 +158,6 @@ fun HomeScreenContent(
     onOpenSeerr: () -> Unit,
     onOpenSpace: () -> Unit,
     onOpenDownloads: () -> Unit,
-    onOpenAgentSettings: () -> Unit,
     onOpenAgentView: () -> Unit,
     onOpenSettings: () -> Unit,
     onUnlockKeyring: () -> Unit,
@@ -396,7 +392,6 @@ fun HomeScreenContent(
                         onOpenSeerr = onOpenSeerr,
                         onOpenSpace = onOpenSpace,
                         onOpenDownloads = onOpenDownloads,
-                        onOpenAgentSettings = onOpenAgentSettings,
                         onOpenAgentView = onOpenAgentView,
                         modifier = Modifier.padding(
                             start = PcDimens.ScreenPad,
@@ -875,7 +870,6 @@ private fun OpenRoutesSection(
     onOpenSeerr: () -> Unit,
     onOpenSpace: () -> Unit,
     onOpenDownloads: () -> Unit,
-    onOpenAgentSettings: () -> Unit,
     onOpenAgentView: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -977,15 +971,7 @@ private fun OpenRoutesSection(
                 onClick = onOpenSpace,
             )
 
-            // 2. Agent tools
-            PcListRow(
-                title = "Agent settings",
-                subtitle = "Models, quotas & usage alerts",
-                icon = Icons.Rounded.Tune,
-                showChevron = true,
-                showDivider = true,
-                onClick = onOpenAgentSettings,
-            )
+            // 2. Agent tools (Agent settings lives cleanly in Settings & the Chat Model Picker)
             PcListRow(
                 title = "Agent view",
                 subtitle = "Watcher rules & live activity",

@@ -995,7 +995,7 @@ fun PcSheetDragHandle(modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 10.dp, bottom = 6.dp),
+            .padding(top = 12.dp, bottom = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
         Box(

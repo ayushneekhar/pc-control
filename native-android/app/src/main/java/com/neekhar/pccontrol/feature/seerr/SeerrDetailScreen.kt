@@ -2,6 +2,7 @@ package com.neekhar.pccontrol.feature.seerr
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,13 +25,16 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -55,15 +59,19 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -83,6 +91,7 @@ import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
 import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
+import com.neekhar.pccontrol.core.ui.PcStatusBarScrim
 import com.neekhar.pccontrol.core.ui.PcTone
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -125,6 +134,24 @@ fun SeerrDetailScreen(
     }
 
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val listState = rememberLazyListState()
+    val density = LocalDensity.current
+    val backdropFadePx = remember(density) { with(density) { 140.dp.toPx() } }
+    val statusBarScrimTarget by remember(hasBackdrop, listState, backdropFadePx) {
+        derivedStateOf {
+            if (!hasBackdrop) {
+                1f
+            } else if (listState.firstVisibleItemIndex > 0) {
+                1f
+            } else {
+                (listState.firstVisibleItemScrollOffset.toFloat() / backdropFadePx).coerceIn(0f, 1f)
+            }
+        }
+    }
+    val statusBarScrimAlpha by animateFloatAsState(
+        targetValue = statusBarScrimTarget,
+        label = "seerrDetailStatusScrim",
+    )
 
     PullToRefreshBox(
         isRefreshing = state.refreshing,
@@ -134,6 +161,7 @@ fun SeerrDetailScreen(
             .background(colors.bg),
     ) {
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 40.dp + navBottom),
         ) {
@@ -757,6 +785,49 @@ fun SeerrDetailScreen(
                 }
             }
         }
+
+        // Subtle status-bar vignette over backdrop at rest, fading smoothly into solid bg scrim on scroll
+        if (hasBackdrop && statusBarScrimAlpha < 0.99f) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .graphicsLayer { alpha = (1f - statusBarScrimAlpha).coerceIn(0f, 1f) },
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .windowInsetsTopHeight(WindowInsets.statusBars)
+                        .background(
+                            Brush.verticalGradient(
+                                0.0f to Color.Black.copy(alpha = 0.55f),
+                                1.0f to Color.Black.copy(alpha = 0.28f),
+                            ),
+                        ),
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(22.dp)
+                        .background(
+                            Brush.verticalGradient(
+                                0.0f to Color.Black.copy(alpha = 0.28f),
+                                1.0f to Color.Transparent,
+                            ),
+                        ),
+                )
+            }
+        }
+
+        if (statusBarScrimAlpha > 0.01f) {
+            PcStatusBarScrim(
+                color = colors.bg,
+                fadeHeight = 22.dp,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .graphicsLayer { alpha = statusBarScrimAlpha },
+            )
+        }
     }
 
     // TV Season Picker ModalBottomSheet
@@ -1026,19 +1097,19 @@ private fun SeerrCastCard(
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
                 lineHeight = 17.sp,
+                minLines = 2,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (member.character.isNotBlank()) {
-                Text(
-                    text = member.character,
-                    color = colors.textFaint,
-                    fontSize = 11.5.sp,
-                    lineHeight = 15.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+            Text(
+                text = member.character.trim().ifEmpty { " " },
+                color = colors.textFaint,
+                fontSize = 11.5.sp,
+                lineHeight = 15.sp,
+                minLines = 1,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -1108,6 +1179,7 @@ private fun SeerrRecommendationCard(
                 fontSize = 12.5.sp,
                 fontWeight = FontWeight.SemiBold,
                 lineHeight = 16.sp,
+                minLines = 2,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )

@@ -1,5 +1,6 @@
 package com.neekhar.pccontrol.feature.chat
 
+import com.neekhar.pccontrol.core.platform.MarkdownStripper
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -1609,7 +1610,10 @@ object ChatLogic {
 
     fun formatMessagePreview(msg: ChatMessage): String {
         val body = msg.text.trim()
-        if (body.isNotEmpty()) return whitespaceRe.replace(body, " ")
+        if (body.isNotEmpty()) {
+            val cleaned = MarkdownStripper.stripToSingleLine(body)
+            return if (cleaned.isNotEmpty()) cleaned else whitespaceRe.replace(body, " ")
+        }
         if (msg.status == ChatStatuses.ERROR && !msg.error.isNullOrBlank()) {
             return whitespaceRe.replace(msg.error.trim(), " ")
         }

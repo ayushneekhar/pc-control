@@ -225,7 +225,14 @@ object PcNotifier {
       else -> deepLinkIntent(ctx, "routes", id.hashCode())
     }
 
-    val builder = baseBuilder(ctx, channelId, title, body)
+    val isChatMessage = category == "chat" || (category == null && isLegacyChatTitle(title))
+    val displayBody = if (isChatMessage) {
+      MarkdownStripper.stripForNotification(body).ifBlank { body }
+    } else {
+      body
+    }
+
+    val builder = baseBuilder(ctx, channelId, title, displayBody)
       .setPriority(NotificationCompat.PRIORITY_HIGH)
       .setContentIntent(tapIntent)
 
@@ -267,7 +274,7 @@ object PcNotifier {
           NotificationCompat.BigPictureStyle()
             .bigPicture(bitmap)
             .bigLargeIcon(null as Bitmap?)
-            .setSummaryText(body),
+            .setSummaryText(displayBody),
         )
     }
 

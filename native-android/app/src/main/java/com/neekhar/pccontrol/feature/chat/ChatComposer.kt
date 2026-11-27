@@ -78,6 +78,7 @@ import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
+import com.neekhar.pccontrol.core.platform.MarkdownStripper
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.tabular
@@ -263,9 +264,12 @@ fun ChatComposer(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (replyTo.text.isNotBlank()) {
+                    val cleanReplyText = remember(replyTo.text) {
+                        MarkdownStripper.stripToSingleLine(replyTo.text).ifBlank { replyTo.text.trim() }
+                    }
+                    if (cleanReplyText.isNotBlank()) {
                         Text(
-                            text = replyTo.text,
+                            text = cleanReplyText,
                             color = colors.textDim,
                             style = type.caption,
                             maxLines = 1,
@@ -455,7 +459,6 @@ fun ChatComposer(
                 ) {
                     ProviderBrandIcon(
                         isClaude = engine != ChatEngines.GEMINI,
-                        tint = colors.accent,
                         contentDescription = if (modelChipLabel.isNotBlank()) {
                             "Switch model ($modelChipLabel)"
                         } else {

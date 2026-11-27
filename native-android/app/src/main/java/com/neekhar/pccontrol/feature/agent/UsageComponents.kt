@@ -99,12 +99,10 @@ fun ProviderUsageIcon(
     when (key) {
         UsageProviderKey.CLAUDE -> ProviderBrandIcon(
             isClaude = true,
-            tint = tint,
             modifier = modifier,
         )
         UsageProviderKey.GEMINI -> ProviderBrandIcon(
             isClaude = false,
-            tint = tint,
             modifier = modifier,
         )
         UsageProviderKey.OPENCODE -> Icon(

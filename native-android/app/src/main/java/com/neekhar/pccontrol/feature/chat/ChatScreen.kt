@@ -369,10 +369,10 @@ fun ChatScreen(
                 }
             }
 
-            // Solid status-bar band fading cleanly over 18dp below it
+            // Solid status-bar band fading cleanly over 28dp below it so messages dissolve smoothly
             PcStatusBarScrim(
                 color = colors.bg,
-                fadeHeight = 18.dp,
+                fadeHeight = 28.dp,
                 modifier = Modifier.align(Alignment.TopCenter),
             )
 
@@ -383,7 +383,7 @@ fun ChatScreen(
                     .fillMaxWidth()
                     .statusBarsPadding()
                     .height(topOverlayBarHeight)
-                    .padding(horizontal = 10.dp),
+                    .padding(horizontal = 14.dp),
             ) {
                 val errMsg = state.error?.takeIf { it.isNotBlank() }
                 val showOfflinePill = errMsg == null && !state.sseConnected && !state.loadingInitial
@@ -695,19 +695,21 @@ fun ChatScreen(
 
         PcBottomSheet(
             onDismissRequest = { actionSheetMsg = null },
+            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 18.dp),
         ) {
             Column(
                 verticalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                // Message preview header
+                // Message preview header (Markdown stripped for clean plain-text preview)
                 Column(
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
+                        .padding(top = 4.dp)
+                        .clip(RoundedCornerShape(14.dp))
                         .background(colors.surfaceRaised)
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
                 ) {
                     Text(
                         text = if (timeStr.isNotEmpty()) "$metaLabel · $timeStr" else metaLabel,

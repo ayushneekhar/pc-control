@@ -1,7 +1,6 @@
 package com.neekhar.pccontrol.core.ui
 
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -14,18 +13,19 @@ import androidx.compose.ui.unit.dp
 import com.neekhar.pccontrol.R
 
 /**
- * Renders the official monochrome Anthropic/Claude or Gemini brand mark from drawable resources.
+ * Renders the official colored Claude starburst (`#D97757`) or Google Antigravity multicolor arch
+ * brand logo without monochrome tinting so true brand colors shine.
  */
 @Composable
 fun ProviderBrandIcon(
     isClaude: Boolean,
     modifier: Modifier = Modifier,
-    tint: Color = LocalContentColor.current,
+    tint: Color = Color.Unspecified,
     contentDescription: String? = null,
 ) {
     Icon(
         painter = painterResource(
-            id = if (isClaude) R.drawable.ic_brand_anthropic else R.drawable.ic_brand_gemini,
+            id = if (isClaude) R.drawable.ic_brand_claude else R.drawable.ic_brand_antigravity,
         ),
         contentDescription = contentDescription,
         tint = tint,

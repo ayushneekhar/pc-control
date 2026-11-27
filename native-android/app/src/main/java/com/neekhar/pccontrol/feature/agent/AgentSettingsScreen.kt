@@ -308,7 +308,6 @@ fun AgentSettingsScreen(
                             ) {
                                 ProviderBrandIcon(
                                     isClaude = otherIsClaude,
-                                    tint = colors.textDim,
                                     modifier = Modifier.size(20.dp),
                                 )
                                 Column(
@@ -461,15 +460,13 @@ fun AgentSettingsScreen(
                     item(key = "section_convo") {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             PcSectionLabel(label = "Conversation")
-                            PcCard {
-                                PcButton(
-                                    label = "Start fresh",
-                                    variant = PcButtonVariant.Subtle,
-                                    busy = state.resetting,
-                                    onClick = { showResetConfirm = true },
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
+                            PcButton(
+                                label = "Start fresh",
+                                variant = PcButtonVariant.Subtle,
+                                busy = state.resetting,
+                                onClick = { showResetConfirm = true },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
                         }
                     }
                 }
@@ -640,12 +637,10 @@ private fun ClaudeSettingsRows(
     onUpdateSettings: (AgentSettingsPatch) -> Unit,
     onRequestRestart: () -> Unit,
 ) {
-    val colors = LocalPcColors.current
     PcListRow(
         leading = {
             ProviderBrandIcon(
                 isClaude = true,
-                tint = colors.textDim,
                 modifier = Modifier.size(20.dp),
             )
         },
@@ -745,7 +740,6 @@ private fun GeminiSettingsRows(
         leading = {
             ProviderBrandIcon(
                 isClaude = false,
-                tint = colors.textDim,
                 modifier = Modifier.size(20.dp),
             )
         },

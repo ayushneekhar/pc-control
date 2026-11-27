@@ -750,7 +750,6 @@ private fun UnifiedStorageCard(
                 val quota = drive.quota
                 val dTotal = quota?.totalBytes ?: 0L
                 val dUsed = quota?.usedBytes ?: 0L
-                val dFree = quota?.freeBytes ?: if (dTotal > 0L) (dTotal - dUsed).coerceAtLeast(0L) else 0L
                 val countLabel = "${drive.items.size} offloaded"
                 val driveLeftText = when {
                     !drive.configured -> "Drive · Not configured"
@@ -758,7 +757,7 @@ private fun UnifiedStorageCard(
                     else -> "Drive · $countLabel"
                 }
                 val driveRightText = if (drive.configured && dTotal > 0L) {
-                    "${formatBytes(dFree)} free"
+                    "${formatBytes(dUsed)} / ${formatBytes(dTotal)}"
                 } else {
                     null
                 }

@@ -3,6 +3,7 @@ package com.neekhar.pccontrol.feature.settings
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.net.URI
+import java.util.Locale
 
 enum class ThemeMode(val id: String, val label: String) {
     DARK("dark", "Dark"),
@@ -178,28 +179,44 @@ interface SettingsPlatformBridge {
     fun downloadAndInstallApk(apkUrl: String)
 }
 
+private val HOST_USER_PREFIX = Regex("^ayushlive-", RegexOption.IGNORE_CASE)
+
+/**
+ * Formats a clean short hostname matching Home (e.g. "ayushlive-HP-Pavilion" -> "hp-pavilion").
+ */
+fun formatShortHostname(raw: String): String {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return ""
+    val withoutTsNet = if (trimmed.endsWith(".ts.net", ignoreCase = true)) {
+        trimmed.substringBefore('.')
+    } else {
+        trimmed
+    }
+    val stripped = HOST_USER_PREFIX.replace(withoutTsNet, "").trim()
+    return (stripped.ifEmpty { withoutTsNet }).lowercase(Locale.US)
+}
+
 /**
  * Concise host label for the main Settings Connection row (e.g. "hp-pavilion").
  */
 fun connectionHostSummary(serverInfo: ServerInfo?, savedServerUrl: String): String {
     val reportedHost = serverInfo?.host?.trim()
-    if (!reportedHost.isNullOrEmpty()) return reportedHost
+    if (!reportedHost.isNullOrEmpty()) {
+        val clean = formatShortHostname(reportedHost)
+        if (clean.isNotEmpty()) return clean
+    }
     val trimmedUrl = savedServerUrl.trim()
     if (trimmedUrl.isEmpty()) return "Not set"
     val parsedHost = runCatching { URI(trimmedUrl).host }.getOrNull()?.trim()
     if (!parsedHost.isNullOrEmpty()) {
-        return if (parsedHost.endsWith(".ts.net", ignoreCase = true)) {
-            parsedHost.substringBefore('.')
-        } else {
-            parsedHost
-        }
+        return formatShortHostname(parsedHost).ifEmpty { parsedHost }
     }
-    return trimmedUrl
+    val fallback = trimmedUrl
         .removePrefix("https://")
         .removePrefix("http://")
         .substringBefore('/')
         .substringBefore(':')
-        .ifBlank { "Not set" }
+    return formatShortHostname(fallback).ifBlank { "Not set" }
 }
 
 /**

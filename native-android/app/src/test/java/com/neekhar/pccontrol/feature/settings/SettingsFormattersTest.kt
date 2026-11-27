@@ -6,7 +6,14 @@ import org.junit.Test
 class SettingsFormattersTest {
 
     @Test
-    fun connectionHostSummary_prefersServerInfoAndFallsBackToUrlHost() {
+    fun connectionHostSummary_prefersServerInfoAndStripsUserPrefixToMatchHome() {
+        assertEquals(
+            "hp-pavilion",
+            connectionHostSummary(
+                serverInfo = ServerInfo(host = "ayushlive-HP-Pavilion"),
+                savedServerUrl = "https://other.tail1234.ts.net",
+            ),
+        )
         assertEquals(
             "hp-pavilion",
             connectionHostSummary(
@@ -18,7 +25,7 @@ class SettingsFormattersTest {
             "hp-pavilion",
             connectionHostSummary(
                 serverInfo = null,
-                savedServerUrl = "https://hp-pavilion.tail1234.ts.net",
+                savedServerUrl = "https://ayushlive-hp-pavilion.tail1234.ts.net",
             ),
         )
         assertEquals(

@@ -22,21 +22,21 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.DarkMode
-import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Fingerprint
-import androidx.compose.material.icons.filled.Keyboard
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.NotificationsActive
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.SmartToy
-import androidx.compose.material.icons.filled.SystemUpdate
-import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.rounded.BugReport
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.DarkMode
+import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Fingerprint
+import androidx.compose.material.icons.rounded.Keyboard
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Notifications
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.SmartToy
+import androidx.compose.material.icons.rounded.SystemUpdate
+import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -54,18 +54,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.MonoTextStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
-import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcConfirmDialog
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
@@ -140,14 +139,14 @@ fun SettingsScreen(
                         PcSectionLabel(label = "Agent")
                         PcListCard {
                             PcListRow(
-                                icon = Icons.Filled.SmartToy,
+                                icon = Icons.Rounded.SmartToy,
                                 title = "Agent settings",
                                 subtitle = agentSub,
                                 showDivider = true,
                                 onClick = onOpenAgentSettings,
                             )
                             PcListRow(
-                                icon = Icons.Filled.Visibility,
+                                icon = Icons.Rounded.Visibility,
                                 title = "Agent view",
                                 subtitle = "Capture proxy & website rewrite rules",
                                 showDivider = false,
@@ -169,7 +168,11 @@ fun SettingsScreen(
                                 error = state.vpnError,
                                 onToggle = viewModel::toggleVpn,
                             )
-                            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = 52.dp),
+                                color = colors.hairline,
+                                thickness = 0.5.dp,
+                            )
                             KeyboardLockListRow(
                                 state = state.kbdLockState,
                                 pending = state.kbdLockPending,
@@ -177,7 +180,11 @@ fun SettingsScreen(
                                 error = state.kbdLockError,
                                 onToggle = viewModel::toggleKbdLock,
                             )
-                            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = 52.dp),
+                                color = colors.hairline,
+                                thickness = 0.5.dp,
+                            )
                             KeyringListRow(
                                 status = state.keyringStatus,
                                 vaultSupported = state.keyringVaultSupported,
@@ -219,7 +226,7 @@ fun SettingsScreen(
                         PcSectionLabel(label = "App")
                         PcListCard {
                             PcListRow(
-                                icon = Icons.Filled.Dns,
+                                icon = Icons.Rounded.Dns,
                                 title = "Connection",
                                 subtitle = if (!state.connectionError.isNullOrBlank()) "Offline" else null,
                                 trailing = hostSummary,
@@ -228,7 +235,7 @@ fun SettingsScreen(
                                 onClick = openConnection,
                             )
                             PcListRow(
-                                icon = Icons.Filled.DarkMode,
+                                icon = Icons.Rounded.DarkMode,
                                 title = "Theme",
                                 trailing = state.themeMode.label,
                                 showChevron = true,
@@ -328,6 +335,7 @@ private fun VpnListRow(
     onToggle: (Boolean) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val enabled = pending ?: state?.enabled ?: false
     val down = enabled && state != null && !state.tunnelUp
     val noPort = enabled && state != null && state.tunnelUp && state.forwardedPort == null
@@ -360,7 +368,7 @@ private fun VpnListRow(
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Icon(
-                imageVector = Icons.Filled.Shield,
+                imageVector = Icons.Rounded.Shield,
                 contentDescription = null,
                 tint = if (down || noPort) colors.warn else colors.textDim,
                 modifier = Modifier.size(20.dp),
@@ -372,8 +380,7 @@ private fun VpnListRow(
                 Text(
                     text = "Torrent VPN",
                     color = colors.text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -385,7 +392,7 @@ private fun VpnListRow(
                     Text(
                         text = statusText,
                         color = colors.textFaint,
-                        style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                        style = type.caption.tabular(),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -405,8 +412,7 @@ private fun VpnListRow(
             Text(
                 text = lastError,
                 color = if (down) colors.warn else colors.textFaint,
-                fontSize = 12.sp,
-                lineHeight = 16.sp,
+                style = type.caption,
                 modifier = Modifier.padding(start = 34.dp),
             )
         }
@@ -422,6 +428,7 @@ private fun KeyboardLockListRow(
     onToggle: (Boolean) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val enabled = pending ?: state?.enabled ?: false
     val unavailable = state != null && !state.available
     val statusText = when {
@@ -450,7 +457,7 @@ private fun KeyboardLockListRow(
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Icon(
-                imageVector = Icons.Filled.Keyboard,
+                imageVector = Icons.Rounded.Keyboard,
                 contentDescription = null,
                 tint = colors.textDim,
                 modifier = Modifier.size(20.dp),
@@ -462,8 +469,7 @@ private fun KeyboardLockListRow(
                 Text(
                     text = "Keyboard lock",
                     color = colors.text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -475,7 +481,7 @@ private fun KeyboardLockListRow(
                     Text(
                         text = statusText,
                         color = colors.textFaint,
-                        fontSize = 12.5.sp,
+                        style = type.caption,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -508,6 +514,7 @@ private fun KeyringListRow(
     onDismissNotice: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val locked = status?.locked == true
     val dotColor = when {
         status == null -> colors.textFaint
@@ -528,7 +535,7 @@ private fun KeyringListRow(
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Icon(
-                imageVector = if (locked) Icons.Filled.Lock else Icons.Filled.Fingerprint,
+                imageVector = if (locked) Icons.Rounded.Lock else Icons.Rounded.Fingerprint,
                 contentDescription = null,
                 tint = if (locked) colors.warn else colors.textDim,
                 modifier = Modifier.size(20.dp),
@@ -540,8 +547,7 @@ private fun KeyringListRow(
                 Text(
                     text = "Keyring",
                     color = colors.text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -553,7 +559,7 @@ private fun KeyringListRow(
                     Text(
                         text = statusLine,
                         color = colors.textFaint,
-                        fontSize = 12.5.sp,
+                        style = type.caption,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -593,14 +599,13 @@ private fun KeyringListRow(
                 Text(
                     text = notice,
                     color = colors.textDim,
-                    fontSize = 12.5.sp,
+                    style = type.caption,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
                     text = "Dismiss",
-                    color = colors.text,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
+                    color = colors.accent,
+                    style = type.caption.copy(fontWeight = FontWeight.Medium),
                     modifier = Modifier
                         .padding(start = 8.dp)
                         .clip(RoundedCornerShape(6.dp))
@@ -649,6 +654,7 @@ private fun NotificationRoutingCard(
     onToggleCategory: (categoryId: String, channel: String, enabled: Boolean) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val summary = remember(settings) { notifRoutingSummary(settings) }
 
     PcListCard(modifier = Modifier.animateContentSize()) {
@@ -663,7 +669,7 @@ private fun NotificationRoutingCard(
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Icon(
-                imageVector = Icons.Filled.Notifications,
+                imageVector = Icons.Rounded.Notifications,
                 contentDescription = null,
                 tint = colors.textDim,
                 modifier = Modifier.size(20.dp),
@@ -675,21 +681,20 @@ private fun NotificationRoutingCard(
                 Text(
                     text = "Where notifications go",
                     color = colors.text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = summary,
                     color = colors.textFaint,
-                    style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                    style = type.caption.tabular(),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
             Icon(
-                imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
                 contentDescription = if (expanded) "Collapse" else "Expand",
                 tint = colors.textFaint,
                 modifier = Modifier.size(20.dp),
@@ -706,7 +711,11 @@ private fun NotificationRoutingCard(
             val tgMaster = settings.masters["telegram"] == true
             val appMaster = settings.masters["app"] == true
 
-            HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+            HorizontalDivider(
+                modifier = Modifier.padding(start = 16.dp),
+                color = colors.hairline,
+                thickness = 0.5.dp,
+            )
 
             // Column headers + master row aligned to the same 2-column grid
             Row(
@@ -718,15 +727,13 @@ private fun NotificationRoutingCard(
                 Text(
                     text = "Channel",
                     color = colors.textFaint,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.micro,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
                     text = if (settings.channels.telegram.configured) "Telegram" else "Telegram · off",
                     color = colors.textFaint,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.micro,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -735,8 +742,7 @@ private fun NotificationRoutingCard(
                 Text(
                     text = "App",
                     color = colors.textFaint,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.micro,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.width(52.dp),
                 )
@@ -752,8 +758,7 @@ private fun NotificationRoutingCard(
                 Text(
                     text = "All notifications",
                     color = colors.text,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.body.copy(fontWeight = FontWeight.Medium),
                     modifier = Modifier.weight(1f),
                 )
                 Box(
@@ -783,7 +788,11 @@ private fun NotificationRoutingCard(
             // Per-category compact 2-column check table
             if (expanded && settings.categories.isNotEmpty()) {
                 settings.categories.forEach { cat ->
-                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 16.dp),
+                        color = colors.hairline,
+                        thickness = 0.5.dp,
+                    )
                     val supportsTelegram = cat.channels == null || "telegram" in cat.channels
                     val anyActive = (supportsTelegram && cat.telegram && tgMaster) || (cat.app && appMaster)
 
@@ -797,8 +806,7 @@ private fun NotificationRoutingCard(
                         Text(
                             text = cat.label,
                             color = if (anyActive) colors.text else colors.textDim,
-                            fontSize = 13.5.sp,
-                            fontWeight = FontWeight.Normal,
+                            style = type.body,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
@@ -818,7 +826,7 @@ private fun NotificationRoutingCard(
                                 Text(
                                     text = "—",
                                     color = colors.textFaint,
-                                    fontSize = 13.sp,
+                                    style = type.caption,
                                 )
                             }
                         }
@@ -878,7 +886,7 @@ private fun CompactCheckToggle(
         ) {
             if (checked) {
                 Icon(
-                    imageVector = Icons.Filled.Check,
+                    imageVector = Icons.Rounded.Check,
                     contentDescription = contentDescription,
                     tint = iconTint,
                     modifier = Modifier.size(13.dp),
@@ -900,6 +908,7 @@ private fun AppUpdatesListRow(
     onDownloadInstall: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val subtitle = when {
         hasNewer && latestRelease != null -> "v$currentVersionName → v${latestRelease.versionName} available"
         checking -> "Checking GitHub Releases…"
@@ -907,72 +916,60 @@ private fun AppUpdatesListRow(
         latestRelease != null -> "v$currentVersionName · Up to date"
         else -> "v$currentVersionName ($currentVersionCode)"
     }
+    val subtitleColor = when {
+        hasNewer -> colors.accent
+        !error.isNullOrBlank() -> colors.bad
+        else -> colors.textFaint
+    }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(enabled = !checking, onClick = if (hasNewer) onDownloadInstall else onCheck)
-                .defaultMinSize(minHeight = 56.dp)
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Filled.SystemUpdate,
-                contentDescription = null,
-                tint = colors.textDim,
-                modifier = Modifier.size(20.dp),
-            )
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(1.dp),
-            ) {
-                Text(
-                    text = "App updates",
-                    color = colors.text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+        PcListRow(
+            icon = Icons.Rounded.SystemUpdate,
+            title = "App updates",
+            subtitleContent = {
                 Text(
                     text = subtitle,
-                    color = if (hasNewer) colors.accent else if (!error.isNullOrBlank()) colors.bad else colors.textFaint,
-                    style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                    color = subtitleColor,
+                    style = type.caption.tabular(),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-            }
-            when {
-                checking -> CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp,
-                    color = colors.textDim,
-                )
-                hasNewer -> PcButton(
-                    label = "Install",
-                    variant = PcButtonVariant.Primary,
-                    compact = true,
-                    onClick = onDownloadInstall,
-                )
-                else -> Text(
-                    text = "Check",
-                    color = colors.textDim,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
-        }
+            },
+            trailingContent = {
+                when {
+                    checking -> CircularProgressIndicator(
+                        modifier = Modifier
+                            .padding(end = 2.dp)
+                            .size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = colors.accent,
+                    )
+                    hasNewer -> PcButton(
+                        label = "Install",
+                        variant = PcButtonVariant.Primary,
+                        compact = true,
+                        onClick = onDownloadInstall,
+                    )
+                    else -> Text(
+                        text = "Check",
+                        color = colors.accent,
+                        style = type.body.copy(fontWeight = FontWeight.Medium),
+                        modifier = Modifier.padding(end = 2.dp),
+                    )
+                }
+            },
+            showChevron = false,
+            showDivider = false,
+            onClick = if (!checking) (if (hasNewer) onDownloadInstall else onCheck) else null,
+        )
 
         val releaseNotes = latestRelease?.releaseNotes
         if (hasNewer && !releaseNotes.isNullOrBlank()) {
             Text(
                 text = releaseNotes,
                 color = colors.textDim,
-                fontSize = 12.sp,
-                lineHeight = 17.sp,
-                modifier = Modifier.padding(start = 50.dp, end = 16.dp, bottom = 12.dp),
+                style = type.caption,
+                modifier = Modifier.padding(start = 52.dp, end = 16.dp, bottom = 12.dp),
             )
         }
     }
@@ -988,6 +985,7 @@ private fun DiagnosticsListCard(
     onOpenCrashViewer: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val fcmOk = fcm.notificationsEnabled && !fcm.token.isNullOrBlank() && serverRegistered == true
     val fcmStatus = when {
         !fcm.notificationsEnabled -> "Notifications off"
@@ -1007,7 +1005,7 @@ private fun DiagnosticsListCard(
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Icon(
-                imageVector = Icons.Filled.NotificationsActive,
+                imageVector = Icons.Rounded.NotificationsActive,
                 contentDescription = null,
                 tint = colors.textDim,
                 modifier = Modifier.size(20.dp),
@@ -1019,8 +1017,7 @@ private fun DiagnosticsListCard(
                 Text(
                     text = "Push notifications",
                     color = colors.text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                 )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -1030,7 +1027,7 @@ private fun DiagnosticsListCard(
                     Text(
                         text = fcmStatus,
                         color = colors.textFaint,
-                        fontSize = 12.5.sp,
+                        style = type.caption,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -1052,9 +1049,13 @@ private fun DiagnosticsListCard(
                 )
             }
         }
-        HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+        HorizontalDivider(
+            modifier = Modifier.padding(start = 52.dp),
+            color = colors.hairline,
+            thickness = 0.5.dp,
+        )
         PcListRow(
-            icon = Icons.Filled.BugReport,
+            icon = Icons.Rounded.BugReport,
             title = "Crash reports",
             trailing = if (crashCount == 0) "None" else "$crashCount",
             showChevron = true,
@@ -1072,6 +1073,7 @@ private fun ThemePickerSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
 
     PcBottomSheet(
         onDismissRequest = onDismiss,
@@ -1085,7 +1087,11 @@ private fun ThemePickerSheet(
         ) {
             ThemeMode.entries.forEachIndexed { idx, mode ->
                 if (idx > 0) {
-                    HorizontalDivider(color = colors.hairline, thickness = 0.5.dp)
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 16.dp),
+                        color = colors.hairline,
+                        thickness = 0.5.dp,
+                    )
                 }
                 val isSelected = mode == selected
                 Row(
@@ -1100,12 +1106,13 @@ private fun ThemePickerSheet(
                     Text(
                         text = mode.label,
                         color = colors.text,
-                        fontSize = 15.sp,
-                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                        style = type.cardTitle.copy(
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                        ),
                     )
                     if (isSelected) {
                         Icon(
-                            imageVector = Icons.Filled.Check,
+                            imageVector = Icons.Rounded.Check,
                             contentDescription = "Selected",
                             tint = colors.accent,
                             modifier = Modifier.size(20.dp),
@@ -1124,6 +1131,7 @@ private fun CrashReportsSheetContent(
     onClose: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1139,8 +1147,7 @@ private fun CrashReportsSheetContent(
             Text(
                 text = "Crash reports",
                 color = colors.text,
-                fontSize = 19.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = type.collapsedTitle,
             )
             if (reports.isNotEmpty()) {
                 PcButton(
@@ -1153,37 +1160,44 @@ private fun CrashReportsSheetContent(
         }
 
         if (reports.isEmpty()) {
-            PcCard {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(colors.surfaceRaised)
+                    .padding(16.dp),
+            ) {
                 Text(
                     text = "No crash reports stored on this device.",
                     color = colors.textDim,
-                    fontSize = 13.5.sp,
+                    style = type.body,
                 )
             }
         } else {
             reports.forEach { entry ->
-                PcCard {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = entry.summary,
-                            color = colors.text,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            text = entry.timestamp,
-                            color = colors.textFaint,
-                            fontSize = 12.sp,
-                            style = TabularNumStyle,
-                        )
-                        Text(
-                            text = entry.stackTrace.take(1500),
-                            color = colors.textDim,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            lineHeight = 15.sp,
-                        )
-                    }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(colors.surfaceRaised)
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = entry.summary,
+                        color = colors.text,
+                        style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
+                    )
+                    Text(
+                        text = entry.timestamp,
+                        color = colors.textFaint,
+                        style = type.caption.tabular(),
+                    )
+                    Text(
+                        text = entry.stackTrace.take(1500),
+                        color = colors.textDim,
+                        style = MonoTextStyle,
+                    )
                 }
             }
         }

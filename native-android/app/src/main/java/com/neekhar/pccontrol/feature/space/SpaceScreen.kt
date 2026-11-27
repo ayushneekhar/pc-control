@@ -14,6 +14,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,31 +34,33 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.CloudDone
-import androidx.compose.material.icons.filled.CloudDownload
-import androidx.compose.material.icons.filled.CloudOff
-import androidx.compose.material.icons.filled.CloudSync
-import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Sort
-import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.Tv
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.automirrored.rounded.Sort
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.CloudDownload
+import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.CloudSync
+import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Error
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material.icons.rounded.Tv
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -64,6 +69,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -75,27 +81,31 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
+import com.neekhar.pccontrol.core.ui.PcIconButton
 import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcProgressBar
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSegmentOption
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
 import com.neekhar.pccontrol.core.ui.PcTone
@@ -149,59 +159,45 @@ fun SpaceScreen(
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val showSearchField = searchOpen || state.query.isNotEmpty()
     val selectionMode = state.hasSelection
+    val listState = rememberLazyListState()
+    val hPad = Modifier.padding(horizontal = 18.dp)
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.bg),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding(),
-        ) {
-            PcScreenHeader(
-                title = "Space",
-                statusText = statusText,
-                statusTone = statusTone,
-                showStatusDot = statusText != null,
-                onBack = onBack,
-                actions = {
-                    IconButton(
-                        onClick = {
-                            if (showSearchField) {
-                                viewModel.updateQuery("")
-                                searchOpen = false
-                            } else {
-                                searchOpen = true
-                            }
-                        },
-                        modifier = Modifier.size(38.dp),
-                    ) {
-                        Icon(
-                            imageVector = if (showSearchField) Icons.Filled.Close else Icons.Filled.Search,
-                            contentDescription = if (showSearchField) "Close search" else "Search media",
-                            tint = if (showSearchField) colors.text else colors.textDim,
-                            modifier = Modifier.size(21.dp),
-                        )
+    PcScaffold(
+        title = "Space",
+        statusText = statusText,
+        statusTone = statusTone,
+        showStatusDot = statusText != null,
+        onBack = onBack,
+        listState = listState,
+        applyNavigationBarPadding = false,
+        actions = {
+            PcIconButton(
+                icon = if (showSearchField) Icons.Rounded.Close else Icons.Rounded.Search,
+                contentDescription = if (showSearchField) "Close search" else "Search media",
+                tint = if (showSearchField) colors.text else colors.textDim,
+                onClick = {
+                    if (showSearchField) {
+                        viewModel.updateQuery("")
+                        searchOpen = false
+                    } else {
+                        searchOpen = true
                     }
                 },
             )
-
+        },
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
             PullToRefreshBox(
                 isRefreshing = state.isRefreshing,
                 onRefresh = viewModel::refresh,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
+                modifier = Modifier.fillMaxSize(),
             ) {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
-                        start = 18.dp,
-                        end = 18.dp,
-                        top = 2.dp,
-                        bottom = (if (selectionMode) 144.dp else 28.dp) + navBottom,
+                        top = 4.dp,
+                        bottom = (if (selectionMode) 148.dp else 32.dp) + navBottom,
                     ),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
@@ -210,6 +206,7 @@ fun SpaceScreen(
                             PcErrorBanner(
                                 title = err,
                                 tone = PcTone.Bad,
+                                modifier = hPad,
                             )
                         }
                     }
@@ -220,6 +217,7 @@ fun SpaceScreen(
                                 title = "Drive status unavailable",
                                 message = driveErr,
                                 tone = PcTone.Warn,
+                                modifier = hPad,
                             )
                         }
                     }
@@ -236,47 +234,56 @@ fun SpaceScreen(
                                 },
                                 actionLabel = "Dismiss",
                                 onAction = viewModel::dismissNotice,
+                                modifier = hPad,
                             )
                         }
                     }
 
                     state.freeFeedback?.let { fb ->
                         item(key = "free_feedback") {
-                            FreeFeedbackCard(
-                                feedback = fb,
-                                onDismiss = viewModel::dismissFreeFeedback,
-                            )
+                            Box(modifier = hPad) {
+                                FreeFeedbackCard(
+                                    feedback = fb,
+                                    onDismiss = viewModel::dismissFreeFeedback,
+                                )
+                            }
                         }
                     }
 
                     state.driveDeleteFeedback?.let { fb ->
                         item(key = "drive_delete_feedback") {
-                            DriveDeleteFeedbackCard(
-                                feedback = fb,
-                                onDismiss = viewModel::dismissDriveDeleteFeedback,
-                            )
+                            Box(modifier = hPad) {
+                                DriveDeleteFeedbackCard(
+                                    feedback = fb,
+                                    onDismiss = viewModel::dismissDriveDeleteFeedback,
+                                )
+                            }
                         }
                     }
 
                     // ONE unified Disk + Google Drive storage summary card
                     item(key = "storage_summary") {
-                        if (hdd != null) {
-                            UnifiedStorageCard(
-                                hdd = hdd,
-                                drive = state.driveData,
-                            )
-                        } else {
-                            StorageSummarySkeleton()
+                        Box(modifier = hPad) {
+                            if (hdd != null) {
+                                UnifiedStorageCard(
+                                    hdd = hdd,
+                                    drive = state.driveData,
+                                )
+                            } else {
+                                StorageSummarySkeleton()
+                            }
                         }
                     }
 
                     if (state.activeJobs.isNotEmpty()) {
                         item(key = "active_transfers") {
-                            ActiveTransfersCard(
-                                jobs = state.activeJobs,
-                                cancellingJobId = state.cancellingJobId,
-                                onCancel = viewModel::cancelJob,
-                            )
+                            Box(modifier = hPad) {
+                                ActiveTransfersCard(
+                                    jobs = state.activeJobs,
+                                    cancellingJobId = state.cancellingJobId,
+                                    onCancel = viewModel::cancelJob,
+                                )
+                            }
                         }
                     }
 
@@ -285,6 +292,7 @@ fun SpaceScreen(
                             PcErrorBanner(
                                 title = msg,
                                 tone = PcTone.Warn,
+                                modifier = hPad,
                             )
                         }
                     }
@@ -296,25 +304,28 @@ fun SpaceScreen(
                             enter = expandVertically() + fadeIn(),
                             exit = shrinkVertically() + fadeOut(),
                         ) {
-                            SpaceSearchField(
-                                query = state.query,
-                                placeholder = when (state.tab) {
-                                    SpaceTab.MOVIES -> "Search local movies"
-                                    SpaceTab.TV_SHOWS -> "Search TV seasons"
-                                    SpaceTab.OFFLOADED -> "Search offloaded media"
-                                },
-                                onQueryChange = viewModel::updateQuery,
-                            )
+                            Box(modifier = hPad) {
+                                SpaceSearchField(
+                                    query = state.query,
+                                    placeholder = when (state.tab) {
+                                        SpaceTab.MOVIES -> "Search local movies"
+                                        SpaceTab.TV_SHOWS -> "Search TV seasons"
+                                        SpaceTab.OFFLOADED -> "Search offloaded media"
+                                    },
+                                    onQueryChange = viewModel::updateQuery,
+                                )
+                            }
                         }
                     }
 
-                    // Compact tabs + filter/sort controls (2 tight rows instead of 4 stacked rows)
+                    // Compact tabs + edge-to-edge filter chips + labeled count & sort bar
                     item(key = "controls") {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             PcSegmentedControl(
                                 options = tabOptions,
                                 selected = state.tab,
                                 onSelect = viewModel::selectTab,
+                                modifier = hPad,
                             )
                             FilterAndSortBar(
                                 tab = state.tab,
@@ -337,34 +348,40 @@ fun SpaceScreen(
                         val drive = state.driveData
                         when {
                             drive == null -> {
-                                item(key = "drive_skel") { MediaListSkeleton() }
+                                item(key = "drive_skel") {
+                                    Box(modifier = hPad) { MediaListSkeleton() }
+                                }
                             }
                             !drive.configured -> {
                                 item(key = "drive_unconfigured") {
-                                    PcCard {
-                                        PcEmptyState(
-                                            icon = Icons.Filled.CloudOff,
-                                            title = "Drive not configured",
-                                            body = "Add a 'gdrive' remote in rclone on your PC to offload and stream media.",
-                                        )
+                                    Box(modifier = hPad) {
+                                        PcCard {
+                                            PcEmptyState(
+                                                icon = Icons.Rounded.CloudOff,
+                                                title = "Drive not configured",
+                                                body = "Add a 'gdrive' remote in rclone on your PC to offload and stream media.",
+                                            )
+                                        }
                                     }
                                 }
                             }
                             state.visibleDrive.isEmpty() -> {
                                 item(key = "drive_empty") {
-                                    PcCard {
-                                        PcEmptyState(
-                                            icon = Icons.Filled.CloudDone,
-                                            title = if (state.query.isNotBlank()) {
-                                                "No matching offloaded items"
-                                            } else {
-                                                when (state.driveKindFilter) {
-                                                    SpaceFilter.MOVIE -> "No offloaded movies"
-                                                    SpaceFilter.SEASON -> "No offloaded TV seasons"
-                                                    SpaceFilter.ALL -> "Nothing on Drive yet"
-                                                }
-                                            },
-                                        )
+                                    Box(modifier = hPad) {
+                                        PcCard {
+                                            PcEmptyState(
+                                                icon = Icons.Rounded.CloudDone,
+                                                title = if (state.query.isNotBlank()) {
+                                                    "No matching offloaded items"
+                                                } else {
+                                                    when (state.driveKindFilter) {
+                                                        SpaceFilter.MOVIE -> "No offloaded movies"
+                                                        SpaceFilter.SEASON -> "No offloaded TV seasons"
+                                                        SpaceFilter.ALL -> "Nothing on Drive yet"
+                                                    }
+                                                },
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -373,26 +390,29 @@ fun SpaceScreen(
                                     val items = state.visibleDrive
                                     val selectedPaths = state.effectiveSelectedDrivePaths
                                     val activeMap = state.activeDriveJobs
-                                    PcListCard {
-                                        items.forEachIndexed { index, item ->
-                                            DriveItemRow(
-                                                item = item,
-                                                selectionMode = selectionMode,
-                                                selected = item.relPath in selectedPaths,
-                                                activeJob = activeMap[item.relPath],
-                                                showDivider = index < items.lastIndex,
-                                                onClick = {
-                                                    if (selectionMode) {
+                                    Box(modifier = hPad) {
+                                        PcListCard {
+                                            items.forEachIndexed { index, item ->
+                                                DriveItemRow(
+                                                    item = item,
+                                                    posterUrl = state.posterUrlFor(item),
+                                                    selectionMode = selectionMode,
+                                                    selected = item.relPath in selectedPaths,
+                                                    activeJob = activeMap[item.relPath],
+                                                    showDivider = index < items.lastIndex,
+                                                    onClick = {
+                                                        if (selectionMode) {
+                                                            viewModel.toggleDriveItem(item.relPath)
+                                                        } else {
+                                                            focusedItem = FocusedSpaceItem.Drive(item)
+                                                        }
+                                                    },
+                                                    onLongClick = {
+                                                        view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                                                         viewModel.toggleDriveItem(item.relPath)
-                                                    } else {
-                                                        focusedItem = FocusedSpaceItem.Drive(item)
-                                                    }
-                                                },
-                                                onLongClick = {
-                                                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                                                    viewModel.toggleDriveItem(item.relPath)
-                                                },
-                                            )
+                                                    },
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -401,29 +421,33 @@ fun SpaceScreen(
                     } else {
                         when {
                             state.localData == null -> {
-                                item(key = "local_skel") { MediaListSkeleton() }
+                                item(key = "local_skel") {
+                                    Box(modifier = hPad) { MediaListSkeleton() }
+                                }
                             }
                             state.visibleLocal.isEmpty() -> {
                                 item(key = "local_empty") {
-                                    PcCard {
-                                        PcEmptyState(
-                                            icon = Icons.Filled.Storage,
-                                            title = if (state.query.isNotBlank()) {
-                                                "No matching media"
-                                            } else if (state.tab == SpaceTab.MOVIES) {
-                                                when (state.localStatusChip) {
-                                                    LocalStatusChip.WATCHED -> "No watched movies"
-                                                    LocalStatusChip.UNWATCHED -> "No unwatched movies"
-                                                    LocalStatusChip.ALL -> "No local movies found"
-                                                }
-                                            } else {
-                                                when (state.localStatusChip) {
-                                                    LocalStatusChip.WATCHED -> "No watched TV seasons"
-                                                    LocalStatusChip.UNWATCHED -> "No unwatched TV seasons"
-                                                    LocalStatusChip.ALL -> "No local TV seasons found"
-                                                }
-                                            },
-                                        )
+                                    Box(modifier = hPad) {
+                                        PcCard {
+                                            PcEmptyState(
+                                                icon = Icons.Rounded.Storage,
+                                                title = if (state.query.isNotBlank()) {
+                                                    "No matching media"
+                                                } else if (state.tab == SpaceTab.MOVIES) {
+                                                    when (state.localStatusChip) {
+                                                        LocalStatusChip.WATCHED -> "No watched movies"
+                                                        LocalStatusChip.UNWATCHED -> "No unwatched movies"
+                                                        LocalStatusChip.ALL -> "No local movies found"
+                                                    }
+                                                } else {
+                                                    when (state.localStatusChip) {
+                                                        LocalStatusChip.WATCHED -> "No watched TV seasons"
+                                                        LocalStatusChip.UNWATCHED -> "No unwatched TV seasons"
+                                                        LocalStatusChip.ALL -> "No local TV seasons found"
+                                                    }
+                                                },
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -432,26 +456,29 @@ fun SpaceScreen(
                                     val items = state.visibleLocal
                                     val selectedIds = state.effectiveSelectedLocalIds
                                     val activeMap = state.activeLocalJobs
-                                    PcListCard {
-                                        items.forEachIndexed { index, item ->
-                                            CandidateRow(
-                                                item = item,
-                                                selectionMode = selectionMode,
-                                                selected = item.id in selectedIds,
-                                                activeJob = activeMap[item.id],
-                                                showDivider = index < items.lastIndex,
-                                                onClick = {
-                                                    if (selectionMode) {
+                                    Box(modifier = hPad) {
+                                        PcListCard {
+                                            items.forEachIndexed { index, item ->
+                                                CandidateRow(
+                                                    item = item,
+                                                    posterUrl = state.posterUrlFor(item),
+                                                    selectionMode = selectionMode,
+                                                    selected = item.id in selectedIds,
+                                                    activeJob = activeMap[item.id],
+                                                    showDivider = index < items.lastIndex,
+                                                    onClick = {
+                                                        if (selectionMode) {
+                                                            viewModel.toggleLocalItem(item.id)
+                                                        } else {
+                                                            focusedItem = FocusedSpaceItem.Local(item)
+                                                        }
+                                                    },
+                                                    onLongClick = {
+                                                        view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                                                         viewModel.toggleLocalItem(item.id)
-                                                    } else {
-                                                        focusedItem = FocusedSpaceItem.Local(item)
-                                                    }
-                                                },
-                                                onLongClick = {
-                                                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                                                    viewModel.toggleLocalItem(item.id)
-                                                },
-                                            )
+                                                    },
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -460,46 +487,66 @@ fun SpaceScreen(
                     }
                 }
             }
-        }
 
-        // Sleek floating contextual action bar shown ONLY when items are selected
-        AnimatedVisibility(
-            visible = selectionMode,
-            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-            modifier = Modifier.align(Alignment.BottomCenter),
-        ) {
-            SelectionActionBar(
-                isDriveMode = state.tab == SpaceTab.OFFLOADED,
-                count = if (state.tab == SpaceTab.OFFLOADED) state.driveSelection.count else state.localSelection.count,
-                totalBytes = if (state.tab == SpaceTab.OFFLOADED) state.driveSelection.totalBytes else state.localSelection.totalBytes,
-                allVisibleSelected = state.visibleSelection.allSelected,
-                offloadDisabled = state.driveExplicitlyUnconfigured,
-                onClear = viewModel::clearSelection,
-                onToggleSelectAll = viewModel::toggleSelectAllVisible,
-                onPrimaryAction = {
-                    viewModel.requestConfirm(
-                        if (state.tab == SpaceTab.OFFLOADED) SpaceConfirmAction.RESTORE else SpaceConfirmAction.OFFLOAD,
-                    )
-                },
-                onDeleteAction = {
-                    viewModel.requestConfirm(
-                        if (state.tab == SpaceTab.OFFLOADED) SpaceConfirmAction.DELETE_DRIVE else SpaceConfirmAction.DELETE_LOCAL,
-                    )
-                },
-            )
+            // Subtle bottom gesture-bar fade scrim so scrolled rows glide cleanly under the nav bar
+            if (!selectionMode) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(navBottom + 20.dp)
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(Color.Transparent, colors.bg),
+                            ),
+                        ),
+                )
+            }
+
+            // Sleek floating contextual action bar shown ONLY when items are selected
+            AnimatedVisibility(
+                visible = selectionMode,
+                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
+                SelectionActionBar(
+                    isDriveMode = state.tab == SpaceTab.OFFLOADED,
+                    count = if (state.tab == SpaceTab.OFFLOADED) state.driveSelection.count else state.localSelection.count,
+                    totalBytes = if (state.tab == SpaceTab.OFFLOADED) state.driveSelection.totalBytes else state.localSelection.totalBytes,
+                    allVisibleSelected = state.visibleSelection.allSelected,
+                    offloadDisabled = state.driveExplicitlyUnconfigured,
+                    onClear = viewModel::clearSelection,
+                    onToggleSelectAll = viewModel::toggleSelectAllVisible,
+                    onPrimaryAction = {
+                        viewModel.requestConfirm(
+                            if (state.tab == SpaceTab.OFFLOADED) SpaceConfirmAction.RESTORE else SpaceConfirmAction.OFFLOAD,
+                        )
+                    },
+                    onDeleteAction = {
+                        viewModel.requestConfirm(
+                            if (state.tab == SpaceTab.OFFLOADED) SpaceConfirmAction.DELETE_DRIVE else SpaceConfirmAction.DELETE_LOCAL,
+                        )
+                    },
+                )
+            }
         }
     }
 
     // Single-item quick action sheet (on short tap outside selection mode)
     val activeFocus = focusedItem
     if (activeFocus != null) {
+        val focusedPoster = when (activeFocus) {
+            is FocusedSpaceItem.Local -> state.posterUrlFor(activeFocus.item)
+            is FocusedSpaceItem.Drive -> state.posterUrlFor(activeFocus.item)
+        }
         PcBottomSheet(
             onDismissRequest = { focusedItem = null },
             contentPadding = PaddingValues(0.dp),
         ) {
             SingleItemActionSheetContent(
                 focused = activeFocus,
+                posterUrl = focusedPoster,
                 offloadDisabled = state.driveExplicitlyUnconfigured,
                 onSelectMultiple = {
                     focusedItem = null
@@ -558,6 +605,7 @@ private fun UnifiedStorageCard(
     drive: DriveStatusResponse?,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val total = hdd.totalBytes ?: 0L
     val used = hdd.usedBytes ?: 0L
     val free = hdd.freeBytes ?: 0L
@@ -586,7 +634,7 @@ private fun UnifiedStorageCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.Storage,
+                        imageVector = Icons.Rounded.Storage,
                         contentDescription = null,
                         tint = colors.warn,
                         modifier = Modifier.size(18.dp),
@@ -595,14 +643,13 @@ private fun UnifiedStorageCard(
                         Text(
                             text = "HDD not mounted",
                             color = colors.warn,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
                         )
                         if (hdd.mount.isNotBlank()) {
                             Text(
                                 text = hdd.mount,
                                 color = colors.textDim,
-                                fontSize = 12.sp,
+                                style = type.caption,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -618,17 +665,14 @@ private fun UnifiedStorageCard(
                     Text(
                         text = "${formatBytes(free)} free",
                         color = if (lowNow) colors.warn else colors.text,
-                        style = TabularNumStyle.copy(
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        ),
+                        style = type.metricValue.copy(fontWeight = FontWeight.SemiBold),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
                         text = "${formatBytes(used)} / ${formatBytes(total)}",
                         color = colors.textDim,
-                        style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                        style = type.caption.tabular(),
                         maxLines = 1,
                     )
                 }
@@ -676,7 +720,7 @@ private fun UnifiedStorageCard(
                         Text(
                             text = "After ${hdd.pendingCount} download$dlSuffix$unknownSuffix",
                             color = colors.textDim,
-                            style = TabularNumStyle.copy(fontSize = 12.sp),
+                            style = type.caption.tabular(),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
@@ -693,10 +737,7 @@ private fun UnifiedStorageCard(
                                 lowAfter -> colors.warn
                                 else -> colors.textDim
                             },
-                            style = TabularNumStyle.copy(
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                            ),
+                            style = type.caption.tabular().copy(fontWeight = FontWeight.Medium),
                             maxLines = 1,
                         )
                     }
@@ -709,7 +750,6 @@ private fun UnifiedStorageCard(
                 val quota = drive.quota
                 val dTotal = quota?.totalBytes ?: 0L
                 val dUsed = quota?.usedBytes ?: 0L
-                val dFree = quota?.freeBytes ?: if (dTotal > 0L) (dTotal - dUsed).coerceAtLeast(0L) else 0L
                 val countLabel = "${drive.items.size} offloaded"
                 val driveLeftText = when {
                     !drive.configured -> "Drive · Not configured"
@@ -717,7 +757,7 @@ private fun UnifiedStorageCard(
                     else -> "Drive · $countLabel"
                 }
                 val driveRightText = if (drive.configured && dTotal > 0L) {
-                    "${formatBytes(dFree)} free"
+                    "${formatBytes(dUsed)} / ${formatBytes(dTotal)}"
                 } else {
                     null
                 }
@@ -728,7 +768,7 @@ private fun UnifiedStorageCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Icon(
-                        imageVector = if (drive.configured && drive.mounted) Icons.Filled.CloudDone else Icons.Filled.CloudOff,
+                        imageVector = if (drive.configured && drive.mounted) Icons.Rounded.CloudDone else Icons.Rounded.CloudOff,
                         contentDescription = null,
                         tint = if (drive.configured && !drive.mounted) colors.warn else colors.textFaint,
                         modifier = Modifier.size(15.dp),
@@ -736,7 +776,7 @@ private fun UnifiedStorageCard(
                     Text(
                         text = driveLeftText,
                         color = if (drive.configured && !drive.mounted) colors.warn else colors.textDim,
-                        style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                        style = type.caption.tabular(),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
@@ -745,7 +785,7 @@ private fun UnifiedStorageCard(
                         Text(
                             text = driveRightText,
                             color = colors.textFaint,
-                            style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                            style = type.caption.tabular(),
                             maxLines = 1,
                         )
                     }
@@ -762,6 +802,7 @@ private fun ActiveTransfersCard(
     onCancel: (String) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     PcCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(
@@ -774,7 +815,7 @@ private fun ActiveTransfersCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.CloudSync,
+                        imageVector = Icons.Rounded.CloudSync,
                         contentDescription = null,
                         tint = colors.textDim,
                         modifier = Modifier.size(18.dp),
@@ -782,8 +823,7 @@ private fun ActiveTransfersCard(
                     Text(
                         text = "Active transfers",
                         color = colors.text,
-                        fontSize = 14.5.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
                     )
                 }
                 PcPill(
@@ -840,15 +880,14 @@ private fun ActiveTransfersCard(
                                     }
                                 },
                                 color = colors.text,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium,
+                                style = type.cardTitle,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(
                                 text = metaParts.joinToString(" · "),
                                 color = colors.textDim,
-                                style = TabularNumStyle.copy(fontSize = 12.sp),
+                                style = type.caption.tabular(),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -890,10 +929,11 @@ private fun SpaceSearchField(
     onQueryChange: (String) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(40.dp)
+            .defaultMinSize(minHeight = 44.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(colors.surface)
             .padding(horizontal = 12.dp),
@@ -901,17 +941,17 @@ private fun SpaceSearchField(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Icon(
-            imageVector = Icons.Filled.Search,
+            imageVector = Icons.Rounded.Search,
             contentDescription = null,
             tint = colors.textFaint,
-            modifier = Modifier.size(17.dp),
+            modifier = Modifier.size(18.dp),
         )
         Box(modifier = Modifier.weight(1f)) {
             if (query.isEmpty()) {
                 Text(
                     text = placeholder,
                     color = colors.textFaint,
-                    fontSize = 14.sp,
+                    style = type.body,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -920,10 +960,7 @@ private fun SpaceSearchField(
                 value = query,
                 onValueChange = onQueryChange,
                 singleLine = true,
-                textStyle = TabularNumStyle.copy(
-                    color = colors.text,
-                    fontSize = 14.sp,
-                ),
+                textStyle = type.body.tabular().copy(color = colors.text),
                 cursorBrush = SolidColor(colors.accent),
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -931,10 +968,10 @@ private fun SpaceSearchField(
         if (query.isNotEmpty()) {
             IconButton(
                 onClick = { onQueryChange("") },
-                modifier = Modifier.size(28.dp),
+                modifier = Modifier.size(32.dp),
             ) {
                 Icon(
-                    imageVector = Icons.Filled.Close,
+                    imageVector = Icons.Rounded.Close,
                     contentDescription = "Clear search",
                     tint = colors.textDim,
                     modifier = Modifier.size(16.dp),
@@ -956,19 +993,19 @@ private fun FilterAndSortBar(
     onSelectSort: (SpaceSort) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     var sortMenuExpanded by remember { mutableStateOf(false) }
 
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.weight(1f),
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Edge-to-edge filter chip rail (36.dp visible pill inside 48.dp touch target)
+        LazyRow(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             if (tab == SpaceTab.OFFLOADED) {
-                SpaceFilter.entries.forEach { filter ->
+                items(SpaceFilter.entries, key = { "drive_${it.name}" }) { filter ->
                     FilterChipButton(
                         label = filter.label,
                         selected = driveKindFilter == filter,
@@ -976,7 +1013,7 @@ private fun FilterAndSortBar(
                     )
                 }
             } else {
-                LocalStatusChip.entries.forEach { chip ->
+                items(LocalStatusChip.entries, key = { "local_${it.name}" }) { chip ->
                     FilterChipButton(
                         label = chip.label,
                         selected = localStatusChip == chip,
@@ -986,45 +1023,69 @@ private fun FilterAndSortBar(
             }
         }
 
+        // Labeled item count + Sort trigger aligned with the list below
         Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (visibleCount > 0) {
-                Text(
-                    text = "$visibleCount",
-                    color = colors.textFaint,
-                    style = TabularNumStyle.copy(fontSize = 12.sp),
-                )
-            }
+            Text(
+                text = if (visibleCount > 0) {
+                    formatSpaceCountLabel(tab = tab, driveKindFilter = driveKindFilter, count = visibleCount)
+                } else {
+                    ""
+                },
+                color = colors.textDim,
+                style = type.caption.tabular().copy(fontWeight = FontWeight.Medium),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+
             Box {
-                Row(
+                val sortInteraction = remember { MutableInteractionSource() }
+                Box(
                     modifier = Modifier
-                        .clip(CircleShape)
-                        .background(colors.surface)
-                        .clickable { sortMenuExpanded = true }
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        .heightIn(min = 48.dp)
+                        .clickable(
+                            role = Role.Button,
+                            interactionSource = sortInteraction,
+                            indication = null,
+                            onClick = { sortMenuExpanded = true },
+                        ),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.Sort,
-                        contentDescription = "Sort",
-                        tint = colors.textDim,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Text(
-                        text = if (tab == SpaceTab.OFFLOADED && sort == SpaceSort.WATCHED) "Recent" else sort.label,
-                        color = colors.textDim,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
+                    Row(
+                        modifier = Modifier
+                            .height(34.dp)
+                            .clip(CircleShape)
+                            .background(colors.surface)
+                            .border(0.5.dp, colors.hairline, CircleShape)
+                            .indication(sortInteraction, ripple())
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.Sort,
+                            contentDescription = "Sort",
+                            tint = colors.textDim,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Text(
+                            text = if (tab == SpaceTab.OFFLOADED && sort == SpaceSort.WATCHED) "Recent" else sort.label,
+                            color = colors.textDim,
+                            style = type.caption.copy(fontWeight = FontWeight.Medium),
+                            maxLines = 1,
+                        )
+                    }
                 }
 
                 DropdownMenu(
                     expanded = sortMenuExpanded,
                     onDismissRequest = { sortMenuExpanded = false },
-                    containerColor = colors.surfaceRaised,
+                    containerColor = if (colors.isDark) colors.surfaceRaised else colors.surface,
                 ) {
                     SpaceSort.entries.forEach { option ->
                         val label = if (tab == SpaceTab.OFFLOADED && option == SpaceSort.WATCHED) {
@@ -1037,14 +1098,15 @@ private fun FilterAndSortBar(
                                 Text(
                                     text = label,
                                     color = if (sort == option) colors.text else colors.textDim,
-                                    fontWeight = if (sort == option) FontWeight.SemiBold else FontWeight.Normal,
-                                    fontSize = 14.sp,
+                                    style = type.body.copy(
+                                        fontWeight = if (sort == option) FontWeight.SemiBold else FontWeight.Normal,
+                                    ),
                                 )
                             },
                             trailingIcon = if (sort == option) {
                                 {
                                     Icon(
-                                        imageVector = Icons.Filled.Check,
+                                        imageVector = Icons.Rounded.Check,
                                         contentDescription = null,
                                         tint = colors.accent,
                                         modifier = Modifier.size(16.dp),
@@ -1072,20 +1134,42 @@ private fun FilterChipButton(
     onClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val interactionSource = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
-            .clip(CircleShape)
-            .background(if (selected) colors.surfaceRaised else colors.surface)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 11.dp, vertical = 5.dp),
+            .heightIn(min = 48.dp)
+            .clickable(
+                role = Role.Tab,
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = label,
-            color = if (selected) colors.text else colors.textFaint,
-            fontSize = 12.5.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-        )
+        Box(
+            modifier = Modifier
+                .height(36.dp)
+                .clip(CircleShape)
+                .background(if (selected) colors.accentSoft else colors.surface)
+                .border(
+                    width = if (selected) 0.dp else 0.5.dp,
+                    color = if (selected) Color.Transparent else colors.hairline,
+                    shape = CircleShape,
+                )
+                .indication(interactionSource, ripple())
+                .padding(horizontal = 14.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = label,
+                color = if (selected) colors.accent else colors.textDim,
+                style = type.caption.copy(
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                ),
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -1110,7 +1194,7 @@ private fun SpacePosterThumbnail(
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            imageVector = if (isSeason) Icons.Filled.Tv else Icons.Filled.Movie,
+            imageVector = if (isSeason) Icons.Rounded.Tv else Icons.Rounded.Movie,
             contentDescription = null,
             tint = colors.textFaint,
             modifier = Modifier.size(18.dp),
@@ -1138,7 +1222,7 @@ private fun SpacePosterThumbnail(
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.Check,
+                        imageVector = Icons.Rounded.Check,
                         contentDescription = "Selected",
                         tint = colors.onAccent,
                         modifier = Modifier.size(14.dp),
@@ -1163,6 +1247,7 @@ private fun SpacePosterThumbnail(
 @Composable
 private fun CandidateRow(
     item: SpaceCandidate,
+    posterUrl: String?,
     selectionMode: Boolean,
     selected: Boolean,
     activeJob: TransferJob?,
@@ -1171,6 +1256,7 @@ private fun CandidateRow(
     onLongClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val locked = activeJob != null
     val subParts = buildList {
         if (!item.subtitle.isNullOrBlank()) add(item.subtitle)
@@ -1195,7 +1281,7 @@ private fun CandidateRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             SpacePosterThumbnail(
-                posterUrl = item.resolvedPosterUrl,
+                posterUrl = posterUrl,
                 isSeason = item.isSeason,
                 selected = selected,
                 selectionMode = selectionMode,
@@ -1209,8 +1295,7 @@ private fun CandidateRow(
                 Text(
                     text = item.title,
                     color = if (locked) colors.textDim else colors.text,
-                    fontSize = 14.5.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -1223,7 +1308,7 @@ private fun CandidateRow(
                         Text(
                             text = subParts.joinToString(" · "),
                             color = colors.textDim,
-                            style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                            style = type.caption.tabular(),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -1232,7 +1317,7 @@ private fun CandidateRow(
                         InFlightBadge(job = activeJob)
                     } else if (item.isWatched) {
                         Icon(
-                            imageVector = Icons.Filled.Check,
+                            imageVector = Icons.Rounded.Check,
                             contentDescription = "Watched",
                             tint = colors.textFaint,
                             modifier = Modifier.size(13.dp),
@@ -1241,7 +1326,7 @@ private fun CandidateRow(
                             Text(
                                 text = "${item.unwatchedUsers.joinToString(", ")} unwatched",
                                 color = colors.warn,
-                                fontSize = 11.5.sp,
+                                style = type.micro,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -1253,10 +1338,7 @@ private fun CandidateRow(
             Text(
                 text = formatBytes(item.sizeBytes),
                 color = if (locked) colors.textDim else colors.text,
-                style = TabularNumStyle.copy(
-                    fontSize = 13.5.sp,
-                    fontWeight = FontWeight.Medium,
-                ),
+                style = type.body.tabular().copy(fontWeight = FontWeight.Medium),
                 maxLines = 1,
             )
         }
@@ -1275,6 +1357,7 @@ private fun CandidateRow(
 @Composable
 private fun DriveItemRow(
     item: DriveItem,
+    posterUrl: String?,
     selectionMode: Boolean,
     selected: Boolean,
     activeJob: TransferJob?,
@@ -1283,6 +1366,7 @@ private fun DriveItemRow(
     onLongClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val locked = activeJob != null
     val subParts = buildList {
         if (!item.subtitle.isNullOrBlank()) add(item.subtitle)
@@ -1307,7 +1391,7 @@ private fun DriveItemRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             SpacePosterThumbnail(
-                posterUrl = item.resolvedPosterUrl,
+                posterUrl = posterUrl,
                 isSeason = item.isSeason,
                 selected = selected,
                 selectionMode = selectionMode,
@@ -1321,8 +1405,7 @@ private fun DriveItemRow(
                 Text(
                     text = item.title,
                     color = if (locked) colors.textDim else colors.text,
-                    fontSize = 14.5.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -1336,7 +1419,7 @@ private fun DriveItemRow(
                             Text(
                                 text = subParts.joinToString(" · "),
                                 color = colors.textDim,
-                                style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                                style = type.caption.tabular(),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -1351,10 +1434,7 @@ private fun DriveItemRow(
             Text(
                 text = formatBytes(item.sizeBytes),
                 color = if (locked) colors.textDim else colors.text,
-                style = TabularNumStyle.copy(
-                    fontSize = 13.5.sp,
-                    fontWeight = FontWeight.Medium,
-                ),
+                style = type.body.tabular().copy(fontWeight = FontWeight.Medium),
                 maxLines = 1,
             )
         }
@@ -1395,7 +1475,9 @@ private fun SelectionActionBar(
     onDeleteAction: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val shape = RoundedCornerShape(18.dp)
+    val barBg = if (colors.isDark) colors.surfaceRaised else colors.surface
 
     Box(
         modifier = Modifier
@@ -1407,7 +1489,7 @@ private fun SelectionActionBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(shape)
-                .background(colors.surfaceRaised)
+                .background(barBg)
                 .border(0.5.dp, colors.hairline, shape)
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -1418,7 +1500,7 @@ private fun SelectionActionBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Icon(
-                    imageVector = Icons.Filled.Close,
+                    imageVector = Icons.Rounded.Close,
                     contentDescription = "Clear selection",
                     tint = colors.textDim,
                     modifier = Modifier
@@ -1429,19 +1511,15 @@ private fun SelectionActionBar(
                 Text(
                     text = "$count selected · ${formatBytes(totalBytes)}",
                     color = colors.text,
-                    style = TabularNumStyle.copy(
-                        fontSize = 13.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    ),
+                    style = type.body.tabular().copy(fontWeight = FontWeight.SemiBold),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
                     text = if (allVisibleSelected) "Deselect all" else "Select all",
-                    color = colors.textDim,
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Medium,
+                    color = colors.accent,
+                    style = type.caption.copy(fontWeight = FontWeight.Medium),
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
                         .clickable(onClick = onToggleSelectAll)
@@ -1455,7 +1533,7 @@ private fun SelectionActionBar(
             ) {
                 PcButton(
                     label = if (isDriveMode) "Restore" else "Offload",
-                    icon = if (isDriveMode) Icons.Filled.CloudDownload else Icons.Filled.CloudUpload,
+                    icon = if (isDriveMode) Icons.Rounded.CloudDownload else Icons.Rounded.CloudUpload,
                     variant = PcButtonVariant.Primary,
                     compact = true,
                     enabled = isDriveMode || !offloadDisabled,
@@ -1464,7 +1542,7 @@ private fun SelectionActionBar(
                 )
                 PcButton(
                     label = "Delete",
-                    icon = Icons.Filled.Delete,
+                    icon = Icons.Rounded.Delete,
                     variant = PcButtonVariant.Danger,
                     compact = true,
                     onClick = onDeleteAction,
@@ -1478,12 +1556,14 @@ private fun SelectionActionBar(
 @Composable
 private fun SingleItemActionSheetContent(
     focused: FocusedSpaceItem,
+    posterUrl: String?,
     offloadDisabled: Boolean,
     onSelectMultiple: () -> Unit,
     onPrimaryAction: () -> Unit,
     onDeleteAction: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val isDrive = focused is FocusedSpaceItem.Drive
     val title = when (focused) {
         is FocusedSpaceItem.Local -> focused.item.title
@@ -1514,10 +1594,6 @@ private fun SingleItemActionSheetContent(
                 add(formatBytes(driveItem.sizeBytes))
             }.joinToString(" · ")
         }
-    }
-    val posterUrl = when (focused) {
-        is FocusedSpaceItem.Local -> focused.item.resolvedPosterUrl
-        is FocusedSpaceItem.Drive -> focused.item.resolvedPosterUrl
     }
     val isSeason = when (focused) {
         is FocusedSpaceItem.Local -> focused.item.isSeason
@@ -1550,15 +1626,14 @@ private fun SingleItemActionSheetContent(
                 Text(
                     text = title,
                     color = colors.text,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = type.collapsedTitle,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = subtitle,
                     color = colors.textDim,
-                    style = TabularNumStyle.copy(fontSize = 13.sp),
+                    style = type.caption.tabular(),
                 )
                 if (focused is FocusedSpaceItem.Local) {
                     val watchedInfo = when {
@@ -1570,7 +1645,7 @@ private fun SingleItemActionSheetContent(
                     Text(
                         text = watchedInfo,
                         color = colors.textFaint,
-                        fontSize = 12.sp,
+                        style = type.caption,
                     )
                 }
             }
@@ -1582,7 +1657,7 @@ private fun SingleItemActionSheetContent(
         ) {
             PcButton(
                 label = if (isDrive) "Restore" else "Offload",
-                icon = if (isDrive) Icons.Filled.CloudDownload else Icons.Filled.CloudUpload,
+                icon = if (isDrive) Icons.Rounded.CloudDownload else Icons.Rounded.CloudUpload,
                 variant = PcButtonVariant.Primary,
                 enabled = isDrive || !offloadDisabled,
                 onClick = onPrimaryAction,
@@ -1590,7 +1665,7 @@ private fun SingleItemActionSheetContent(
             )
             PcButton(
                 label = "Delete",
-                icon = Icons.Filled.Delete,
+                icon = Icons.Rounded.Delete,
                 variant = PcButtonVariant.Danger,
                 onClick = onDeleteAction,
                 modifier = Modifier.weight(0.9f),
@@ -1599,7 +1674,7 @@ private fun SingleItemActionSheetContent(
 
         PcButton(
             label = "Select multiple",
-            icon = Icons.Filled.CheckCircle,
+            icon = Icons.Rounded.CheckCircle,
             variant = PcButtonVariant.Subtle,
             onClick = onSelectMultiple,
             modifier = Modifier.fillMaxWidth(),
@@ -1617,6 +1692,7 @@ private fun ConfirmActionSheetContent(
     onConfirm: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val isLocal = action == SpaceConfirmAction.DELETE_LOCAL || action == SpaceConfirmAction.OFFLOAD
     val count = if (isLocal) localSelection.count else driveSelection.count
     val totalBytes = if (isLocal) localSelection.totalBytes else driveSelection.totalBytes
@@ -1644,9 +1720,9 @@ private fun ConfirmActionSheetContent(
         SpaceConfirmAction.DELETE_DRIVE -> "Delete from Drive"
     }
     val confirmIcon = when (action) {
-        SpaceConfirmAction.OFFLOAD -> Icons.Filled.CloudUpload
-        SpaceConfirmAction.RESTORE -> Icons.Filled.CloudDownload
-        SpaceConfirmAction.DELETE_LOCAL, SpaceConfirmAction.DELETE_DRIVE -> Icons.Filled.Delete
+        SpaceConfirmAction.OFFLOAD -> Icons.Rounded.CloudUpload
+        SpaceConfirmAction.RESTORE -> Icons.Rounded.CloudDownload
+        SpaceConfirmAction.DELETE_LOCAL, SpaceConfirmAction.DELETE_DRIVE -> Icons.Rounded.Delete
     }
     val confirmVariant = when (action) {
         SpaceConfirmAction.OFFLOAD, SpaceConfirmAction.RESTORE -> PcButtonVariant.Primary
@@ -1667,10 +1743,7 @@ private fun ConfirmActionSheetContent(
             Text(
                 text = title,
                 color = colors.text,
-                style = TabularNumStyle.copy(
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                ),
+                style = type.collapsedTitle.tabular(),
                 modifier = Modifier.weight(1f),
             )
             Spacer(modifier = Modifier.width(8.dp))
@@ -1683,8 +1756,7 @@ private fun ConfirmActionSheetContent(
         Text(
             text = description,
             color = colors.textDim,
-            fontSize = 13.sp,
-            lineHeight = 19.sp,
+            style = type.body,
         )
 
         if (action == SpaceConfirmAction.DELETE_LOCAL && localSelection.unwatched.isNotEmpty()) {
@@ -1701,7 +1773,7 @@ private fun ConfirmActionSheetContent(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.Warning,
+                        imageVector = Icons.Rounded.Warning,
                         contentDescription = null,
                         tint = colors.warn,
                         modifier = Modifier.size(16.dp),
@@ -1709,8 +1781,7 @@ private fun ConfirmActionSheetContent(
                     Text(
                         text = "Not watched by others",
                         color = colors.warn,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        style = type.caption.copy(fontWeight = FontWeight.SemiBold),
                     )
                 }
                 localSelection.unwatched.forEach { item ->
@@ -1718,7 +1789,7 @@ private fun ConfirmActionSheetContent(
                     Text(
                         text = "• ${item.title}$sub (${item.unwatchedUsers.joinToString(", ")})",
                         color = colors.text,
-                        fontSize = 12.5.sp,
+                        style = type.caption,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -1784,6 +1855,7 @@ private fun ConfirmItemRow(
     sizeBytes: Long,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1792,7 +1864,7 @@ private fun ConfirmItemRow(
         Text(
             text = if (!subtitle.isNullOrBlank()) "$title · $subtitle" else title,
             color = colors.textDim,
-            fontSize = 13.5.sp,
+            style = type.body,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
@@ -1801,10 +1873,7 @@ private fun ConfirmItemRow(
         Text(
             text = formatBytes(sizeBytes),
             color = colors.text,
-            style = TabularNumStyle.copy(
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-            ),
+            style = type.caption.tabular().copy(fontWeight = FontWeight.Medium),
             maxLines = 1,
         )
     }
@@ -1816,6 +1885,7 @@ private fun FreeFeedbackCard(
     onDismiss: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val failedCount = feedback.results.count { !it.ok }
     val hasWarnings = feedback.warnings.isNotEmpty() || feedback.results.any { it.warnings.isNotEmpty() }
     val title = when {
@@ -1834,10 +1904,7 @@ private fun FreeFeedbackCard(
             Text(
                 text = title,
                 color = accentColor,
-                style = TabularNumStyle.copy(
-                    fontSize = 14.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                ),
+                style = type.cardTitle.tabular().copy(fontWeight = FontWeight.SemiBold),
             )
             feedback.results.forEach { res ->
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -1846,7 +1913,7 @@ private fun FreeFeedbackCard(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Icon(
-                            imageVector = if (res.ok) Icons.Filled.Check else Icons.Filled.Error,
+                            imageVector = if (res.ok) Icons.Rounded.Check else Icons.Rounded.Error,
                             contentDescription = null,
                             tint = if (res.ok) colors.ok else colors.bad,
                             modifier = Modifier.size(14.dp),
@@ -1854,7 +1921,7 @@ private fun FreeFeedbackCard(
                         Text(
                             text = res.label.ifBlank { res.id },
                             color = colors.text,
-                            fontSize = 13.sp,
+                            style = type.caption,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
@@ -1863,7 +1930,7 @@ private fun FreeFeedbackCard(
                             Text(
                                 text = formatBytes(res.freedBytes),
                                 color = colors.textDim,
-                                style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                                style = type.caption.tabular(),
                             )
                         }
                     }
@@ -1871,7 +1938,7 @@ private fun FreeFeedbackCard(
                         Text(
                             text = res.error,
                             color = colors.bad,
-                            fontSize = 12.sp,
+                            style = type.caption,
                             modifier = Modifier.padding(start = 20.dp),
                         )
                     }
@@ -1879,14 +1946,14 @@ private fun FreeFeedbackCard(
                         Text(
                             text = w,
                             color = colors.warn,
-                            fontSize = 12.sp,
+                            style = type.caption,
                             modifier = Modifier.padding(start = 20.dp),
                         )
                     }
                 }
             }
             feedback.warnings.forEach { w ->
-                Text(text = w, color = colors.warn, fontSize = 12.sp)
+                Text(text = w, color = colors.warn, style = type.caption)
             }
             PcButton(
                 label = "Dismiss",
@@ -1904,6 +1971,7 @@ private fun DriveDeleteFeedbackCard(
     onDismiss: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val title = if (feedback.ok) {
         "Deleted ${feedback.results.size} item${if (feedback.results.size == 1) "" else "s"} from Drive"
     } else {
@@ -1915,14 +1983,13 @@ private fun DriveDeleteFeedbackCard(
             Text(
                 text = title,
                 color = if (feedback.ok) colors.ok else colors.warn,
-                fontSize = 14.5.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
             )
             feedback.results.filter { !it.ok }.forEach { res ->
                 Text(
                     text = "${res.relPath}: ${res.error ?: "Failed"}",
                     color = colors.bad,
-                    fontSize = 12.sp,
+                    style = type.caption,
                 )
             }
             PcButton(

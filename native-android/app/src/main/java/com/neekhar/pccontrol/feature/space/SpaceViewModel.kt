@@ -14,6 +14,9 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.util.concurrent.ConcurrentHashMap
 
 enum class SpaceConfirmAction {
     DELETE_LOCAL,
@@ -57,7 +60,13 @@ data class SpaceUiState(
     val confirmAction: SpaceConfirmAction? = null,
     val isBusyAction: Boolean = false,
     val cancellingJobId: String? = null,
+    val posterUrls: Map<String, String> = emptyMap(),
 ) {
+    fun posterUrlFor(item: SpaceCandidate): String? =
+        item.resolvedPosterUrl ?: posterUrls[item.posterCacheKey]
+
+    fun posterUrlFor(item: DriveItem): String? =
+        item.resolvedPosterUrl ?: posterUrls[item.posterCacheKey]
     val activeJobs: List<TransferJob>
         get() = activeTransferJobs(jobs)
 
@@ -166,17 +175,22 @@ class SpaceViewModel(
             localData = initialLocal,
             driveData = initialDrive,
             jobs = initialDrive?.jobs.orEmpty(),
+            posterUrls = repository.getCachedPosters(),
         ),
     )
     val uiState: StateFlow<SpaceUiState> = _uiState.asStateFlow()
 
     private var sseJob: Job? = null
     private var fallbackPollJob: Job? = null
+    private val posterSemaphore = Semaphore(permits = 4)
+    private val attemptedPosterKeys = ConcurrentHashMap.newKeySet<String>()
     private var jobsSeq: Long = 0L
     private var prevJobStatuses: Map<String, String> =
         initialDrive?.jobs?.associate { it.id to it.status }.orEmpty()
 
     init {
+        initialLocal?.candidates?.let { resolveMissingCandidatePosters(it) }
+        initialDrive?.items?.let { resolveMissingDrivePosters(it) }
         loadAll(forceDrive = false)
     }
 
@@ -277,6 +291,7 @@ class SpaceViewModel(
                         },
                     )
                 }
+                resolveMissingCandidatePosters(data.candidates)
             }
             is ApiResult.Error -> {
                 _uiState.update { state ->
@@ -319,6 +334,7 @@ class SpaceViewModel(
                         selectedDrivePaths = pruneDisabledSelection(prunedPaths, lockedDrive),
                     )
                 }
+                resolveMissingDrivePosters(data.items)
             }
             is ApiResult.Error -> {
                 _uiState.update { state ->
@@ -698,6 +714,61 @@ class SpaceViewModel(
         stopStream()
         super.onCleared()
     }
+
+    private fun resolveMissingCandidatePosters(items: List<SpaceCandidate>) {
+        val currentMap = _uiState.value.posterUrls
+        val requests = items
+            .asSequence()
+            .filter { it.resolvedPosterUrl == null && it.posterCacheKey !in currentMap }
+            .distinctBy { it.posterCacheKey }
+            .map { PosterRequest(key = it.posterCacheKey, kind = it.kind, title = it.title, year = it.year, tmdbId = it.tmdbId) }
+            .toList()
+        enqueuePosterLookups(requests)
+    }
+
+    private fun resolveMissingDrivePosters(items: List<DriveItem>) {
+        val currentMap = _uiState.value.posterUrls
+        val requests = items
+            .asSequence()
+            .filter { it.resolvedPosterUrl == null && it.posterCacheKey !in currentMap }
+            .distinctBy { it.posterCacheKey }
+            .map { PosterRequest(key = it.posterCacheKey, kind = it.kind, title = it.title, year = it.year, tmdbId = it.tmdbId) }
+            .toList()
+        enqueuePosterLookups(requests)
+    }
+
+    private fun enqueuePosterLookups(requests: List<PosterRequest>) {
+        for (req in requests) {
+            if (!attemptedPosterKeys.add(req.key)) continue
+            viewModelScope.launch {
+                val resolved = posterSemaphore.withPermit {
+                    repository.resolvePoster(
+                        kind = req.kind,
+                        title = req.title,
+                        year = req.year,
+                        tmdbId = req.tmdbId,
+                    )
+                }
+                if (resolved != null) {
+                    _uiState.update { state ->
+                        if (state.posterUrls[resolved.first] == resolved.second) {
+                            state
+                        } else {
+                            state.copy(posterUrls = state.posterUrls + resolved)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private data class PosterRequest(
+        val key: String,
+        val kind: String,
+        val title: String,
+        val year: Int?,
+        val tmdbId: Int?,
+    )
 
     companion object {
         private const val FALLBACK_POLL_MS = 4_000L

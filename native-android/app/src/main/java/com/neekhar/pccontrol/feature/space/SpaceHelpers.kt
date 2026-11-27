@@ -502,6 +502,26 @@ fun formatDuration(seconds: Long): String {
 private const val TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185"
 
 /**
+ * Formats a clear labeled count for Space lists instead of a bare number (e.g. "11 movies", "4 shows", "11 items").
+ */
+fun formatSpaceCountLabel(
+    tab: SpaceTab,
+    driveKindFilter: SpaceFilter,
+    count: Int,
+): String {
+    val (singular, plural) = when (tab) {
+        SpaceTab.MOVIES -> "movie" to "movies"
+        SpaceTab.TV_SHOWS -> "show" to "shows"
+        SpaceTab.OFFLOADED -> when (driveKindFilter) {
+            SpaceFilter.MOVIE -> "movie" to "movies"
+            SpaceFilter.SEASON -> "show" to "shows"
+            SpaceFilter.ALL -> "item" to "items"
+        }
+    }
+    return "$count ${if (count == 1) singular else plural}"
+}
+
+/**
  * Resolves an optional poster URL or TMDB relative path (e.g. "/abc.jpg") into a loadable HTTP(S) URL.
  */
 fun resolveSpacePosterUrl(
@@ -517,4 +537,70 @@ fun resolveSpacePosterUrl(
         raw.startsWith("/") -> "$TMDB_POSTER_BASE$raw"
         else -> null
     }
+}
+
+private val NON_ALNUM_REGEX = Regex("[^a-z0-9]+")
+
+internal fun normalizeMediaTitle(title: String): String =
+    NON_ALNUM_REGEX.replace(title.lowercase(Locale.US), " ").trim()
+
+/**
+ * Canonical cache key for resolving posters across movies, TV seasons (shared per show), and Drive items.
+ */
+fun spacePosterCacheKey(
+    kind: String,
+    title: String,
+    year: Int? = null,
+    tmdbId: Int? = null,
+): String {
+    val mediaType = if (kind == "season" || kind == "tv") "tv" else "movie"
+    if (tmdbId != null && tmdbId > 0) {
+        return "tmdb:$mediaType:$tmdbId"
+    }
+    val normTitle = normalizeMediaTitle(title)
+    return if (year != null && year > 0) {
+        "title:$mediaType:$normTitle:$year"
+    } else {
+        "title:$mediaType:$normTitle"
+    }
+}
+
+/**
+ * Picks the most accurate poster URL from Seerr search hits for a Space media item.
+ */
+fun pickBestSeerrPoster(
+    hits: List<SpacePosterLookupHit>,
+    kind: String,
+    title: String,
+    year: Int? = null,
+): String? {
+    val expectedType = if (kind == "season" || kind == "tv") "tv" else "movie"
+    val targetTitle = normalizeMediaTitle(title)
+    if (targetTitle.isEmpty()) return null
+
+    val candidates = hits.filter { hit ->
+        hit.mediaType.equals(expectedType, ignoreCase = true) &&
+            !resolveSpacePosterUrl(poster = hit.poster).isNullOrBlank()
+    }
+    if (candidates.isEmpty()) return null
+
+    fun score(hit: SpacePosterLookupHit): Int {
+        val hitTitle = normalizeMediaTitle(hit.title)
+        val exactTitle = hitTitle == targetTitle
+        val closeTitle = !exactTitle && (hitTitle.startsWith(targetTitle) || targetTitle.startsWith(hitTitle))
+        val yearDelta = if (year != null && hit.year != null) kotlin.math.abs(hit.year - year) else null
+        return when {
+            exactTitle && yearDelta == 0 -> 100
+            exactTitle && yearDelta == 1 -> 90
+            exactTitle && yearDelta == null -> 80
+            exactTitle -> 70
+            closeTitle && yearDelta == 0 -> 60
+            closeTitle && yearDelta == 1 -> 50
+            else -> 0
+        }
+    }
+
+    val best = candidates.maxByOrNull(::score) ?: return null
+    if (score(best) <= 0) return null
+    return resolveSpacePosterUrl(poster = best.poster)
 }

@@ -4079,12 +4079,17 @@ def arr_retry_import(body):
     return 200, {"ok": True, "app": app, "command_id": res.get("id")}
 
 
+def _jellyfin_api_key():
+    with open(JELLYFIN_KEY_FILE) as f:
+        key = f.read().strip()
+    if not key:
+        raise ValueError("no Jellyfin API key")
+    return key
+
+
 def jellyfin_refresh_library():
     try:
-        with open(JELLYFIN_KEY_FILE) as f:
-            key = f.read().strip()
-        if not key:
-            raise ValueError("no Jellyfin API key")
+        key = _jellyfin_api_key()
         req = urllib.request.Request(
             f"{JELLYFIN_URL}/Library/Refresh", data=b"", method="POST",
             headers={"Authorization": f'MediaBrowser Token="{key}"'},
@@ -4094,6 +4099,153 @@ def jellyfin_refresh_library():
     except (OSError, ValueError) as e:
         return 502, {"error": clip(f"Jellyfin refresh failed: {e}", 240)}
     return 200, {"ok": True}
+
+
+JELLYFIN_ITEM_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+def _jellyfin_extract_item_id(media_url):
+    """Extract a 32-hex Jellyfin item ID from a mediaUrl's query/fragment `id` param or path segment."""
+    if not isinstance(media_url, str) or not media_url.strip():
+        return None
+    parts = urllib.parse.urlsplit(media_url.strip())
+    # Check `id` query parameter in both URL query and hash-router fragment (e.g. #/details?id=...)
+    frag_path, _, frag_query = parts.fragment.partition("?")
+    for qs in (parts.query, frag_query):
+        if not qs:
+            continue
+        for val in urllib.parse.parse_qs(qs).get("id", ()):
+            if JELLYFIN_ITEM_ID_RE.match(val):
+                return val
+    # Fallback: check path segments in URL path and fragment path
+    for raw_path in (parts.path, frag_path):
+        for seg in raw_path.split("/"):
+            if JELLYFIN_ITEM_ID_RE.match(seg):
+                return seg
+    return None
+
+
+def _jellyfin_lookup_item_by_tmdb(key, tmdb_id, media_type):
+    include_type = "Series" if media_type == "tv" else "Movie"
+    qs = urllib.parse.urlencode({
+        "Recursive": "true",
+        "IncludeItemTypes": include_type,
+        "AnyProviderIdEquals": f"tmdb.{tmdb_id}",
+    })
+    req = urllib.request.Request(
+        f"{JELLYFIN_URL}/Items?{qs}",
+        headers={"Authorization": f'MediaBrowser Token="{key}"'},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        data = json.loads(r.read() or b"{}")
+    items = data.get("Items") if isinstance(data, dict) else None
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and item.get("Id"):
+                return str(item["Id"])
+    return None
+
+
+def _jellyfin_find_tv_session(sessions, device_name, explicit_device=False):
+    controllable = [
+        s for s in (sessions if isinstance(sessions, list) else [])
+        if isinstance(s, dict) and s.get("SupportsRemoteControl") is True and s.get("Id")
+    ]
+    needle = device_name.lower()
+    # 1. Exact DeviceName match (case-insensitive)
+    for s in controllable:
+        if str(s.get("DeviceName") or "").strip().lower() == needle:
+            return s
+    # 2. Substring DeviceName match (case-insensitive)
+    for s in controllable:
+        if needle in str(s.get("DeviceName") or "").lower():
+            return s
+    # 3. Fallback to Android TV / TV client when deviceName was not explicitly overridden
+    if not explicit_device:
+        for kw in ("android tv", "tv"):
+            for s in controllable:
+                if kw in str(s.get("Client") or "").lower():
+                    return s
+    return None
+
+
+def _jellyfin_send_remote_command(key, session_id, item_id, media_type, title=""):
+    sid = urllib.parse.quote(session_id, safe="")
+    if media_type == "tv":
+        qs = urllib.parse.urlencode({
+            "itemId": item_id,
+            "itemType": "Series",
+            "itemName": title,
+        })
+        url = f"{JELLYFIN_URL}/Sessions/{sid}/Viewing?{qs}"
+        action = "view"
+    else:
+        qs = urllib.parse.urlencode({
+            "itemIds": item_id,
+            "playCommand": "PlayNow",
+        })
+        url = f"{JELLYFIN_URL}/Sessions/{sid}/Playing?{qs}"
+        action = "play"
+    req = urllib.request.Request(
+        url, data=b"", method="POST",
+        headers={"Authorization": f'MediaBrowser Token="{key}"'},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        r.read()
+    return action
+
+
+def jellyfin_play_on_tv(body):
+    """Send an available movie or TV show to the configured Jellyfin Android TV session.
+    Level 2 (auto-launching org.jellyfin.androidtv via Android TV Remote v2 / ADB when no
+    session is active) can hook in right after `_jellyfin_find_tv_session` returns None."""
+    media_url = body.get("mediaUrl")
+    tmdb_id_raw = body.get("tmdbId")
+    tmdb_id = None
+    if tmdb_id_raw is not None and not isinstance(tmdb_id_raw, bool):
+        try:
+            val = int(tmdb_id_raw)
+            if val > 0:
+                tmdb_id = val
+        except (TypeError, ValueError):
+            pass
+    media_type = "tv" if str(body.get("mediaType") or "").strip().lower() == "tv" else "movie"
+    title = str(body.get("title") or "").strip()
+    explicit_raw = body.get("deviceName")
+    explicit_device = isinstance(explicit_raw, str) and bool(explicit_raw.strip())
+    target_device = (
+        explicit_raw.strip() if explicit_device
+        else (str(CONFIG.get("jellyfin_tv_device") or "").strip() or "Lumio Arc 7")
+    )
+
+    try:
+        key = _jellyfin_api_key()
+        item_id = _jellyfin_extract_item_id(media_url)
+        if not item_id and tmdb_id is not None:
+            item_id = _jellyfin_lookup_item_by_tmdb(key, tmdb_id, media_type)
+        if not item_id:
+            return 404, {"ok": False, "error": "Item not found in Jellyfin library."}
+
+        req = urllib.request.Request(
+            f"{JELLYFIN_URL}/Sessions",
+            headers={"Authorization": f'MediaBrowser Token="{key}"'},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            sessions = json.loads(r.read() or b"[]")
+
+        session = _jellyfin_find_tv_session(sessions, target_device, explicit_device=explicit_device)
+        if not session:
+            return 409, {
+                "ok": False,
+                "code": "tv_offline",
+                "error": f"{target_device} isn't open in Jellyfin right now. Open Jellyfin on the projector and try again.",
+            }
+
+        action = _jellyfin_send_remote_command(key, str(session["Id"]), item_id, media_type, title=title)
+        device_label = str(session.get("DeviceName") or session.get("Client") or target_device)
+        return 200, {"ok": True, "device": device_label, "action": action, "itemId": item_id}
+    except (OSError, ValueError) as e:
+        return 502, {"ok": False, "error": clip(f"Jellyfin play on TV failed: {e}", 240)}
 
 
 def kbd_lock_status(run_fn=None):
@@ -5257,6 +5409,8 @@ def route_round4_post(path, b):
         return arr_retry_import(b)
     if path == "/api/jellyfin/refresh":
         return jellyfin_refresh_library()
+    if path == "/api/jellyfin/play-on-tv":
+        return jellyfin_play_on_tv(b)
     if path == "/api/kbd-lock":
         return kbd_lock_set(b)
     if path == "/api/seerr/request":

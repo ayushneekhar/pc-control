@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,6 +20,9 @@ data class SeerrDetailUiState(
     val error: String? = null,
     val overviewExpanded: Boolean = false,
     val submitting: Boolean = false,
+    val playingOnTv: Boolean = false,
+    val playOnTvStatus: String? = null,
+    val playOnTvError: String? = null,
     val selectedSeasons: Set<Int> = emptySet(),
     val showSeasonSheet: Boolean = false,
     val collectionSheet: SeerrCollectionSheetState = SeerrCollectionSheetState(),
@@ -57,6 +61,7 @@ class SeerrDetailViewModel(
 
     private var loadJob: Job? = null
     private var collectionJob: Job? = null
+    private var playOnTvClearJob: Job? = null
 
     init {
         if (tmdbId > 0) {
@@ -115,6 +120,58 @@ class SeerrDetailViewModel(
                 state.pickableSeasons.map { it.seasonNumber }.toSet()
             }
             state.copy(selectedSeasons = next)
+        }
+    }
+
+    fun playOnTv() {
+        val current = _uiState.value.item ?: return
+        if (_uiState.value.playingOnTv) return
+        playOnTvClearJob?.cancel()
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    playingOnTv = true,
+                    playOnTvStatus = null,
+                    playOnTvError = null,
+                )
+            }
+            when (
+                val res = repository.playOnTv(
+                    mediaUrl = current.mediaUrl,
+                    tmdbId = current.id,
+                    mediaType = normalizedType,
+                    title = current.title,
+                )
+            ) {
+                is ApiResult.Success -> {
+                    val device = res.data.device?.takeIf { it.isNotBlank() } ?: "TV"
+                    val statusMessage = if (res.data.action == "view") {
+                        "Opened on $device"
+                    } else {
+                        "Sent to $device"
+                    }
+                    _uiState.update {
+                        it.copy(
+                            playingOnTv = false,
+                            playOnTvStatus = statusMessage,
+                            playOnTvError = null,
+                        )
+                    }
+                    playOnTvClearJob = viewModelScope.launch {
+                        delay(3_000L)
+                        _uiState.update { it.copy(playOnTvStatus = null) }
+                    }
+                }
+                is ApiResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            playingOnTv = false,
+                            playOnTvStatus = null,
+                            playOnTvError = res.message,
+                        )
+                    }
+                }
+            }
         }
     }
 

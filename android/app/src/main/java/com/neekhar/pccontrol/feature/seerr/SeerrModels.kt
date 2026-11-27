@@ -327,3 +327,21 @@ data class SeerrCreateRequestResponse(
 data class SeerrResolveRequestBody(
     val url: String,
 )
+
+@Serializable
+data class PlayOnTvRequestBody(
+    val mediaUrl: String? = null,
+    val tmdbId: Int? = null,
+    val mediaType: String = "movie",
+    val title: String? = null,
+)
+
+@Serializable
+data class PlayOnTvResponse(
+    val ok: Boolean = false,
+    val device: String? = null,
+    val action: String? = null,
+    val itemId: String? = null,
+    val code: String? = null,
+    val error: String? = null,
+)

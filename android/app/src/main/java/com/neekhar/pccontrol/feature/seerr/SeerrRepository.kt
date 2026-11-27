@@ -95,6 +95,24 @@ class SeerrRepository(
         )
     }
 
+    suspend fun playOnTv(
+        mediaUrl: String?,
+        tmdbId: Int?,
+        mediaType: String,
+        title: String?,
+    ): ApiResult<PlayOnTvResponse> {
+        val type = if (mediaType == "tv") "tv" else "movie"
+        return api.postJson<PlayOnTvRequestBody, PlayOnTvResponse>(
+            pathOrUrl = "/pc/api/jellyfin/play-on-tv",
+            body = PlayOnTvRequestBody(
+                mediaUrl = mediaUrl?.takeIf { it.isNotBlank() },
+                tmdbId = tmdbId?.takeIf { it > 0 },
+                mediaType = type,
+                title = title?.takeIf { it.isNotBlank() },
+            ),
+        )
+    }
+
     fun getCachedRequests(): List<SeerrRequestItem>? {
         val raw = cache?.getString(CACHE_KEY_REQUESTS) ?: return null
         return runCatching {

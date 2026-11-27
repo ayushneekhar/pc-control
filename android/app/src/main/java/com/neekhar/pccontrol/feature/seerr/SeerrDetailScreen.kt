@@ -40,13 +40,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckBox
 import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.Person
-import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Tv
@@ -378,14 +378,33 @@ fun SeerrDetailScreen(
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }
-                        if (!item.mediaUrl.isNullOrBlank() && item.status == SeerrStatus.AVAILABLE) {
+                        if (item.status == SeerrStatus.AVAILABLE) {
+                            val hasPrimaryRequestAbove = (!state.isTv && state.canRequestMovie) ||
+                                (state.isTv && state.pickableSeasons.isNotEmpty())
                             PcButton(
-                                label = "Open in Jellyfin",
-                                onClick = { openExternalUrl(item.mediaUrl) },
-                                variant = PcButtonVariant.Subtle,
-                                icon = Icons.Rounded.PlayArrow,
+                                label = state.playOnTvStatus ?: "Play on TV",
+                                onClick = viewModel::playOnTv,
+                                variant = if (hasPrimaryRequestAbove) {
+                                    PcButtonVariant.Subtle
+                                } else {
+                                    PcButtonVariant.Primary
+                                },
+                                icon = if (state.playOnTvStatus != null) {
+                                    Icons.Rounded.Check
+                                } else {
+                                    Icons.Rounded.Tv
+                                },
+                                busy = state.playingOnTv,
+                                enabled = !state.loading && !state.playingOnTv,
                                 modifier = Modifier.fillMaxWidth(),
                             )
+                            if (!state.playOnTvError.isNullOrBlank()) {
+                                PcErrorBanner(
+                                    title = "Play on TV",
+                                    message = state.playOnTvError,
+                                    tone = PcTone.Warn,
+                                )
+                            }
                         }
                     }
                 }

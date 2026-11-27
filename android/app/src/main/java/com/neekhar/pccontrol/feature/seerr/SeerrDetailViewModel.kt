@@ -5,8 +5,11 @@ import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -23,6 +26,7 @@ data class SeerrDetailUiState(
     val playingOnTv: Boolean = false,
     val playOnTvStatus: String? = null,
     val playOnTvError: String? = null,
+    val playOnTvShowRemoteAction: Boolean = false,
     val selectedSeasons: Set<Int> = emptySet(),
     val showSeasonSheet: Boolean = false,
     val collectionSheet: SeerrCollectionSheetState = SeerrCollectionSheetState(),
@@ -58,6 +62,9 @@ class SeerrDetailViewModel(
         ),
     )
     val uiState: StateFlow<SeerrDetailUiState> = _uiState.asStateFlow()
+
+    private val _openTvRemoteEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val openTvRemoteEvents: SharedFlow<Unit> = _openTvRemoteEvents.asSharedFlow()
 
     private var loadJob: Job? = null
     private var collectionJob: Job? = null
@@ -145,7 +152,8 @@ class SeerrDetailViewModel(
             ) {
                 is ApiResult.Success -> {
                     val device = res.data.device?.takeIf { it.isNotBlank() } ?: "TV"
-                    val statusMessage = if (res.data.action == "view") {
+                    val isView = res.data.action == "view"
+                    val statusMessage = if (isView) {
                         "Opened on $device"
                     } else {
                         "Sent to $device"
@@ -155,7 +163,11 @@ class SeerrDetailViewModel(
                             playingOnTv = false,
                             playOnTvStatus = statusMessage,
                             playOnTvError = null,
+                            playOnTvShowRemoteAction = isView,
                         )
+                    }
+                    if (!isView) {
+                        _openTvRemoteEvents.tryEmit(Unit)
                     }
                     playOnTvClearJob = viewModelScope.launch {
                         delay(3_000L)
@@ -168,6 +180,7 @@ class SeerrDetailViewModel(
                             playingOnTv = false,
                             playOnTvStatus = null,
                             playOnTvError = res.message,
+                            playOnTvShowRemoteAction = false,
                         )
                     }
                 }

@@ -321,7 +321,7 @@ fun ChatScreen(
                         start = 18.dp,
                         end = 18.dp,
                         top = statusBarTop + 56.dp,
-                        bottom = (composerHeightDp - 8.dp).coerceAtLeast(0.dp) + if (hasFloatingAttachments) 76.dp else 0.dp,
+                        bottom = composerHeightDp + 8.dp + if (hasFloatingAttachments) 76.dp else 0.dp,
                     ),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                     modifier = Modifier.fillMaxSize(),
@@ -399,6 +399,14 @@ fun ChatScreen(
                                 onPressImage = { img ->
                                     keyboard?.hide()
                                     previewImage = img
+                                },
+                                onToggleActivityExpand = { expanded ->
+                                    if (expanded) {
+                                        scope.launch {
+                                            delay(80L)
+                                            scrollToAbsoluteBottom(animated = true)
+                                        }
+                                    }
                                 },
                             )
                         }

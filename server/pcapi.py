@@ -63,7 +63,7 @@ pc-api is NOT a security boundary for root: it runs as the agent's user, so it i
 by rootd. Only the phone's signature releases a command. The tailnet identity check below just keeps
 other tailnet nodes/users away from the service controls.
 """
-import base64, concurrent.futures, datetime, glob, hashlib, ipaddress, json, os, queue, secrets, re, socket, stat, struct, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse
+import base64, concurrent.futures, datetime, glob, hashlib, ipaddress, json, math, os, queue, secrets, re, socket, stat, struct, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -4146,6 +4146,55 @@ def _jellyfin_lookup_item_by_tmdb(key, tmdb_id, media_type):
     return None
 
 
+JELLYFIN_TICKS_PER_SEC = 10_000_000
+JELLYFIN_IMAGE_TYPES = {
+    "primary": "Primary",
+    "backdrop": "Backdrop",
+    "thumb": "Thumb",
+    "logo": "Logo",
+}
+JELLYFIN_PLAYSTATE_COMMANDS = {
+    c.lower(): c for c in (
+        "PlayPause", "Pause", "Unpause", "Stop",
+        "NextTrack", "PreviousTrack", "Rewind", "FastForward", "Seek",
+    )
+}
+JELLYFIN_GENERAL_COMMANDS = {
+    c.lower(): c for c in (
+        "SetAudioStreamIndex", "SetSubtitleStreamIndex",
+        "VolumeUp", "VolumeDown", "ToggleMute", "SetVolume",
+    )
+}
+
+
+def _jellyfin_resolve_target_device(device_name=None):
+    explicit_device = isinstance(device_name, str) and bool(device_name.strip())
+    target_device = (
+        device_name.strip() if explicit_device
+        else (str(CONFIG.get("jellyfin_tv_device") or "").strip() or "Lumio Arc 7")
+    )
+    return target_device, explicit_device
+
+
+def _jellyfin_get_sessions(key, timeout=10):
+    req = urllib.request.Request(
+        f"{JELLYFIN_URL}/Sessions",
+        headers={"Authorization": f'MediaBrowser Token="{key}"'},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read() or b"[]")
+    return data if isinstance(data, list) else []
+
+
+def _jellyfin_pick_best_session(matches):
+    if not matches:
+        return None
+    for s in matches:
+        if isinstance(s.get("NowPlayingItem"), dict):
+            return s
+    return matches[0]
+
+
 def _jellyfin_find_tv_session(sessions, device_name, explicit_device=False):
     controllable = [
         s for s in (sessions if isinstance(sessions, list) else [])
@@ -4153,20 +4202,374 @@ def _jellyfin_find_tv_session(sessions, device_name, explicit_device=False):
     ]
     needle = device_name.lower()
     # 1. Exact DeviceName match (case-insensitive)
-    for s in controllable:
-        if str(s.get("DeviceName") or "").strip().lower() == needle:
-            return s
+    exact = [s for s in controllable if str(s.get("DeviceName") or "").strip().lower() == needle]
+    if exact:
+        return _jellyfin_pick_best_session(exact)
     # 2. Substring DeviceName match (case-insensitive)
-    for s in controllable:
-        if needle in str(s.get("DeviceName") or "").lower():
-            return s
+    substr = [s for s in controllable if needle in str(s.get("DeviceName") or "").lower()]
+    if substr:
+        return _jellyfin_pick_best_session(substr)
     # 3. Fallback to Android TV / TV client when deviceName was not explicitly overridden
     if not explicit_device:
         for kw in ("android tv", "tv"):
-            for s in controllable:
-                if kw in str(s.get("Client") or "").lower():
-                    return s
+            client_matches = [s for s in controllable if kw in str(s.get("Client") or "").lower()]
+            if client_matches:
+                return _jellyfin_pick_best_session(client_matches)
     return None
+
+
+def _jellyfin_tv_offline_response(target_device):
+    return 409, {
+        "ok": False,
+        "code": "tv_offline",
+        "error": f"{target_device} isn't open in Jellyfin right now. Open Jellyfin on the projector and try again.",
+    }
+
+
+def _jellyfin_safe_int(val):
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _jellyfin_safe_float(val):
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        f = float(val)
+        return f if math.isfinite(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _jellyfin_image_proxy_url(item_id, image_type="Primary", series_id=None):
+    if not isinstance(item_id, str) or not JELLYFIN_ITEM_ID_RE.match(item_id):
+        return None
+    params = {"type": image_type}
+    if isinstance(series_id, str) and JELLYFIN_ITEM_ID_RE.match(series_id) and series_id != item_id:
+        params["seriesId"] = series_id
+    return f"/pc/api/jellyfin/image/{item_id}?{urllib.parse.urlencode(params)}"
+
+
+def jellyfin_tv_session(device_name=None):
+    """Return structured playback state for the active controllable Jellyfin TV session."""
+    target_device, explicit_device = _jellyfin_resolve_target_device(device_name)
+    try:
+        key = _jellyfin_api_key()
+        sessions = _jellyfin_get_sessions(key, timeout=10)
+    except (OSError, ValueError) as e:
+        return 502, {"ok": False, "error": clip(f"Jellyfin TV session lookup failed: {e}", 240)}
+
+    session = _jellyfin_find_tv_session(sessions, target_device, explicit_device=explicit_device)
+    if not session:
+        return 200, {
+            "connected": False,
+            "sessionId": None,
+            "deviceName": target_device,
+            "client": None,
+            "appVersion": None,
+            "isPlaying": False,
+            "isPaused": False,
+            "isMuted": False,
+            "volumeLevel": None,
+            "positionTicks": 0,
+            "runTimeTicks": 0,
+            "positionSeconds": 0.0,
+            "durationSeconds": 0.0,
+            "canSeek": False,
+            "audioStreamIndex": None,
+            "subtitleStreamIndex": None,
+            "nowPlaying": None,
+            "audioTracks": [],
+            "subtitleTracks": [],
+            "supportedCommands": [],
+        }
+
+    play_state = session.get("PlayState") if isinstance(session.get("PlayState"), dict) else {}
+    now_item = session.get("NowPlayingItem") if isinstance(session.get("NowPlayingItem"), dict) else None
+    is_playing = now_item is not None
+
+    pos_ticks = max(0, _jellyfin_safe_int(play_state.get("PositionTicks")) or 0) if is_playing else 0
+    runtime_ticks = max(0, _jellyfin_safe_int(now_item.get("RunTimeTicks")) or 0) if is_playing else 0
+    vol_raw = _jellyfin_safe_int(play_state.get("VolumeLevel"))
+    volume_level = max(0, min(100, vol_raw)) if vol_raw is not None else None
+
+    if "CanSeek" in play_state:
+        can_seek = bool(play_state.get("CanSeek")) and is_playing
+    else:
+        can_seek = is_playing and runtime_ticks > 0
+
+    now_playing = None
+    audio_tracks = []
+    subtitle_tracks = []
+    if is_playing:
+        item_id = str(now_item.get("Id") or "").strip()
+        item_type = str(now_item.get("Type") or "").strip()
+        series_id_raw = str(now_item.get("SeriesId") or "").strip()
+        series_id = series_id_raw if JELLYFIN_ITEM_ID_RE.match(series_id_raw) else None
+        parent_backdrop_raw = str(now_item.get("ParentBackdropItemId") or "").strip()
+        parent_backdrop_id = parent_backdrop_raw if JELLYFIN_ITEM_ID_RE.match(parent_backdrop_raw) else None
+
+        poster_url = _jellyfin_image_proxy_url(item_id, "Primary", series_id=series_id)
+        if not poster_url and series_id:
+            poster_url = _jellyfin_image_proxy_url(series_id, "Primary")
+
+        has_own_backdrop = bool(now_item.get("BackdropImageTags"))
+        backdrop_target = item_id if has_own_backdrop else (parent_backdrop_id or series_id or item_id)
+        backdrop_url = _jellyfin_image_proxy_url(backdrop_target, "Backdrop", series_id=series_id)
+
+        now_playing = {
+            "itemId": item_id,
+            "name": str(now_item.get("Name") or ""),
+            "type": item_type,
+            "seriesName": (str(now_item["SeriesName"]) if now_item.get("SeriesName") else None),
+            "seasonName": (str(now_item["SeasonName"]) if now_item.get("SeasonName") else None),
+            "seasonNumber": _jellyfin_safe_int(now_item.get("ParentIndexNumber")),
+            "episodeNumber": _jellyfin_safe_int(now_item.get("IndexNumber")),
+            "year": _jellyfin_safe_int(now_item.get("ProductionYear")),
+            "posterUrl": poster_url,
+            "backdropUrl": backdrop_url,
+        }
+
+        for stream in (now_item.get("MediaStreams") or []):
+            if not isinstance(stream, dict):
+                continue
+            s_type = str(stream.get("Type") or "")
+            s_idx = _jellyfin_safe_int(stream.get("Index"))
+            if s_idx is None:
+                continue
+            title = str(
+                stream.get("DisplayTitle")
+                or stream.get("Title")
+                or stream.get("Language")
+                or f"{s_type} {s_idx}"
+            ).strip()
+            if s_type == "Audio":
+                audio_tracks.append({
+                    "index": s_idx,
+                    "displayTitle": title,
+                    "language": (str(stream["Language"]) if stream.get("Language") else None),
+                    "codec": (str(stream["Codec"]) if stream.get("Codec") else None),
+                    "channels": _jellyfin_safe_int(stream.get("Channels")),
+                    "isDefault": bool(stream.get("IsDefault")),
+                })
+            elif s_type == "Subtitle":
+                subtitle_tracks.append({
+                    "index": s_idx,
+                    "displayTitle": title,
+                    "language": (str(stream["Language"]) if stream.get("Language") else None),
+                    "codec": (str(stream["Codec"]) if stream.get("Codec") else None),
+                    "isExternal": bool(stream.get("IsExternal")),
+                    "isDefault": bool(stream.get("IsDefault")),
+                })
+
+    supported = [
+        str(c) for c in (session.get("SupportedCommands") or [])
+        if isinstance(c, str) and c.strip()
+    ]
+
+    return 200, {
+        "connected": True,
+        "sessionId": str(session["Id"]),
+        "deviceName": str(session.get("DeviceName") or session.get("Client") or target_device),
+        "client": (str(session["Client"]) if session.get("Client") else None),
+        "appVersion": (str(session["ApplicationVersion"]) if session.get("ApplicationVersion") else None),
+        "isPlaying": is_playing,
+        "isPaused": bool(play_state.get("IsPaused")) if is_playing else False,
+        "isMuted": bool(play_state.get("IsMuted")),
+        "volumeLevel": volume_level,
+        "positionTicks": pos_ticks,
+        "runTimeTicks": runtime_ticks,
+        "positionSeconds": round(pos_ticks / JELLYFIN_TICKS_PER_SEC, 3),
+        "durationSeconds": round(runtime_ticks / JELLYFIN_TICKS_PER_SEC, 3),
+        "canSeek": can_seek,
+        "audioStreamIndex": _jellyfin_safe_int(play_state.get("AudioStreamIndex")) if is_playing else None,
+        "subtitleStreamIndex": _jellyfin_safe_int(play_state.get("SubtitleStreamIndex")) if is_playing else None,
+        "nowPlaying": now_playing,
+        "audioTracks": audio_tracks,
+        "subtitleTracks": subtitle_tracks,
+        "supportedCommands": supported,
+    }
+
+
+def jellyfin_tv_command(body):
+    """Send a playstate, seek, track-switch, or volume command to the active Jellyfin TV session."""
+    raw_cmd = str(body.get("command") or "").strip()
+    if not raw_cmd:
+        return 400, {"ok": False, "error": "command is required"}
+    cmd_key = raw_cmd.lower()
+
+    is_seek_relative = cmd_key == "seekrelative"
+    playstate_cmd = JELLYFIN_PLAYSTATE_COMMANDS.get(cmd_key)
+    general_cmd = JELLYFIN_GENERAL_COMMANDS.get(cmd_key)
+    if not (is_seek_relative or playstate_cmd or general_cmd):
+        return 400, {"ok": False, "error": f"Unsupported TV command: {raw_cmd}"}
+
+    # Validate command-specific parameters before hitting Jellyfin
+    seek_ticks = None
+    delta_seconds = None
+    cmd_args = {}
+    if playstate_cmd == "Seek":
+        raw_ticks = _jellyfin_safe_int(body.get("seekPositionTicks"))
+        raw_secs = _jellyfin_safe_float(body.get("positionSeconds"))
+        if raw_ticks is not None and raw_ticks >= 0:
+            seek_ticks = raw_ticks
+        elif raw_secs is not None and raw_secs >= 0:
+            seek_ticks = int(round(raw_secs * JELLYFIN_TICKS_PER_SEC))
+        else:
+            return 400, {"ok": False, "error": "Seek requires non-negative seekPositionTicks or positionSeconds"}
+    elif is_seek_relative:
+        delta_seconds = _jellyfin_safe_float(body.get("deltaSeconds"))
+        if delta_seconds is None:
+            return 400, {"ok": False, "error": "SeekRelative requires numeric deltaSeconds"}
+    elif general_cmd == "SetAudioStreamIndex":
+        idx = _jellyfin_safe_int(body.get("index"))
+        if idx is None or idx < 0:
+            return 400, {"ok": False, "error": "SetAudioStreamIndex requires non-negative integer index"}
+        cmd_args = {"Index": str(idx)}
+    elif general_cmd == "SetSubtitleStreamIndex":
+        idx = _jellyfin_safe_int(body.get("index"))
+        if idx is None or idx < -1:
+            return 400, {"ok": False, "error": "SetSubtitleStreamIndex requires integer index >= -1"}
+        cmd_args = {"Index": str(idx)}
+    elif general_cmd == "SetVolume":
+        vol = _jellyfin_safe_float(body.get("volume"))
+        if vol is None:
+            return 400, {"ok": False, "error": "SetVolume requires numeric volume (0..100)"}
+        cmd_args = {"Volume": str(max(0, min(100, int(round(vol)))))}
+
+    explicit_sid = str(body.get("sessionId") or "").strip() or None
+    target_device, explicit_device = _jellyfin_resolve_target_device(body.get("deviceName"))
+
+    try:
+        key = _jellyfin_api_key()
+        session = None
+        if explicit_sid and not is_seek_relative:
+            session_id = explicit_sid
+        else:
+            sessions = _jellyfin_get_sessions(key, timeout=10)
+            if explicit_sid:
+                session = next(
+                    (s for s in sessions if isinstance(s, dict) and str(s.get("Id") or "") == explicit_sid),
+                    None,
+                )
+            else:
+                session = _jellyfin_find_tv_session(sessions, target_device, explicit_device=explicit_device)
+            if not session:
+                return _jellyfin_tv_offline_response(target_device)
+            session_id = str(session["Id"])
+
+        sid_quoted = urllib.parse.quote(session_id, safe="")
+        headers = {"Authorization": f'MediaBrowser Token="{key}"'}
+
+        if is_seek_relative:
+            play_state = session.get("PlayState") if isinstance(session.get("PlayState"), dict) else {}
+            now_item = session.get("NowPlayingItem") if isinstance(session.get("NowPlayingItem"), dict) else {}
+            cur_ticks = max(0, _jellyfin_safe_int(play_state.get("PositionTicks")) or 0)
+            runtime_ticks = max(0, _jellyfin_safe_int(now_item.get("RunTimeTicks")) or 0)
+            target_ticks = cur_ticks + int(round(delta_seconds * JELLYFIN_TICKS_PER_SEC))
+            if runtime_ticks > 0:
+                target_ticks = max(0, min(runtime_ticks, target_ticks))
+            else:
+                target_ticks = max(0, target_ticks)
+            qs = urllib.parse.urlencode({"SeekPositionTicks": str(target_ticks)})
+            req = urllib.request.Request(
+                f"{JELLYFIN_URL}/Sessions/{sid_quoted}/Playing/Seek?{qs}",
+                data=b"",
+                method="POST",
+                headers=headers,
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                r.read()
+            return 200, {
+                "ok": True,
+                "command": "SeekRelative",
+                "sessionId": session_id,
+                "positionTicks": target_ticks,
+                "positionSeconds": round(target_ticks / JELLYFIN_TICKS_PER_SEC, 3),
+            }
+
+        if playstate_cmd:
+            url = f"{JELLYFIN_URL}/Sessions/{sid_quoted}/Playing/{playstate_cmd}"
+            if playstate_cmd == "Seek":
+                url += "?" + urllib.parse.urlencode({"SeekPositionTicks": str(seek_ticks)})
+            req = urllib.request.Request(url, data=b"", method="POST", headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as r:
+                r.read()
+            res = {"ok": True, "command": playstate_cmd, "sessionId": session_id}
+            if playstate_cmd == "Seek":
+                res["positionTicks"] = seek_ticks
+                res["positionSeconds"] = round(seek_ticks / JELLYFIN_TICKS_PER_SEC, 3)
+            return 200, res
+
+        payload = json.dumps({"Name": general_cmd, "Arguments": cmd_args}).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(
+            f"{JELLYFIN_URL}/Sessions/{sid_quoted}/Command",
+            data=payload,
+            method="POST",
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            r.read()
+        return 200, {"ok": True, "command": general_cmd, "sessionId": session_id}
+    except urllib.error.HTTPError as e:
+        if e.code == 404 and explicit_sid:
+            return _jellyfin_tv_offline_response(target_device)
+        return 502, {"ok": False, "error": clip(f"Jellyfin TV command failed: HTTP {e.code}", 240)}
+    except (OSError, ValueError) as e:
+        return 502, {"ok": False, "error": clip(f"Jellyfin TV command failed: {e}", 240)}
+
+
+def jellyfin_proxy_image(item_id, image_type_name="Primary", series_id=None, max_width=None, quality=None):
+    """Fetch a Jellyfin item image (Primary/Backdrop/Thumb/Logo) server-side without exposing API credentials."""
+    if not isinstance(item_id, str) or not JELLYFIN_ITEM_ID_RE.match(item_id):
+        return 400, {"error": "invalid Jellyfin item id"}, None
+    img_type = JELLYFIN_IMAGE_TYPES.get(str(image_type_name or "Primary").strip().lower())
+    if not img_type:
+        return 400, {"error": "unsupported image type"}, None
+
+    mw = _jellyfin_safe_int(max_width)
+    mw = max(64, min(1920, mw)) if mw is not None else 600
+    qual = _jellyfin_safe_int(quality)
+    qual = max(10, min(100, qual)) if qual is not None else 85
+
+    fallback_series_id = (
+        series_id.strip()
+        if isinstance(series_id, str) and JELLYFIN_ITEM_ID_RE.match(series_id.strip()) and series_id.strip() != item_id
+        else None
+    )
+
+    try:
+        key = _jellyfin_api_key()
+    except (OSError, ValueError) as e:
+        return 502, {"error": clip(f"Jellyfin key error: {e}", 240)}, None
+
+    qs = urllib.parse.urlencode({"maxWidth": str(mw), "quality": str(qual)})
+    headers = {"Authorization": f'MediaBrowser Token="{key}"'}
+    candidates = [item_id] + ([fallback_series_id] if fallback_series_id else [])
+
+    for idx, candidate in enumerate(candidates):
+        url = f"{JELLYFIN_URL}/Items/{candidate}/Images/{img_type}?{qs}"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = r.read(8 * 1024 * 1024)
+                raw_ct = (r.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                ctype = raw_ct if raw_ct.startswith("image/") else (image_type(data) or "image/jpeg")
+                return 200, data, ctype
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and idx + 1 < len(candidates):
+                continue
+            if e.code == 404:
+                return 404, {"error": "image not found"}, None
+            return 502, {"error": clip(f"Jellyfin image fetch failed: HTTP {e.code}", 240)}, None
+        except (OSError, ValueError) as e:
+            return 502, {"error": clip(f"Jellyfin image fetch failed: {e}", 240)}, None
+    return 404, {"error": "image not found"}, None
 
 
 def _jellyfin_send_remote_command(key, session_id, item_id, media_type, title=""):
@@ -4211,12 +4614,7 @@ def jellyfin_play_on_tv(body):
             pass
     media_type = "tv" if str(body.get("mediaType") or "").strip().lower() == "tv" else "movie"
     title = str(body.get("title") or "").strip()
-    explicit_raw = body.get("deviceName")
-    explicit_device = isinstance(explicit_raw, str) and bool(explicit_raw.strip())
-    target_device = (
-        explicit_raw.strip() if explicit_device
-        else (str(CONFIG.get("jellyfin_tv_device") or "").strip() or "Lumio Arc 7")
-    )
+    target_device, explicit_device = _jellyfin_resolve_target_device(body.get("deviceName"))
 
     try:
         key = _jellyfin_api_key()
@@ -4226,20 +4624,10 @@ def jellyfin_play_on_tv(body):
         if not item_id:
             return 404, {"ok": False, "error": "Item not found in Jellyfin library."}
 
-        req = urllib.request.Request(
-            f"{JELLYFIN_URL}/Sessions",
-            headers={"Authorization": f'MediaBrowser Token="{key}"'},
-        )
-        with urllib.request.urlopen(req, timeout=10) as r:
-            sessions = json.loads(r.read() or b"[]")
-
+        sessions = _jellyfin_get_sessions(key, timeout=10)
         session = _jellyfin_find_tv_session(sessions, target_device, explicit_device=explicit_device)
         if not session:
-            return 409, {
-                "ok": False,
-                "code": "tv_offline",
-                "error": f"{target_device} isn't open in Jellyfin right now. Open Jellyfin on the projector and try again.",
-            }
+            return _jellyfin_tv_offline_response(target_device)
 
         action = _jellyfin_send_remote_command(key, str(session["Id"]), item_id, media_type, title=title)
         device_label = str(session.get("DeviceName") or session.get("Client") or target_device)
@@ -5380,6 +5768,8 @@ def route_round4_get(path, qs):
         except ValueError:
             return 400, {"error": "invalid take"}
         return SEERR.requests(take=take, status_filter=flt)
+    if path == "/api/jellyfin/tv/session":
+        return jellyfin_tv_session(device_name=(qs.get("deviceName") or [None])[0])
     return None
 
 
@@ -5411,6 +5801,8 @@ def route_round4_post(path, b):
         return jellyfin_refresh_library()
     if path == "/api/jellyfin/play-on-tv":
         return jellyfin_play_on_tv(b)
+    if path == "/api/jellyfin/tv/command":
+        return jellyfin_tv_command(b)
     if path == "/api/kbd-lock":
         return kbd_lock_set(b)
     if path == "/api/seerr/request":
@@ -5592,6 +5984,23 @@ class H(BaseHTTPRequestHandler):
                         ("X-Content-Type-Options", "nosniff"),
                         ("Content-Disposition", f'inline; filename="{filename}"'),
                     ],
+                )
+            m = re.fullmatch(r"/api/jellyfin/image/([^/]+)", path)
+            if m:
+                code, data_or_err, ctype = jellyfin_proxy_image(
+                    m.group(1),
+                    image_type_name=(qs.get("type") or ["Primary"])[0],
+                    series_id=(qs.get("seriesId") or [None])[0],
+                    max_width=(qs.get("maxWidth") or [None])[0],
+                    quality=(qs.get("quality") or [None])[0],
+                )
+                if code != 200:
+                    return self.send_json(code, data_or_err)
+                return self.send_bytes(
+                    data_or_err,
+                    ctype,
+                    extra=[("X-Content-Type-Options", "nosniff")],
+                    cache_control="private, max-age=3600",
                 )
             r4 = route_round4_get(path, qs)
             if r4 is not None:

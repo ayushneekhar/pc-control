@@ -79,6 +79,9 @@ sealed interface PcRoute {
 
     @Serializable
     data object ConnectionSettings : PcRoute
+
+    @Serializable
+    data object TvRemote : PcRoute
 }
 
 /**
@@ -220,6 +223,7 @@ object DeepLinkParser {
                 url = query["url"],
             )
             "connection-settings", "connection" -> PcRoute.ConnectionSettings
+            "tv-remote", "tv", "remote" -> PcRoute.TvRemote
             else -> null
         }
     }

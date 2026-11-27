@@ -53,6 +53,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
@@ -62,9 +63,13 @@ import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
+import com.neekhar.pccontrol.core.ui.PcIconButton
 import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcTone
+import com.neekhar.pccontrol.feature.tvremote.TvNowPlayingBar
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteUiState
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -72,13 +77,29 @@ fun SeerrScreen(
     viewModel: SeerrViewModel,
     onBack: () -> Unit,
     onOpenDetail: (mediaType: String, id: Int, seed: SeerrItem?) -> Unit,
+    tvRemoteViewModel: TvRemoteViewModel? = null,
+    onOpenTvRemote: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val tvState: TvRemoteUiState? = if (tvRemoteViewModel != null) {
+        tvRemoteViewModel.uiState.collectAsStateWithLifecycle().value
+    } else {
+        null
+    }
     val colors = LocalPcColors.current
     val type = LocalPcType.current
     val keyboard = LocalSoftwareKeyboardController.current
     val listState = rememberLazyListState()
+
+    if (tvRemoteViewModel != null) {
+        LifecycleResumeEffect(tvRemoteViewModel) {
+            tvRemoteViewModel.setMiniBarOwnerActive("seerr", true)
+            onPauseOrDispose {
+                tvRemoteViewModel.setMiniBarOwnerActive("seerr", false)
+            }
+        }
+    }
 
     PcScaffold(
         modifier = modifier,
@@ -87,6 +108,17 @@ fun SeerrScreen(
         statusTone = PcTone.Bad,
         showStatusDot = !state.error.isNullOrBlank(),
         onBack = onBack,
+        actions = {
+            if (tvState?.connected == true) {
+                PcIconButton(
+                    icon = Icons.Rounded.Tv,
+                    contentDescription = "Open TV Remote",
+                    onClick = onOpenTvRemote,
+                    tint = if (tvState.isPlaying) colors.accent else colors.textDim,
+                    containerColor = if (tvState.isPlaying) colors.accentSoft else colors.surface,
+                )
+            }
+        },
         listState = listState,
     ) { innerPadding ->
         val topPad = innerPadding.calculateTopPadding()
@@ -121,6 +153,19 @@ fun SeerrScreen(
                     item(key = "error") {
                         Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
                             PcErrorBanner(title = "Seerr", message = state.error)
+                        }
+                    }
+                }
+
+                if (tvRemoteViewModel != null && tvState != null && tvState.isPlaying) {
+                    item(key = "tv_now_playing_bar") {
+                        Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                            TvNowPlayingBar(
+                                state = tvState,
+                                resolveImageUrl = tvRemoteViewModel::resolveImageUrl,
+                                onTogglePlayPause = tvRemoteViewModel::togglePlayPause,
+                                onOpenRemote = onOpenTvRemote,
+                            )
                         }
                     }
                 }

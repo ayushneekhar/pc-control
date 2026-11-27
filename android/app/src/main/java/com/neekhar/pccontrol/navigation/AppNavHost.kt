@@ -141,6 +141,8 @@ import com.neekhar.pccontrol.feature.system.ServiceDetailScreen
 import com.neekhar.pccontrol.feature.system.ServicesScreen
 import com.neekhar.pccontrol.feature.system.SystemScreen
 import com.neekhar.pccontrol.feature.system.VitalsScreen
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteScreen
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -188,6 +190,7 @@ class PcScreenRegistry(
     val agentView: @Composable (NavHostController) -> Unit,
     val agentRule: @Composable (NavHostController, PcRoute.AgentRule) -> Unit,
     val connectionSettings: @Composable (NavHostController) -> Unit,
+    val tvRemote: @Composable (NavHostController) -> Unit,
 )
 
 @Serializable
@@ -287,6 +290,10 @@ fun PcAppShell(
         key = "pc_space_vm",
         factory = simpleViewModelFactory { SpaceViewModel(container.spaceRepository) },
     )
+    val tvRemoteViewModel: TvRemoteViewModel = viewModel(
+        key = "pc_tv_remote_vm",
+        factory = simpleViewModelFactory { TvRemoteViewModel(container.tvRemoteRepository) },
+    )
 
     val rootState by rootViewModel.uiState.collectAsStateWithLifecycle()
     val rootPendingCount = rootState.waitingCount
@@ -305,6 +312,7 @@ fun PcAppShell(
         agentViewViewModel,
         seerrViewModel,
         spaceViewModel,
+        tvRemoteViewModel,
         onOpenExternalUrl,
     ) {
         PcScreenRegistry(
@@ -321,6 +329,8 @@ fun PcAppShell(
                     onOpenAgentView = { nav.navigate(PcRoute.AgentView) { launchSingleTop = true } },
                     onOpenSettings = { nav.navigateToTopTab(PcRoute.Settings) },
                     onUnlockKeyring = { nav.navigateToTopTab(PcRoute.Settings) },
+                    tvRemoteViewModel = tvRemoteViewModel,
+                    onOpenTvRemote = { nav.navigate(PcRoute.TvRemote) { launchSingleTop = true } },
                 )
             },
             system = { nav, route ->
@@ -399,6 +409,8 @@ fun PcAppShell(
                         if (seed != null) seerrItemSeeds["$mediaType:$id"] = seed
                         nav.navigate(PcRoute.SeerrDetail(mediaType = mediaType, id = id))
                     },
+                    tvRemoteViewModel = tvRemoteViewModel,
+                    onOpenTvRemote = { nav.navigate(PcRoute.TvRemote) { launchSingleTop = true } },
                 )
             },
             seerrDetail = { nav, route ->
@@ -425,6 +437,8 @@ fun PcAppShell(
                         seerrPersonSeeds[id] = name to profilePath
                         nav.navigate(PcRoute.SeerrPerson(id = id))
                     },
+                    tvRemoteViewModel = tvRemoteViewModel,
+                    onOpenTvRemote = { nav.navigate(PcRoute.TvRemote) { launchSingleTop = true } },
                 )
             },
             seerrPerson = { nav, route ->
@@ -505,6 +519,13 @@ fun PcAppShell(
                 ConnectionSettingsScreen(
                     viewModel = settingsViewModel,
                     onBack = { nav.popBackStack() },
+                )
+            },
+            tvRemote = { nav ->
+                TvRemoteScreen(
+                    viewModel = tvRemoteViewModel,
+                    onBack = { nav.popBackStack() },
+                    onOpenSeerr = { nav.navigate(PcRoute.Seerr) { launchSingleTop = true } },
                 )
             },
         )
@@ -843,6 +864,7 @@ fun AppNavHost(
         composable<PcRoute.AgentView> { screens.agentView(navController) }
         composable<PcRoute.AgentRule> { entry -> screens.agentRule(navController, entry.toRoute()) }
         composable<PcRoute.ConnectionSettings> { screens.connectionSettings(navController) }
+        composable<PcRoute.TvRemote> { screens.tvRemote(navController) }
     }
 }
 

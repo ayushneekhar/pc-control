@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -141,6 +142,7 @@ fun ChatMessageItem(
     onSteer: (ChatMessage) -> Unit,
     onPressReplyQuote: (String) -> Unit,
     onPressImage: (PreviewImageItem) -> Unit,
+    onToggleActivityExpand: ((Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
@@ -157,7 +159,10 @@ fun ChatMessageItem(
                 .fillMaxWidth()
                 .padding(vertical = 2.dp),
         ) {
-            LiveStreamingActivityCard(progress = msg.progress)
+            LiveStreamingActivityCard(
+                progress = msg.progress,
+                onToggleExpand = onToggleActivityExpand,
+            )
         }
         return
     }
@@ -587,6 +592,7 @@ private fun SwipeableMessageRow(
 fun LiveStreamingActivityCard(
     progress: ChatProgress?,
     modifier: Modifier = Modifier,
+    onToggleExpand: ((Boolean) -> Unit)? = null,
 ) {
     val colors = LocalPcColors.current
     val type = LocalPcType.current
@@ -631,8 +637,21 @@ fun LiveStreamingActivityCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier
-                .then(if (steps.isNotEmpty()) Modifier.clickable { expanded = !expanded } else Modifier)
-                .padding(vertical = 3.dp),
+                .fillMaxWidth()
+                .heightIn(min = 40.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .then(
+                    if (steps.isNotEmpty()) {
+                        Modifier.clickable {
+                            val next = !expanded
+                            expanded = next
+                            onToggleExpand?.invoke(next)
+                        }
+                    } else {
+                        Modifier
+                    },
+                )
+                .padding(vertical = 8.dp),
         ) {
             // Subtle pulsing status dot
             Box(

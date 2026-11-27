@@ -43,6 +43,7 @@ import com.neekhar.pccontrol.feature.settings.FcmDiagnostics
 import com.neekhar.pccontrol.feature.settings.SettingsPlatformBridge
 import com.neekhar.pccontrol.feature.settings.VaultResult
 import com.neekhar.pccontrol.feature.space.SpaceRepository
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -76,6 +77,7 @@ class AppContainer(
     val camsRepository: CamsRepository = CamsRepository(apiClient, cache)
     val seerrRepository: SeerrRepository = SeerrRepository(apiClient, cache)
     val spaceRepository: SpaceRepository = SpaceRepository(apiClient, cache)
+    val tvRemoteRepository: TvRemoteRepository = TvRemoteRepository(apiClient)
 
     init {
         installPlatformPrefHooks()

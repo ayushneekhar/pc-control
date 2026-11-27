@@ -56,6 +56,8 @@ class DeepLinkParserTest {
             DeepLinkTarget.Route(PcRoute.AgentRule(ruleId = "r-1")),
             DeepLinkParser.parseUri("pccontrol://agent-rule/r-1"),
         )
+        assertEquals(DeepLinkTarget.Route(PcRoute.TvRemote), DeepLinkParser.parseUri("pccontrol://tv-remote"))
+        assertEquals(DeepLinkTarget.Route(PcRoute.TvRemote), DeepLinkParser.parseUri("pccontrol://tv"))
     }
 
     @Test

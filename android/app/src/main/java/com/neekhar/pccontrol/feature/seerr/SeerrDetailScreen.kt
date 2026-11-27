@@ -59,6 +59,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -77,6 +78,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
@@ -93,6 +95,8 @@ import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcStatusBarScrim
 import com.neekhar.pccontrol.core.ui.PcTone
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteUiState
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -101,14 +105,37 @@ fun SeerrDetailScreen(
     onBack: () -> Unit,
     onOpenDetail: (mediaType: String, id: Int, seed: SeerrItem?) -> Unit,
     onOpenPerson: (id: Int, name: String, profilePath: String?) -> Unit,
+    tvRemoteViewModel: TvRemoteViewModel? = null,
+    onOpenTvRemote: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val tvState: TvRemoteUiState? = if (tvRemoteViewModel != null) {
+        tvRemoteViewModel.uiState.collectAsStateWithLifecycle().value
+    } else {
+        null
+    }
     val colors = LocalPcColors.current
     val type = LocalPcType.current
     val context = LocalContext.current
     val item = state.item
     val hasBackdrop = !item?.backdrop.isNullOrBlank()
+
+    if (tvRemoteViewModel != null) {
+        LifecycleResumeEffect(tvRemoteViewModel) {
+            tvRemoteViewModel.setMiniBarOwnerActive("seerr_detail", true)
+            onPauseOrDispose {
+                tvRemoteViewModel.setMiniBarOwnerActive("seerr_detail", false)
+            }
+        }
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.openTvRemoteEvents.collect {
+            tvRemoteViewModel?.notifyPlaybackStarted()
+            onOpenTvRemote()
+        }
+    }
 
     val openExternalUrl: (String) -> Unit = { url ->
         runCatching {
@@ -381,8 +408,12 @@ fun SeerrDetailScreen(
                         if (item.status == SeerrStatus.AVAILABLE) {
                             val hasPrimaryRequestAbove = (!state.isTv && state.canRequestMovie) ||
                                 (state.isTv && state.pickableSeasons.isNotEmpty())
+                            val connectedDevice = tvState?.connectedDeviceName
+                            val playLabel = state.playOnTvStatus
+                                ?: connectedDevice?.let { "Play on $it" }
+                                ?: "Play on TV"
                             PcButton(
-                                label = state.playOnTvStatus ?: "Play on TV",
+                                label = playLabel,
                                 onClick = viewModel::playOnTv,
                                 variant = if (hasPrimaryRequestAbove) {
                                     PcButtonVariant.Subtle
@@ -398,6 +429,15 @@ fun SeerrDetailScreen(
                                 enabled = !state.loading && !state.playingOnTv,
                                 modifier = Modifier.fillMaxWidth(),
                             )
+                            if (state.playOnTvShowRemoteAction) {
+                                PcButton(
+                                    label = "Open TV Remote",
+                                    onClick = onOpenTvRemote,
+                                    variant = PcButtonVariant.Subtle,
+                                    icon = Icons.Rounded.Tv,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
                             if (!state.playOnTvError.isNullOrBlank()) {
                                 PcErrorBanner(
                                     title = "Play on TV",

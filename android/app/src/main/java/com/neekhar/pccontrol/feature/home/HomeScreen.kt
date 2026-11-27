@@ -43,6 +43,7 @@ import androidx.compose.material.icons.rounded.SmartDisplay
 import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SwapVert
+import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.VideocamOff
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material.icons.rounded.WifiOff
@@ -109,6 +110,10 @@ import com.neekhar.pccontrol.feature.cams.WebRtcCamLink
 import com.neekhar.pccontrol.feature.cams.WebRtcLivePlayer
 import com.neekhar.pccontrol.feature.cams.WebRtcRuntime
 import com.neekhar.pccontrol.feature.system.ServiceHelpers
+import com.neekhar.pccontrol.feature.tvremote.TvNowPlayingBar
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteFormatters
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteUiState
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import okhttp3.OkHttpClient
 import org.webrtc.VideoTrack
@@ -132,18 +137,27 @@ fun HomeScreen(
     onOpenAgentView: () -> Unit,
     onOpenSettings: () -> Unit,
     onUnlockKeyring: () -> Unit = onOpenSettings,
+    tvRemoteViewModel: TvRemoteViewModel? = null,
+    onOpenTvRemote: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HomeViewModel = viewModel(factory = HomeViewModel.factory(api, cache)),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val tvState: TvRemoteUiState? = if (tvRemoteViewModel != null) {
+        tvRemoteViewModel.uiState.collectAsStateWithLifecycle().value
+    } else {
+        null
+    }
     var isResumed by remember { mutableStateOf(false) }
 
-    LifecycleResumeEffect(viewModel) {
+    LifecycleResumeEffect(viewModel, tvRemoteViewModel) {
         isResumed = true
         viewModel.onResume()
+        tvRemoteViewModel?.setMiniBarOwnerActive("home", true)
         onPauseOrDispose {
             isResumed = false
             viewModel.onPause()
+            tvRemoteViewModel?.setMiniBarOwnerActive("home", false)
         }
     }
 
@@ -151,7 +165,14 @@ fun HomeScreen(
         state = state,
         okHttpClient = api.okHttpClient,
         isResumed = isResumed,
-        onRefresh = { viewModel.refresh(isPullToRefresh = true) },
+        tvState = tvState,
+        resolveTvImageUrl = { path -> tvRemoteViewModel?.resolveImageUrl(path) },
+        onToggleTvPlayPause = { tvRemoteViewModel?.togglePlayPause() },
+        onOpenTvRemote = onOpenTvRemote,
+        onRefresh = {
+            viewModel.refresh(isPullToRefresh = true)
+            tvRemoteViewModel?.refreshNow(userInitiated = false)
+        },
         onEnableCatCams = viewModel::enableCatCams,
         onOpenVitals = onOpenVitals,
         onOpenServices = onOpenServices,
@@ -184,6 +205,10 @@ fun HomeScreenContent(
     modifier: Modifier = Modifier,
     okHttpClient: OkHttpClient? = null,
     isResumed: Boolean = false,
+    tvState: TvRemoteUiState? = null,
+    resolveTvImageUrl: (String?) -> String? = { null },
+    onToggleTvPlayPause: () -> Unit = {},
+    onOpenTvRemote: () -> Unit = {},
 ) {
     val colors = LocalPcColors.current
     val type = LocalPcType.current
@@ -340,6 +365,23 @@ fun HomeScreenContent(
                     }
                 }
 
+                // Compact "Playing on TV" bar when Jellyfin playback is active on projector
+                if (!state.isOffline && tvState != null && tvState.isPlaying) {
+                    item(key = "tv_now_playing_bar") {
+                        TvNowPlayingBar(
+                            state = tvState,
+                            resolveImageUrl = resolveTvImageUrl,
+                            onTogglePlayPause = onToggleTvPlayPause,
+                            onOpenRemote = onOpenTvRemote,
+                            modifier = Modifier.padding(
+                                start = PcDimens.ScreenPad,
+                                end = PcDimens.ScreenPad,
+                                top = PcDimens.Space3,
+                            ),
+                        )
+                    }
+                }
+
                 // Cameras section: exact 24.dp above label, 8.dp from label to card, full 48.dp action touch targets
                 item(key = "cameras") {
                     if (state.catCamEnabled) {
@@ -424,9 +466,11 @@ fun HomeScreenContent(
                 item(key = "open_section") {
                     OpenRoutesSection(
                         state = state,
+                        tvState = tvState,
                         transfers = transfers,
                         context = context,
                         onOpenSeerr = onOpenSeerr,
+                        onOpenTvRemote = onOpenTvRemote,
                         onOpenSpace = onOpenSpace,
                         onOpenDownloads = onOpenDownloads,
                         onOpenAgentView = onOpenAgentView,
@@ -1083,9 +1127,11 @@ private fun ActiveTransfersCard(
 @Composable
 private fun OpenRoutesSection(
     state: HomeUiState,
+    tvState: TvRemoteUiState?,
     transfers: HomeTransfersSummary,
     context: Context,
     onOpenSeerr: () -> Unit,
+    onOpenTvRemote: () -> Unit,
     onOpenSpace: () -> Unit,
     onOpenDownloads: () -> Unit,
     onOpenAgentView: () -> Unit,
@@ -1153,6 +1199,37 @@ private fun OpenRoutesSection(
                 showChevron = true,
                 showDivider = true,
                 onClick = onOpenSeerr,
+            )
+            val tvNowPlaying = tvState?.session?.nowPlaying
+            val tvSubtitle = when {
+                tvState != null && tvState.isPlaying && tvNowPlaying != null -> {
+                    val verb = if (tvState.isPaused) "Paused" else "Playing"
+                    "$verb · ${TvRemoteFormatters.miniBarTitle(tvNowPlaying)}"
+                }
+                tvState?.connected == true -> "${tvState.deviceName} · Connected"
+                else -> "${tvState?.deviceName ?: "Lumio Arc 7"} · Jellyfin remote"
+            }
+            PcListRow(
+                title = "TV Remote",
+                subtitle = tvSubtitle,
+                icon = Icons.Rounded.Tv,
+                trailingContent = if (tvState?.connected == true) {
+                    {
+                        PcStatusDot(
+                            tone = when {
+                                tvState.isPlaying && !tvState.isPaused -> PcTone.Ok
+                                tvState.isPlaying && tvState.isPaused -> PcTone.Warn
+                                else -> PcTone.Dim
+                            },
+                            size = 7.dp,
+                        )
+                    }
+                } else {
+                    null
+                },
+                showChevron = true,
+                showDivider = true,
+                onClick = onOpenTvRemote,
             )
             PcListRow(
                 title = "Downloads",

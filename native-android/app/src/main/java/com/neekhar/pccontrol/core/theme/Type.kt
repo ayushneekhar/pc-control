@@ -10,11 +10,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 /**
- * 7-role PC Control typography scale plus tabular metric styles.
- * System Roboto only, restricted to 400 / 500 / 600 weights (never 700/800).
+ * PC Control typography scale plus tabular metric and control styles.
+ * System Roboto only, restricted to 400 / 500 / 600 weights (never 700/800), with an
+ * `11.sp` minimum font size across every role.
  *
- * Color-bearing roles ([sectionLabel], [caption], [micro]) default to their semantic
- * theme tones (`textDim` / `textFaint`) and can still be overridden via `Text(color = ...)`.
+ * Color-bearing roles ([sectionLabel], [caption], [label], [micro], [metricUnit]) default to
+ * their semantic theme tones (`textDim` / `textFaint`) and can still be overridden via
+ * `Text(color = ...)`.
  */
 @Immutable
 data class PcType(
@@ -24,9 +26,12 @@ data class PcType(
     val cardTitle: TextStyle,
     val body: TextStyle,
     val caption: TextStyle,
+    val label: TextStyle,
+    val chip: TextStyle,
     val micro: TextStyle,
     val metricHero: TextStyle,
     val metricValue: TextStyle,
+    val metricUnit: TextStyle,
 )
 
 /** Tabular numerals text style helper (`fontFeatureSettings = "tnum"`). */
@@ -86,6 +91,20 @@ fun pcTypeFor(colors: PcColors): PcType = PcType(
         lineHeight = 17.sp,
         color = colors.textDim,
     ),
+    label = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Medium,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        color = colors.textDim,
+    ),
+    chip = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Medium,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+        fontFeatureSettings = "tnum",
+    ),
     micro = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Medium,
@@ -106,6 +125,14 @@ fun pcTypeFor(colors: PcColors): PcType = PcType(
         fontWeight = FontWeight.Medium,
         fontSize = 20.sp,
         lineHeight = 24.sp,
+        fontFeatureSettings = "tnum",
+    ),
+    metricUnit = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Normal,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        color = colors.textDim,
         fontFeatureSettings = "tnum",
     ),
 )
@@ -145,7 +172,7 @@ val PcTypography: Typography = run {
         ),
         bodySmall = base.caption.copy(color = Color.Unspecified),
         labelLarge = base.cardTitle.copy(fontWeight = FontWeight.SemiBold),
-        labelMedium = base.sectionLabel.copy(color = Color.Unspecified),
+        labelMedium = base.label.copy(color = Color.Unspecified),
         labelSmall = base.micro.copy(color = Color.Unspecified),
     )
 }

@@ -3,7 +3,6 @@ package com.neekhar.pccontrol.core.ui
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,7 +10,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,8 +25,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -33,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -44,6 +45,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.lerp as lerpTextStyle
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,17 +56,20 @@ import com.neekhar.pccontrol.core.theme.PcDimens
 import com.neekhar.pccontrol.core.theme.PcTheme
 import com.neekhar.pccontrol.core.theme.tabular
 
+private val HEADER_FADE_TAIL_DP = 24.dp
+
 /**
  * Shared screen scaffold for all PC Control screens.
  *
  * Features:
+ * - Seamless fading header overlaid on top of scrolling content (`bg` 0%..65% -> `bg` 50% at 85%
+ *   -> transparent at 100%, extending ~24.dp below the title row) with zero hard divider seam.
  * - Optional collapsing large title (`30.sp` SemiBold -> `18.sp` SemiBold on scroll) driven by
- *   either [listState] or an automatic [NestedScrollConnection], with a subtle `1.dp` hairline
- *   divider fading in once scrolled.
- * - Optional back button (guaranteed `48.dp` touch target) and trailing [actions].
- * - Subtle top status-bar gradient scrim (`bg` 100% -> transparent over ~20.dp) plus idempotent
- *   `statusBarsPadding()` and `navigationBarsPadding()` so content never collides with the
- *   status bar clock or gets double-indented when hosted inside [com.neekhar.pccontrol.navigation.PcAppShell].
+ *   either [listState] or an automatic [NestedScrollConnection].
+ * - Optional back button cleanly vertically centered with the title (guaranteed `48.dp` touch
+ *   target) and trailing [actions].
+ * - Passes the header's height as top [PaddingValues] to [content] so initial items start cleanly
+ *   below the header and scroll smoothly underneath the fade.
  */
 @Composable
 fun PcScaffold(
@@ -91,6 +96,7 @@ fun PcScaffold(
     val collapseRangePx = remember(density) { with(density) { 56.dp.toPx() } }
 
     var nestedScrolledPx by remember { mutableFloatStateOf(0f) }
+    var headerHeightPx by remember { mutableIntStateOf(0) }
 
     val nestedScrollConnection = remember(listState, collapseRangePx) {
         object : NestedScrollConnection {
@@ -141,11 +147,31 @@ fun PcScaffold(
         label = "pcScaffoldCollapseFraction",
     )
 
-    val hairlineAlpha by animateFloatAsState(
-        targetValue = if (rawScrollFraction > 0.08f) 1f else 0f,
-        animationSpec = tween(durationMillis = 180),
-        label = "pcScaffoldHairlineAlpha",
-    )
+    val statusBarTopDp = if (applyStatusBarPadding) {
+        WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    } else {
+        0.dp
+    }
+    val fallbackHeaderHeightDp = if (title != null) {
+        val estimatedRowDp = when {
+            compactHeader -> 56.dp
+            !statusText.isNullOrEmpty() -> 72.dp
+            else -> 64.dp
+        }
+        statusBarTopDp + estimatedRowDp + HEADER_FADE_TAIL_DP
+    } else {
+        0.dp
+    }
+    val contentTopPadding = if (title != null) {
+        if (headerHeightPx > 0) {
+            with(density) { headerHeightPx.toDp() }
+        } else {
+            fallbackHeaderHeightDp
+        }
+    } else {
+        0.dp
+    }
+    val contentPadding = PaddingValues(top = contentTopPadding)
 
     Box(
         modifier = modifier
@@ -158,22 +184,6 @@ fun PcScaffold(
                 .fillMaxSize()
                 .then(if (applyNavigationBarPadding) Modifier.navigationBarsPadding() else Modifier),
         ) {
-            if (title != null) {
-                PcScaffoldTopBar(
-                    title = title,
-                    statusText = statusText,
-                    statusTone = statusTone,
-                    statusColor = statusColor,
-                    showStatusDot = showStatusDot,
-                    onBack = onBack,
-                    actions = actions,
-                    collapseFraction = collapseFraction,
-                    hairlineAlpha = hairlineAlpha,
-                    containerColor = containerColor,
-                    applyStatusBarPadding = applyStatusBarPadding,
-                )
-            }
-
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -188,22 +198,29 @@ fun PcScaffold(
                         content(PaddingValues(0.dp))
                     }
                 } else {
-                    content(PaddingValues(0.dp))
+                    content(contentPadding)
                 }
 
-                // Subtle top edge gradient scrim below header when scrolled
-                if (title != null && showStatusBarScrim && hairlineAlpha > 0.01f) {
-                    Box(
+                if (title != null) {
+                    PcScaffoldTopBar(
+                        title = title,
+                        statusText = statusText,
+                        statusTone = statusTone,
+                        statusColor = statusColor,
+                        showStatusDot = showStatusDot,
+                        onBack = onBack,
+                        actions = actions,
+                        collapseFraction = collapseFraction,
+                        containerColor = containerColor,
+                        applyStatusBarPadding = applyStatusBarPadding,
                         modifier = Modifier
                             .align(Alignment.TopCenter)
-                            .fillMaxWidth()
-                            .height(20.dp)
-                            .graphicsLayer { alpha = hairlineAlpha * 0.72f }
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(containerColor, Color.Transparent),
-                                ),
-                            ),
+                            .onSizeChanged { size ->
+                                val atRest = collapseFraction < 0.01f && rawScrollFraction == 0f
+                                if (size.height > 0 && (atRest || compactHeader || !collapsing || headerHeightPx == 0)) {
+                                    headerHeightPx = size.height
+                                }
+                            },
                     )
                 }
 
@@ -219,7 +236,7 @@ fun PcScaffold(
             bottomBar()
         }
 
-        // For headerless screens, overlay the solid status-bar band + 20dp gradient scrim
+        // For headerless screens, overlay the solid status-bar band + soft gradient scrim
         // at the very top so scrolling content never clashes with the status bar clock.
         if (title == null && showStatusBarScrim) {
             PcStatusBarScrim(
@@ -232,13 +249,13 @@ fun PcScaffold(
 
 /**
  * Top status-bar gradient scrim: solid [color] across the status-bar inset fading smoothly to
- * transparent over [fadeHeight] (default `20.dp`).
+ * transparent over [fadeHeight] (default `24.dp`).
  */
 @Composable
 fun PcStatusBarScrim(
     modifier: Modifier = Modifier,
     color: Color = PcTheme.colors.bg,
-    fadeHeight: Dp = 20.dp,
+    fadeHeight: Dp = 24.dp,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         Box(
@@ -253,7 +270,9 @@ fun PcStatusBarScrim(
                 .height(fadeHeight)
                 .background(
                     Brush.verticalGradient(
-                        colors = listOf(color, Color.Transparent),
+                        0.00f to color,
+                        0.50f to color.copy(alpha = 0.5f),
+                        1.00f to Color.Transparent,
                     ),
                 ),
         )
@@ -270,9 +289,9 @@ private fun PcScaffoldTopBar(
     onBack: (() -> Unit)?,
     actions: @Composable RowScope.() -> Unit,
     collapseFraction: Float,
-    hairlineAlpha: Float,
     containerColor: Color,
     applyStatusBarPadding: Boolean,
+    modifier: Modifier = Modifier,
 ) {
     val colors = PcTheme.colors
     val type = PcTheme.type
@@ -280,27 +299,32 @@ private fun PcScaffoldTopBar(
     val clampedFraction = collapseFraction.coerceIn(0f, 1f)
     val titleStyle = lerpTextStyle(type.screenTitle, type.collapsedTitle, clampedFraction)
     val topPad = lerpDp(12.dp, 4.dp, clampedFraction)
-    val bottomPad = lerpDp(12.dp, 4.dp, clampedFraction)
 
     val statusProgress = (clampedFraction * 1.5f).coerceIn(0f, 1f)
     val statusHeight = lerpDp(18.dp, 0.dp, statusProgress)
     val statusAlpha = (1f - statusProgress).coerceIn(0f, 1f)
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .background(containerColor)
+            .background(
+                Brush.verticalGradient(
+                    0.00f to containerColor,
+                    0.65f to containerColor,
+                    0.85f to containerColor.copy(alpha = 0.5f),
+                    1.00f to Color.Transparent,
+                ),
+            )
             .then(if (applyStatusBarPadding) Modifier.statusBarsPadding() else Modifier),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .defaultMinSize(minHeight = 56.dp)
+                .defaultMinSize(minHeight = 52.dp)
                 .padding(
                     start = if (onBack != null) 4.dp else PcDimens.ScreenPad,
                     end = PcDimens.ScreenPad,
                     top = topPad,
-                    bottom = bottomPad,
                 ),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -311,7 +335,7 @@ private fun PcScaffoldTopBar(
                     modifier = Modifier.size(48.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                         contentDescription = "Back",
                         tint = colors.text,
                         modifier = Modifier.size(24.dp),
@@ -360,9 +384,7 @@ private fun PcScaffoldTopBar(
             )
         }
 
-        HorizontalDivider(
-            thickness = 1.dp,
-            color = colors.hairline.copy(alpha = hairlineAlpha),
-        )
+        // Soft bottom fade tail so scrolling cards dissolve smoothly behind the title
+        Spacer(modifier = Modifier.height(HEADER_FADE_TAIL_DP))
     }
 }

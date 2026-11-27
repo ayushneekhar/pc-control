@@ -43,12 +43,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.rounded.ChatBubble
+import androidx.compose.material.icons.rounded.Dashboard
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -65,6 +64,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -147,11 +148,11 @@ enum class PcBottomTab(
     val route: PcRoute,
     val routeClass: KClass<out PcRoute>,
 ) {
-    Home("Home", Icons.Filled.Home, PcRoute.Home, PcRoute.Home::class),
-    System("System", Icons.Filled.Dashboard, PcRoute.System(), PcRoute.System::class),
-    Chat("Chat", Icons.Filled.ChatBubble, PcRoute.Chat, PcRoute.Chat::class),
-    Root("Root", Icons.Filled.Security, PcRoute.Root(), PcRoute.Root::class),
-    Settings("Settings", Icons.Filled.Settings, PcRoute.Settings, PcRoute.Settings::class),
+    Home("Home", Icons.Rounded.Home, PcRoute.Home, PcRoute.Home::class),
+    System("System", Icons.Rounded.Dashboard, PcRoute.System(), PcRoute.System::class),
+    Chat("Chat", Icons.Rounded.ChatBubble, PcRoute.Chat, PcRoute.Chat::class),
+    Root("Root", Icons.Rounded.Security, PcRoute.Root(), PcRoute.Root::class),
+    Settings("Settings", Icons.Rounded.Settings, PcRoute.Settings, PcRoute.Settings::class),
 }
 
 /**
@@ -639,14 +640,43 @@ fun PcAppShell(
             }
         },
     ) { innerPadding ->
-        AppNavHost(
-            navController = navController,
-            screens = screens,
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding),
-        )
+        ) {
+            AppNavHost(
+                navController = navController,
+                screens = screens,
+                modifier = Modifier.fillMaxSize(),
+            )
+            // Seamless flipped bottom fade scrim right above the nav bar on scrollable tabs
+            // (omitted on Chat so the pinned composer stays crisp and unobscured)
+            AnimatedVisibility(
+                visible = showBottomBar && !isOnChat,
+                enter = fadeIn(
+                    animationSpec = tween(durationMillis = 160, easing = LinearOutSlowInEasing),
+                ),
+                exit = fadeOut(
+                    animationSpec = tween(durationMillis = 120, easing = FastOutLinearInEasing),
+                ),
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(24.dp)
+                        .background(
+                            Brush.verticalGradient(
+                                0.00f to Color.Transparent,
+                                0.50f to colors.bg.copy(alpha = 0.5f),
+                                1.00f to colors.bg,
+                            ),
+                        ),
+                )
+            }
+        }
     }
 
     pendingMagnet?.let { magnet ->
@@ -809,7 +839,8 @@ fun AppNavHost(
 
 /**
  * Material 3 Expressive 5-tab bottom bar matching docs/DESIGN.md:
- * - True black (or light bg) fill with hairline top divider
+ * - True black (or light bg) fill paired with a seamless flipped gradient fade above the bar
+ *   (no hard top hairline divider)
  * - Active tab: smoothly sliding 64x32dp mint-soft pill (`accentSoft`) with mint icon (`accent`)
  *   and crisp text label
  * - Inactive tab: faint icon + label (`textFaint`)
@@ -834,7 +865,6 @@ fun PcBottomNavBar(
             .background(colors.bg)
             .navigationBarsPadding(),
     ) {
-        HorizontalDivider(thickness = 0.5.dp, color = colors.hairline)
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
@@ -932,10 +962,10 @@ fun PcBottomNavBar(
                                 ) {
                                     Text(
                                         text = if (badge > 99) "99+" else badge.toString(),
-                                        color = colors.bg,
+                                        color = if (colors.isDark) colors.bg else colors.surface,
                                         style = TabularNumStyle.copy(
-                                            fontSize = 10.sp,
-                                            lineHeight = 12.sp,
+                                            fontSize = 11.sp,
+                                            lineHeight = 13.sp,
                                             fontWeight = FontWeight.SemiBold,
                                         ),
                                         maxLines = 1,

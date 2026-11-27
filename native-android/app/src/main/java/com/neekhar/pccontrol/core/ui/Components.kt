@@ -37,13 +37,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Error
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -73,6 +73,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -138,7 +140,7 @@ fun PcCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = PcTheme.colors
-    val shape = RoundedCornerShape(PcDimens.RadiusMd)
+    val shape = RoundedCornerShape(PcDimens.RadiusLg)
     val baseModifier = modifier
         .fillMaxWidth()
         .clip(shape)
@@ -174,7 +176,7 @@ fun PcListCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(PcDimens.RadiusMd))
+            .clip(RoundedCornerShape(PcDimens.RadiusLg))
             .background(colors.surface),
         content = content,
     )
@@ -182,8 +184,8 @@ fun PcListCard(
 
 /**
  * Single row inside a [PcListCard]. Min height 56.dp, hairline separator when [showDivider] is true.
- * [dividerStartIndent] defaults to `52.dp` when a leading icon or leading slot is present so
- * hairlines align with the title text rather than bleeding full-width under the icon.
+ * [dividerStartIndent] defaults to `52.dp` when a leading icon or leading slot is present, and
+ * `16.dp` ([PcDimens.Space4]) otherwise so hairlines always align cleanly with the title text start.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -201,7 +203,7 @@ fun PcListRow(
     showDivider: Boolean = true,
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
-    dividerStartIndent: Dp = if (icon != null || leading != null) 52.dp else 0.dp,
+    dividerStartIndent: Dp = if (icon != null || leading != null) 52.dp else PcDimens.Space4,
 ) {
     val colors = PcTheme.colors
     val type = PcTheme.type
@@ -279,7 +281,7 @@ fun PcListRow(
             }
             if (chevronVisible) {
                 Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                     contentDescription = null,
                     tint = colors.textFaint,
                     modifier = Modifier.size(20.dp),
@@ -314,7 +316,8 @@ fun PcStatStrip(
     onClick: (() -> Unit)? = null,
 ) {
     val colors = PcTheme.colors
-    val shape = RoundedCornerShape(PcDimens.RadiusMd)
+    val type = PcTheme.type
+    val shape = RoundedCornerShape(PcDimens.RadiusLg)
     val baseModifier = modifier
         .fillMaxWidth()
         .clip(shape)
@@ -354,8 +357,7 @@ fun PcStatStrip(
                 Text(
                     text = item.label,
                     color = colors.textFaint,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Normal,
+                    style = type.label.copy(fontWeight = FontWeight.Normal),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -366,11 +368,7 @@ fun PcStatStrip(
                     Text(
                         text = item.value,
                         color = item.valueColor ?: colors.text,
-                        style = TabularNumStyle.copy(
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Medium,
-                            lineHeight = 24.sp,
-                        ),
+                        style = type.metricValue,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -378,11 +376,7 @@ fun PcStatStrip(
                         Text(
                             text = item.unit,
                             color = colors.textDim,
-                            style = TabularNumStyle.copy(
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Normal,
-                                lineHeight = 18.sp,
-                            ),
+                            style = type.metricUnit,
                             maxLines = 1,
                             modifier = Modifier.padding(bottom = 1.dp),
                         )
@@ -482,6 +476,102 @@ fun PcPill(
 }
 
 /**
+ * Shared filter chip matching PC Control design tokens:
+ * `36.dp` visible pill height inside a guaranteed `48.dp` minimum touch target.
+ * Uses `accentSoft` background + `accent` foreground when [selected], and
+ * `surface` background + `textDim` foreground when unselected.
+ */
+@Composable
+fun PcFilterChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    count: Int? = null,
+    enabled: Boolean = true,
+) {
+    val colors = PcTheme.colors
+    val type = PcTheme.type
+    val interactionSource = remember { MutableInteractionSource() }
+
+    val targetBg = when {
+        !enabled -> colors.surfaceRaised.copy(alpha = 0.6f)
+        selected -> colors.accentSoft
+        else -> colors.surface
+    }
+    val targetFg = when {
+        !enabled -> colors.textFaint
+        selected -> colors.accent
+        else -> colors.textDim
+    }
+    val bg by animateColorAsState(
+        targetValue = targetBg,
+        animationSpec = tween(durationMillis = 160),
+        label = "pcFilterChipBg",
+    )
+    val fg by animateColorAsState(
+        targetValue = targetFg,
+        animationSpec = tween(durationMillis = 160),
+        label = "pcFilterChipFg",
+    )
+
+    Box(
+        modifier = modifier
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .semantics { this.selected = selected }
+            .clickable(
+                enabled = enabled,
+                role = Role.Tab,
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            modifier = Modifier
+                .height(36.dp)
+                .clip(RoundedCornerShape(PcDimens.RadiusPill))
+                .background(bg)
+                .indication(
+                    interactionSource = interactionSource,
+                    indication = ripple(),
+                )
+                .padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = fg,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+            Text(
+                text = label,
+                color = fg,
+                style = type.chip.copy(
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (count != null) {
+                Text(
+                    text = count.toString(),
+                    color = fg.copy(alpha = 0.78f),
+                    style = type.micro.tabular(),
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/**
  * Action button matching DESIGN.md:
  * - Primary: accent fill + black text (when disabled: surfaceRaised fill + textFaint text)
  * - Subtle: surfaceRaised fill + primary text (when disabled: surfaceRaised + textFaint)
@@ -523,7 +613,7 @@ fun PcButton(
     }
     val visualAlpha = if (enabled && busy) 0.85f else 1f
     val height = if (compact) 36.dp else 44.dp
-    val radius = if (compact) 10.dp else PcDimens.RadiusSm
+    val radius = if (compact) PcDimens.RadiusSm else PcDimens.RadiusMd
     val shape = RoundedCornerShape(radius)
     val interactionSource = remember { MutableInteractionSource() }
 
@@ -693,7 +783,7 @@ fun <T> PcSegmentedControl(
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(PcDimens.RadiusMd))
             .background(colors.surface)
             .padding(trackPadding),
     ) {
@@ -719,7 +809,7 @@ fun <T> PcSegmentedControl(
                     .offset { IntOffset(animatedOffset.roundToPx(), 0) }
                     .width(segmentWidth)
                     .height(segmentHeight)
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(PcDimens.RadiusSm))
                     .background(colors.surfaceRaised),
             )
         }
@@ -741,7 +831,7 @@ fun <T> PcSegmentedControl(
                     modifier = Modifier
                         .weight(1f)
                         .height(segmentHeight)
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(PcDimens.RadiusSm))
                         .clickable(
                             role = Role.Tab,
                             interactionSource = interactionSource,
@@ -840,8 +930,8 @@ fun PcStatusRing(
     val colors = PcTheme.colors
     val fg = colors.toneForeground(tone)
     val resolvedIcon = icon ?: when (tone) {
-        PcTone.Bad, PcTone.Warn -> Icons.Filled.Warning
-        else -> Icons.Filled.Check
+        PcTone.Bad, PcTone.Warn -> Icons.Rounded.Warning
+        else -> Icons.Rounded.Check
     }
     Box(
         modifier = modifier
@@ -885,7 +975,7 @@ fun PcScreenHeader(
                 top = PcDimens.Space4,
                 bottom = PcDimens.Space4,
             ),
-        verticalAlignment = Alignment.Bottom,
+        verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         if (onBack != null) {
@@ -894,7 +984,7 @@ fun PcScreenHeader(
                 modifier = Modifier.size(48.dp),
             ) {
                 Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                     contentDescription = "Back",
                     tint = colors.text,
                     modifier = Modifier.size(24.dp),
@@ -1029,7 +1119,7 @@ fun PcBottomSheet(
         contentColor = colors.text,
         scrimColor = colors.overlay,
         dragHandle = { PcSheetDragHandle() },
-        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        shape = RoundedCornerShape(topStart = PcDimens.RadiusXl, topEnd = PcDimens.RadiusXl),
     ) {
         Column(
             modifier = Modifier
@@ -1124,16 +1214,16 @@ fun PcErrorBanner(
     val fg = colors.toneForeground(tone)
     val bg = colors.toneSoftBackground(tone)
     val resolvedIcon = icon ?: when (tone) {
-        PcTone.Bad -> Icons.Filled.Error
-        PcTone.Warn -> Icons.Filled.Warning
-        PcTone.Ok, PcTone.Accent -> Icons.Filled.CheckCircle
-        else -> Icons.Filled.Info
+        PcTone.Bad -> Icons.Rounded.Error
+        PcTone.Warn -> Icons.Rounded.Warning
+        PcTone.Ok, PcTone.Accent -> Icons.Rounded.CheckCircle
+        else -> Icons.Rounded.Info
     }
 
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(PcDimens.RadiusMd))
+            .clip(RoundedCornerShape(PcDimens.RadiusLg))
             .background(bg)
             .padding(PcDimens.Space4),
         horizontalArrangement = Arrangement.spacedBy(PcDimens.Space3),
@@ -1202,9 +1292,9 @@ fun PcConfirmDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(PcDimens.RadiusMd))
+                .clip(RoundedCornerShape(PcDimens.RadiusLg))
                 .background(colors.surface)
-                .border(0.5.dp, colors.hairline, RoundedCornerShape(PcDimens.RadiusMd))
+                .border(0.5.dp, colors.hairline, RoundedCornerShape(PcDimens.RadiusLg))
                 .padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 16.dp),
         ) {
             Text(
@@ -1249,7 +1339,62 @@ fun PcConfirmDialog(
 }
 
 /**
- * Thin progress bar (4.dp default). Fill uses primary text color, switching to warn above 85%.
+ * Unified progress meter supporting `4.dp` (compact) and `8.dp` (prominent) thicknesses.
+ *
+ * - Track uses [PcColors.meterTrack] (`#2C2C2C` dark / `#E0E0E0` light).
+ * - Automatically switches fill color to `colors.warn` at `>= 0.80f` and `colors.bad` at `>= 0.95f`
+ *   (unless an explicit [color] override is supplied).
+ * - Guarantees a minimum visible fill width ([minVisibleFillWidth], default `4.dp`) for very small
+ *   non-zero values so tiny fractions remain readable.
+ */
+@Composable
+fun PcMeter(
+    progress: Float,
+    modifier: Modifier = Modifier,
+    thickness: Dp = 4.dp,
+    color: Color? = null,
+    trackColor: Color = PcTheme.colors.meterTrack,
+    minVisibleFillWidth: Dp = 4.dp,
+    warnThreshold: Float = 0.80f,
+    badThreshold: Float = 0.95f,
+) {
+    val colors = PcTheme.colors
+    val safeProgress = if (progress.isFinite()) progress.coerceIn(0f, 1f) else 0f
+    val targetFill = color ?: when {
+        safeProgress >= badThreshold -> colors.bad
+        safeProgress >= warnThreshold -> colors.warn
+        else -> colors.text
+    }
+    val fill by animateColorAsState(
+        targetValue = targetFill,
+        animationSpec = tween(durationMillis = 180),
+        label = "pcMeterFillColor",
+    )
+
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(thickness)
+            .clip(CircleShape)
+            .background(trackColor),
+    ) {
+        if (safeProgress > 0f && maxWidth > 0.dp) {
+            val minWidth = minVisibleFillWidth.coerceAtMost(maxWidth)
+            val fillWidth = (maxWidth * safeProgress).coerceIn(minWidth, maxWidth)
+            Box(
+                modifier = Modifier
+                    .width(fillWidth)
+                    .fillMaxHeight()
+                    .clip(CircleShape)
+                    .background(fill),
+            )
+        }
+    }
+}
+
+/**
+ * Thin progress bar (`4.dp` default), delegating to [PcMeter] for unified track contrast,
+ * minimum visible fill width, and automatic `warn`/`bad` thresholds.
  */
 @Composable
 fun PcProgressBar(
@@ -1258,26 +1403,12 @@ fun PcProgressBar(
     color: Color? = null,
     height: Dp = 4.dp,
 ) {
-    val colors = PcTheme.colors
-    val clamped = progress.coerceIn(0f, 1f)
-    val fill = color ?: if (clamped > 0.85f) colors.warn else colors.text
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(height)
-            .clip(CircleShape)
-            .background(colors.surfaceRaised),
-    ) {
-        if (clamped > 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(clamped)
-                    .fillMaxHeight()
-                    .clip(CircleShape)
-                    .background(fill),
-            )
-        }
-    }
+    PcMeter(
+        progress = progress,
+        modifier = modifier,
+        thickness = height,
+        color = color,
+    )
 }
 
 /**
@@ -1342,7 +1473,7 @@ fun PcCompactTextField(
 ) {
     val colors = PcTheme.colors
     var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(10.dp)
+    val shape = RoundedCornerShape(PcDimens.RadiusMd)
 
     BasicTextField(
         value = value,

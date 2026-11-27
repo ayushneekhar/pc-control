@@ -1,5 +1,8 @@
 package com.neekhar.pccontrol.core.theme
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material.ripple.RippleAlpha
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -12,9 +15,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowInsetsControllerCompat
 
 enum class ThemeMode(val storageValue: String) {
     System("system"),
@@ -42,6 +48,7 @@ data class PcColors(
     val surface: Color,
     val surfaceRaised: Color,
     val hairline: Color,
+    val meterTrack: Color,
     val text: Color,
     val textDim: Color,
     val textFaint: Color,
@@ -69,6 +76,7 @@ val DarkPcColors = PcColors(
     surface = Color(0xFF141414),
     surfaceRaised = Color(0xFF1F1F1F),
     hairline = Color(0xFF262626),
+    meterTrack = Color(0xFF2C2C2C),
     text = Color(0xFFF5F5F5),
     textDim = Color(0xFFA8A8A8),
     textFaint = Color(0xFF707070),
@@ -96,6 +104,7 @@ val LightPcColors = PcColors(
     surface = Color(0xFFFFFFFF),
     surfaceRaised = Color(0xFFEBEBEB),
     hairline = Color(0xFFE2E2E2),
+    meterTrack = Color(0xFFE0E0E0),
     text = Color(0xFF111111),
     textDim = Color(0xFF555555),
     textFaint = Color(0xFF8A8A8A),
@@ -133,9 +142,10 @@ object PcTheme {
 
 object PcDimens {
     val ScreenPad = 18.dp
-    val RadiusSm = 12.dp
-    val RadiusMd = 16.dp
+    val RadiusSm = 8.dp
+    val RadiusMd = 12.dp
     val RadiusLg = 16.dp
+    val RadiusXl = 24.dp
     val RadiusPill = 999.dp
     val Space1 = 4.dp
     val Space2 = 8.dp
@@ -222,6 +232,15 @@ fun PcControlTheme(
         ThemeMode.Light -> false
         ThemeMode.System -> isSystemInDarkTheme()
     }
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = view.context.findActivity()?.window ?: return@SideEffect
+            val insetsController = WindowInsetsControllerCompat(window, view)
+            insetsController.isAppearanceLightStatusBars = !isDark
+            insetsController.isAppearanceLightNavigationBars = !isDark
+        }
+    }
     val colors = if (isDark) DarkPcColors else LightPcColors
     val type = if (isDark) DarkPcType else LightPcType
     val rippleConfig = RippleConfiguration(
@@ -248,4 +267,10 @@ fun PcControlTheme(
             )
         }
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

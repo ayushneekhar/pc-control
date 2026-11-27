@@ -1,17 +1,32 @@
-node_modules/
-/android/
-/ios/
-*.apk
-*.jks
-*.keystore
-.env*
-__pycache__/
-.expo/
-*.pem
-*.p12
-*.env
+# Android / Gradle build outputs & local config
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/google-services.json
+android/.idea/
+*.iml
+.gradle/
 build/
 dist/
+
+# Signing keys, secrets & APKs
+*.apk
+*.aab
+*.jks
+*.keystore
+*.pem
+*.p12
 google-services.json
 fcm-service-account*.json
+.env*
+*.env
+
+# Python / Server
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Misc
 .artifacts/

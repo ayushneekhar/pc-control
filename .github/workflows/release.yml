@@ -1,18 +1,21 @@
-# Native release on GitHub Actions: same build + publish as scripts/release-apk.sh, but signing material
-# comes from repository secrets instead of ~/.config/pc-control/. Run it on the branch you want to release.
-name: Release APK
+name: Android Build & Release
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "android/**"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
-      mode:
-        description: "apk: build + sign + publish an APK. ota: publish a JS-only update for the current build."
-        required: true
-        type: choice
-        options: [apk, ota]
-        default: apk
+      publish_release:
+        description: "Publish signed release APK to GitHub Releases"
+        required: false
+        type: boolean
+        default: true
       notes:
-        description: Release notes (optional)
+        description: "Release notes (optional)"
         required: false
         type: string
 
@@ -20,72 +23,55 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: android-release-${{ github.ref_name }}-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build-and-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
     env:
-      MODE: ${{ inputs.mode }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PCC_KEYSTORE_BASE64: ${{ secrets.PCC_KEYSTORE_BASE64 }}
       PCC_KEY_ALIAS: ${{ secrets.PCC_KEY_ALIAS }}
       PCC_STORE_PASSWORD: ${{ secrets.PCC_STORE_PASSWORD }}
       PCC_KEY_PASSWORD: ${{ secrets.PCC_KEY_PASSWORD }}
-      OTA_SIGNING_KEY_PEM: ${{ secrets.OTA_SIGNING_KEY_PEM }}
-      # Optional: without it the CI APK builds without FCM push, like a laptop build without the file.
       GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
-      CCACHE_COMPRESS: "true"
-      CCACHE_COMPRESSLEVEL: "6"
-      CCACHE_MAXSIZE: "2G"
-      CCACHE_SLOPPINESS: "time_macros,include_file_mtime,include_file_ctime"
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
           fetch-depth: 0
 
-      - name: Validate required secrets
+      - name: Read app version and check release tag
+        id: version
         run: |
-          missing=0
-          names="OTA_SIGNING_KEY_PEM"
-          if [ "${MODE:-apk}" = "apk" ]; then
-            names="PCC_KEYSTORE_BASE64 PCC_KEY_ALIAS PCC_STORE_PASSWORD PCC_KEY_PASSWORD OTA_SIGNING_KEY_PEM"
+          VERSION_NAME=$(grep -oP 'versionName\s*=.*"\K[^"]+' android/app/build.gradle.kts | tail -n 1)
+          VERSION_CODE=$(grep -oP 'versionCode\s*=.*\?:\s*\K[0-9]+' android/app/build.gradle.kts | tail -n 1)
+          if [ -z "$VERSION_NAME" ] || [ -z "$VERSION_CODE" ]; then
+            echo "::error::Failed to parse versionName/versionCode from android/app/build.gradle.kts"
+            exit 1
           fi
-          for name in $names; do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::Missing required repository secret: $name"
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ] || exit 1
+          TAG="v${VERSION_NAME}"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Detected PC Control ${VERSION_NAME} (${VERSION_CODE}), tag ${TAG}"
 
-      - name: Set up Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.publish_release }}" = "true" ]; then
+            if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+              echo "::error::Release $TAG already exists; bump versionName/versionCode in android/app/build.gradle.kts before publishing."
+              exit 1
+            fi
+          fi
 
       - name: Set up JDK 21
-        if: inputs.mode == 'apk'
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
-      - name: Locate the JDK 17 toolchain
-        if: inputs.mode == 'apk'
-        run: |
-          if [ -x "${JAVA_HOME_17_X64:-}/bin/javac" ]; then
-            echo "JDK17=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
-          else
-            echo "::warning::JDK 17 not found; Gradle may try to provision a Java 17 toolchain."
-          fi
-
       - name: Ensure Android SDK packages
-        if: inputs.mode == 'apk'
         run: |
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then
@@ -101,106 +87,115 @@ jobs:
           [ -d "$SDK/platform-tools" ] || MISSING+=("platform-tools")
           [ -d "$SDK/platforms/android-35" ] || MISSING+=("platforms;android-35")
           [ -d "$SDK/build-tools/35.0.0" ] || MISSING+=("build-tools;35.0.0")
-          [ -d "$SDK/ndk/27.1.12297006" ] || MISSING+=("ndk;27.1.12297006")
-          [ -d "$SDK/cmake/3.22.1" ] || MISSING+=("cmake;3.22.1")
           if [ "${#MISSING[@]}" -gt 0 ]; then
             echo "Installing missing Android SDK packages: ${MISSING[*]}"
             yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
             "$SDKMANAGER" --install "${MISSING[@]}" >/dev/null
           else
-            echo "All required Android SDK/NDK packages already preinstalled."
+            echo "All required Android SDK packages already preinstalled."
           fi
 
-      - name: Install ccache
-        if: inputs.mode == 'apk'
-        uses: hendrikmuhs/ccache-action@v1.2
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          key: release-apk-${{ runner.os }}
-          max-size: 2G
+          gradle-home-cache-cleanup: true
 
-      - name: Cache Gradle
-        if: inputs.mode == 'apk'
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Cache node_modules
-        id: node-modules-cache
-        uses: actions/cache@v6
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
-
-      - name: Install dependencies
-        if: steps.node-modules-cache.outputs.cache-hit != 'true'
-        run: yarn install --frozen-lockfile --network-timeout 600000
-
-      - name: Cache Metro
-        uses: actions/cache@v6
-        with:
-          path: /tmp/metro-cache
-          key: metro-cache-${{ runner.os }}-${{ hashFiles('yarn.lock', 'babel.config.js') }}
-          restore-keys: |
-            metro-cache-${{ runner.os }}-
-
-      - name: Restore the OTA signing key
+      - name: Restore signing keystore and google-services.json
         run: |
           umask 077
           DIR="$HOME/.config/pc-control"
           mkdir -p "$DIR"
-          printf '%s\n' "$OTA_SIGNING_KEY_PEM" > "$DIR/ota-signing-key.pem"
-          chmod 600 "$DIR/ota-signing-key.pem"
 
-      - name: Restore Android signing material
-        if: inputs.mode == 'apk'
-        run: |
-          umask 077
-          DIR="$HOME/.config/pc-control"
-          printf '%s' "$PCC_KEYSTORE_BASE64" | base64 --decode > "$DIR/release.jks"
-          {
-            printf 'PCC_KEYSTORE=%q\n' "$DIR/release.jks"
-            printf 'PCC_KEY_ALIAS=%q\n' "$PCC_KEY_ALIAS"
-            printf 'PCC_STORE_PASSWORD=%q\n' "$PCC_STORE_PASSWORD"
-            printf 'PCC_KEY_PASSWORD=%q\n' "$PCC_KEY_PASSWORD"
-          } > "$DIR/keystore.env"
-          chmod 600 "$DIR/release.jks" "$DIR/keystore.env"
+          if [ -n "${PCC_KEYSTORE_BASE64:-}" ] && [ -n "${PCC_KEY_ALIAS:-}" ] && [ -n "${PCC_STORE_PASSWORD:-}" ] && [ -n "${PCC_KEY_PASSWORD:-}" ]; then
+            printf '%s' "$PCC_KEYSTORE_BASE64" | base64 --decode > "$DIR/release.jks"
+            {
+              printf 'PCC_KEYSTORE=%q\n' "$DIR/release.jks"
+              printf 'PCC_KEY_ALIAS=%q\n' "$PCC_KEY_ALIAS"
+              printf 'PCC_STORE_PASSWORD=%q\n' "$PCC_STORE_PASSWORD"
+              printf 'PCC_KEY_PASSWORD=%q\n' "$PCC_KEY_PASSWORD"
+            } > "$DIR/keystore.env"
+            chmod 600 "$DIR/release.jks" "$DIR/keystore.env"
+            echo "PCC_KEYSTORE=$DIR/release.jks" >> "$GITHUB_ENV"
+            echo "HAS_RELEASE_KEYSTORE=true" >> "$GITHUB_ENV"
+            keytool -list -keystore "$DIR/release.jks" -storepass "$PCC_STORE_PASSWORD" -alias "$PCC_KEY_ALIAS" >/dev/null
+            echo "Release keystore restored and verified."
+          else
+            echo "HAS_RELEASE_KEYSTORE=false" >> "$GITHUB_ENV"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.publish_release }}" = "true" ]; then
+              echo "::error::publish_release=true requires PCC_KEYSTORE_BASE64, PCC_KEY_ALIAS, PCC_STORE_PASSWORD, and PCC_KEY_PASSWORD secrets."
+              exit 1
+            fi
+            echo "Release keystore secrets not set; Gradle will fall back to debug signing."
+          fi
+
           if [ -n "${GOOGLE_SERVICES_JSON:-}" ]; then
-            printf '%s\n' "$GOOGLE_SERVICES_JSON" > "$DIR/google-services.json"
-            chmod 600 "$DIR/google-services.json"
-          fi
-          # Fail now, without printing anything, if the keystore/password/alias don't match.
-          keytool -list -keystore "$DIR/release.jks" -storepass "$PCC_STORE_PASSWORD" -alias "$PCC_KEY_ALIAS" >/dev/null
-
-      - name: Fail early if the release tag exists
-        if: inputs.mode == 'apk'
-        run: |
-          VERSION=$(node -p 'require("./app.json").expo.version')
-          REPO=$(node -p 'require("./app.json").expo.extra.github.repo')
-          if gh release view "v$VERSION" -R "$REPO" >/dev/null 2>&1; then
-            echo "::error::Release v$VERSION already exists; bump the version in app.json before releasing."
-            exit 1
+            printf '%s\n' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+            chmod 600 android/app/google-services.json
+            echo "google-services.json restored."
+          else
+            echo "GOOGLE_SERVICES_JSON not set; building without FCM google-services plugin."
           fi
 
-      - name: Compute the bundled OTA version
-        if: inputs.mode == 'apk'
+      - name: Run unit tests and assemble release APK
+        working-directory: android
         run: |
-          OTA=$(( $(node -p 'require("./scripts/ota/ota-bundle-version.json").android') + 1 ))
-          echo "EXPO_PUBLIC_BUNDLED_OTA_VERSION=$OTA" >> "$GITHUB_ENV"
+          chmod +x ./gradlew
+          ./gradlew testDebugUnitTest assembleRelease --stacktrace --no-daemon
 
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc-control-release-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
 
-      - name: Build, sign and publish the APK release
-        if: inputs.mode == 'apk'
+      - name: Upload unit test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: android/app/build/reports/tests/
+          if-no-files-found: ignore
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
         env:
           NOTES: ${{ inputs.notes }}
-        run: scripts/release-apk.sh "$NOTES"
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          OUT="$(mktemp -d)"
+          cp "$APK" "$OUT/pc-control.apk"
+          SHA256=$(sha256sum "$OUT/pc-control.apk" | awk '{print $1}')
+          SIZE=$(stat -c%s "$OUT/pc-control.apk")
+          BUILT=$(date +%s)
 
-      - name: Publish the JS-only OTA
-        if: inputs.mode == 'ota'
-        env:
-          NOTES: ${{ inputs.notes }}
-        run: scripts/ota-publish.sh "$NOTES"
+          SHA256="$SHA256" SIZE="$SIZE" BUILT="$BUILT" python3 - <<'PY' > "$OUT/version.json"
+          import json, os
 
-      - name: Push the version counter bump
-        run: git push origin "HEAD:${{ github.ref_name }}"
+          payload = {
+              "versionName": os.environ["VERSION_NAME"],
+              "versionCode": int(os.environ["VERSION_CODE"]),
+              "sha256": os.environ["SHA256"],
+              "size": int(os.environ["SIZE"]),
+              "built": int(os.environ["BUILT"]),
+          }
+          notes = os.environ.get("NOTES", "").strip()
+          if notes:
+              payload["releaseNotes"] = notes
+          print(json.dumps(payload, indent=2))
+          PY
+
+          RELEASE_NOTES="${NOTES:-PC Control ${VERSION_NAME} (${VERSION_CODE}).}"
+          gh release create "$TAG" \
+            -R "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --latest \
+            --title "PC Control ${VERSION_NAME} (${VERSION_CODE})" \
+            --notes "${RELEASE_NOTES}
+
+          APK: \`pc-control.apk\` (signed with the release key; SHA-256: \`${SHA256}\`)." \
+            "$OUT/pc-control.apk" \
+            "$OUT/version.json"

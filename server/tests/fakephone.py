@@ -1,19 +1,98 @@
-"""A software stand-in for the phone: EC P-256 key, payload built by the app's own JS, SHA256withECDSA (DER).
+"""A software stand-in for the phone: EC P-256 key, canonical rootd-v2 payload, SHA256withECDSA (DER).
 
 Usable as a library (tests) or a CLI against a running pc-api:
   python3 -I server/tests/fakephone.py --api http://127.0.0.1:1990 --key /tmp/k.pem enroll
   python3 -I server/tests/fakephone.py --api ... --key ... approve|deny <request-id>
 """
-import base64, json, os, subprocess, sys, urllib.request
+import base64, hashlib, json, os, re, sys, unicodedata, urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+_NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_BAD_CATS = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 
-def js(query):
-    p = subprocess.run(["node", os.path.join(HERE, "js_bridge.mjs")], input=json.dumps(query), capture_output=True,
-                       text=True, timeout=30)
-    if p.returncode: raise RuntimeError(p.stderr)
-    return json.loads(p.stdout)
+def canonical_argv(argv):
+    return json.dumps(list(argv), separators=(",", ":"), ensure_ascii=False)
+
+
+def argv_hash(argv):
+    return hashlib.sha256(canonical_argv(argv).encode("utf-8")).hexdigest()
+
+
+def argv_looks_safe(argv):
+    if not isinstance(argv, (list, tuple)) or len(argv) == 0:
+        return False
+    for a in argv:
+        if not isinstance(a, str):
+            return False
+        for ch in a:
+            if ch in ("\t", "\n"):
+                continue
+            if unicodedata.category(ch) in _BAD_CATS:
+                return False
+    return True
+
+
+def key_fingerprint(spki_der_b64):
+    raw = base64.b64decode(spki_der_b64)
+    h = hashlib.sha256(raw).hexdigest().upper()
+    return "-".join(h[i:i + 4] for i in (0, 4, 8, 12))
+
+
+def build_payload_v1(decision, req):
+    if decision not in ("approve", "deny"):
+        raise ValueError("bad decision")
+    if not _ID_RE.match(str(req.get("id", ""))) or not _NONCE_RE.match(str(req.get("nonce", ""))):
+        raise ValueError("bad request id/nonce")
+    expires = req.get("expires")
+    if isinstance(expires, bool) or not isinstance(expires, int):
+        raise ValueError("bad expiry")
+    if not argv_looks_safe(req.get("argv")):
+        raise ValueError("argv contains characters that cannot be shown faithfully")
+    return f"rootd-v1\n{decision}\n{req['id']}\n{req['nonce']}\n{expires}\n{argv_hash(req['argv'])}"
+
+
+def build_payload_v2(decision, req):
+    if decision not in ("approve", "deny"):
+        raise ValueError("bad decision")
+    if not _ID_RE.match(str(req.get("id", ""))) or not _NONCE_RE.match(str(req.get("nonce", ""))):
+        raise ValueError("bad request id/nonce")
+    expires = req.get("expires")
+    if isinstance(expires, bool) or not isinstance(expires, int):
+        raise ValueError("bad expiry")
+    timeout = req.get("timeout", 600)
+    if timeout is None:
+        timeout = 600
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1 or timeout > 3600:
+        raise ValueError("bad timeout")
+    if not argv_looks_safe(req.get("argv")):
+        raise ValueError("argv contains characters that cannot be shown faithfully")
+    snap = req.get("snap_sha256") or ""
+    if snap != "" and not _SHA256_RE.match(str(snap)):
+        raise ValueError("bad snapshot sha256")
+    reason_hash = hashlib.sha256((req.get("reason") or "").encode("utf-8")).hexdigest()
+    return (
+        f"rootd-v2\n{decision}\n{req['id']}\n{req['nonce']}\n{expires}\n"
+        f"{timeout}\n{reason_hash}\n{snap}\n{argv_hash(req['argv'])}"
+    )
+
+
+def client_payload(query):
+    """Pure-Python phone-side canonicalization helper matching Android RootPayload.kt."""
+    payloads = []
+    for p in query.get("payloads") or []:
+        try:
+            fn = build_payload_v1 if p.get("version") == 1 else build_payload_v2
+            payloads.append(fn(p["decision"], p["req"]))
+        except Exception as e:
+            payloads.append({"error": str(e)})
+    return {
+        "argvs": [{"canon": canonical_argv(a), "hash": argv_hash(a)} for a in (query.get("argvs") or [])],
+        "ders": [key_fingerprint(d) for d in (query.get("ders") or [])],
+        "payloads": payloads,
+        "safe": [argv_looks_safe(a) for a in (query.get("safe") or [])],
+    }
 
 
 class FakePhone:
@@ -37,8 +116,8 @@ class FakePhone:
 
     @property
     def fingerprint(self):
-        # computed the way the app does (src/lib/rootPayload.ts keyFingerprint over the SPKI DER)
-        if self._fp is None: self._fp = js({"ders": [self.der_b64]})["ders"][0]
+        if self._fp is None:
+            self._fp = key_fingerprint(self.der_b64)
         return self._fp
 
     def payload(self, decision, req, version=2):
@@ -46,10 +125,8 @@ class FakePhone:
         if "timeout" in req: fields["timeout"] = req["timeout"]
         if "reason" in req: fields["reason"] = req["reason"]
         if "snap_sha256" in req: fields["snap_sha256"] = req["snap_sha256"]
-        out = js({"payloads": [{"decision": decision, "req": fields, "version": version}]})
-        p = out["payloads"][0]
-        if isinstance(p, dict): raise ValueError(p["error"])
-        return p
+        fn = build_payload_v1 if version == 1 else build_payload_v2
+        return fn(decision, fields)
 
     def sign(self, decision, req, version=2):
         from cryptography.hazmat.primitives import hashes

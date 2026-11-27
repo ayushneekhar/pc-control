@@ -1,6 +1,6 @@
 """rootd tests, run unprivileged:  python3 -I -m unittest discover -s server/tests -v
 
-- canonical payload: Python (rootd) vs the app's own TypeScript (src/lib/rootPayload.ts via Node)
+- canonical payload: rootd vs the phone-side canonicalization helper (matching Android RootPayload.kt)
 - signature verification: good, wrong key, wrong argv, wrong decision, replay, expired, revoked
 - enrollment needs the admin uid (0 in production); the agent can only propose keys
 - peer-uid rejection over a real socket, plus a real command run with output cap and timeout kill
@@ -12,7 +12,7 @@ SERVER = os.path.dirname(HERE)
 sys.path.insert(0, SERVER)
 sys.path.insert(0, HERE)
 import rootd  # noqa: E402
-from fakephone import FakePhone, js  # noqa: E402
+from fakephone import FakePhone, client_payload  # noqa: E402
 
 AGENT, ADMIN, STRANGER = 1000, 0, 4242
 
@@ -45,8 +45,8 @@ def setup_tmp_cfg(tc):
 
 
 class Canonicalization(unittest.TestCase):
-    def test_argv_hash_matches_app_js(self):
-        out = js({"argvs": TRICKY})["argvs"]
+    def test_argv_hash_matches_client(self):
+        out = client_payload({"argvs": TRICKY})["argvs"]
         for argv, o in zip(TRICKY, out):
             self.assertIsNone(rootd.check_argv(argv), argv)
             self.assertEqual(rootd.canon_argv(argv), o["canon"].encode("utf-8"), argv)
@@ -55,33 +55,29 @@ class Canonicalization(unittest.TestCase):
     def test_hash_agrees_even_for_rejected_strings(self):
         # canonicalization agreement is independent of the acceptance policy
         sendable = [a for a in BAD if not any(0xD800 <= ord(c) <= 0xDFFF for c in a[1])]
-        for argv, o in zip(sendable, js({"argvs": sendable})["argvs"]):
+        for argv, o in zip(sendable, client_payload({"argvs": sendable})["argvs"]):
             self.assertEqual(rootd.argv_hash(argv), o["hash"], repr(argv))
 
-    def test_payload_matches_app_js(self):
+    def test_payload_matches_client(self):
         req = {"id": "0123456789abcdef", "nonce": "f" * 32, "expires": 1794128000, "timeout": 120,
                "reason": "restart nginx", "snap_sha256": "a" * 64, "argv": TRICKY[5]}
         for d in ("approve", "deny"):
-            self.assertEqual(js({"payloads": [{"decision": d, "req": req, "version": 2}]})["payloads"][0],
+            self.assertEqual(client_payload({"payloads": [{"decision": d, "req": req, "version": 2}]})["payloads"][0],
                              rootd.payload_v2(req, d).decode())
-            self.assertEqual(js({"payloads": [{"decision": d, "req": req, "version": 1}]})["payloads"][0],
+            self.assertEqual(client_payload({"payloads": [{"decision": d, "req": req, "version": 1}]})["payloads"][0],
                              rootd.payload_v1(req, d).decode())
 
     def test_rejected_chars_agree(self):
         for argv in BAD:
             self.assertIsNotNone(rootd.check_argv(argv), repr(argv))
-        # the app refuses to build a payload for them as well (lone surrogates can't cross JSON from Python,
-        # so they are checked via the escape form)
-        sendable = [a for a in BAD if not any(0xD800 <= ord(c) <= 0xDFFF for c in a[1])]
-        self.assertEqual(js({"safe": sendable})["safe"], [False] * len(sendable))
-        self.assertEqual(js({"safe": TRICKY})["safe"], [True] * len(TRICKY))
-        res = subprocess.run(["node", "-e", "process.stdout.write(JSON.stringify(JSON.stringify(['\\ud800'])))"],
-                             capture_output=True, text=True)
-        self.assertIn("\\\\ud800", res.stdout)   # JS escapes lone surrogates; Python can't encode them: rejected
+        self.assertEqual(client_payload({"safe": BAD})["safe"], [False] * len(BAD))
+        self.assertEqual(client_payload({"safe": TRICKY})["safe"], [True] * len(TRICKY))
+        with self.assertRaises(UnicodeEncodeError):
+            json.dumps(["\ud800"], ensure_ascii=False).encode("utf-8")
 
-    def test_fingerprint_matches_app_js(self):
+    def test_fingerprint_matches_client(self):
         phones = [FakePhone() for _ in range(3)]
-        out = js({"ders": [p.der_b64 for p in phones]})["ders"]
+        out = client_payload({"ders": [p.der_b64 for p in phones]})["ders"]
         for p, fp in zip(phones, out):
             self.assertEqual(rootd.key_fp(p.pem), fp)
             self.assertRegex(fp, r"^[0-9A-F]{4}(-[0-9A-F]{4}){3}$")

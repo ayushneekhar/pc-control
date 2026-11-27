@@ -1,372 +1,225 @@
 # pc-control
 
-An Android app for managing Ayush's always-on Ubuntu laptop (`ayushlive-hp-pavilion`) from his phone over
-Tailscale, plus the server pieces behind it. Everything runs over the tailnet, with one exception: **notification
-text** goes through Firebase Cloud Messaging (FCM) so the phone gets notifications without a background
-connection. FCM payloads hold only a title, a short body and an id. A root request says "Root approval needed" and
-the reason, never the command. Approving still happens in the app, with a biometric signature, over the tailnet.
+A native Android app (Kotlin + Jetpack Compose) for managing Ayush's always-on Ubuntu laptop
+(`ayushlive-hp-pavilion`) over Tailscale, paired with the Python `pc-api` / `rootd` server stack.
 
-The app has five tabs:
+Everything runs directly over the tailnet, with one exception: **notification text** travels through
+Firebase Cloud Messaging (FCM) so the phone receives alerts without maintaining an always-on
+background socket. FCM payloads carry only a title, short body, and identifier — a root request
+sends *"Root approval needed"* and the reason, never the command. Approving always happens inside
+the app with a hardware-backed biometric signature over the tailnet.
 
-- **Routes**: the `tailscale serve` routes (Cat cams, …) as cards that open in the browser, plus a
-  **Jellyfin** tile that launches the Jellyfin app (`org.jellyfin.mobile`, needs the 1.5.2+ APK). If the app isn't
-  installed, or on older builds, it opens `http://<tailnet host>:8096/` instead. The list is read live, so new
-  routes appear by themselves. Cameras (go2rtc `/`), Seerr, Radarr, Sonarr and Bazarr are hidden by default
-  (`HIDDEN` in `server/pcapi.py`). Only the tiles are hidden: the routes and services keep running.
-  API-only routes (backends used by another page or app screen: the Cat cams page's `/rec`, `/music`, `/ptz`
-  and `/detect`, and the app Vitals tab's `/vitals`) are hidden on the server. To hide a new one, or to show a
-  hidden one, edit
-  `~/.config/pc-control/routes.json`; it is read live, so there's no restart and no app rebuild:
-  `{"/new-api": {"hidden": true}, ":7878": {"hidden": false}, "jellyfin": {"hidden": true}}`
-  (keys are the path for the main HTTPS host, or `":<port>"` for other ports; you can also set `name`, `icon`
-  (a Material Community icon name), `subtitle` and `kind` (`"api"` hides a route)).
-  **Cat cams** is the exception: it opens the app's own cams player (below), not the browser.
-- **Vitals**: everything the old web page showed, natively: live CPU with per-core bars and load, a history
-  graph for CPU, memory, CPU temperature, GPU and network (RX/TX), memory and swap, CPU/nvme/PCH/wifi
-  temperatures, GPU utilisation/memory/temperature/power, per-interface network rates, disk usage plus read/write
-  I/O, battery, and a process list with filtering and sortable columns (name, PID, user, threads, GPU memory,
-  RSS, CPU). It polls `/vitals/api` every second only while the tab is visible, re-reads the 5 minute history
-  when it comes back, and samples processes only when you switch them on. The old HTML dashboard is gone; the
-  API stays for the app and the Telegram `/vitals` snapshot.
-- **Root**: the approval inbox. Each request shows the exact command and the reason, with **Approve
-  (fingerprint)** and **Deny** buttons. Below it is the history, with exit codes and output.
-- **Health**: the home server at a glance, from one `GET /pc/api/health` call (each source has a ~2 s budget,
-  runs concurrently, and only its own section goes unavailable if it is down). Problems first (a service
-  failed/inactive, a disk under 10% free, a Radarr/Sonarr import needing action, a stalled torrent), then the
-  systemd user units with status dots (tap one for its logs and restart), active qBittorrent downloads with
-  down/up speed plus the Radarr/Sonarr queue counts, active Jellyfin streams (direct play or transcode), and
-  SSD/HDD free/total bars. It polls every ~5 s only while the tab is visible, with pull-to-refresh. A pc-api
-  watcher checks enabled long-running units every 60 s and sends one `service_down` push after two bad checks,
-  then one recovery push. Radarr/Sonarr API keys come from their `config.xml`, Jellyfin's from
-  `~/tools/localagent/.jellyfin-key`; none are logged or returned.
-- **Settings**: root-approval enrollment, **Notifications** (where each kind of notification goes: Telegram,
-  the app, or both), push status with **Test app** / **Test Telegram** buttons, the server URL, and **App
-  updates** (APK releases + over-the-air JS updates).
+---
 
-## Cat cams (native player)
+## App Overview (v2.0.0 — Native Kotlin + Jetpack Compose)
 
-Tapping **Cat cams** in Routes opens a native screen instead of the `/cams/` page, with **Live | Replay | Music**
-at the top (like the page's tabs). The menu (top right) still opens the web page.
+- **Home**: live server glance with a WebRTC Cat cams hero, attention banners (failed/inactive
+  units, low disk space, stalled torrents, Radarr/Sonarr manual imports), active transfers &
+  downloads, Jellyfin shortcut, and live `tailscale serve` routes. Routes can be customized or
+  hidden live via `~/.config/pc-control/routes.json` (no restart or rebuild needed).
+- **System**:
+  - **Vitals**: live CPU per-core bars and load, 5-minute history graphs (CPU, memory, CPU temp,
+    GPU, network RX/TX), memory & swap, thermal sensors, GPU telemetry, disk usage & I/O, battery,
+    and a filterable/sortable process table (`/vitals/api`).
+  - **Services**: systemd user units with status indicators, log inspection, and restart controls.
+- **Chat**: mobile client for T3 Code and laptop coding agents — streaming turns with monospace
+  activity steps, model & provider picker, mid-turn stop (`POST /pc/api/chat/stop`), queued-message
+  steering, markdown rendering with JetBrains Mono inline code, image attachments & viewer, and
+  inline replies directly from Android notifications.
+- **Cams**:
+  - **Live**: low-latency native WebRTC (`org.jitsi:webrtc`) directly to `go2rtc` over UDP
+    (`:8555`) with hardware MediaCodec decode, independent audio & Talk backchannel (hold or latch),
+    pinch-to-zoom, fullscreen landscape, snapshots to `Pictures/PC Control`, PTZ pan/tilt, and Cat
+    alerts toggle. Includes a crash guard / safe mode marker and automatic backoff reconnect.
+  - **Replay**: 24-hour continuous VOD HLS playlists from `camrec` rendered via native AndroidX
+    Media3 ExoPlayer with synchronized multi-cam wall clock, 24h overview + zoomable scrub ribbon,
+    cat-sighting markers, 1×/4×/16× playback, and full-res frame capture.
+  - **Detections**: recent cat detection snapshots gallery.
+  - **Music**: `cam-music` YouTube playback controller, including Android **Share → PC Control**
+    (`ACTION_SEND`) support.
+- **Seerr, Space & Downloads**: native media discovery & request management (Seerr), storage
+  cleanup & Google Drive offload (`Space`), and live qBittorrent / Radarr / Sonarr transfer views.
+- **Root**: biometric root-approval inbox showing the exact resolved command, reason, timeout, and
+  script snapshot hash, with **Approve (biometric)** and **Deny** actions plus execution history.
+- **Settings**: root-approval device enrollment, **Notifications** router (per-category Telegram /
+  App switches), push registration status & test buttons, **Agent Usage** & **AgentView** rules,
+  connection configuration, and **App updates** (GitHub Releases primary with automatic Tailnet
+  mirror fallback, SHA-256 verification, and in-app APK installer).
 
-- **Transport: WebRTC** (react-native-webrtc 155 = libwebrtc M155), using go2rtc's own WebSocket signalling
-  (`/api/ws?src=…`, trickle ICE, `src/lib/cams/signal.ts`). Media goes straight over the tailnet (UDP to go2rtc's
-  :8555), hardware-decoded by MediaCodec into the view. One **video-only** connection per camera (the page found
-  audio on the same connection held video back ~400 ms for lip sync); audio has its own connections, only while on.
-  Why not RTSP/fMP4 into ExoPlayer/MediaCodec: everything goes through `tailscale serve` over TCP (head-of-line
-  stalls on a lossy link become delay), it needs a second stack for Talk (WebRTC is the only way into go2rtc's
-  backchannel) and its own demuxer, and the page measured MSE well behind WebRTC. Cost: libwebrtc adds ~12.5 MB
-  (arm64 only) to the APK.
-- **WebRTC options** (`CamsWebrtc.kt`, applied by `camsPrepare()` right before the Cams screen loads
-  react-native-webrtc): field trial `WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/` (libwebrtc's low-latency
-  renderer) and media-usage audio (loudspeaker). An H.265 decoder factory exists but is off
-  (`LIBWEBRTC_H265 = false`): org.jitsi:webrtc 155 has no H.265 depacketizer, so when 1.4.1 to 1.5.0 offered H.265,
-  go2rtc sent cat3hd as H.265 and libwebrtc segfaulted on the worker thread (`payload_type_map_[pt]->Parse()` on a
-  null depacketizer). That was the "Cat cams crashes the app" bug. `scripts/cams/check-webrtc-h265.sh` (run by
-  `build-apk.sh`) fails the build if the flag is on but the packaged libjingle can't receive H.265.
-  Nothing built there may call native code before libjingle is loaded (1.4.0 did and got an UnsatisfiedLinkError).
-  `scripts/cams/check-startup-jni.sh` fails the build if the app-start path (CamsPackage, CrashReporter, the
-  CamsWebrtc marker code) calls into `org.webrtc`.
-- **Crash guard / safe mode**: a marker (SharedPreferences, synchronous) is set while live video starts and cleared
-  after 15 s or when it stops. If the next start finds it and Android's last exit was a crash, safe mode turns on
-  (react-native-webrtc's own defaults), the screen says so once, and the menu can leave safe mode.
-- **Crash reports**: `CrashReporter.kt` keeps Java crash stacks and reads Android's exit records (native crash
-  tombstones, ANRs). `src/lib/crash.ts` POSTs them to `/pc/api/crash` on the next start (stored in
-  `DATA_DIR/crashes`, `GET /pc/api/crash` lists them).
-- **CP Plus HD/SD**: HD (`cat3hd`, H.265 2304×1296, passthrough) only with a libwebrtc that can receive H.265 (not
-  the current one: live is SD) and a hardware HEVC decoder for that size; no HD frame within 12 s falls back to SD (`cat3`, H.264 720p) with a toast. The
-  badge says what plays (`20 fps · HD·WebRTC`); focusing a camera shows codec, size, decoder name (`c2.….hevc.decoder`
-  = hardware), jitter-buffer time and round trip.
-- **Audio**: everything starts muted. The speaker chip on the Food bowl card plays the cam's mic (`cat3hd` audio),
-  **Listen** the laptop mic (`mic`), **Talk** sends the phone mic to the laptop speakers (`talk`): hold to talk,
-  or tap to latch until the next tap. The mic (RECORD_AUDIO, asked on first use) is captured only while Talk is on.
-  Playback uses the media stream (loudspeaker, media volume), capture the voice-communication source (echo
-  canceller on).
-- **Also**: tap a camera to focus it (the others become thumbnails), fullscreen = landscape with hidden system
-  bars, snapshot = go2rtc's `/api/frame.jpeg` saved to Pictures/PC Control (with a Share button; the Food bowl
-  always uses `cat3`, frame.jpeg fails on `cat3hd`), hold-to-move pan/tilt pad (`/ptz/move?dir=`, `/ptz/stop` on
-  release), the Cat alerts switch (`/detect/state` every 15 s, `/detect/toggle`). Leaving the screen or
-  backgrounding the app closes every connection (Listen/Talk too); coming back reconnects at once. A dropped camera
-  retries with backoff (0.5 s … 10 s); no new frame for 6 s counts as dropped.
-- **Replay** (`src/screens/cams/ReplayTab.tsx` + `replayEngine.ts`, maths in `src/lib/cams/replay.ts`): the last
-  24 h of cat, cat2 and cat3hd from camrec. Each cam is **one continuous VOD HLS playlist** (`/rec/<cam>/index.m3u8?a=…&b=…`,
-  recording gaps left out) in a native Media3 ExoPlayer (`RecPlayerView.kt`: TextureView, muted, hardware decode,
-  H.265 for cat3hd when the phone has a hardware HEVC decoder for 2304×1296, else the laptop's `&v=avc` H.264). One
-  wall clock drives all three, as on the page: it follows the big tile while playing (media ↔ wall time through
-  `index.json`'s spans), the others seek when they drift > 1.5 s, a cam without footage says so, and if none has
-  footage the clock jumps to the next recording. Timeline: 24 h overview (tap/drag) and a zoomable ribbon (drag to
-  scrub with keyframe previews, pinch or the zoom button, tap to jump) with cat sightings in amber; play/pause,
-  ±10 s / ±1 min, 1×/4×/16×, **Now** (live edge), last-seen chip, previous/next visit and a row of visits; the
-  camera button saves the frame on screen (full resolution) to Pictures/PC Control. Playlists are reloaded near
-  their end when newer footage exists.
-- **Music** (`src/screens/cams/MusicTab.tsx`): the cam-music service (`/music/api`): paste a YouTube link, or in
-  the YouTube app **Share → PC Control** (an `ACTION_SEND text/plain` target; `SharePackage.kt` keeps the text until
-  the app takes it, then Cat cams → Music plays it). Now playing with state, position, pause/resume, stop, loop,
-  volume (sent 200 ms after the last change, one request at a time) and mute, and the recent list. Status is polled
-  every 2 s (1 s while loading) only while the Music tab is on screen.
-- `yarn test:js` runs the TypeScript unit tests (`src/**/*.test.ts`: replay timeline maths, YouTube link parsing).
-- `node scripts/cams/signal-test.mjs [base] [stream:kind …]` checks the signalling against go2rtc in a headless
-  browser (needs playwright-core via `PW_CORE`): time to connect / first frame, codec, fps, jitter buffer, and that
-  go2rtc answers H.265 for `cat3hd`.
+---
 
-## Notification router
+## Notification Router & FCM
 
-pc-api decides where every unsolicited notification goes. Each category has two switches, **Telegram** (the
-Qwen bot's chat) and **App** (FCM push), plus one master switch per channel (Settings → Notifications). The
-settings live on the laptop in `~/.local/share/pc-control/notify-settings.json`.
+`pc-api` routes every unsolicited alert across **Telegram** and **App (FCM)** with per-category and
+master switches stored in `~/.local/share/pc-control/notify-settings.json`.
 
 | Category | Sent by | Telegram | App |
 |---|---|---|---|
-| Cat alerts (photo in Telegram, big picture in the app) | catdetect | on | off |
+| Cat alerts (photo in Telegram, big picture in app) | `catdetect` | on | off |
 | Download started | Radarr/Sonarr webhook (On Grab) | on | off |
 | Available to watch | Seerr webhook (media available) | on | off |
-| Download problems | Seerr (failed), Radarr/Sonarr (manual interaction), import-watch | on | on |
+| Download problems | Seerr / Radarr / Sonarr / import-watch | on | on |
 | Qwen downloads finished | qBittorrent hook `notify_done.py` | on | off |
-| Backups & system alerts | config-backup, kernel-fix-watch, rec-digest | on | on |
-| Service down | pc-api watcher (enabled long-running user units) | on | on |
-| Root approvals | rootd via pc-api | off | on |
-| Command results | rootd via pc-api | off | on |
-| Other messages | anything else sent to `/pc/api/notify` | off | on |
-| Live download progress | Radarr/Sonarr Grab webhook, Qwen bot downloads | – (app only) | on |
+| Backups & system alerts | `config-backup`, `kernel-fix-watch`, `rec-digest` | on | on |
+| Service down | `pc-api` unit watcher | on | on |
+| Root approvals | `rootd` via `pc-api` | off | on |
+| Command results | `rootd` via `pc-api` | off | on |
+| Other messages | `/pc/api/notify` | off | on |
+| Live download progress | Radarr/Sonarr Grab webhook, Qwen downloads | — (app only) | on |
 
-The defaults keep what went to Telegram before the router. On the app side, only the things you shouldn't miss
-are on. The Qwen bot's replies to your own messages (`/status`, searches, repo runs…) don't go through here.
+- **FCM**: data-only, high-priority messages sent via FCM HTTP v1 using
+  `~/.config/pc-control/fcm-service-account.json` (never committed). Images (cat alerts, posters)
+  are fetched directly over the tailnet (`/pc/api/notify/image/<id>`).
+- **Live download progress**: while qBittorrent downloads are active, a short-lived `dataSync`
+  foreground service (`LiveDownloadsService.kt`) polls `GET /pc/api/downloads` and posts a promoted
+  Android 16 `ProgressStyle` Live Update (status bar chip / Samsung One UI Now Bar), falling back to
+  a standard ongoing progress notification on older Android versions.
+- **Local scripts**: call `~/remote-pc/lib/pcnotify.py` or `POST /pc/api/notify` with the local
+  bearer token in `~/.config/pc-control/local-token`. Radarr/Sonarr/Seerr webhooks authenticate via
+  `~/.config/pc-control/hook-secret`.
 
-- Local scripts call the helper `~/remote-pc/lib/pcnotify.py` (Python `pcnotify.notify(category, title, body,
-  telegram_text=, image=, link=)` or shell `python3 -I ~/remote-pc/lib/pcnotify.py <category> <title> [body]
-  [--image F] [--text T]`). It **fails open**: if pc-api is down, errors, or its Telegram send failed (HTTP
-  502), the helper sends straight to Telegram as before, so alerts are never lost.
-- Radarr, Sonarr and Seerr post to `http://127.0.0.1:1990/pc/api/hook/{radarr,sonarr,seerr}` with the shared
-  secret from `~/.config/pc-control/hook-secret` (Radarr/Sonarr: Basic auth password, Seerr: Authorization
-  header `Bearer …`). Without it pc-api answers 401.
-- Laptop-specific values (Telegram chat id, Seerr's public URL) are in `~/.config/pc-control/pcapi.json`
-  (`telegram_chat`, `seerr_url`); the bot token is read from the Qwen bot's token file. None of it is in git.
+---
 
-## Live download progress (status bar chip / Now Bar)
+## Security Model (`rootd`)
 
-While something downloads in qBittorrent (any category: `radarr`, `tv-sonarr`, `qwen`), the app shows **one**
-ongoing notification with the progress. On Android 16 it is a promoted "Live Update" (`ProgressStyle`,
-`setRequestPromotedOngoing`, a short "42%" chip), so it shows in the status bar chip and, on Samsung One UI 8, in the
-Now Bar. On older Android it is a normal ongoing progress notification.
+The AI agent on the laptop runs as `ayushlive` without sudo.
 
-- One download: its title (the Radarr/Sonarr title when known, else a cleaned-up release name), %, speed, ETA.
-  Several: "3 downloads · 42%" with the combined progress. Actions: tap opens the app, **Stop** (or swiping it
-  away) hides it until the next new download.
-- There's still no always-on connection. When a download starts (Radarr/Sonarr Grab webhook, or the Qwen bot's
-  `start_download` calling `POST /pc/api/downloads/started`), pc-api sends a high-priority FCM data message
-  (`kind: downloads`, no names in it, at most one per 20 s). That lets the app start a short-lived `dataSync`
-  foreground service, which polls `GET /pc/api/downloads` over the tailnet every 3 s while the screen is on (30 s
-  while it's off). Opening the app while something downloads starts it too.
-- It stops (and replaces the notification with a quiet "Download finished" when something completed) when nothing
-  is downloading, when the laptop can't be reached for 2 minutes, when every download has been stalled for 15
-  minutes, on Stop, when the category is switched off, or when Android's dataSync time limit runs out.
-- Paused, errored and seeding torrents don't count. Titles come from the Grab webhook's `downloadId` (kept in
-  `~/.local/share/pc-control/download-titles.json`) or, failing that, from Radarr's/Sonarr's queue API (API key read
-  from their `config.xml`, at most once per 30 s, only for unknown torrents). The qBittorrent WebUI password is read
-  from `~/tools/localagent/.qbt-password` (override: `qbt_password_file`, `qbt_url`, `qbt_user` in `pcapi.json`).
-- Settings → Notifications → **Live download progress** shows whether Android allows promoted ("Live")
-  notifications for the app (`canPostPromotedNotifications()`), with a button to that system setting, and a **Show
-  now** button. On Samsung, if it doesn't appear in the Now Bar, turn on Developer options → "Live notifications
-  for all apps".
+> A root command runs only after Ayush approves **that exact command** with his fingerprint on his
+> phone. There is no password anywhere in the flow, and nothing on the laptop can approve or enroll
+> by itself.
 
-## Notifications (FCM)
+1. **`rootd`** (`/usr/local/lib/rootd/rootd.py`, root-owned) listens on `/run/rootd/rootd.sock` and
+   accepts connections only from `ayushlive` and `root`, verified via `SO_PEERCRED`.
+2. Submitting `{argv, reason, timeout}` via `rootctl` assigns a random id, random nonce, and 180 s
+   expiry, resolves `argv[0]` against a fixed root `PATH`, and rejects invisible/confusable
+   characters (control chars except tab/newline, bidi overrides, zero-width chars, lone surrogates).
+3. The phone holds an **Android Keystore EC P-256 key** (`BiometricSigner.kt`, StrongBox when
+   available) requiring strong biometric authentication via `BiometricPrompt` for every signature;
+   enrolling a new fingerprint on the phone invalidates the key.
+4. `BiometricSigner.kt` / `RootPayload.kt` constructs and signs the `rootd-v2` payload directly from
+   the exact command and metadata displayed in `BiometricPrompt`:
+   `rootd-v2\napprove\n<id>\n<nonce>\n<expires>\n<timeout>\n<sha256(reason)>\n<snap_sha256>\n<sha256(canonical_argv)>`.
+   `rootd` recomputes the payload from its stored request; any mismatch fails verification.
+5. Approvals are single-use. Pending requests are capped at 5, `argv` at 8 KB, and submissions are
+   rate-limited. User-writable executables/scripts are snapshotted to `/var/lib/rootd/snap/<id>`
+   (`0700`), hashed into `snap_sha256`, executed from the snapshot, and deleted afterward. Commands
+   run with a clean environment, cwd `/`, stdin `/dev/null`, process-group timeout kill, and
+   audit logging (`/var/log/rootd/audit.jsonl`).
+6. **Enrollment requires root**: the app generates its keypair and submits the public key as
+   *pending*; Ayush runs `sudo rootd-admin enroll` and enters the 16-character fingerprint computed
+   on the phone.
 
-- The app gets an FCM token and registers it with pc-api (`POST /pc/api/push/register`, over the tailnet,
-  checked like every other call). It registers again on every app start and whenever FCM rotates the token.
-  pc-api keeps the tokens in `~/.local/share/pc-control/push-tokens.json` (mode 600, at most 10).
-- pc-api sends through the FCM HTTP v1 API with the service-account key in
-  `~/.config/pc-control/fcm-service-account.json` (never in the repo, never logged). It signs a JWT, exchanges
-  it for an OAuth access token and caches that token for about an hour.
-- pc-api sends **data-only, high-priority** messages, and the app shows them itself, so channels and tap actions
-  work in the background too: new root request → "Root approval needed" + reason (tapping opens it in the
-  Root tab); command finished → "Command finished / failed (exit N)" + reason; decided, expired or cancelled →
-  a silent dismiss. Tokens that FCM reports as `UNREGISTERED`/404 (or as invalid) are dropped.
-- Anything local can send a notification through the router (see above) using the local bearer token in
-  `~/.config/pc-control/local-token` (mode 600, auto-created by pc-api):
-  `curl -s localhost:1990/pc/api/notify -H "Authorization: Bearer $(cat ~/.config/pc-control/local-token)" -H 'Content-Type: application/json' -d '{"category":"system","title":"Backup done","body":"42 GB"}'`.
-- Router notifications use one Android channel per category, so you can also tune them in Android settings.
-  A picture (cat alerts, Seerr posters) is fetched from pc-api over the tailnet when the notification arrives
-  (`/pc/api/notify/image/<id>`); FCM itself only carries the text and that path.
-- No always-on foreground service, no pinned notification, no battery-optimization exemption. The only foreground
-  service is the short-lived live download progress one above. While the app is open, the Root tab still updates
-  live over SSE (`/pc/api/events`).
-- Build-time Firebase config: `app.config.js` uses `~/.config/pc-control/google-services.json` (or
-  `$PCC_GOOGLE_SERVICES`). It is never copied into the repo, only into the generated `android/`, which is
-  gitignored.
+### Threat-model notes
 
-## Security model, in plain words
+- **App updates are trusted code**: install APK updates only from trusted releases signed with your
+  release keystore.
+- **The repo is user-writable**: review `git log -p server/` before running `sudo server/install-rootd.sh`.
+- **Snapshotted scripts can still read sibling files**: only the script file itself is frozen and
+  hashed.
+- **FCM carries notification text**: avoid placing secrets in `--reason` or `/pc/api/notify` bodies.
 
-The AI agent on the laptop runs as `ayushlive` and has no sudo. Sometimes it needs root. The rule:
-
-> A root command runs only after Ayush approves **that exact command** with his fingerprint on his phone.
-> There is no password anywhere in the flow, and nothing on the laptop can approve or enroll by itself.
-
-How that is enforced:
-
-1. **rootd** is a small root daemon (`/usr/local/lib/rootd/rootd.py`, root-owned and copied out of the repo).
-   It listens on `/run/rootd/rootd.sock` and accepts connections only from `ayushlive` and root, checked with
-   `SO_PEERCRED`.
-2. The agent submits `{argv, reason, timeout}` (with `rootctl`). rootd stores the request with a random id, a
-   random nonce and a 180-second expiry. It resolves the command against a fixed root `PATH`, so the phone
-   shows e.g. `/usr/bin/apt`, not `apt`. It rejects invisible or confusable characters: control characters
-   other than tab and newline, bidi overrides and zero-width characters.
-3. The phone holds an **Android Keystore EC P-256 key**. The key never leaves the phone's secure hardware
-   (StrongBox when available), and every use needs a strong biometric through `BiometricPrompt`. Adding a new
-   fingerprint on the phone destroys the key.
-4. To approve, native Kotlin code (`Signer.kt`) builds the `rootd-v2` payload **itself from the exact command
-   and metadata it displays in BiometricPrompt** and signs it:
-   `rootd-v2\napprove\n<id>\n<nonce>\n<expires>\n<timeout>\n<sha256(reason)>\n<snap_sha256>\n<sha256(JSON.stringify(argv))>`.
-   rootd recomputes the payload from the request **it** stored. If anything differs (the command, decision,
-   id, nonce, expiry, timeout, reason, or snapshot hash), the signature fails. A request can't be swapped
-   behind the screen, and JS cannot decouple what is shown in `BiometricPrompt` from what is signed.
-   Legacy `rootd-v1` signatures stay accepted by default during the APK upgrade transition; once the new APK is
-   installed, turn v1 off by setting `"allow_v1": false` in `/etc/rootd/settings.json` (or
-   `Environment=ROOTD_ALLOW_V1=0` via `sudo systemctl edit rootd`) and running `sudo systemctl restart rootd`.
-5. Approvals are single-use, so a replay finds the request already decided. Pending requests are capped at 5,
-   `argv` is capped at 8 KB, and submissions are rate-limited (10/min, 30/h per uid, counted even when
-   cancelled; `enroll_request` is 5/min). If `argv[0]` (or the script argument to `sh`, `bash`, `dash`,
-   `python3`, `perl`, or `node`) resolves to a non-root-writable file or parent directory, rootd snapshots it
-   into `/var/lib/rootd/snap/<id>` (`0700`), includes its SHA-256 in the request and `rootd-v2` payload,
-   executes the snapshot, and deletes it on finish/expiry. Commands run with a clean environment, cwd `/`,
-   stdin `/dev/null`, a timeout that kills the whole process group, and capped output. Command outputs in
-   `history.jsonl` are stripped after 24 hours (metadata is kept). Everything is logged to
-   `/var/log/rootd/audit.jsonl` (rotated at 5 MB, 3 rotations kept, mode `0600`).
-6. **Enrollment needs root.** The app creates the key and proposes its public key. rootd only marks it
-   *pending*. Ayush runs `sudo rootd-admin enroll` and **types the code the phone displays**. The phone computes
-   that code from its own key; it never comes from the server. The agent can propose keys but can never
-   confirm one, revoke one, or see the list of pending codes.
-
-**pc-api** (the app's HTTP backend) runs as `ayushlive`, so rootd treats it as untrusted. It only relays the
-phone's signature, and the signature is what counts. pc-api also accepts tailnet requests only from Ayush's
-Tailscale login (the `Tailscale-User-Login` header that `tailscale serve` adds).
-
-### What this does *not* protect against (read this)
-
-- **App updates are trusted code.** The APK is built on this laptop by the agent's user, and the release
-  keystore (`~/.config/pc-control/`) is readable by that user. A malicious app update signed with the same key
-  would inherit access to the approval key, and it could show one command while signing another. Install app
-  updates only when you expect them.
-- **The repo is user-writable.** `install-rootd.sh` copies `server/rootd.py` from here. Before running it with
-  sudo (first install or upgrade), check what you are installing: `git -C ~/code/pc-control log -p server/`
-  or compare the sha256 the installer prints.
-- **Snapshotted scripts can still read sibling files.** When rootd snapshots a user-writable script (e.g. under
-  `/home` or `/tmp`), only that script file itself is frozen and hashed; any sibling files, modules, or configs
-  the script reads at runtime remain user-writable.
-- The agent can deny service: fill the pending queue, hit rate limits, or fill its per-uid enrollment slots. It
-  cannot get a command run.
-- **Notification text goes through Google.** The `--reason` of every root request (and any `/pc/api/notify`
-  text) is visible to FCM. Don't put secrets in reasons. The agent can also send you any notification text it
-  likes, but a notification can't approve anything: approving means checking the command in the app and
-  signing it with your fingerprint.
+---
 
 ## Install
 
-### 1. User side (no sudo; already done on the laptop)
+### 1. Laptop user services (no sudo)
 
 ```sh
 ~/code/pc-control/server/install-user.sh
 ```
 
-This installs `rootctl` to `~/.local/bin`, installs and starts the `pc-api` user service (127.0.0.1:1990),
-and adds the tailnet route `tailscale serve --bg --set-path /pc http://127.0.0.1:1990/pc`.
+Installs `rootctl` to `~/.local/bin`, enables the `pc-api` user unit (`127.0.0.1:1990`), and sets up
+`tailscale serve --bg --set-path /pc http://127.0.0.1:1990/pc`.
 
-### 2. The app
+### 2. Android app
 
-On the phone, open https://github.com/ayushneekhar/pc-control/releases/latest and install `pc-control.apk`.
-Later APK releases and over-the-air updates show up in Settings → App updates (and as an "App update available"
-card when you open the app).
+Download and install `pc-control.apk` from
+[GitHub Releases](https://github.com/ayushneekhar/pc-control/releases/latest).
+Subsequent releases are detected automatically in **Settings → App updates** via `version.json`
+(with SHA-256 verification and automatic Tailnet mirror fallback at `/pc/api/ota/apk/*`).
 
-Open the app and allow notifications. Then check Settings → Push notifications: it should say **Registered with
-the laptop**. Tap **Send test notification** to confirm.
+Open the app, grant notifications permission, and verify **Settings → Push notifications** reports
+**Registered with the laptop**.
 
-### 3. Root daemon (Ayush, once, with sudo)
+### 3. Root daemon (once, with sudo)
 
 ```sh
 sudo ~/code/pc-control/server/install-rootd.sh
 ```
 
-The script installs rootd into root-owned paths and installs and starts `rootd.service`. It then asks for
-enrollment: on the phone, go to Settings → Root approvals → **Set up** and type the 16-character code it shows.
-Running the script again upgrades rootd (it skips enrollment if a phone is already enrolled; `--enroll` adds
-another).
+Installs `rootd` and prompts for phone enrollment (in the app: **Settings → Root approvals → Set up**).
 
-Admin commands (root only):
+Admin commands:
 
 ```sh
-sudo rootd-admin enroll           # enroll a phone (type the code shown in the app)
+sudo rootd-admin enroll           # enroll a phone using the code displayed in the app
 sudo rootd-admin devices          # list enrolled phones
-sudo rootd-admin revoke <code>    # remove one
-sudo rootd-admin status           # daemon + current requests
+sudo rootd-admin revoke <code>    # revoke a device
+sudo rootd-admin status           # daemon + pending requests
 sudo ~/code/pc-control/server/uninstall-rootd.sh [--purge]
 ```
 
-## How the agent uses root: `rootctl`
+---
+
+## Using `rootctl`
 
 ```sh
 rootctl run --reason "install ffmpeg for camrec" -- apt-get install -y ffmpeg
 ```
 
-This submits the request, prints `waiting for Ayush to approve on his phone (id …, expires in 180s)`, waits,
-then prints the command's stdout and stderr and exits with the command's exit code. Other exit codes:
-**126** denied, **125** expired (not approved within 180 s), **124** timed out, **3** rootd not installed or
-not running.
+Exit codes: command exit code on approval, **126** denied, **125** expired (180 s), **124** timed
+out, **3** `rootd` unavailable.
 
 ```sh
-rootctl submit --reason "..." -- cmd args   # just submit, print the id
-rootctl wait <id>                           # wait for it like `run`
+rootctl submit --reason "..." -- cmd args   # submit and print request id
+rootctl wait <id>                           # wait for decision + output
 rootctl list | history | cancel <id> | status
 ```
 
-Tips for the agent: give a clear `--reason` (Ayush reads it on his lock screen), pass a real argv (no
-`sh -c` unless needed), and default `--timeout` is 600 s (max 3600).
+---
 
-## Development
+## Development & Releases
+
+### Server tests (Python)
 
 ```sh
-yarn test           # rootd + pc-api + rootctl tests, incl. end-to-end with a software key as the phone
-yarn typecheck && yarn lint
-scripts/build-apk.sh [--bump]   # build + sign the release APK locally (no publishing)
-scripts/release-apk.sh ["notes"]  # native release: build, sign, publish to GitHub Releases + matching OTA
-scripts/ota-publish.sh ["notes"]  # JS-only change: signed over-the-air update for the current build
+python3 -I -m unittest discover -s server/tests -v
 ```
 
-### Releases: native changes → new APK, JS-only → OTA
+Covers `rootd` canonicalization & protocol hardening, end-to-end `rootd` + `pc-api` + `rootctl`
+flows (`fakephone.py`), Chat/T3 adapters, Space manager, Google Drive offload, AgentView, Bazarr
+triggers, cat detection snapshots, and WireGuard watchdogs.
 
-- **Native change** (anything in `modules/*/android`, `plugins/`, `app.json`, `app.config.js`,
-  `package.json`/`yarn.lock`, a new native dependency): bump `version` and `versionCode` in `app.json` (or
-  `scripts/build-apk.sh --bump`), commit, push, then `scripts/release-apk.sh "notes"`. It builds and signs on the
-  laptop (the keystore never goes to GitHub), creates the GitHub release `v<version>` with `pc-control.apk` and
-  `version.json`, and publishes the matching OTA snapshot. Push the counter commit it makes.
-- **JS/TS-only change** (`App.tsx`, `src/`): commit, then `scripts/ota-publish.sh "what changed"`, then push the
-  counter commit. It refuses if native files changed since the installed build's tag `v<version>`.
-- OTA works like Apex's (react-native-nitro-ota 0.14.0): the app checks on launch and when it returns to the
-  foreground, shows **Later / Update**, downloads, and restarts into the new bundle. If the app crashes right
-  after an update, it rolls back. Differences from Apex: the snapshot is the rolling GitHub release
-  `ota-android` (`bundle.zip` + `ota.version.json`, public, no auth), not a branch; and bundles are **signed**.
-- Each bundle targets one exact build (`<version>+<versionCode>`). Installing a new APK drops all OTA data.
-  react-native-nitro-ota has no signing of its own, so `scripts/ota/build-nitro-ota.mjs` writes `ota.manifest`
-  (target build + SHA-256 of every file) and `ota.sig` (ECDSA P-256 with `~/.config/pc-control/ota-signing-key.pem`,
-  laptop only). `MainApplication` (generated through `plugins/withNitroOta.js`) checks both with
-  `OtaVerifier.kt` on every cold start, before React Native gets the bundle. A bundle that isn't signed, is for
-  another build, or has any file changed is refused, and the APK's own JS runs. Lose that key and OTA stops
-  working until a new APK ships with a new public key in `OtaVerifier.kt`.
-- OTA versions are plain counters (`scripts/ota/ota-bundle-version.json`). The APK's embedded JS knows its own
-  number, so only strictly newer bundles are offered.
+### Android builds & GitHub Releases (GitHub Actions)
 
-- `server/tests/test_rootd.py`: checks payload canonicalization against the app's own TypeScript
-  (`src/lib/rootPayload.ts`, run through Node) with quotes, backslashes, unicode, emoji, `\n` and `\t`. Also
-  covers signature checks (good, wrong key, wrong argv, wrong decision, wrong nonce or expiry, replay,
-  expired, revoked), peer-uid rejection, enrollment needing the admin uid, output cap, process-group kill and
-  clean env.
-- `server/tests/test_e2e.py`: runs rootd (test mode, unprivileged), pc-api over HTTP/SSE and `rootctl` against
-  `fakephone.py`. Enrollment happens through `rootd-admin enroll` with the typed code, then approve, deny,
-  attack and replay attempts.
-- rootd test mode: `ROOTD_TEST_DIR`, `ROOTD_TEST_UID` and `ROOTD_TEST_ADMIN_UID` override paths and uids **only
-  when not running as root**. rootd refuses to start as root with any of them set.
-- Release keystore: `~/.config/pc-control/release.jks` with its passwords in `keystore.env` (mode 600), outside
-  the repo. Keep it: every update must be signed with the same key. `plugins/withReleaseSigning.js` reads it
-  from the environment at build time.
+All Android unit tests (`./gradlew testDebugUnitTest`), signed release APK builds
+(`./gradlew assembleRelease`), and GitHub Releases are executed in GitHub Actions via
+[`.github/workflows/release.yml`](.github/workflows/release.yml):
 
-Layout: `App.tsx` + `src/` (screens, API, SSE, payload code, OTA), `modules/pc-native` (Kotlin: keystore +
-biometric signing, FCM push service + notification display, OTA signature check), `plugins/` (release signing,
-nitro-ota MainApplication wiring), `scripts/` (build, release, OTA), `server/` (rootd, pc-api incl. the FCM
-sender and notification router, rootctl, units, install scripts, tests).
+- **CI on push to `main`**: runs automatically whenever `android/**` or the workflow changes,
+  executing unit tests, building the signed release APK, and uploading `pc-control-release-apk` as a
+  workflow artifact.
+- **Publishing a release**:
+  1. Bump `versionCode` and `versionName` in `android/app/build.gradle.kts` and push to `main`.
+  2. Trigger the **Android Build & Release** workflow (`workflow_dispatch`) with
+     `publish_release=true` and optional release `notes`:
+     ```sh
+     gh workflow run release.yml --ref main -f publish_release=true -f notes="Release summary"
+     ```
+  3. The workflow verifies the tag `v<versionName>` doesn't exist, restores the release keystore and
+     `google-services.json` from repository secrets (`PCC_KEYSTORE_BASE64`, `PCC_KEY_ALIAS`,
+     `PCC_STORE_PASSWORD`, `PCC_KEY_PASSWORD`, `GOOGLE_SERVICES_JSON`), runs tests + release build,
+     computes SHA-256 + size, and publishes `v<versionName>` with `pc-control.apk` and
+     `version.json` attached.
+
+---
+
+## Repository Layout
+
+- [`android/`](android/) — Native Kotlin + Jetpack Compose Android application (`minSdk 30`,
+  `targetSdk 35`, `arm64-v8a`), Gradle Kotlin DSL, and JVM unit tests (`android/app/src/test/`).
+- [`server/`](server/) — Python `pc-api`, `rootd`, `rootctl`, systemd units, install scripts, and
+  unittest suite (`server/tests/`).
+- [`docs/`](docs/) — Architecture specification and design notes.
+- [`.github/workflows/release.yml`](.github/workflows/release.yml) — Unified Android CI and GitHub
+  Release pipeline.

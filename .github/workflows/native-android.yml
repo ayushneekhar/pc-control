@@ -1,0 +1,179 @@
+name: Native Android
+
+on:
+  push:
+    branches:
+      - feat/native-android
+    paths:
+      - "native-android/**"
+      - ".github/workflows/native-android.yml"
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish signed release APK to GitHub Releases"
+        required: false
+        type: boolean
+        default: false
+      notes:
+        description: "Release notes (optional)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: native-android-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PCC_KEYSTORE_BASE64: ${{ secrets.PCC_KEYSTORE_BASE64 }}
+      PCC_KEY_ALIAS: ${{ secrets.PCC_KEY_ALIAS }}
+      PCC_STORE_PASSWORD: ${{ secrets.PCC_STORE_PASSWORD }}
+      PCC_KEY_PASSWORD: ${{ secrets.PCC_KEY_PASSWORD }}
+      GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Ensure Android SDK packages
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then
+            echo "::error::Preinstalled Android SDK not found in ANDROID_HOME/ANDROID_SDK_ROOT"
+            exit 1
+          fi
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found at $SDKMANAGER"
+            exit 1
+          fi
+          MISSING=()
+          [ -d "$SDK/platform-tools" ] || MISSING+=("platform-tools")
+          [ -d "$SDK/platforms/android-35" ] || MISSING+=("platforms;android-35")
+          [ -d "$SDK/build-tools/35.0.0" ] || MISSING+=("build-tools;35.0.0")
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "Installing missing Android SDK packages: ${MISSING[*]}"
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+            "$SDKMANAGER" --install "${MISSING[@]}" >/dev/null
+          else
+            echo "All required Android SDK packages already preinstalled."
+          fi
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-home-cache-cleanup: true
+
+      - name: Restore signing keystore and google-services.json
+        run: |
+          umask 077
+          DIR="$HOME/.config/pc-control"
+          mkdir -p "$DIR"
+
+          if [ -n "${PCC_KEYSTORE_BASE64:-}" ] && [ -n "${PCC_KEY_ALIAS:-}" ] && [ -n "${PCC_STORE_PASSWORD:-}" ] && [ -n "${PCC_KEY_PASSWORD:-}" ]; then
+            printf '%s' "$PCC_KEYSTORE_BASE64" | base64 --decode > "$DIR/release.jks"
+            {
+              printf 'PCC_KEYSTORE=%q\n' "$DIR/release.jks"
+              printf 'PCC_KEY_ALIAS=%q\n' "$PCC_KEY_ALIAS"
+              printf 'PCC_STORE_PASSWORD=%q\n' "$PCC_STORE_PASSWORD"
+              printf 'PCC_KEY_PASSWORD=%q\n' "$PCC_KEY_PASSWORD"
+            } > "$DIR/keystore.env"
+            chmod 600 "$DIR/release.jks" "$DIR/keystore.env"
+            echo "PCC_KEYSTORE=$DIR/release.jks" >> "$GITHUB_ENV"
+            echo "HAS_RELEASE_KEYSTORE=true" >> "$GITHUB_ENV"
+            keytool -list -keystore "$DIR/release.jks" -storepass "$PCC_STORE_PASSWORD" -alias "$PCC_KEY_ALIAS" >/dev/null
+            echo "Release keystore restored and verified."
+          else
+            echo "HAS_RELEASE_KEYSTORE=false" >> "$GITHUB_ENV"
+            if [ "${{ inputs.publish_release }}" = "true" ]; then
+              echo "::error::publish_release=true requires PCC_KEYSTORE_BASE64, PCC_KEY_ALIAS, PCC_STORE_PASSWORD, and PCC_KEY_PASSWORD secrets."
+              exit 1
+            fi
+            echo "Release keystore secrets not set; Gradle will fall back to debug signing."
+          fi
+
+          if [ -n "${GOOGLE_SERVICES_JSON:-}" ]; then
+            printf '%s\n' "$GOOGLE_SERVICES_JSON" > native-android/app/google-services.json
+            chmod 600 native-android/app/google-services.json
+            echo "google-services.json restored."
+          else
+            echo "GOOGLE_SERVICES_JSON not set; building without FCM google-services plugin."
+          fi
+
+      - name: Run unit tests and assemble release APK
+        working-directory: native-android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew testDebugUnitTest assembleRelease --stacktrace --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc-control-native-release-apk
+          path: native-android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload unit test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: native-android/app/build/reports/tests/
+          if-no-files-found: ignore
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: |
+          APK="native-android/app/build/outputs/apk/release/app-release.apk"
+          VERSION_NAME=$(grep -oP 'versionName\s*=.*"\K[^"]+' native-android/app/build.gradle.kts | tail -n 1)
+          VERSION_CODE=$(grep -oP 'versionCode\s*=.*\?:\s*\K[0-9]+' native-android/app/build.gradle.kts | tail -n 1)
+          TAG="v${VERSION_NAME}"
+
+          if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists; bump versionName/versionCode in native-android/app/build.gradle.kts before publishing."
+            exit 1
+          fi
+
+          OUT="$(mktemp -d)"
+          cp "$APK" "$OUT/pc-control.apk"
+          SHA256=$(sha256sum "$OUT/pc-control.apk" | awk '{print $1}')
+          SIZE=$(stat -c%s "$OUT/pc-control.apk")
+          BUILT=$(date +%s)
+
+          cat > "$OUT/version.json" <<EOF
+          {
+            "versionName": "${VERSION_NAME}",
+            "versionCode": ${VERSION_CODE},
+            "sha256": "${SHA256}",
+            "size": ${SIZE},
+            "built": ${BUILT}
+          }
+          EOF
+
+          RELEASE_NOTES="${NOTES:-Native Android release ${VERSION_NAME} (${VERSION_CODE}).}"
+          gh release create "$TAG" \
+            -R "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --latest \
+            --title "PC Control ${VERSION_NAME} (${VERSION_CODE})" \
+            --notes "${RELEASE_NOTES}
+
+          APK: \`pc-control.apk\` (signed with the release key; SHA-256: \`${SHA256}\`)." \
+            "$OUT/pc-control.apk" \
+            "$OUT/version.json"

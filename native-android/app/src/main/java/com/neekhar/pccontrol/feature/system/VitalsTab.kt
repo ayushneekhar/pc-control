@@ -1,0 +1,901 @@
+package com.neekhar.pccontrol.feature.system
+
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.MonoTextStyle
+import com.neekhar.pccontrol.core.theme.PcDimens
+import com.neekhar.pccontrol.core.theme.tabular
+import com.neekhar.pccontrol.core.ui.PcCard
+import com.neekhar.pccontrol.core.ui.PcErrorBanner
+import com.neekhar.pccontrol.core.ui.PcListCard
+import com.neekhar.pccontrol.core.ui.PcListRow
+import com.neekhar.pccontrol.core.ui.PcSectionLabel
+import com.neekhar.pccontrol.core.ui.PcTone
+import com.neekhar.pccontrol.feature.home.PcFormatters
+import java.util.Locale
+import kotlin.math.roundToInt
+
+@Immutable
+data class VitalsUiState(
+    val vitals: VitalsResponse? = null,
+    val history: List<VitalsHistPoint> = emptyList(),
+    val error: String? = null,
+    val isLive: Boolean = true,
+    val showProcesses: Boolean = false,
+    val processQuery: String = "",
+    val sortKey: ProcessSortKey = ProcessSortKey.CPU,
+    val sortDescending: Boolean = true,
+) {
+    val statusText: String?
+        get() = vitals?.let {
+            if (isLive) "Up ${PcFormatters.formatUptimeFor(it.uptime)} · live"
+            else "Disconnected, retrying…"
+        }
+
+    val statusTone: PcTone
+        get() = if (isLive) PcTone.Ok else PcTone.Bad
+}
+
+@Composable
+fun VitalsTab(
+    state: VitalsUiState,
+    onToggleProcesses: (Boolean) -> Unit,
+    onProcessQueryChange: (String) -> Unit,
+    onSelectSort: (ProcessSortKey) -> Unit,
+    modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
+    topPadding: Dp = 4.dp,
+) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val v = state.vitals
+
+    LazyColumn(
+        state = listState,
+        modifier = modifier
+            .fillMaxSize()
+            .background(colors.bg),
+        contentPadding = PaddingValues(
+            start = PcDimens.ScreenPad,
+            end = PcDimens.ScreenPad,
+            top = topPadding,
+            bottom = PcDimens.Space8,
+        ),
+        verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
+    ) {
+        if (state.error != null && v == null) {
+            item(key = "error") {
+                PcErrorBanner(
+                    title = "Can't reach /vitals",
+                    message = state.error,
+                    tone = PcTone.Bad,
+                )
+            }
+        }
+
+        if (v == null) {
+            if (state.error == null) {
+                item(key = "loading") {
+                    PcCard {
+                        Text(
+                            text = "Connecting to vitals…",
+                            color = colors.textDim,
+                            style = type.body,
+                        )
+                    }
+                }
+            }
+            return@LazyColumn
+        }
+
+        // 1. Hero CPU Card (metricHero tabular + auto-scaled Canvas sparkline)
+        item(key = "cpu_hero") {
+            CpuHeroCard(vitals = v, history = state.history)
+        }
+
+        // 2. 2x2 Grid: Memory / Swap
+        item(key = "mem_swap_row") {
+            val gib = 1024.0 * 1024.0 * 1024.0
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(IntrinsicSize.Min),
+                horizontalArrangement = Arrangement.spacedBy(PcDimens.Space3),
+            ) {
+                MetricTile(
+                    label = "Memory",
+                    value = String.format(Locale.US, "%.1f", v.mem.used / gib),
+                    unit = String.format(Locale.US, " / %.0f GB", v.mem.total / gib),
+                    percent = v.mem.pct,
+                    sub = "${v.mem.pct.roundToInt()}% used",
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                )
+                MetricTile(
+                    label = "Swap",
+                    value = String.format(Locale.US, "%.1f", v.swap.used / gib),
+                    unit = String.format(Locale.US, " / %.0f GB", v.swap.total / gib),
+                    percent = v.swap.pct,
+                    sub = "${v.swap.pct.roundToInt()}% used",
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                )
+            }
+        }
+
+        // 3. 2x2 Grid: GPU / VRAM
+        item(key = "gpu_vram_row") {
+            val gpu = v.gpu
+            val vramPct = if (gpu != null && gpu.memTotal > 0.0) (gpu.memUsed / gpu.memTotal) * 100.0 else null
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(IntrinsicSize.Min),
+                horizontalArrangement = Arrangement.spacedBy(PcDimens.Space3),
+            ) {
+                MetricTile(
+                    label = "GPU",
+                    value = gpu?.let { "${it.util.roundToInt()}" } ?: "–",
+                    unit = if (gpu != null) "%" else null,
+                    percent = gpu?.util,
+                    sub = gpu?.let { "${it.temp.roundToInt()}°C · ${it.power.roundToInt()} W" } ?: "Not available",
+                    barColorOverride = colors.textDim,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                )
+                MetricTile(
+                    label = "VRAM",
+                    value = gpu?.let { String.format(Locale.US, "%.1f", it.memUsed / 1024.0) } ?: "–",
+                    unit = gpu?.let { String.format(Locale.US, " / %.0f GB", it.memTotal / 1024.0) },
+                    percent = vramPct,
+                    sub = vramPct?.let { "${it.roundToInt()}% used" } ?: "Not available",
+                    barColorOverride = colors.textDim,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                )
+            }
+        }
+
+        // 4. Temperatures
+        val temps = ServiceHelpers.sortedTemperatures(v.temps)
+        if (temps.isNotEmpty()) {
+            item(key = "temps_section") {
+                Column(
+                    modifier = Modifier.padding(top = PcDimens.Space3),
+                    verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+                ) {
+                    PcSectionLabel(label = "Temperatures")
+                    PcListCard {
+                        temps.forEachIndexed { idx, (key, tempC) ->
+                            val tempColor = when {
+                                tempC >= 85.0 -> colors.bad
+                                tempC >= 70.0 -> colors.warn
+                                else -> colors.text
+                            }
+                            PcListRow(
+                                title = ServiceHelpers.prettyTempLabel(key),
+                                trailingContent = {
+                                    Text(
+                                        text = buildAnnotatedString {
+                                            withStyle(
+                                                SpanStyle(
+                                                    color = tempColor,
+                                                    fontSize = type.cardTitle.fontSize,
+                                                    fontWeight = FontWeight.Medium,
+                                                ),
+                                            ) {
+                                                append("${tempC.roundToInt()}")
+                                            }
+                                            withStyle(
+                                                SpanStyle(
+                                                    color = colors.textDim,
+                                                    fontSize = type.caption.fontSize,
+                                                    fontWeight = FontWeight.Normal,
+                                                ),
+                                            ) {
+                                                append("°C")
+                                            }
+                                        },
+                                        style = type.cardTitle.tabular(),
+                                    )
+                                },
+                                showChevron = false,
+                                showDivider = idx < temps.lastIndex,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Power & I/O
+        item(key = "power_io") {
+            Column(
+                modifier = Modifier.padding(top = PcDimens.Space3),
+                verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+            ) {
+                PcSectionLabel(label = "Power & I/O")
+                PcListCard {
+                    PcListRow(
+                        title = "Battery",
+                        subtitle = v.bat?.let { if (it.plugged) "Plugged in" else "On battery" } ?: "No battery",
+                        trailing = v.bat?.let { "${it.pct.roundToInt()}%" } ?: "–",
+                        showChevron = false,
+                        showDivider = true,
+                    )
+                    PcListRow(
+                        title = "Disk I/O",
+                        trailing = "↓ ${PcFormatters.formatRate(v.diskIo.r)} · ↑ ${PcFormatters.formatRate(v.diskIo.w)}",
+                        showChevron = false,
+                        showDivider = false,
+                    )
+                }
+            }
+        }
+
+        // 6. Network
+        item(key = "network") {
+            NetworkVitalsSection(vitals = v, history = state.history)
+        }
+
+        // 7. Disks
+        item(key = "disks") {
+            DisksVitalsSection(disks = v.disks)
+        }
+
+        // 8. Top Processes
+        item(key = "processes") {
+            ProcessesVitalsSection(
+                state = state,
+                onToggleProcesses = onToggleProcesses,
+                onProcessQueryChange = onProcessQueryChange,
+                onSelectSort = onSelectSort,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CpuHeroCard(
+    vitals: VitalsResponse,
+    history: List<VitalsHistPoint>,
+) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val cpuValues = remember(history) { history.map { it.cpu } }
+
+    PcCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Column {
+                Text(
+                    text = "CPU",
+                    style = type.sectionLabel,
+                )
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        text = "${vitals.cpu.roundToInt()}",
+                        color = if (vitals.cpu >= 80.0) colors.warn else colors.text,
+                        style = type.metricHero,
+                    )
+                    Text(
+                        text = "%",
+                        color = colors.textDim,
+                        style = type.metricValue.copy(fontWeight = FontWeight.Normal),
+                        modifier = Modifier.padding(start = 2.dp, bottom = 6.dp),
+                    )
+                }
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = "${vitals.percpu.size} threads",
+                    color = colors.textDim,
+                    style = type.caption.tabular(),
+                )
+                Text(
+                    text = vitals.freq?.let { String.format(Locale.US, "%.2f GHz", it / 1000.0) } ?: "–",
+                    color = colors.textFaint,
+                    style = type.caption.tabular(),
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        val cpuSparkMax = remember(cpuValues) { computeCpuSparklineMax(cpuValues) }
+        VitalsSparkline(
+            series = listOf(
+                SparklineSeries(
+                    values = cpuValues,
+                    color = colors.text,
+                    strokeWidthDp = 1.9f,
+                ),
+            ),
+            baselineColor = colors.hairline,
+            dotColor = colors.accent,
+            maxValue = cpuSparkMax,
+            height = 48.dp,
+        )
+
+        if (vitals.load.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Load ${vitals.load.joinToString(" ") { String.format(Locale.US, "%.2f", it) }}",
+                color = colors.textFaint,
+                style = type.caption.tabular(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun MetricTile(
+    label: String,
+    value: String,
+    percent: Double?,
+    sub: String,
+    modifier: Modifier = Modifier,
+    unit: String? = null,
+    barColorOverride: Color? = null,
+) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val over = percent != null && percent >= 80.0
+    val barColor = if (over) colors.warn else (barColorOverride ?: colors.text)
+    val trackColor = vitalsProgressTrackColor()
+
+    PcCard(
+        modifier = modifier,
+        contentPadding = PaddingValues(14.dp),
+    ) {
+        Text(
+            text = label,
+            style = type.sectionLabel,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = buildAnnotatedString {
+                withStyle(
+                    SpanStyle(
+                        color = if (over) colors.warn else colors.text,
+                        fontSize = type.metricValue.fontSize,
+                        fontWeight = type.metricValue.fontWeight,
+                        letterSpacing = type.collapsedTitle.letterSpacing,
+                    ),
+                ) {
+                    append(value)
+                }
+                if (!unit.isNullOrEmpty()) {
+                    withStyle(
+                        SpanStyle(
+                            color = colors.textDim,
+                            fontSize = type.caption.fontSize,
+                            fontWeight = FontWeight.Normal,
+                        ),
+                    ) {
+                        append(unit)
+                    }
+                }
+            },
+            style = type.metricValue,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (percent != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            VitalsProgressBar(
+                percent = percent,
+                trackColor = trackColor,
+                fillColor = barColor,
+                height = 4.dp,
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = sub,
+            color = if (over && sub.contains('%')) colors.warn else colors.textFaint,
+            style = type.caption.tabular(),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun NetworkVitalsSection(
+    vitals: VitalsResponse,
+    history: List<VitalsHistPoint>,
+) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val nics = vitals.nics.entries.toList()
+    val totalRx = nics.sumOf { it.value.rx }
+    val totalTx = nics.sumOf { it.value.tx }
+    val activeNics = nics.filter { it.value.rx + it.value.tx > 1024.0 }
+    val rxSeries = remember(history) { history.map { it.rx } }
+    val txSeries = remember(history) { history.map { it.tx } }
+
+    Column(
+        modifier = Modifier.padding(top = PcDimens.Space3),
+        verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+    ) {
+        PcSectionLabel(label = "Network")
+        PcCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = "↓ ${PcFormatters.formatRate(totalRx)}",
+                    color = colors.text,
+                    style = type.collapsedTitle.tabular().copy(fontWeight = FontWeight.Medium),
+                )
+                Text(
+                    text = "↑ ${PcFormatters.formatRate(totalTx)}",
+                    color = colors.textDim,
+                    style = type.body.tabular().copy(fontWeight = FontWeight.Medium),
+                )
+                Text(
+                    text = if (activeNics.isNotEmpty()) activeNics.joinToString(", ") { it.key } else "idle",
+                    color = colors.textFaint,
+                    style = type.caption,
+                    textAlign = TextAlign.End,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            VitalsSparkline(
+                series = listOf(
+                    SparklineSeries(values = rxSeries, color = colors.text, strokeWidthDp = 1.7f),
+                    SparklineSeries(values = txSeries, color = colors.textFaint, strokeWidthDp = 1.4f),
+                ),
+                baselineColor = colors.hairline,
+                dotColor = colors.accent,
+                height = 38.dp,
+            )
+
+            if (nics.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    nics.forEach { (name, stats) ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = name,
+                                color = colors.text,
+                                style = MonoTextStyle.copy(
+                                    fontSize = type.caption.fontSize,
+                                    lineHeight = type.caption.lineHeight,
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                imageVector = Icons.Rounded.ArrowDownward,
+                                contentDescription = null,
+                                tint = colors.textDim,
+                                modifier = Modifier.size(13.dp),
+                            )
+                            Text(
+                                text = PcFormatters.formatRate(stats.rx),
+                                color = colors.textDim,
+                                style = type.caption.tabular(),
+                                textAlign = TextAlign.End,
+                                modifier = Modifier.width(78.dp),
+                            )
+                            Icon(
+                                imageVector = Icons.Rounded.ArrowUpward,
+                                contentDescription = null,
+                                tint = colors.textDim,
+                                modifier = Modifier.size(13.dp),
+                            )
+                            Text(
+                                text = PcFormatters.formatRate(stats.tx),
+                                color = colors.textDim,
+                                style = type.caption.tabular(),
+                                textAlign = TextAlign.End,
+                                modifier = Modifier.width(78.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DisksVitalsSection(disks: List<DiskUsage>) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val trackColor = vitalsProgressTrackColor()
+    Column(
+        modifier = Modifier.padding(top = PcDimens.Space3),
+        verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+    ) {
+        PcSectionLabel(label = "Disks")
+        PcCard {
+            if (disks.isEmpty()) {
+                Text(
+                    text = "No disks reported.",
+                    color = colors.textFaint,
+                    style = type.caption,
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    disks.forEach { disk ->
+                        val shortName = if (disk.mount == "/") "/" else disk.mount.substringAfterLast('/')
+                        val fillColor = when {
+                            disk.pct >= 90.0 -> colors.bad
+                            disk.pct >= 80.0 -> colors.warn
+                            else -> colors.text
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text(
+                                    text = if (shortName == disk.mount) disk.mount else "$shortName · ${disk.mount}",
+                                    color = colors.text,
+                                    style = type.body,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "${PcFormatters.formatBytes(disk.used)} / ${PcFormatters.formatBytes(disk.total)}",
+                                    color = colors.textDim,
+                                    style = type.caption.tabular(),
+                                )
+                            }
+                            VitalsProgressBar(
+                                percent = disk.pct,
+                                trackColor = trackColor,
+                                fillColor = fillColor,
+                                height = 4.dp,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProcessesVitalsSection(
+    state: VitalsUiState,
+    onToggleProcesses: (Boolean) -> Unit,
+    onProcessQueryChange: (String) -> Unit,
+    onSelectSort: (ProcessSortKey) -> Unit,
+) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val allProcs = state.vitals?.procs
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (state.showProcesses) 180f else 0f,
+        label = "top_processes_chevron",
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = PcDimens.Space3)
+            .animateContentSize(),
+        verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = 44.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(role = Role.Button) { onToggleProcesses(!state.showProcesses) }
+                .padding(horizontal = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = "Top processes",
+                style = type.sectionLabel,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (state.showProcesses && allProcs != null) {
+                Text(
+                    text = "${allProcs.size}",
+                    color = colors.textFaint,
+                    style = type.caption.tabular(),
+                )
+            }
+            Icon(
+                imageVector = Icons.Rounded.KeyboardArrowDown,
+                contentDescription = if (state.showProcesses) "Collapse top processes" else "Expand top processes",
+                tint = colors.textDim,
+                modifier = Modifier
+                    .size(20.dp)
+                    .rotate(chevronRotation),
+            )
+        }
+
+        if (state.showProcesses) {
+            if (allProcs == null) {
+                PcCard {
+                    Text(
+                        text = "Sampling processes…",
+                        color = colors.textDim,
+                        style = type.body,
+                    )
+                }
+            } else {
+                val (shown, filteredCount) = remember(allProcs, state.processQuery, state.sortKey, state.sortDescending) {
+                    ServiceHelpers.filterAndSortProcesses(
+                        processes = allProcs,
+                        query = state.processQuery,
+                        sortKey = state.sortKey,
+                        descending = state.sortDescending,
+                    )
+                }
+
+                PcCard {
+                    // Search box
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(38.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(colors.surfaceRaised)
+                                .border(0.5.dp, colors.hairline, RoundedCornerShape(10.dp))
+                                .padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Search,
+                                contentDescription = null,
+                                tint = colors.textFaint,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                                if (state.processQuery.isEmpty()) {
+                                    Text(
+                                        text = "Filter name, command or PID",
+                                        color = colors.textFaint,
+                                        style = type.caption,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                BasicTextField(
+                                    value = state.processQuery,
+                                    onValueChange = onProcessQueryChange,
+                                    singleLine = true,
+                                    textStyle = type.body.tabular().copy(color = colors.text),
+                                    cursorBrush = SolidColor(colors.accent),
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                            if (state.processQuery.isNotEmpty()) {
+                                IconButton(
+                                    onClick = { onProcessQueryChange("") },
+                                    modifier = Modifier.size(22.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = "Clear filter",
+                                        tint = colors.textDim,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            text = "$filteredCount/${allProcs.size}",
+                            color = colors.textFaint,
+                            style = type.caption.tabular(),
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Sort chips
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        ProcessSortKey.entries.forEach { key ->
+                            val selected = key == state.sortKey
+                            val arrow = if (!selected) "" else if (state.sortDescending) " ▾" else " ▴"
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(if (selected) colors.accentSoft else Color.Transparent)
+                                    .border(
+                                        width = 0.5.dp,
+                                        color = if (selected) colors.accent else colors.hairline,
+                                        shape = CircleShape,
+                                    )
+                                    .clickable { onSelectSort(key) }
+                                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                            ) {
+                                Text(
+                                    text = "${key.label}$arrow",
+                                    color = if (selected) colors.accent else colors.textDim,
+                                    style = type.caption.copy(fontWeight = FontWeight.Medium),
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    if (shown.isEmpty()) {
+                        Text(
+                            text = "No matching processes.",
+                            color = colors.textFaint,
+                            style = type.caption,
+                        )
+                    } else {
+                        shown.forEachIndexed { idx, proc ->
+                            if (idx > 0) {
+                                HorizontalDivider(
+                                    thickness = 0.5.dp,
+                                    color = colors.hairline,
+                                    modifier = Modifier.padding(vertical = 8.dp),
+                                )
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Text(
+                                        text = proc.name,
+                                        color = colors.text,
+                                        style = type.body.copy(fontWeight = FontWeight.SemiBold),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Text(
+                                        text = String.format(Locale.US, "%.1f%%", proc.cpu),
+                                        color = if (proc.cpu > 50.0) colors.bad else colors.text,
+                                        style = type.caption.tabular().copy(fontWeight = FontWeight.Medium),
+                                        textAlign = TextAlign.End,
+                                        modifier = Modifier.width(56.dp),
+                                    )
+                                    Text(
+                                        text = PcFormatters.formatBytes(proc.rss, digits = 0),
+                                        color = colors.textDim,
+                                        style = type.caption.tabular(),
+                                        textAlign = TextAlign.End,
+                                        modifier = Modifier.width(64.dp),
+                                    )
+                                }
+                                val meta = buildString {
+                                    append("PID ${proc.pid} · ${proc.user.ifBlank { "–" }} · ${proc.thr?.toString() ?: "–"} thr")
+                                    if (proc.gpu != null) {
+                                        append(" · GPU ${proc.gpu.roundToInt()} MB")
+                                    }
+                                }
+                                Text(
+                                    text = meta,
+                                    color = colors.textFaint,
+                                    style = type.micro.tabular(),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (proc.cmd.isNotBlank()) {
+                                    Text(
+                                        text = proc.cmd.take(120),
+                                        color = colors.textFaint,
+                                        style = MonoTextStyle.copy(
+                                            fontSize = type.micro.fontSize,
+                                            lineHeight = type.micro.lineHeight,
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                        if (filteredCount > shown.size) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Showing ${shown.size} of $filteredCount",
+                                color = colors.textFaint,
+                                style = type.caption.tabular(),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

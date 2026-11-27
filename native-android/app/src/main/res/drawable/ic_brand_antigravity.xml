@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="26"
+    android:viewportHeight="26">
+    <group
+        android:translateX="1"
+        android:translateY="1">
+        <clip-path
+            android:pathData="M21.751,22.607c1.34,1.005 3.35,0.335 1.508,-1.508C17.73,15.74 18.904,1 12.037,1 5.17,1 6.342,15.74 0.815,21.1c-2.01,2.009 0.167,2.511 1.507,1.506 5.192,-3.517 4.857,-9.714 9.715,-9.714 4.857,0 4.522,6.197 9.714,9.715z" />
+        <!-- Base vibrant Google Blue across the arch -->
+        <path
+            android:fillColor="#3186FF"
+            android:pathData="M-2,-2H26V26H-2Z" />
+        <!-- Left curve green glow -->
+        <path android:pathData="M-2,-2H26V26H-2Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:centerX="2.5"
+                    android:centerY="12.5"
+                    android:gradientRadius="12.0"
+                    android:type="radial">
+                    <item android:color="#FF00B95C" android:offset="0.0" />
+                    <item android:color="#CC00B95C" android:offset="0.45" />
+                    <item android:color="#0000B95C" android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <!-- Top-left apex yellow glow -->
+        <path android:pathData="M-2,-2H26V26H-2Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:centerX="8.5"
+                    android:centerY="2.5"
+                    android:gradientRadius="10.5"
+                    android:type="radial">
+                    <item android:color="#FFFFE432" android:offset="0.0" />
+                    <item android:color="#E6FBBC04" android:offset="0.42" />
+                    <item android:color="#00FBBC04" android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <!-- Top-right curve red glow -->
+        <path android:pathData="M-2,-2H26V26H-2Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:centerX="18.5"
+                    android:centerY="6.5"
+                    android:gradientRadius="12.5"
+                    android:type="radial">
+                    <item android:color="#FFFC413D" android:offset="0.0" />
+                    <item android:color="#E6FC413D" android:offset="0.42" />
+                    <item android:color="#00FC413D" android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <!-- Bottom-right leg blue depth -->
+        <path android:pathData="M-2,-2H26V26H-2Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:centerX="19.5"
+                    android:centerY="20.5"
+                    android:gradientRadius="10.5"
+                    android:type="radial">
+                    <item android:color="#FF3186FF" android:offset="0.0" />
+                    <item android:color="#CC3186FF" android:offset="0.5" />
+                    <item android:color="#003186FF" android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <!-- Bottom-left leg blue depth -->
+        <path android:pathData="M-2,-2H26V26H-2Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:centerX="4.0"
+                    android:centerY="21.5"
+                    android:gradientRadius="9.5"
+                    android:type="radial">
+                    <item android:color="#FF3186FF" android:offset="0.0" />
+                    <item android:color="#B33186FF" android:offset="0.45" />
+                    <item android:color="#003186FF" android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+</vector>

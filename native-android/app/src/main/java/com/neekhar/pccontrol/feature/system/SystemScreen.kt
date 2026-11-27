@@ -1,11 +1,9 @@
 package com.neekhar.pccontrol.feature.system
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
@@ -20,9 +18,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.storage.LocalCache
-import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.PcDimens
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSegmentOption
 import com.neekhar.pccontrol.core.ui.PcSegmentedControl
 import com.neekhar.pccontrol.core.ui.PcTone
@@ -44,7 +41,6 @@ fun SystemScreen(
     vitalsViewModel: VitalsViewModel = viewModel(factory = VitalsViewModel.factory(api, cache)),
     servicesViewModel: ServicesViewModel = viewModel(factory = ServicesViewModel.factory(api, cache)),
 ) {
-    val colors = LocalPcColors.current
     val vitalsState by vitalsViewModel.uiState.collectAsStateWithLifecycle()
     val servicesState by servicesViewModel.uiState.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -54,6 +50,8 @@ fun SystemScreen(
         initialPage = resolvedInitial.ordinal,
         pageCount = { SystemTab.entries.size },
     )
+    val vitalsListState = rememberLazyListState()
+    val servicesListState = rememberLazyListState()
 
     LaunchedEffect(initialTab) {
         if (!initialTab.isNullOrBlank()) {
@@ -65,6 +63,7 @@ fun SystemScreen(
     }
 
     val currentTab = SystemTab.entries[pagerState.currentPage]
+    val activeListState = if (currentTab == SystemTab.VITALS) vitalsListState else servicesListState
 
     // Lifecycle-aware polling: only poll the visible tab while the screen is RESUMED.
     LifecycleResumeEffect(vitalsViewModel, servicesViewModel, currentTab) {
@@ -97,55 +96,56 @@ fun SystemScreen(
         )
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(colors.bg)
-            .statusBarsPadding(),
+    PcScaffold(
+        title = "System",
+        statusText = headerStatusText,
+        statusTone = headerStatusTone,
+        showStatusDot = headerStatusText != null,
+        listState = activeListState,
+        applyNavigationBarPadding = false,
+        modifier = modifier,
     ) {
-        PcScreenHeader(
-            title = "System",
-            statusText = headerStatusText,
-            statusTone = headerStatusTone,
-            showStatusDot = headerStatusText != null,
-        )
+        Column(modifier = Modifier.fillMaxSize()) {
+            PcSegmentedControl(
+                options = segmentOptions,
+                selected = currentTab,
+                onSelect = { tab ->
+                    scope.launch {
+                        pagerState.animateScrollToPage(tab.ordinal)
+                    }
+                },
+                modifier = Modifier.padding(
+                    start = PcDimens.ScreenPad,
+                    end = PcDimens.ScreenPad,
+                    top = 4.dp,
+                    bottom = 12.dp,
+                ),
+            )
 
-        PcSegmentedControl(
-            options = segmentOptions,
-            selected = currentTab,
-            onSelect = { tab ->
-                scope.launch {
-                    pagerState.animateScrollToPage(tab.ordinal)
+            HorizontalPager(
+                state = pagerState,
+                beyondViewportPageCount = 1,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f),
+            ) { page ->
+                when (SystemTab.entries[page]) {
+                    SystemTab.VITALS -> VitalsTab(
+                        state = vitalsState,
+                        onToggleProcesses = vitalsViewModel::toggleProcesses,
+                        onProcessQueryChange = vitalsViewModel::setProcessQuery,
+                        onSelectSort = vitalsViewModel::selectSort,
+                        listState = vitalsListState,
+                    )
+                    SystemTab.SERVICES -> ServicesTab(
+                        state = servicesState,
+                        onRefresh = servicesViewModel::refresh,
+                        onSelectFilter = servicesViewModel::selectFilter,
+                        onOpenServiceDetail = onOpenServiceDetail,
+                        onOpenDownloads = onOpenDownloads,
+                        listState = servicesListState,
+                    )
                 }
-            },
-            modifier = Modifier.padding(
-                start = PcDimens.ScreenPad,
-                end = PcDimens.ScreenPad,
-                bottom = 12.dp,
-            ),
-        )
-
-        HorizontalPager(
-            state = pagerState,
-            beyondViewportPageCount = 1,
-            modifier = Modifier
-                .fillMaxSize()
-                .weight(1f),
-        ) { page ->
-            when (SystemTab.entries[page]) {
-                SystemTab.VITALS -> VitalsTab(
-                    state = vitalsState,
-                    onToggleProcesses = vitalsViewModel::toggleProcesses,
-                    onProcessQueryChange = vitalsViewModel::setProcessQuery,
-                    onSelectSort = vitalsViewModel::selectSort,
-                )
-                SystemTab.SERVICES -> ServicesTab(
-                    state = servicesState,
-                    onRefresh = servicesViewModel::refresh,
-                    onSelectFilter = servicesViewModel::selectFilter,
-                    onOpenServiceDetail = onOpenServiceDetail,
-                    onOpenDownloads = onOpenDownloads,
-                )
             }
         }
     }
@@ -162,37 +162,34 @@ fun VitalsScreen(
     modifier: Modifier = Modifier,
     viewModel: VitalsViewModel = viewModel(factory = VitalsViewModel.factory(api, cache)),
 ) {
-    val colors = LocalPcColors.current
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val listState = rememberLazyListState()
 
     LifecycleResumeEffect(viewModel) {
         viewModel.startPolling()
         onPauseOrDispose { viewModel.stopPolling() }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(colors.bg)
-            .statusBarsPadding()
-            .navigationBarsPadding(),
+    val vitalsWarnText = state.statusText.takeIf {
+        state.statusTone == PcTone.Bad || state.statusTone == PcTone.Warn
+    }
+
+    PcScaffold(
+        title = "Vitals",
+        statusText = vitalsWarnText,
+        statusTone = state.statusTone,
+        showStatusDot = vitalsWarnText != null,
+        onBack = onBack,
+        listState = listState,
+        modifier = modifier,
     ) {
-        val vitalsWarnText = state.statusText.takeIf {
-            state.statusTone == PcTone.Bad || state.statusTone == PcTone.Warn
-        }
-        PcScreenHeader(
-            title = "Vitals",
-            statusText = vitalsWarnText,
-            statusTone = state.statusTone,
-            showStatusDot = vitalsWarnText != null,
-            onBack = onBack,
-        )
         VitalsTab(
             state = state,
             onToggleProcesses = viewModel::toggleProcesses,
             onProcessQueryChange = viewModel::setProcessQuery,
             onSelectSort = viewModel::selectSort,
-            modifier = Modifier.weight(1f),
+            listState = listState,
+            modifier = Modifier.fillMaxSize(),
         )
     }
 }
@@ -210,38 +207,35 @@ fun ServicesScreen(
     modifier: Modifier = Modifier,
     viewModel: ServicesViewModel = viewModel(factory = ServicesViewModel.factory(api, cache)),
 ) {
-    val colors = LocalPcColors.current
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val listState = rememberLazyListState()
 
     LifecycleResumeEffect(viewModel) {
         viewModel.startPolling()
         onPauseOrDispose { viewModel.stopPolling() }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(colors.bg)
-            .statusBarsPadding()
-            .navigationBarsPadding(),
+    val servicesWarnText = state.statusText.takeIf {
+        state.summaryTone == PcTone.Bad || state.summaryTone == PcTone.Warn
+    }
+
+    PcScaffold(
+        title = "Services",
+        statusText = servicesWarnText,
+        statusTone = state.summaryTone,
+        showStatusDot = servicesWarnText != null,
+        onBack = onBack,
+        listState = listState,
+        modifier = modifier,
     ) {
-        val servicesWarnText = state.statusText.takeIf {
-            state.summaryTone == PcTone.Bad || state.summaryTone == PcTone.Warn
-        }
-        PcScreenHeader(
-            title = "Services",
-            statusText = servicesWarnText,
-            statusTone = state.summaryTone,
-            showStatusDot = servicesWarnText != null,
-            onBack = onBack,
-        )
         ServicesTab(
             state = state,
             onRefresh = viewModel::refresh,
             onSelectFilter = viewModel::selectFilter,
             onOpenServiceDetail = onOpenServiceDetail,
             onOpenDownloads = onOpenDownloads,
-            modifier = Modifier.weight(1f),
+            listState = listState,
+            modifier = Modifier.fillMaxSize(),
         )
     }
 }

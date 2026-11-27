@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,8 +31,22 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.neekhar.pccontrol.core.theme.LocalPcColors
 import kotlin.math.max
 import kotlin.math.min
+
+val VITALS_BAR_TRACK_DARK = Color(0xFF2C2C2C)
+
+@Composable
+fun vitalsProgressTrackColor(): Color {
+    val colors = LocalPcColors.current
+    return if (colors.isDark) VITALS_BAR_TRACK_DARK else colors.surfaceRaised
+}
+
+fun vitalsProgressFraction(percent: Double): Float {
+    if (!percent.isFinite() || percent <= 0.0) return 0f
+    return (percent / 100.0).toFloat().coerceIn(0.04f, 1f)
+}
 
 data class SparklineSeries(
     val values: List<Double?>,
@@ -160,12 +175,13 @@ fun VitalsSparkline(
 @Composable
 fun VitalsProgressBar(
     percent: Double,
-    trackColor: Color,
     fillColor: Color,
     modifier: Modifier = Modifier,
+    trackColor: Color = vitalsProgressTrackColor(),
     height: Dp = 4.dp,
 ) {
-    val target = (percent / 100.0).toFloat().coerceIn(0f, 1f)
+    val hasFill = percent.isFinite() && percent > 0.0
+    val target = vitalsProgressFraction(percent)
     val animated by animateFloatAsState(
         targetValue = target,
         animationSpec = tween(durationMillis = 280),
@@ -179,10 +195,11 @@ fun VitalsProgressBar(
             .clip(shape)
             .background(trackColor),
     ) {
-        if (animated > 0f) {
+        if (animated > 0.001f) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(animated)
+                    .defaultMinSize(minWidth = if (hasFill) 6.dp else 0.dp)
                     .fillMaxHeight()
                     .clip(shape)
                     .background(fillColor),
@@ -210,7 +227,7 @@ fun PerCoreCpuStrip(
     ) {
         perCpu.forEach { load ->
             val fraction = (load / 100.0).toFloat().coerceIn(0.08f, 1f)
-            val barColor = if (load > 65.0) warnColor else normalColor
+            val barColor = if (load >= 80.0) warnColor else normalColor
             Box(
                 modifier = Modifier
                     .weight(1f)

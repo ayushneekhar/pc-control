@@ -21,14 +21,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckBox
-import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
-import androidx.compose.material.icons.filled.Fingerprint
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.rounded.CheckBox
+import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
+import androidx.compose.material.icons.rounded.Fingerprint
+import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -52,18 +53,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
+import com.neekhar.pccontrol.core.theme.MonoTextStyle
 import com.neekhar.pccontrol.core.theme.PcDimens
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcConfirmDialog
-import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcPill
@@ -85,6 +87,7 @@ fun RootScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val pullState = rememberPullToRefreshState()
 
     LaunchedEffect(initialRequestId) {
@@ -134,7 +137,6 @@ fun RootScreen(
                 contentPadding = PaddingValues(top = 4.dp, bottom = PcDimens.Space8),
                 verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
             ) {
-
                 if (state.rootdState == RootdState.NOT_INSTALLED) {
                     item(key = "banner_not_installed") {
                         PcCard(
@@ -148,20 +150,21 @@ fun RootScreen(
                                 Text(
                                     text = "rootd isn't installed yet",
                                     color = colors.text,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.SemiBold,
+                                    style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
                                 )
                                 Text(
                                     text = "Root approvals need the root daemon on the laptop. Run this once in a terminal:",
                                     color = colors.textDim,
-                                    fontSize = 13.5.sp,
-                                    lineHeight = 19.sp,
+                                    style = type.body,
                                 )
                                 Text(
                                     text = "sudo ~/code/pc-control/server/install-rootd.sh",
                                     color = colors.accent,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.5.sp,
+                                    style = MonoTextStyle.copy(
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = type.caption.fontSize,
+                                        lineHeight = type.caption.lineHeight,
+                                    ),
                                 )
                             }
                         }
@@ -196,7 +199,7 @@ fun RootScreen(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Filled.Fingerprint,
+                                        imageVector = Icons.Rounded.Fingerprint,
                                         contentDescription = null,
                                         tint = colors.warn,
                                         modifier = Modifier.size(20.dp),
@@ -204,15 +207,13 @@ fun RootScreen(
                                     Text(
                                         text = "This phone can't approve yet",
                                         color = colors.text,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.SemiBold,
+                                        style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
                                     )
                                 }
                                 Text(
                                     text = "Set up root approvals in Settings to enroll this phone's hardware key.",
                                     color = colors.textDim,
-                                    fontSize = 13.5.sp,
-                                    lineHeight = 19.sp,
+                                    style = type.body,
                                 )
                                 PcButton(
                                     label = "Open Settings",
@@ -233,13 +234,9 @@ fun RootScreen(
 
                 if (state.pending.isEmpty()) {
                     item(key = "empty_waiting") {
-                        PcCard(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
-                            PcEmptyState(
-                                icon = Icons.Filled.VerifiedUser,
-                                title = "Nothing waiting",
-                                body = "New root approval requests will appear here.",
-                            )
-                        }
+                        CompactRootEmptyCard(
+                            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                        )
                     }
                 } else {
                     items(
@@ -286,7 +283,7 @@ fun RootScreen(
                         Text(
                             text = "No commands yet.",
                             color = colors.textFaint,
-                            fontSize = 13.sp,
+                            style = type.caption,
                             modifier = Modifier.padding(horizontal = PcDimens.ScreenPad + 4.dp),
                         )
                     }
@@ -341,6 +338,53 @@ fun RootScreen(
     }
 }
 
+/**
+ * Compact (~120.dp) empty state card for the "Waiting for you" section.
+ */
+@Composable
+private fun CompactRootEmptyCard(modifier: Modifier = Modifier) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    PcCard(
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = PcDimens.Space4, vertical = 18.dp),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(colors.surfaceRaised),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.VerifiedUser,
+                    contentDescription = null,
+                    tint = colors.textFaint,
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Nothing waiting",
+                color = colors.text,
+                style = type.cardTitle,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                text = "New root approval requests will appear here.",
+                color = colors.textDim,
+                style = type.caption,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
 @Composable
 private fun PendingRequestCard(
     req: RootRequest,
@@ -350,6 +394,7 @@ private fun PendingRequestCard(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val isPending = req.status == "pending"
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
@@ -373,7 +418,7 @@ private fun PendingRequestCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Icon(
-                    imageVector = Icons.Filled.Security,
+                    imageVector = Icons.Rounded.Security,
                     contentDescription = null,
                     tint = if (isPending) colors.warn else colors.accent,
                     modifier = Modifier.size(20.dp),
@@ -381,8 +426,7 @@ private fun PendingRequestCard(
                 Text(
                     text = req.reason.ifBlank { "Root command" },
                     color = colors.text,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -410,8 +454,7 @@ private fun PendingRequestCard(
                     Text(
                         text = "Long command (${cmd.length} chars) · Review every argument below before approving.",
                         color = colors.warn,
-                        fontSize = 12.5.sp,
-                        lineHeight = 17.sp,
+                        style = type.caption,
                     )
                 }
             }
@@ -428,16 +471,17 @@ private fun PendingRequestCard(
                 Text(
                     text = "# $cmd",
                     color = colors.text,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 13.5.sp,
-                    lineHeight = 19.sp,
+                    style = MonoTextStyle.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = type.body.fontSize,
+                        lineHeight = type.body.lineHeight,
+                    ),
                 )
                 if (!longCmd) {
                     Text(
                         text = "${if (showArgs) "Hide" else "Show"} ${req.argv.size} argument${if (req.argv.size == 1) "" else "s"} exactly",
                         color = colors.accent,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = type.caption.copy(fontWeight = FontWeight.Medium),
                     )
                 }
             }
@@ -463,7 +507,7 @@ private fun PendingRequestCard(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Icon(
-                        imageVector = if (reviewedFull) Icons.Filled.CheckBox else Icons.Filled.CheckBoxOutlineBlank,
+                        imageVector = if (reviewedFull) Icons.Rounded.CheckBox else Icons.Rounded.CheckBoxOutlineBlank,
                         contentDescription = null,
                         tint = if (reviewedFull) colors.ok else colors.warn,
                         modifier = Modifier.size(20.dp),
@@ -471,7 +515,7 @@ private fun PendingRequestCard(
                     Text(
                         text = "I reviewed all ${req.argv.size} arguments (${cmd.length} chars)",
                         color = colors.text,
-                        fontSize = 13.5.sp,
+                        style = type.body,
                     )
                 }
             }
@@ -479,8 +523,7 @@ private fun PendingRequestCard(
             Text(
                 text = "${formatClock(req.created)} · uid ${req.uid} · timeout ${formatDuration(req.timeout)} · id ${req.id.take(8)}",
                 color = colors.textFaint,
-                fontSize = 12.sp,
-                style = TabularNumStyle,
+                style = type.caption.tabular(),
             )
 
             if (isPending) {
@@ -531,6 +574,7 @@ private fun RootActionButton(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val interactive = enabled && !busy
     val (bg, fg) = when {
         !enabled && !busy -> colors.surfaceRaised to colors.textFaint
@@ -566,8 +610,7 @@ private fun RootActionButton(
         Text(
             text = label,
             color = fg,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
+            style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -577,6 +620,7 @@ private fun RootActionButton(
 @Composable
 private fun ArgvList(argv: List<String>) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -593,16 +637,21 @@ private fun ArgvList(argv: List<String>) {
                 Text(
                     text = idx.toString(),
                     color = colors.textFaint,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
+                    style = MonoTextStyle.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = type.caption.fontSize,
+                        lineHeight = type.caption.lineHeight,
+                    ),
                     modifier = Modifier.width(20.dp),
                 )
                 Text(
                     text = if (arg.isEmpty()) "(empty)" else RootPayload.showArg(arg),
                     color = if (arg.isEmpty()) colors.textFaint else colors.text,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.5.sp,
-                    lineHeight = 18.sp,
+                    style = MonoTextStyle.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = type.caption.fontSize,
+                        lineHeight = type.caption.lineHeight,
+                    ),
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -616,6 +665,8 @@ private fun HistoryRow(
     onClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val cmd = remember(req.argv) { RootPayload.commandLine(req.argv).take(120) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -629,10 +680,14 @@ private fun HistoryRow(
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             Text(
-                text = RootPayload.commandLine(req.argv).take(120),
+                text = cmd,
                 color = colors.text,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 13.sp,
+                style = MonoTextStyle.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = type.caption.fontSize,
+                    lineHeight = type.caption.lineHeight,
+                    fontWeight = FontWeight.Medium,
+                ),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -646,10 +701,9 @@ private fun HistoryRow(
             Text(
                 text = meta,
                 color = colors.textFaint,
-                fontSize = 12.sp,
+                style = type.caption.tabular(),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                style = TabularNumStyle,
             )
         }
         RootStatusPill(req)
@@ -686,6 +740,7 @@ private fun RootDetailSheetContent(
     onClose: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     var reviewedFull by remember(req?.id) { mutableStateOf(false) }
 
     Column(
@@ -696,14 +751,15 @@ private fun RootDetailSheetContent(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (loading && req == null) {
-            Text(text = "Loading…", color = colors.textDim, fontSize = 14.sp)
+            Text(text = "Loading…", color = colors.textDim, style = type.body)
         }
         if (error != null && req == null) {
             PcErrorBanner(message = error)
         }
         if (req != null) {
+            val cmd = remember(req.argv) { RootPayload.commandLine(req.argv) }
             val longCmd = remember(req.argv) { RootPayload.isLongCommand(req.argv) }
-            val cmdLen = remember(req.argv) { RootPayload.commandLine(req.argv).length }
+            val cmdLen = cmd.length
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -712,13 +768,30 @@ private fun RootDetailSheetContent(
                 Text(
                     text = req.reason.ifBlank { "Root command" },
                     color = colors.text,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = type.collapsedTitle,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
                 RootStatusPill(req)
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(colors.surfaceRaised)
+                    .padding(12.dp),
+            ) {
+                Text(
+                    text = "# $cmd",
+                    color = colors.text,
+                    style = MonoTextStyle.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = type.caption.fontSize,
+                        lineHeight = type.caption.lineHeight,
+                    ),
+                )
             }
 
             ArgvList(argv = req.argv)
@@ -740,7 +813,7 @@ private fun RootDetailSheetContent(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Icon(
-                        imageVector = if (reviewedFull) Icons.Filled.CheckBox else Icons.Filled.CheckBoxOutlineBlank,
+                        imageVector = if (reviewedFull) Icons.Rounded.CheckBox else Icons.Rounded.CheckBoxOutlineBlank,
                         contentDescription = null,
                         tint = if (reviewedFull) colors.ok else colors.warn,
                         modifier = Modifier.size(20.dp),
@@ -748,7 +821,7 @@ private fun RootDetailSheetContent(
                     Text(
                         text = "I reviewed all ${req.argv.size} arguments ($cmdLen chars)",
                         color = colors.text,
-                        fontSize = 13.5.sp,
+                        style = type.body,
                     )
                 }
             }
@@ -808,7 +881,7 @@ private fun RootDetailSheetContent(
                 Text(
                     text = if (req.outputExpired == true) "Output expired (kept for 24 h)." else "No output.",
                     color = colors.textFaint,
-                    fontSize = 13.sp,
+                    style = type.caption,
                 )
             }
         }
@@ -826,22 +899,33 @@ private fun RootDetailSheetContent(
 @Composable
 private fun DetailKvRow(label: String, value: String, mono: Boolean = false) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(text = label, color = colors.textDim, fontSize = 13.sp)
+        Text(
+            text = label,
+            color = colors.textDim,
+            style = type.caption,
+        )
         Spacer(modifier = Modifier.width(12.dp))
         Text(
             text = value,
             color = colors.text,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
+            style = if (mono) {
+                MonoTextStyle.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = type.caption.fontSize,
+                    lineHeight = type.caption.lineHeight,
+                    fontWeight = FontWeight.Medium,
+                )
+            } else {
+                type.caption.tabular().copy(fontWeight = FontWeight.Medium)
+            },
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            style = TabularNumStyle,
         )
     }
 }
@@ -849,6 +933,7 @@ private fun DetailKvRow(label: String, value: String, mono: Boolean = false) {
 @Composable
 private fun OutputBlock(title: String, text: String, isError: Boolean) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val trimmed = remember(text) {
         if (text.length > 60_000) text.take(30_000) + "\n…\n" + text.takeLast(30_000) else text
     }
@@ -856,8 +941,7 @@ private fun OutputBlock(title: String, text: String, isError: Boolean) {
         Text(
             text = title,
             color = if (isError) colors.bad else colors.textDim,
-            fontSize = 12.5.sp,
-            fontWeight = FontWeight.Medium,
+            style = type.sectionLabel,
         )
         Box(
             modifier = Modifier
@@ -871,9 +955,11 @@ private fun OutputBlock(title: String, text: String, isError: Boolean) {
             Text(
                 text = trimmed,
                 color = colors.text,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                lineHeight = 17.sp,
+                style = MonoTextStyle.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = type.caption.fontSize,
+                    lineHeight = type.caption.lineHeight,
+                ),
             )
         }
     }

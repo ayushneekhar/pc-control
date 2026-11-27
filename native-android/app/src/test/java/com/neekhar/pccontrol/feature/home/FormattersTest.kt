@@ -55,8 +55,9 @@ class FormattersTest {
     }
 
     @Test
-    fun `formatShortHost strips ayushlive prefix`() {
+    fun `formatShortHost strips ayushlive prefix and tailnet suffix`() {
         assertEquals("hp-pavilion", PcFormatters.formatShortHost("ayushlive-HP-Pavilion"))
+        assertEquals("hp-pavilion", PcFormatters.formatShortHost("ayushlive-hp-pavilion.tail65e4a4.ts.net"))
         assertEquals("workstation", PcFormatters.formatShortHost("workstation"))
     }
 

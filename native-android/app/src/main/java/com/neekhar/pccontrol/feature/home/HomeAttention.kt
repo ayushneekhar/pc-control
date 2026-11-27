@@ -2,6 +2,7 @@ package com.neekhar.pccontrol.feature.home
 
 import com.neekhar.pccontrol.feature.system.HealthProblem
 import com.neekhar.pccontrol.feature.system.VpnState
+import java.net.URI
 
 enum class HomeAttentionTone {
     WARN,
@@ -27,10 +28,26 @@ data class HomeAttentionSummary(
     val primaryAction: HomeAttentionAction,
 )
 
-fun formatHomeTitle(host: String?): String {
+fun formatHomeTitle(host: String?, fallbackUrl: String? = null): String {
     val raw = host?.trim().orEmpty()
-    if (raw.isEmpty()) return "PC Control"
-    return PcFormatters.formatShortHost(raw).ifBlank { "PC Control" }
+    if (raw.isNotEmpty()) {
+        val short = PcFormatters.formatShortHost(raw)
+        if (short.isNotBlank()) return short
+    }
+    val urlRaw = fallbackUrl?.trim().orEmpty()
+    if (urlRaw.isNotEmpty()) {
+        val parsedHost = runCatching { URI(urlRaw).host }.getOrNull()?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: urlRaw
+                .removePrefix("https://")
+                .removePrefix("http://")
+                .substringBefore('/')
+                .substringBefore(':')
+                .trim()
+        val shortFromUrl = PcFormatters.formatShortHost(parsedHost)
+        if (shortFromUrl.isNotBlank()) return shortFromUrl
+    }
+    return "PC Control"
 }
 
 fun formatHomeUptimeSubtitle(uptimeSeconds: Double?): String? {

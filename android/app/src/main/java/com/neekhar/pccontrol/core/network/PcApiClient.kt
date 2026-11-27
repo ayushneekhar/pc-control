@@ -2,11 +2,13 @@ package com.neekhar.pccontrol.core.network
 
 import com.neekhar.pccontrol.core.storage.AppPrefs
 import com.neekhar.pccontrol.core.storage.AppPrefsSnapshot
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.filterIsInstance
@@ -53,6 +55,7 @@ import kotlin.coroutines.resumeWithException
 class PcApiClient(
     private val prefs: AppPrefs,
     okHttpClient: OkHttpClient? = null,
+    private val getRetryBackoffMs: Long = GET_RETRY_BACKOFF_MS,
 ) {
     val json: Json = DefaultJson
 
@@ -210,7 +213,7 @@ class PcApiClient(
         timeoutMs: Long = DEFAULT_BYTES_TIMEOUT_MS,
         useChatTarget: Boolean = false,
     ): ApiResult<ByteArray> {
-        val snap = prefs.current.value
+        val snap = prefs.awaitLoaded()
         val target = if (useChatTarget) resolveChatTarget(snap) else null
         val url = buildTargetUrl(pathOrUrl, target?.baseUrl ?: snap.serverUrl)
         val mergedHeaders = buildMap {
@@ -218,18 +221,25 @@ class PcApiClient(
             if (target != null) putAll(target.headers)
             putAll(headers)
         }
-
-        val first = executeBytesOnce(url, mergedHeaders, timeoutMs, isCustomChat = target?.isCustom == true)
-        if (first is ApiResult.Error &&
-            first.statusCode == 0 &&
-            useChatTarget &&
+        val shouldFallbackToCloudflare = useChatTarget &&
             target?.isCustom == false &&
             snap.chatToken.isNotBlank() &&
             !HTTP_PREFIX.containsMatchIn(pathOrUrl.trim())
-        ) {
+
+        val first = executeBytesOnce(url, mergedHeaders, timeoutMs, isCustomChat = target?.isCustom == true)
+        if (first is ApiResult.Error && first.statusCode == 0 && shouldFallbackToCloudflare) {
             val fallbackUrl = buildTargetUrl(pathOrUrl, AppPrefs.CLOUDFLARE_CHAT_ORIGIN)
             val fallbackHeaders = mergedHeaders + ("Authorization" to "Bearer ${snap.chatToken}")
-            return executeBytesOnce(fallbackUrl, fallbackHeaders, timeoutMs, isCustomChat = true)
+            val fallbackFirst = executeBytesOnce(fallbackUrl, fallbackHeaders, timeoutMs, isCustomChat = true)
+            if (isRetryableGetError("GET", fallbackFirst)) {
+                delay(getRetryBackoffMs)
+                return executeBytesOnce(fallbackUrl, fallbackHeaders, timeoutMs, isCustomChat = true)
+            }
+            return fallbackFirst
+        }
+        if (isRetryableGetError("GET", first)) {
+            delay(getRetryBackoffMs)
+            return executeBytesOnce(url, mergedHeaders, timeoutMs, isCustomChat = target?.isCustom == true)
         }
         return first
     }
@@ -257,6 +267,8 @@ class PcApiClient(
                 try {
                     val decoded = json.decodeFromString<T>(raw.data)
                     ApiResult.Success(decoded, raw.statusCode)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     ApiResult.Error(
                         statusCode = raw.statusCode,
@@ -277,7 +289,7 @@ class PcApiClient(
         timeoutMs: Long = DEFAULT_POST_TIMEOUT_MS,
         useChatTarget: Boolean = false,
     ): ApiResult<String> {
-        val snap = prefs.current.value
+        val snap = prefs.awaitLoaded()
         val target = if (useChatTarget) resolveChatTarget(snap) else null
         val url = buildTargetUrl(pathOrUrl, target?.baseUrl ?: snap.serverUrl)
         val mergedHeaders = buildMap {
@@ -285,18 +297,25 @@ class PcApiClient(
             if (target != null) putAll(target.headers)
             putAll(headers)
         }
-
-        val first = executeStringOnce(method, url, requestBody, mergedHeaders, timeoutMs, isCustomChat = target?.isCustom == true)
-        if (first is ApiResult.Error &&
-            first.statusCode == 0 &&
-            useChatTarget &&
+        val shouldFallbackToCloudflare = useChatTarget &&
             target?.isCustom == false &&
             snap.chatToken.isNotBlank() &&
             !HTTP_PREFIX.containsMatchIn(pathOrUrl.trim())
-        ) {
+
+        val first = executeStringOnce(method, url, requestBody, mergedHeaders, timeoutMs, isCustomChat = target?.isCustom == true)
+        if (first is ApiResult.Error && first.statusCode == 0 && shouldFallbackToCloudflare) {
             val fallbackUrl = buildTargetUrl(pathOrUrl, AppPrefs.CLOUDFLARE_CHAT_ORIGIN)
             val fallbackHeaders = mergedHeaders + ("Authorization" to "Bearer ${snap.chatToken}")
-            return executeStringOnce(method, fallbackUrl, requestBody, fallbackHeaders, timeoutMs, isCustomChat = true)
+            val fallbackFirst = executeStringOnce(method, fallbackUrl, requestBody, fallbackHeaders, timeoutMs, isCustomChat = true)
+            if (isRetryableGetError(method, fallbackFirst)) {
+                delay(getRetryBackoffMs)
+                return executeStringOnce(method, fallbackUrl, requestBody, fallbackHeaders, timeoutMs, isCustomChat = true)
+            }
+            return fallbackFirst
+        }
+        if (isRetryableGetError(method, first)) {
+            delay(getRetryBackoffMs)
+            return executeStringOnce(method, url, requestBody, mergedHeaders, timeoutMs, isCustomChat = target?.isCustom == true)
         }
         return first
     }
@@ -341,7 +360,7 @@ class PcApiClient(
             var retryDelay = initialRetryMs.coerceAtLeast(250L)
 
             while (currentCoroutineContext().isActive) {
-                val snap = prefs.current.value
+                val snap = prefs.awaitLoaded()
                 val target = if (useChatTarget) resolveChatTarget(snap) else null
                 val resolvedUrl = buildTargetUrl(url, target?.baseUrl ?: snap.serverUrl)
                 val reqBuilder = Request.Builder()
@@ -443,12 +462,14 @@ class PcApiClient(
                 }
             }
         } catch (e: SocketTimeoutException) {
+            currentCoroutineContext().ensureActive()
             ApiResult.Error(
                 statusCode = 0,
                 message = if (isCustomChat) "Chat endpoint timed out." else "Timed out. Is Tailscale connected?",
                 cause = e,
             )
         } catch (e: IOException) {
+            currentCoroutineContext().ensureActive()
             ApiResult.Error(
                 statusCode = 0,
                 message = if (isCustomChat) {
@@ -485,12 +506,14 @@ class PcApiClient(
                 }
             }
         } catch (e: SocketTimeoutException) {
+            currentCoroutineContext().ensureActive()
             ApiResult.Error(
                 statusCode = 0,
                 message = if (isCustomChat) "Chat endpoint timed out." else "Timed out. Is Tailscale connected?",
                 cause = e,
             )
         } catch (e: IOException) {
+            currentCoroutineContext().ensureActive()
             ApiResult.Error(
                 statusCode = 0,
                 message = if (isCustomChat) {
@@ -565,10 +588,20 @@ class PcApiClient(
             explicitNulls = false
         }
 
-        const val DEFAULT_TIMEOUT_MS = 12_000L
+        const val DEFAULT_TIMEOUT_MS = 15_000L
         const val DEFAULT_POST_TIMEOUT_MS = 15_000L
         const val DEFAULT_BYTES_TIMEOUT_MS = 20_000L
         const val DEFAULT_UPLOAD_TIMEOUT_MS = 60_000L
+        const val GET_RETRY_BACKOFF_MS = 400L
+
+        internal fun isRetryableGetError(method: String, result: ApiResult<*>): Boolean {
+            if (!method.equals("GET", ignoreCase = true)) return false
+            if (result !is ApiResult.Error) return false
+            return result.statusCode == 0 ||
+                result.statusCode == 502 ||
+                result.statusCode == 503 ||
+                result.statusCode == 504
+        }
 
         @PublishedApi
         internal val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()

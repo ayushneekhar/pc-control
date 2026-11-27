@@ -93,6 +93,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import coil3.compose.AsyncImage
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
@@ -134,6 +135,11 @@ fun SpaceScreen(
     DisposableEffect(viewModel) {
         viewModel.startStream()
         onDispose { viewModel.stopStream() }
+    }
+
+    LifecycleResumeEffect(viewModel) {
+        viewModel.onScreenResume()
+        onPauseOrDispose {}
     }
 
     BackHandler(enabled = state.hasSelection) {

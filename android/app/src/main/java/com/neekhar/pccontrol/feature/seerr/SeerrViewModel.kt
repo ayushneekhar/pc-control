@@ -49,6 +49,7 @@ data class SeerrUiState(
 @OptIn(FlowPreview::class)
 class SeerrViewModel(
     private val repository: SeerrRepository,
+    autoLoad: Boolean = true,
 ) : ViewModel() {
 
     companion object {
@@ -81,7 +82,14 @@ class SeerrViewModel(
                     }
                 }
         }
-        loadRequests(SeerrRequestFilter.ALL, showSpinner = false)
+        if (autoLoad) {
+            loadRequests(SeerrRequestFilter.ALL, showSpinner = false)
+        }
+    }
+
+    fun onScreenResume() {
+        if (requestsJob?.isActive == true) return
+        loadRequests(_uiState.value.statusFilter, showSpinner = false)
     }
 
     fun onQueryChange(value: String) {
@@ -137,13 +145,16 @@ class SeerrViewModel(
     fun refresh() {
         viewModelScope.launch {
             _uiState.update { it.copy(refreshing = true) }
-            val currentFilter = _uiState.value.statusFilter
-            fetchRequestsInternal(currentFilter)
-            val q = _uiState.value.query.trim()
-            if (q.isNotEmpty()) {
-                fetchSearchInternal(q)
+            try {
+                val currentFilter = _uiState.value.statusFilter
+                fetchRequestsInternal(currentFilter)
+                val q = _uiState.value.query.trim()
+                if (q.isNotEmpty()) {
+                    fetchSearchInternal(q)
+                }
+            } finally {
+                _uiState.update { it.copy(refreshing = false) }
             }
-            _uiState.update { it.copy(refreshing = false) }
         }
     }
 
@@ -155,16 +166,19 @@ class SeerrViewModel(
         if (_uiState.value.busyMovieId != null) return
         viewModelScope.launch {
             _uiState.update { it.copy(busyMovieId = movieId, error = null) }
-            when (val res = repository.createMovieRequest(movieId)) {
-                is ApiResult.Success -> {
-                    syncMovieStatus(movieId, SeerrStatus.REQUESTED)
-                    loadRequests(_uiState.value.statusFilter, showSpinner = false)
+            try {
+                when (val res = repository.createMovieRequest(movieId)) {
+                    is ApiResult.Success -> {
+                        syncMovieStatus(movieId, SeerrStatus.REQUESTED)
+                        loadRequests(_uiState.value.statusFilter, showSpinner = false)
+                    }
+                    is ApiResult.Error -> {
+                        _uiState.update { it.copy(error = res.message) }
+                    }
                 }
-                is ApiResult.Error -> {
-                    _uiState.update { it.copy(error = res.message) }
-                }
+            } finally {
+                _uiState.update { it.copy(busyMovieId = null) }
             }
-            _uiState.update { it.copy(busyMovieId = null) }
         }
     }
 
@@ -331,8 +345,11 @@ class SeerrViewModel(
             if (showSpinner) {
                 _uiState.update { it.copy(loadingFilter = true) }
             }
-            fetchRequestsInternal(filter)
-            _uiState.update { it.copy(loadingFilter = false) }
+            try {
+                fetchRequestsInternal(filter)
+            } finally {
+                _uiState.update { it.copy(loadingFilter = false) }
+            }
         }
     }
 

@@ -164,6 +164,7 @@ data class SpaceUiState(
 
 class SpaceViewModel(
     private val repository: SpaceRepository,
+    autoLoad: Boolean = true,
 ) : ViewModel() {
 
     private val initialLocal: SpaceResponse? =
@@ -182,6 +183,7 @@ class SpaceViewModel(
 
     private var sseJob: Job? = null
     private var fallbackPollJob: Job? = null
+    private var loadAllJob: Job? = null
     private val posterSemaphore = Semaphore(permits = 4)
     private val attemptedPosterKeys = ConcurrentHashMap.newKeySet<String>()
     private var jobsSeq: Long = 0L
@@ -191,6 +193,13 @@ class SpaceViewModel(
     init {
         initialLocal?.candidates?.let { resolveMissingCandidatePosters(it) }
         initialDrive?.items?.let { resolveMissingDrivePosters(it) }
+        if (autoLoad) {
+            loadAll(forceDrive = false)
+        }
+    }
+
+    fun onScreenResume() {
+        if (loadAllJob?.isActive == true || _uiState.value.isRefreshing) return
         loadAll(forceDrive = false)
     }
 
@@ -256,7 +265,8 @@ class SpaceViewModel(
     }
 
     fun loadAll(forceDrive: Boolean = false) {
-        viewModelScope.launch {
+        loadAllJob?.cancel()
+        loadAllJob = viewModelScope.launch {
             loadAllSuspend(forceDrive)
         }
     }

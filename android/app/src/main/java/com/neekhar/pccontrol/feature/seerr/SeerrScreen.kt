@@ -92,6 +92,11 @@ fun SeerrScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val listState = rememberLazyListState()
 
+    LifecycleResumeEffect(viewModel) {
+        viewModel.onScreenResume()
+        onPauseOrDispose {}
+    }
+
     if (tvRemoteViewModel != null) {
         LifecycleResumeEffect(tvRemoteViewModel) {
             tvRemoteViewModel.setMiniBarOwnerActive("seerr", true)

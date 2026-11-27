@@ -80,6 +80,7 @@ fun PcScaffold(
     showStatusDot: Boolean = false,
     onBack: (() -> Unit)? = null,
     actions: @Composable RowScope.() -> Unit = {},
+    headerBottom: (@Composable () -> Unit)? = null,
     collapsing: Boolean = true,
     compactHeader: Boolean = false,
     listState: LazyListState? = null,
@@ -157,7 +158,8 @@ fun PcScaffold(
             !statusText.isNullOrEmpty() -> 72.dp
             else -> 64.dp
         }
-        statusBarTopDp + estimatedRowDp + HEADER_FADE_TAIL_DP
+        val estimatedBottomDp = if (headerBottom != null) 52.dp else 0.dp
+        statusBarTopDp + estimatedRowDp + estimatedBottomDp + HEADER_FADE_TAIL_DP
     } else {
         0.dp
     }
@@ -209,6 +211,7 @@ fun PcScaffold(
                         showStatusDot = showStatusDot,
                         onBack = onBack,
                         actions = actions,
+                        headerBottom = headerBottom,
                         collapseFraction = collapseFraction,
                         containerColor = containerColor,
                         applyStatusBarPadding = applyStatusBarPadding,
@@ -287,6 +290,7 @@ private fun PcScaffoldTopBar(
     showStatusDot: Boolean,
     onBack: (() -> Unit)?,
     actions: @Composable RowScope.() -> Unit,
+    headerBottom: (@Composable () -> Unit)?,
     collapseFraction: Float,
     containerColor: Color,
     applyStatusBarPadding: Boolean,
@@ -304,7 +308,7 @@ private fun PcScaffoldTopBar(
     val statusAlpha = (1f - statusProgress).coerceIn(0f, 1f)
 
     Column(modifier = modifier.fillMaxWidth()) {
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(containerColor)
@@ -375,6 +379,10 @@ private fun PcScaffoldTopBar(
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     content = actions,
                 )
+            }
+
+            if (headerBottom != null) {
+                headerBottom()
             }
         }
 

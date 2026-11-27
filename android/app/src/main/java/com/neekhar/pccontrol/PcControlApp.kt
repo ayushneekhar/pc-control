@@ -88,7 +88,8 @@ class AppContainer(
                 is ApkUpdateState.ReadyToInstall -> st.release
                 else -> null
             }
-            val release = existingRelease ?: apkUpdater.checkForUpdate(prefs.current.value.serverUrl)
+            val serverUrl = prefs.awaitLoaded().serverUrl
+            val release = existingRelease ?: apkUpdater.checkForUpdate(serverUrl)
                 .getOrNull()?.release
                 ?: ApkRelease(
                     versionName = "latest",
@@ -128,6 +129,11 @@ class AppContainer(
     init {
         installPlatformPrefHooks()
         syncPrefsToPlatformStorage()
+        pushManager.onTokenRefreshed = { token ->
+            appScope.launch(Dispatchers.IO) {
+                runCatching { prefs.setPushStatus(token, null) }
+            }
+        }
     }
 
     private fun installPlatformPrefHooks() {
@@ -143,30 +149,56 @@ class AppContainer(
 
     private fun syncPrefsToPlatformStorage() {
         appScope.launch(Dispatchers.IO) {
+            var seededPushFromPlatform = false
             prefs.snapshots.collect { snap ->
                 PlatformPrefs.setServerUrl(appContext, snap.serverUrl)
                 PlatformPrefs.setChatConfig(appContext, snap.chatUrl, snap.chatToken)
                 if (!snap.deviceFingerprint.isNullOrBlank()) {
                     PlatformPrefs.setDeviceFingerprint(appContext, snap.deviceFingerprint)
                 }
+                if (!seededPushFromPlatform) {
+                    seededPushFromPlatform = true
+                    if (snap.pushToken.isNullOrBlank()) {
+                        val existingToken = PlatformPrefs.pushToken(appContext)?.takeIf { it.isNotBlank() }
+                        val existingErr = PlatformPrefs.pushError(appContext)?.takeIf { it.isNotBlank() }
+                        if (existingToken != null || existingErr != null) {
+                            prefs.setPushStatus(existingToken, existingErr)
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    private suspend fun syncPushResultToPrefs(result: PushRegisterResult) {
+        when (result) {
+            is PushRegisterResult.Success -> prefs.setPushStatus(result.token, null)
+            is PushRegisterResult.Failure -> prefs.setPushStatus(PlatformPrefs.pushToken(appContext), result.error)
         }
     }
 
     fun startBackgroundTasks() {
         notifier.ensureChannels(appContext)
         appScope.launch(Dispatchers.IO) {
-            runCatching { crashReporter.uploadPending(appContext, apiClient.okHttpClient) }
+            runCatching {
+                prefs.awaitLoaded()
+                crashReporter.uploadPending(appContext, apiClient.okHttpClient)
+            }
         }
         appScope.launch(Dispatchers.IO) {
             runCatching {
+                prefs.awaitLoaded()
                 if (pushManager.isFirebaseAvailable(appContext)) {
-                    pushManager.register(appContext, apiClient.okHttpClient)
+                    val result = pushManager.register(appContext, apiClient.okHttpClient)
+                    syncPushResultToPrefs(result)
                 }
             }
         }
         appScope.launch(Dispatchers.IO) {
-            runCatching { LiveDownloadsController.startIfDownloading(appContext, apiClient.okHttpClient) }
+            runCatching {
+                prefs.awaitLoaded()
+                LiveDownloadsController.startIfDownloading(appContext, apiClient.okHttpClient)
+            }
         }
         WebRtcRuntime.prewarmAsync(appContext)
     }
@@ -270,7 +302,10 @@ class AppContainer(
         }
 
         override suspend fun registerFcmToken(): Boolean {
-            return pushManager.register(appContext, apiClient.okHttpClient) is PushRegisterResult.Success
+            prefs.awaitLoaded()
+            val result = pushManager.register(appContext, apiClient.okHttpClient)
+            syncPushResultToPrefs(result)
+            return result is PushRegisterResult.Success
         }
 
         override fun openNotificationSettings() {

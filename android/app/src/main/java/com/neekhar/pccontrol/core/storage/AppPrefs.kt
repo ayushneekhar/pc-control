@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.neekhar.pccontrol.core.theme.ThemeMode
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -77,6 +78,7 @@ class AppPrefs internal constructor(
     }
 
     private val _current = MutableStateFlow(AppPrefsSnapshot())
+    private val loaded = CompletableDeferred<AppPrefsSnapshot>()
 
     /** In-memory state synced with DataStore for fast synchronous reads. */
     val current: StateFlow<AppPrefsSnapshot> = _current.asStateFlow()
@@ -107,14 +109,29 @@ class AppPrefs internal constructor(
         scope.launch {
             snapshots.collect { snap ->
                 _current.value = snap
+                if (!loaded.isCompleted) {
+                    loaded.complete(snap)
+                }
             }
         }
+    }
+
+    /**
+     * Suspends until the first DataStore emission has loaded persisted preferences from disk,
+     * then returns the latest in-memory snapshot.
+     */
+    suspend fun awaitLoaded(): AppPrefsSnapshot {
+        loaded.await()
+        return _current.value
     }
 
     /** Suspends until DataStore has read persisted preferences from disk. */
     suspend fun snapshot(): AppPrefsSnapshot {
         val snap = snapshots.first()
         _current.value = snap
+        if (!loaded.isCompleted) {
+            loaded.complete(snap)
+        }
         return snap
     }
 

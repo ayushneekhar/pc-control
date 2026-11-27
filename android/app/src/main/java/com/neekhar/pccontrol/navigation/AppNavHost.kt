@@ -271,24 +271,24 @@ fun PcAppShell(
     val settingsViewModel: SettingsViewModel = viewModel(
         key = "pc_settings_vm",
         factory = simpleViewModelFactory {
-            SettingsViewModel(container.apiClient, container.prefs, settingsPlatformBridge)
+            SettingsViewModel(container.apiClient, container.prefs, settingsPlatformBridge, autoLoad = false)
         },
     )
     val agentSettingsViewModel: AgentSettingsViewModel = viewModel(
         key = "pc_agent_settings_vm",
-        factory = simpleViewModelFactory { AgentSettingsViewModel(container.apiClient) },
+        factory = simpleViewModelFactory { AgentSettingsViewModel(container.apiClient, autoLoad = false) },
     )
     val agentViewViewModel: AgentViewViewModel = viewModel(
         key = "pc_agent_view_vm",
-        factory = simpleViewModelFactory { AgentViewViewModel(container.apiClient) },
+        factory = simpleViewModelFactory { AgentViewViewModel(container.apiClient, autoLoad = false) },
     )
     val seerrViewModel: SeerrViewModel = viewModel(
         key = "pc_seerr_vm",
-        factory = simpleViewModelFactory { SeerrViewModel(container.seerrRepository) },
+        factory = simpleViewModelFactory { SeerrViewModel(container.seerrRepository, autoLoad = false) },
     )
     val spaceViewModel: SpaceViewModel = viewModel(
         key = "pc_space_vm",
-        factory = simpleViewModelFactory { SpaceViewModel(container.spaceRepository) },
+        factory = simpleViewModelFactory { SpaceViewModel(container.spaceRepository, autoLoad = false) },
     )
     val tvRemoteViewModel: TvRemoteViewModel = viewModel(
         key = "pc_tv_remote_vm",

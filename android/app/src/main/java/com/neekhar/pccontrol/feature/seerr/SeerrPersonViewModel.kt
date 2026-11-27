@@ -83,8 +83,11 @@ class SeerrPersonViewModel(
         if (id <= 0) return
         loadJob?.cancel()
         loadJob = viewModelScope.launch {
-            fetchPersonInternal(id)
-            _uiState.update { it.copy(loading = false) }
+            try {
+                fetchPersonInternal(id)
+            } finally {
+                _uiState.update { it.copy(loading = false) }
+            }
         }
     }
 
@@ -93,8 +96,11 @@ class SeerrPersonViewModel(
         if (id <= 0) return
         viewModelScope.launch {
             _uiState.update { it.copy(refreshing = true) }
-            fetchPersonInternal(id)
-            _uiState.update { it.copy(refreshing = false, loading = false) }
+            try {
+                fetchPersonInternal(id)
+            } finally {
+                _uiState.update { it.copy(refreshing = false, loading = false) }
+            }
         }
     }
 

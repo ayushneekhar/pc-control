@@ -52,6 +52,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.ui.PcBottomSheet
@@ -107,6 +108,11 @@ fun AgentSettingsScreen(
     var showRestartConfirm by remember { mutableStateOf(false) }
     var showResetConfirm by remember { mutableStateOf(false) }
     var showOtherProvider by remember(state.selectedEngine) { mutableStateOf(false) }
+
+    LifecycleResumeEffect(viewModel) {
+        viewModel.onScreenResume()
+        onPauseOrDispose {}
+    }
 
     val statusText = when {
         state.isSwitching -> "Switching…"

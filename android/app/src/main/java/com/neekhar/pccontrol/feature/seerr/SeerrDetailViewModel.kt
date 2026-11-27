@@ -81,8 +81,11 @@ class SeerrDetailViewModel(
         if (id <= 0) return
         loadJob?.cancel()
         loadJob = viewModelScope.launch {
-            fetchDetailsInternal(id)
-            _uiState.update { it.copy(loading = false) }
+            try {
+                fetchDetailsInternal(id)
+            } finally {
+                _uiState.update { it.copy(loading = false) }
+            }
         }
     }
 
@@ -91,8 +94,11 @@ class SeerrDetailViewModel(
         if (id <= 0) return
         viewModelScope.launch {
             _uiState.update { it.copy(refreshing = true) }
-            fetchDetailsInternal(id)
-            _uiState.update { it.copy(refreshing = false, loading = false) }
+            try {
+                fetchDetailsInternal(id)
+            } finally {
+                _uiState.update { it.copy(refreshing = false, loading = false) }
+            }
         }
     }
 

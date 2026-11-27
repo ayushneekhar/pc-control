@@ -17,13 +17,14 @@ class SeerrRepository(
     companion object {
         private const val CACHE_KEY_REQUESTS = "seerr:requests"
         private const val CACHE_KEY_COUNTS = "seerr:requestCounts"
+        private const val SEERR_TIMEOUT_MS = 25_000L
     }
 
     suspend fun search(query: String): ApiResult<List<SeerrItem>> {
         val trimmed = query.trim()
         if (trimmed.isEmpty()) return ApiResult.Success(emptyList())
         val encoded = URLEncoder.encode(trimmed, "UTF-8")
-        return when (val res = api.getJson<SeerrSearchResponse>("/pc/api/seerr/search?q=$encoded")) {
+        return when (val res = api.getJson<SeerrSearchResponse>("/pc/api/seerr/search?q=$encoded", timeoutMs = SEERR_TIMEOUT_MS)) {
             is ApiResult.Success -> ApiResult.Success(res.data.results)
             is ApiResult.Error -> res
         }
@@ -31,15 +32,15 @@ class SeerrRepository(
 
     suspend fun getDetails(mediaType: String, id: Int): ApiResult<SeerrItem> {
         val type = if (mediaType == "tv") "tv" else "movie"
-        return api.getJson<SeerrItem>("/pc/api/seerr/details?type=$type&id=$id")
+        return api.getJson<SeerrItem>("/pc/api/seerr/details?type=$type&id=$id", timeoutMs = SEERR_TIMEOUT_MS)
     }
 
     suspend fun getCollection(id: Int): ApiResult<SeerrCollection> {
-        return api.getJson<SeerrCollection>("/pc/api/seerr/collection?id=$id")
+        return api.getJson<SeerrCollection>("/pc/api/seerr/collection?id=$id", timeoutMs = SEERR_TIMEOUT_MS)
     }
 
     suspend fun getPerson(id: Int): ApiResult<SeerrPerson> {
-        return api.getJson<SeerrPerson>("/pc/api/seerr/person?id=$id")
+        return api.getJson<SeerrPerson>("/pc/api/seerr/person?id=$id", timeoutMs = SEERR_TIMEOUT_MS)
     }
 
     suspend fun getRequests(
@@ -54,7 +55,7 @@ class SeerrRepository(
             params.add("take=$take")
         }
         val suffix = if (params.isNotEmpty()) "?${params.joinToString("&")}" else ""
-        val result = api.getJson<SeerrRequestsResponse>("/pc/api/seerr/requests$suffix")
+        val result = api.getJson<SeerrRequestsResponse>("/pc/api/seerr/requests$suffix", timeoutMs = SEERR_TIMEOUT_MS)
         if (result is ApiResult.Success && filter == SeerrRequestFilter.ALL) {
             saveCachedRequests(result.data.requests)
             result.data.counts?.let { saveCachedCounts(it) }
@@ -92,6 +93,7 @@ class SeerrRepository(
         return api.postJson<SeerrResolveRequestBody, SeerrItem>(
             pathOrUrl = "/pc/api/seerr/resolve",
             body = SeerrResolveRequestBody(url = url),
+            timeoutMs = SEERR_TIMEOUT_MS,
         )
     }
 

@@ -6,7 +6,9 @@ import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.platform.ApkUpdateState
 import com.neekhar.pccontrol.core.storage.AppPrefs
+import com.neekhar.pccontrol.core.storage.AppPrefsSnapshot
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,7 +16,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.Request
 import java.net.URLEncoder
 
 data class SettingsUiState(
@@ -66,6 +67,7 @@ data class SettingsUiState(
     // Diagnostics
     val fcmDiagnostics: FcmDiagnostics = FcmDiagnostics(),
     val fcmServerRegistered: Boolean? = null,
+    val fcmChecking: Boolean = false,
     val crashReports: List<CrashReportEntry> = emptyList(),
     val showCrashViewer: Boolean = false,
     val isRefreshing: Boolean = false,
@@ -88,6 +90,7 @@ class SettingsViewModel(
     private val api: PcApiClient,
     private val prefs: AppPrefs,
     private val platform: SettingsPlatformBridge,
+    autoLoad: Boolean = true,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(
@@ -110,9 +113,24 @@ class SettingsViewModel(
     )
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
 
+    private var refreshJob: Job? = null
+    private var pushDiagJob: Job? = null
+    private var pushCheckInFlight: Boolean = false
+    private var lastVerifiedPushToken: String? = null
+
     init {
         viewModelScope.launch {
+            var observedInitialPush = false
+            var lastObservedPushToken: String? = null
+            var lastObservedPushError: String? = null
             prefs.snapshots.collect { snap ->
+                val pushChanged = observedInitialPush &&
+                    (snap.pushToken != lastObservedPushToken || snap.pushError != lastObservedPushError)
+                observedInitialPush = true
+                lastObservedPushToken = snap.pushToken
+                lastObservedPushError = snap.pushError
+
+                val mergedFcm = mergeFcmDiagnostics(platform.fcmDiagnostics(), snap)
                 _uiState.update { cur ->
                     val shouldUpdateInputs = !cur.connectionDirty
                     cur.copy(
@@ -123,7 +141,24 @@ class SettingsViewModel(
                         savedChatBaseUrl = snap.chatUrl,
                         savedChatToken = snap.chatToken,
                         themeMode = ThemeMode.fromId(snap.themeMode.storageValue),
+                        fcmDiagnostics = mergedFcm,
                     )
+                }
+
+                if (pushChanged && !pushCheckInFlight) {
+                    val token = mergedFcm.token
+                    if (mergedFcm.notificationsEnabled &&
+                        !token.isNullOrBlank() &&
+                        (token != lastVerifiedPushToken || _uiState.value.fcmServerRegistered != true)
+                    ) {
+                        pushDiagJob?.cancel()
+                        pushDiagJob = viewModelScope.launch {
+                            loadPushDiagnostics(allowAutoRegister = false)
+                        }
+                    } else if (token.isNullOrBlank()) {
+                        lastVerifiedPushToken = null
+                        _uiState.update { it.copy(fcmServerRegistered = null) }
+                    }
                 }
             }
         }
@@ -132,12 +167,26 @@ class SettingsViewModel(
                 _uiState.update { it.copy(apkUpdateState = updateState) }
             }
         }
-        refreshAll()
+        if (autoLoad) {
+            refreshInternal(showPullIndicator = false)
+        }
+    }
+
+    fun onScreenResume() {
+        if (refreshJob?.isActive == true) return
+        refreshInternal(showPullIndicator = false)
     }
 
     fun refreshAll() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isRefreshing = true) }
+        refreshJob?.cancel()
+        refreshInternal(showPullIndicator = true)
+    }
+
+    private fun refreshInternal(showPullIndicator: Boolean) {
+        refreshJob = viewModelScope.launch {
+            if (showPullIndicator) {
+                _uiState.update { it.copy(isRefreshing = true) }
+            }
             try {
                 coroutineScope {
                     launch { testConnectionSuspend() }
@@ -146,7 +195,7 @@ class SettingsViewModel(
                     launch { loadKbdLock() }
                     launch { loadKeyring() }
                     launch { loadNotifSettings() }
-                    launch { loadPushDiagnostics() }
+                    launch { loadPushDiagnostics(allowAutoRegister = true) }
                     launch { checkForApkUpdateSuspend() }
                 }
             } finally {
@@ -201,7 +250,7 @@ class SettingsViewModel(
             prefs.setChatConfig(cleanChat, cleanToken)
             testConnection()
             platform.registerFcmToken()
-            loadPushDiagnostics()
+            loadPushDiagnostics(allowAutoRegister = false)
         }
     }
 
@@ -538,34 +587,21 @@ class SettingsViewModel(
 
     private suspend fun checkForApkUpdateSuspend() {
         _uiState.update { it.copy(updateChecking = true, updateError = null) }
-        val result = withContext(Dispatchers.IO) {
-            fetchApkReleaseJson(GITHUB_VERSION_URL)
-                ?: fetchApkReleaseJson("${api.baseUrl}/pc/api/apk/version.json")
-        }
-        if (result != null) {
-            _uiState.update {
-                it.copy(latestRelease = result, updateChecking = false, updateError = null)
+        try {
+            val primary = api.getJson<ApkReleaseInfo>(GITHUB_VERSION_URL, timeoutMs = 15_000L)
+            val result = (primary as? ApiResult.Success)?.data
+                ?: (api.getJson<ApkReleaseInfo>("/pc/api/apk/version.json", timeoutMs = 15_000L) as? ApiResult.Success)?.data
+            if (result != null) {
+                _uiState.update {
+                    it.copy(latestRelease = result, updateChecking = false, updateError = null)
+                }
+            } else {
+                _uiState.update {
+                    it.copy(updateChecking = false, updateError = "Could not check GitHub Releases for updates.")
+                }
             }
-        } else {
-            _uiState.update {
-                it.copy(updateChecking = false, updateError = "Could not check GitHub Releases for updates.")
-            }
-        }
-    }
-
-    private fun fetchApkReleaseJson(url: String): ApkReleaseInfo? {
-        return try {
-            val req = Request.Builder()
-                .url(url)
-                .header("Accept", "application/json")
-                .build()
-            api.okHttpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                val body = resp.body?.string() ?: return null
-                api.json.decodeFromString<ApkReleaseInfo>(body)
-            }
-        } catch (_: Exception) {
-            null
+        } finally {
+            _uiState.update { it.copy(updateChecking = false) }
         }
     }
 
@@ -576,25 +612,93 @@ class SettingsViewModel(
 
     // ---- Diagnostics ----
 
-    private suspend fun loadPushDiagnostics() {
-        val diag = platform.fcmDiagnostics()
-        _uiState.update { it.copy(fcmDiagnostics = diag) }
-        val token = diag.token
-        if (diag.notificationsEnabled && !token.isNullOrBlank()) {
-            val encoded = withContext(Dispatchers.IO) { URLEncoder.encode(token, "UTF-8") }
-            when (val res = api.getJson<PushStatusResponse>("/pc/api/push/status?token=$encoded")) {
-                is ApiResult.Success -> _uiState.update { it.copy(fcmServerRegistered = res.data.registered) }
-                is ApiResult.Error -> _uiState.update { it.copy(fcmServerRegistered = null) }
-            }
+    private fun mergeFcmDiagnostics(platformDiag: FcmDiagnostics, snap: AppPrefsSnapshot): FcmDiagnostics {
+        val effectiveToken = platformDiag.token?.takeIf { it.isNotBlank() }
+            ?: snap.pushToken?.takeIf { it.isNotBlank() }
+        val effectiveError = if (effectiveToken != null) {
+            null
         } else {
-            _uiState.update { it.copy(fcmServerRegistered = null) }
+            platformDiag.error?.takeIf { it.isNotBlank() }
+                ?: snap.pushError?.takeIf { it.isNotBlank() }
+        }
+        return platformDiag.copy(token = effectiveToken, error = effectiveError)
+    }
+
+    private suspend fun queryPushServerRegistered(token: String): Boolean? {
+        val encoded = withContext(Dispatchers.IO) { URLEncoder.encode(token, "UTF-8") }
+        return when (val res = api.getJson<PushStatusResponse>("/pc/api/push/status?token=$encoded")) {
+            is ApiResult.Success -> res.data.registered
+            is ApiResult.Error -> null
+        }
+    }
+
+    private suspend fun loadPushDiagnostics(allowAutoRegister: Boolean = true) {
+        pushCheckInFlight = true
+        _uiState.update { it.copy(fcmChecking = true) }
+        try {
+            val snap = prefs.awaitLoaded()
+            var diag = mergeFcmDiagnostics(platform.fcmDiagnostics(), snap)
+            _uiState.update { it.copy(fcmDiagnostics = diag) }
+
+            if (!diag.notificationsEnabled) {
+                lastVerifiedPushToken = null
+                _uiState.update { it.copy(fcmServerRegistered = null) }
+                return
+            }
+
+            if (diag.token.isNullOrBlank()) {
+                if (!allowAutoRegister) {
+                    lastVerifiedPushToken = null
+                    _uiState.update { it.copy(fcmServerRegistered = null) }
+                    return
+                }
+                platform.registerFcmToken()
+                diag = mergeFcmDiagnostics(platform.fcmDiagnostics(), prefs.current.value)
+                _uiState.update { it.copy(fcmDiagnostics = diag) }
+                val recoveredToken = diag.token
+                if (recoveredToken.isNullOrBlank()) {
+                    lastVerifiedPushToken = null
+                    _uiState.update { it.copy(fcmServerRegistered = null) }
+                    return
+                }
+                val registered = queryPushServerRegistered(recoveredToken)
+                lastVerifiedPushToken = if (registered == true) recoveredToken else null
+                _uiState.update { it.copy(fcmServerRegistered = registered) }
+                return
+            }
+
+            val token = diag.token ?: return
+            var registered = queryPushServerRegistered(token)
+            if (registered == false && allowAutoRegister) {
+                platform.registerFcmToken()
+                diag = mergeFcmDiagnostics(platform.fcmDiagnostics(), prefs.current.value)
+                _uiState.update { it.copy(fcmDiagnostics = diag) }
+                val refreshedToken = diag.token
+                registered = if (!refreshedToken.isNullOrBlank()) {
+                    queryPushServerRegistered(refreshedToken)
+                } else {
+                    false
+                }
+            }
+
+            lastVerifiedPushToken = if (registered == true) diag.token else null
+            _uiState.update { it.copy(fcmServerRegistered = registered) }
+        } finally {
+            pushCheckInFlight = false
+            _uiState.update { it.copy(fcmChecking = false) }
         }
     }
 
     fun retryPushRegistration() {
-        viewModelScope.launch {
-            platform.registerFcmToken()
-            loadPushDiagnostics()
+        pushDiagJob?.cancel()
+        pushDiagJob = viewModelScope.launch {
+            _uiState.update { it.copy(fcmChecking = true) }
+            try {
+                platform.registerFcmToken()
+                loadPushDiagnostics(allowAutoRegister = false)
+            } finally {
+                _uiState.update { it.copy(fcmChecking = false) }
+            }
         }
     }
 

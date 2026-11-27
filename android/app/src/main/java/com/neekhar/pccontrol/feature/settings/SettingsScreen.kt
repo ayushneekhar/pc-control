@@ -63,6 +63,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.neekhar.pccontrol.core.platform.ApkUpdateState
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
@@ -93,6 +94,11 @@ fun SettingsScreen(
     var showForgetConfirm by remember { mutableStateOf(false) }
     var showThemeSheet by remember { mutableStateOf(false) }
     var showInlineConnectionScreen by remember { mutableStateOf(false) }
+
+    LifecycleResumeEffect(viewModel) {
+        viewModel.onScreenResume()
+        onPauseOrDispose {}
+    }
 
     if (showInlineConnectionScreen && onOpenConnectionSettings == null) {
         BackHandler { showInlineConnectionScreen = false }
@@ -284,6 +290,7 @@ fun SettingsScreen(
                         DiagnosticsListCard(
                             fcm = state.fcmDiagnostics,
                             serverRegistered = state.fcmServerRegistered,
+                            checking = state.fcmChecking,
                             crashCount = state.crashReports.size,
                             onRetryPush = viewModel::retryPushRegistration,
                             onOpenNotifSettings = viewModel::openNotificationSettings,
@@ -1054,6 +1061,7 @@ private fun AppUpdatesListRow(
 private fun DiagnosticsListCard(
     fcm: FcmDiagnostics,
     serverRegistered: Boolean?,
+    checking: Boolean,
     crashCount: Int,
     onRetryPush: () -> Unit,
     onOpenNotifSettings: () -> Unit,
@@ -1064,10 +1072,16 @@ private fun DiagnosticsListCard(
     val fcmOk = fcm.notificationsEnabled && !fcm.token.isNullOrBlank() && serverRegistered == true
     val fcmStatus = when {
         !fcm.notificationsEnabled -> "Notifications off"
+        checking && !fcmOk -> "Checking…"
         fcm.token.isNullOrBlank() -> fcm.error ?: "No FCM token"
         serverRegistered == true -> "Connected · registered"
         serverRegistered == false -> "Not registered on laptop"
         else -> "Token present"
+    }
+    val fcmDotColor = when {
+        fcmOk -> colors.ok
+        checking -> colors.textFaint
+        else -> colors.warn
     }
 
     PcListCard {
@@ -1098,7 +1112,7 @@ private fun DiagnosticsListCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    PcStatusDot(color = if (fcmOk) colors.ok else colors.warn, size = 6.dp)
+                    PcStatusDot(color = fcmDotColor, size = 6.dp)
                     Text(
                         text = fcmStatus,
                         color = colors.textFaint,
@@ -1114,6 +1128,14 @@ private fun DiagnosticsListCard(
                     variant = PcButtonVariant.Subtle,
                     compact = true,
                     onClick = onOpenNotifSettings,
+                )
+            } else if (checking && !fcmOk) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .padding(end = 2.dp)
+                        .size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = colors.accent,
                 )
             } else if (!fcmOk) {
                 PcButton(

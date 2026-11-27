@@ -79,12 +79,15 @@ class RootViewModel(
     fun refresh() {
         viewModelScope.launch {
             _uiState.update { it.copy(isRefreshing = true) }
-            refreshEnrollmentState()
-            fetchPending()
-            if (_uiState.value.rootdState == RootdState.OK) {
-                fetchHistory()
+            try {
+                refreshEnrollmentState()
+                fetchPending()
+                if (_uiState.value.rootdState == RootdState.OK) {
+                    fetchHistory()
+                }
+            } finally {
+                _uiState.update { it.copy(isRefreshing = false) }
             }
-            _uiState.update { it.copy(isRefreshing = false) }
         }
     }
 

@@ -595,6 +595,32 @@ fun CamsScreen(
         statusTone = masterDotTone,
         showStatusDot = !masterStatusText.isNullOrBlank(),
         onBack = if (inReplayFullscreen) null else onBack,
+        collapsing = false,
+        headerBottom = if (!inReplayFullscreen && stackActive) {
+            {
+                PcSegmentedControl(
+                    options = listOf(
+                        PcSegmentOption(CamsTab.LIVE, "Live"),
+                        PcSegmentOption(CamsTab.REPLAY, "Replay"),
+                        PcSegmentOption(CamsTab.DETECTIONS, "Detections"),
+                        PcSegmentOption(CamsTab.MUSIC, "Music"),
+                    ),
+                    selected = activeTab,
+                    onSelect = {
+                        if (it != CamsTab.REPLAY) replayFullscreen = false
+                        activeTab = it
+                    },
+                    modifier = Modifier.padding(
+                        start = PcDimens.ScreenPad,
+                        end = PcDimens.ScreenPad,
+                        top = 8.dp,
+                        bottom = 2.dp,
+                    ),
+                )
+            }
+        } else {
+            null
+        },
         applyStatusBarPadding = !inReplayFullscreen,
         applyNavigationBarPadding = !inReplayFullscreen,
         showStatusBarScrim = !inReplayFullscreen,
@@ -733,28 +759,6 @@ fun CamsScreen(
                 .fillMaxSize()
                 .padding(top = innerPadding.calculateTopPadding()),
         ) {
-            // Segmented tab bar (Live / Replay / Detections / Music)
-            if (!inReplayFullscreen && stackActive) {
-                PcSegmentedControl(
-                    options = listOf(
-                        PcSegmentOption(CamsTab.LIVE, "Live"),
-                        PcSegmentOption(CamsTab.REPLAY, "Replay"),
-                        PcSegmentOption(CamsTab.DETECTIONS, "Detections"),
-                        PcSegmentOption(CamsTab.MUSIC, "Music"),
-                    ),
-                    selected = activeTab,
-                    onSelect = {
-                        if (it != CamsTab.REPLAY) replayFullscreen = false
-                        activeTab = it
-                    },
-                    modifier = Modifier.padding(
-                        start = PcDimens.ScreenPad,
-                        end = PcDimens.ScreenPad,
-                        bottom = 8.dp,
-                    ),
-                )
-            }
-
             // Main body with seamless top & bottom vertical fades (no hard hairlines)
             Box(
                 modifier = Modifier

@@ -59,6 +59,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.MonoTextStyle
@@ -95,6 +96,11 @@ fun AgentViewScreen(
     val colors = LocalPcColors.current
     val type = LocalPcType.current
     var pendingDelete by remember { mutableStateOf<AgentRule?>(null) }
+
+    LifecycleResumeEffect(viewModel) {
+        viewModel.onScreenResume()
+        onPauseOrDispose {}
+    }
 
     val master = state.master
     val displayEnabled = if (state.switching) state.switchingTarget == true else master?.enabled == true

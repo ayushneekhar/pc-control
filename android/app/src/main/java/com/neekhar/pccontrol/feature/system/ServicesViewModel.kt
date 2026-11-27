@@ -71,7 +71,7 @@ class ServicesViewModel(
     }
 
     private suspend fun fetchHealth(includeCatCam: Boolean) = coroutineScope {
-        val healthDef = async { api.getJson<HealthResponse>("/pc/api/health", timeoutMs = 8_000L) }
+        val healthDef = async { api.getJson<HealthResponse>("/pc/api/health", timeoutMs = 15_000L) }
         val catCamDef = if (includeCatCam) {
             async { api.getJson<CatCamState>("/pc/api/catcam").getOrNull() }
         } else {

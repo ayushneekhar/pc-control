@@ -15,7 +15,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 
@@ -50,6 +49,7 @@ data class AgentRuleUiState(
 
 class AgentViewViewModel(
     private val api: PcApiClient,
+    autoLoad: Boolean = true,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AgentViewUiState())
@@ -58,9 +58,17 @@ class AgentViewViewModel(
     private val _ruleState = MutableStateFlow(AgentRuleUiState())
     val ruleState: StateFlow<AgentRuleUiState> = _ruleState.asStateFlow()
 
+    private var loadJob: Job? = null
     private var searchJob: Job? = null
 
     init {
+        if (autoLoad) {
+            load()
+        }
+    }
+
+    fun onScreenResume() {
+        if (_uiState.value.switching || loadJob?.isActive == true) return
         load()
     }
 
@@ -80,16 +88,21 @@ class AgentViewViewModel(
     }
 
     fun refresh() {
-        viewModelScope.launch {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             _uiState.update { it.copy(isRefreshing = true) }
-            loadInternal()
-            _uiState.update { it.copy(isRefreshing = false) }
+            try {
+                loadInternal()
+            } finally {
+                _uiState.update { it.copy(isRefreshing = false) }
+            }
         }
     }
 
     fun load() {
         if (_uiState.value.switching) return
-        viewModelScope.launch { loadInternal() }
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch { loadInternal() }
     }
 
     private suspend fun loadInternal() {
@@ -405,27 +418,19 @@ class AgentViewViewModel(
         method: String,
         path: String,
         jsonBody: String?,
-    ): Result<String> = withContext(Dispatchers.IO) {
-        runCatching {
-            val mediaType = "application/json; charset=utf-8".toMediaType()
-            val reqBody = jsonBody?.toRequestBody(mediaType)
-            val builder = Request.Builder()
-                .url("${api.baseUrl}$path")
-                .header("Accept", "application/json")
-                .header("X-Requested-With", "pc-control")
-            when (method) {
-                "POST" -> builder.post(reqBody ?: "{}".toRequestBody(mediaType))
-                "PUT" -> builder.put(reqBody ?: "{}".toRequestBody(mediaType))
-                "DELETE" -> if (reqBody != null) builder.delete(reqBody) else builder.delete()
-                else -> builder.get()
-            }
-            api.okHttpClient.newCall(builder.build()).execute().use { resp ->
-                val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) {
-                    throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
-                }
-                text
-            }
+    ): Result<String> {
+        val mediaType = "application/json; charset=utf-8".toMediaType()
+        val reqBody = jsonBody?.toRequestBody(mediaType)
+        return when (
+            val res = api.executeRaw(
+                method = method,
+                pathOrUrl = path,
+                requestBody = reqBody,
+                headers = mapOf("X-Requested-With" to "pc-control"),
+            )
+        ) {
+            is ApiResult.Success -> Result.success(res.data)
+            is ApiResult.Error -> Result.failure(IllegalStateException(res.message))
         }
     }
 }

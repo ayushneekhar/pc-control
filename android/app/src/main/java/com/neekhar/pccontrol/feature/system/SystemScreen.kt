@@ -1,6 +1,5 @@
 package com.neekhar.pccontrol.feature.system
 
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -101,15 +100,7 @@ fun SystemScreen(
         statusText = headerStatusText,
         statusTone = headerStatusTone,
         showStatusDot = headerStatusText != null,
-        listState = activeListState,
-        applyNavigationBarPadding = false,
-        modifier = modifier,
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(top = innerPadding.calculateTopPadding()),
-        ) {
+        headerBottom = {
             PcSegmentedControl(
                 options = segmentOptions,
                 selected = currentTab,
@@ -121,34 +112,39 @@ fun SystemScreen(
                 modifier = Modifier.padding(
                     start = PcDimens.ScreenPad,
                     end = PcDimens.ScreenPad,
-                    bottom = 12.dp,
+                    top = 8.dp,
+                    bottom = 2.dp,
                 ),
             )
-
-            HorizontalPager(
-                state = pagerState,
-                beyondViewportPageCount = 1,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .weight(1f),
-            ) { page ->
-                when (SystemTab.entries[page]) {
-                    SystemTab.VITALS -> VitalsTab(
-                        state = vitalsState,
-                        onToggleProcesses = vitalsViewModel::toggleProcesses,
-                        onProcessQueryChange = vitalsViewModel::setProcessQuery,
-                        onSelectSort = vitalsViewModel::selectSort,
-                        listState = vitalsListState,
-                    )
-                    SystemTab.SERVICES -> ServicesTab(
-                        state = servicesState,
-                        onRefresh = servicesViewModel::refresh,
-                        onSelectFilter = servicesViewModel::selectFilter,
-                        onOpenServiceDetail = onOpenServiceDetail,
-                        onOpenDownloads = onOpenDownloads,
-                        listState = servicesListState,
-                    )
-                }
+        },
+        listState = activeListState,
+        applyNavigationBarPadding = false,
+        modifier = modifier,
+    ) { innerPadding ->
+        val topPad = innerPadding.calculateTopPadding()
+        HorizontalPager(
+            state = pagerState,
+            beyondViewportPageCount = 1,
+            modifier = Modifier.fillMaxSize(),
+        ) { page ->
+            when (SystemTab.entries[page]) {
+                SystemTab.VITALS -> VitalsTab(
+                    state = vitalsState,
+                    onToggleProcesses = vitalsViewModel::toggleProcesses,
+                    onProcessQueryChange = vitalsViewModel::setProcessQuery,
+                    onSelectSort = vitalsViewModel::selectSort,
+                    listState = vitalsListState,
+                    topPadding = topPad,
+                )
+                SystemTab.SERVICES -> ServicesTab(
+                    state = servicesState,
+                    onRefresh = servicesViewModel::refresh,
+                    onSelectFilter = servicesViewModel::selectFilter,
+                    onOpenServiceDetail = onOpenServiceDetail,
+                    onOpenDownloads = onOpenDownloads,
+                    listState = servicesListState,
+                    topPadding = topPad,
+                )
             }
         }
     }

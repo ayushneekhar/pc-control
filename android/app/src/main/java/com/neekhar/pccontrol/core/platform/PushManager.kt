@@ -18,6 +18,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 data class PushStatus(
@@ -130,6 +131,7 @@ object PushManager {
 
   /**
    * Blocking `POST /pc/api/push/register`. Records the result in [PlatformPrefs] for Settings.
+   * Retries once on transient transport or gateway errors (the endpoint is an idempotent upsert).
    * Safe to invoke from [PcFirebaseMessagingService.onNewToken].
    */
   fun registerTokenBlocking(
@@ -137,29 +139,47 @@ object PushManager {
     token: String,
     client: OkHttpClient = PlatformHttp.defaultClient,
   ): Boolean {
-    try {
-      val payload = PlatformHttp.json.encodeToString(
-        PushRegisterBody.serializer(),
-        PushRegisterBody(token = token, name = PlatformPrefs.deviceName()),
-      )
-      val req = Request.Builder()
-        .url("${PlatformPrefs.serverUrl(ctx)}/pc/api/push/register")
-        .post(payload.toRequestBody(JSON_MEDIA))
-        .header("Accept", "application/json")
-        .build()
-      client.newCall(req).execute().use { resp ->
-        if (!resp.isSuccessful) {
-          throw IllegalStateException("HTTP ${resp.code}")
+    val payload = PlatformHttp.json.encodeToString(
+      PushRegisterBody.serializer(),
+      PushRegisterBody(token = token, name = PlatformPrefs.deviceName()),
+    )
+    var lastError: String? = null
+    for (attempt in 0..1) {
+      var retryable = false
+      try {
+        val req = Request.Builder()
+          .url("${PlatformPrefs.serverUrl(ctx)}/pc/api/push/register")
+          .post(payload.toRequestBody(JSON_MEDIA))
+          .header("Accept", "application/json")
+          .build()
+        client.newCall(req).execute().use { resp ->
+          if (resp.isSuccessful) {
+            PlatformPrefs.setPush(ctx, token, null)
+            return true
+          }
+          lastError = "HTTP ${resp.code}"
+          retryable = resp.code == 502 || resp.code == 503 || resp.code == 504
         }
+      } catch (e: IOException) {
+        lastError = e.message ?: e.javaClass.simpleName
+        retryable = true
+      } catch (e: Exception) {
+        lastError = e.message ?: e.javaClass.simpleName
+        retryable = false
       }
-    } catch (e: Exception) {
-      val msg = e.message ?: e.javaClass.simpleName
-      Log.i(TAG, "register failed: $msg")
-      PlatformPrefs.setPush(ctx, null, msg)
-      return false
+      if (!retryable || attempt == 1) break
+      try {
+        Thread.sleep(400L)
+      } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        break
+      }
     }
-    PlatformPrefs.setPush(ctx, token, null)
-    return true
+    val msg = lastError ?: "Registration failed"
+    Log.i(TAG, "register failed: $msg")
+    // Preserve any previously registered token so transient cold-start glitches don't wipe it.
+    PlatformPrefs.setPush(ctx, PlatformPrefs.pushToken(ctx), msg)
+    return false
   }
 
   /** Fetches the current FCM token and registers it with pc-api. */

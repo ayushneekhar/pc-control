@@ -39,7 +39,6 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Movie
-import androidx.compose.material.icons.rounded.SmartDisplay
 import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SwapVert
@@ -1139,15 +1138,11 @@ private fun OpenRoutesSection(
 ) {
     val colors = LocalPcColors.current
     val type = LocalPcType.current
-    val jellyfinRoute = remember(state.routes) {
-        state.routes.firstOrNull {
-            it.name.contains("jellyfin", ignoreCase = true) || it.port == 8096
-        }
-    }
-    val remainingExternalRoutes = remember(state.routes, jellyfinRoute) {
+    val remainingExternalRoutes = remember(state.routes) {
         state.routes
             .filter { r ->
-                r.id != jellyfinRoute?.id &&
+                !r.name.contains("jellyfin", ignoreCase = true) &&
+                    r.port != 8096 &&
                     r.path != "/cams/" &&
                     !r.name.equals("Cat cams", ignoreCase = true) &&
                     r.path != "/agentview" &&
@@ -1176,22 +1171,6 @@ private fun OpenRoutesSection(
         PcSectionLabel(label = "Open")
         PcListCard {
             // 1. Primary everyday media & storage apps (curated priority order)
-            PcListRow(
-                title = "Jellyfin",
-                subtitle = jellyfinRoute?.subtitle?.takeIf { it.isNotBlank() } ?: "Media server",
-                icon = Icons.Rounded.SmartDisplay,
-                showChevron = true,
-                showDivider = true,
-                onClick = {
-                    val target = jellyfinRoute ?: RouteItem(
-                        id = "jellyfin",
-                        name = "Jellyfin",
-                        url = "${state.baseUrl.trimEnd('/')}:8096/",
-                        app = "org.jellyfin.mobile",
-                    )
-                    launchExternalRoute(context, target)
-                },
-            )
             PcListRow(
                 title = "Seerr",
                 subtitle = "Search & request movies or TV",

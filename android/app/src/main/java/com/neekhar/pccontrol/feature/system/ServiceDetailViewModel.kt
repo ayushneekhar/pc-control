@@ -68,13 +68,16 @@ class ServiceDetailViewModel(
         if (unit.isBlank()) return
         viewModelScope.launch {
             _uiState.update { it.copy(logsLoading = true) }
-            coroutineScope {
-                val statusJob = async { fetchStatusInternal() }
-                val logsJob = async { fetchLogsInternal() }
-                statusJob.await()
-                logsJob.await()
+            try {
+                coroutineScope {
+                    val statusJob = async { fetchStatusInternal() }
+                    val logsJob = async { fetchLogsInternal() }
+                    statusJob.await()
+                    logsJob.await()
+                }
+            } finally {
+                _uiState.update { it.copy(logsLoading = false) }
             }
-            _uiState.update { it.copy(logsLoading = false) }
         }
     }
 
@@ -82,8 +85,11 @@ class ServiceDetailViewModel(
         if (unit.isBlank()) return
         viewModelScope.launch {
             _uiState.update { it.copy(logsLoading = true) }
-            fetchLogsInternal()
-            _uiState.update { it.copy(logsLoading = false) }
+            try {
+                fetchLogsInternal()
+            } finally {
+                _uiState.update { it.copy(logsLoading = false) }
+            }
         }
     }
 

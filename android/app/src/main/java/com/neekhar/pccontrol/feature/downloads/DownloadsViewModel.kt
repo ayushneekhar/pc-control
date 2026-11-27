@@ -274,7 +274,7 @@ class DownloadsViewModel(
     }
 
     private suspend fun fetchDownloadsAll() {
-        when (val res = api.getJson<DownloadsAllResponse>("/pc/api/downloads/all", timeoutMs = 10_000L)) {
+        when (val res = api.getJson<DownloadsAllResponse>("/pc/api/downloads/all", timeoutMs = 15_000L)) {
             is ApiResult.Success -> {
                 cache.putAsync(CACHE_DOWNLOADS_ALL, res.data)
                 _uiState.update { it.copy(data = res.data, error = null) }

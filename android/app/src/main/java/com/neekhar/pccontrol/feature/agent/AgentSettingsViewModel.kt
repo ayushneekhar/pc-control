@@ -46,22 +46,38 @@ data class AgentSettingsUiState(
 
 class AgentSettingsViewModel(
     private val api: PcApiClient,
+    autoLoad: Boolean = true,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AgentSettingsUiState())
     val uiState: StateFlow<AgentSettingsUiState> = _uiState.asStateFlow()
 
+    private var refreshJob: Job? = null
     private var switchPollJob: Job? = null
     private var staleRepollJob: Job? = null
     private var staleAttempts = 0
 
     init {
-        refreshAll(forceUsage = false)
+        if (autoLoad) {
+            refreshInternal(forceUsage = false, showPullIndicator = false)
+        }
+    }
+
+    fun onScreenResume() {
+        if (refreshJob?.isActive == true) return
+        refreshInternal(forceUsage = false, showPullIndicator = false)
     }
 
     fun refreshAll(forceUsage: Boolean = true) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isRefreshing = true) }
+        refreshJob?.cancel()
+        refreshInternal(forceUsage = forceUsage, showPullIndicator = true)
+    }
+
+    private fun refreshInternal(forceUsage: Boolean, showPullIndicator: Boolean) {
+        refreshJob = viewModelScope.launch {
+            if (showPullIndicator) {
+                _uiState.update { it.copy(isRefreshing = true) }
+            }
             try {
                 coroutineScope {
                     launch { loadAgentStateSuspend() }
@@ -114,7 +130,7 @@ class AgentSettingsViewModel(
         if (force) staleAttempts = 0
         if (!silent) _uiState.update { it.copy(usageLoading = true) }
         val path = if (force) "/pc/api/agent/usage?refresh=1" else "/pc/api/agent/usage"
-        when (val res = api.getJson<AgentUsageResponse>(path)) {
+        when (val res = api.getJson<AgentUsageResponse>(path, timeoutMs = USAGE_TIMEOUT_MS)) {
             is ApiResult.Success -> {
                 _uiState.update {
                     it.copy(usage = res.data, usageLoading = false, usageError = null)
@@ -246,6 +262,7 @@ class AgentSettingsViewModel(
     }
 
     override fun onCleared() {
+        refreshJob?.cancel()
         switchPollJob?.cancel()
         staleRepollJob?.cancel()
         super.onCleared()
@@ -256,5 +273,6 @@ class AgentSettingsViewModel(
         private const val AGENT_POLL_MAX_ATTEMPTS = 15
         private const val STALE_REPOLL_MS = 2_500L
         private const val STALE_REPOLL_MAX = 4
+        private const val USAGE_TIMEOUT_MS = 25_000L
     }
 }

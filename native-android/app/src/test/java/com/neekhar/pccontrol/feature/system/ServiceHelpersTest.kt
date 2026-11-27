@@ -117,7 +117,7 @@ class ServiceHelpersTest {
     }
 
     @Test
-    fun `sortedTemperatures places cpu first and omits nulls`() {
+    fun `sortedTemperatures places cpu first case-insensitively and omits nulls`() {
         val temps = mapOf(
             "nvme" to 42.0,
             "gpu" to 55.0,
@@ -128,6 +128,66 @@ class ServiceHelpersTest {
             listOf("cpu" to 61.5, "gpu" to 55.0, "nvme" to 42.0),
             ServiceHelpers.sortedTemperatures(temps),
         )
+
+        val upperTemps = mapOf(
+            "GPU" to 59.0,
+            "CPU" to 64.0,
+            "NVMe" to 41.0,
+        )
+        assertEquals(
+            listOf("CPU" to 64.0, "GPU" to 59.0, "NVMe" to 41.0),
+            ServiceHelpers.sortedTemperatures(upperTemps),
+        )
+    }
+
+    @Test
+    fun `primaryCpuTemp picks CPU sensor case-insensitively over hotter other sensors`() {
+        val upperCpu = VitalsResponse(temps = mapOf("CPU" to 64.0, "acpi" to 72.0, "GPU" to 59.0))
+        assertEquals(64.0, ServiceHelpers.primaryCpuTemp(upperCpu) ?: -1.0, 0.001)
+
+        val pkgCpu = VitalsResponse(temps = mapOf("Package id 0" to 62.5, "nvme" to 70.0))
+        assertEquals(62.5, ServiceHelpers.primaryCpuTemp(pkgCpu) ?: -1.0, 0.001)
+
+        val fallback = VitalsResponse(temps = mapOf("sensor_a" to 40.0, "sensor_b" to 58.0))
+        assertEquals(58.0, ServiceHelpers.primaryCpuTemp(fallback) ?: -1.0, 0.001)
+    }
+
+    @Test
+    fun `servicesSummaryCopy avoids All running contradiction when inactive units exist`() {
+        val withInactive = ServiceHelpers.servicesSummaryCopy(
+            runningCount = 20,
+            counts = ServiceCounts(running = 20, failed = 0, inactive = 9),
+            problemCount = 0,
+        )
+        assertEquals("20 running · 9 inactive", withInactive.headline)
+        assertEquals("0 failed · all healthy", withInactive.detail)
+
+        val allActive = ServiceHelpers.servicesSummaryCopy(
+            runningCount = 20,
+            counts = ServiceCounts(running = 20, failed = 0, inactive = 0),
+            problemCount = 0,
+        )
+        assertEquals("All 20 running", allActive.headline)
+        assertEquals("0 failed · all healthy", allActive.detail)
+
+        val withProblems = ServiceHelpers.servicesSummaryCopy(
+            runningCount = 19,
+            counts = ServiceCounts(running = 19, failed = 1, inactive = 9),
+            problemCount = 1,
+        )
+        assertEquals("1 problem", withProblems.headline)
+        assertEquals("19 running · 1 failed · 9 inactive", withProblems.detail)
+    }
+
+    @Test
+    fun `vitalsProgressFraction keeps low positive values visible and zeroes non-positive`() {
+        assertEquals(0f, vitalsProgressFraction(0.0), 0.0001f)
+        assertEquals(0f, vitalsProgressFraction(-5.0), 0.0001f)
+        assertEquals(0f, vitalsProgressFraction(Double.NaN), 0.0001f)
+        assertEquals(0.04f, vitalsProgressFraction(0.5), 0.0001f)
+        assertEquals(0.04f, vitalsProgressFraction(2.0), 0.0001f)
+        assertEquals(0.80f, vitalsProgressFraction(80.0), 0.0001f)
+        assertEquals(1.0f, vitalsProgressFraction(120.0), 0.0001f)
     }
 
     @Test

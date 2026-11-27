@@ -9,8 +9,11 @@ import org.junit.Test
 class HomeAttentionTest {
 
     @Test
-    fun `formatHomeTitle strips prefix and falls back to PC Control`() {
+    fun `formatHomeTitle strips prefix and falls back to URL or PC Control`() {
         assertEquals("hp-pavilion", formatHomeTitle("ayushlive-HP-Pavilion"))
+        assertEquals("hp-pavilion", formatHomeTitle("ayushlive-hp-pavilion.tail65e4a4.ts.net"))
+        assertEquals("hp-pavilion", formatHomeTitle(null, fallbackUrl = "https://ayushlive-hp-pavilion.tail65e4a4.ts.net"))
+        assertEquals("hp-pavilion", formatHomeTitle("", fallbackUrl = "https://ayushlive-hp-pavilion.tail65e4a4.ts.net/"))
         assertEquals("workstation", formatHomeTitle("workstation"))
         assertEquals("PC Control", formatHomeTitle(null))
         assertEquals("PC Control", formatHomeTitle(""))

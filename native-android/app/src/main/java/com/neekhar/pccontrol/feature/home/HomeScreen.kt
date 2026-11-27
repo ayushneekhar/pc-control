@@ -3,8 +3,17 @@ package com.neekhar.pccontrol.feature.home
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,31 +28,32 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.LiveTv
-import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.SmartToy
-import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.SwapVert
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.VideocamOff
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.filled.WifiOff
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.SmartDisplay
+import androidx.compose.material.icons.rounded.SmartToy
+import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material.icons.rounded.SwapVert
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.VideocamOff
+import androidx.compose.material.icons.rounded.Warning
+import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -52,6 +62,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -59,7 +72,6 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -70,8 +82,9 @@ import coil3.request.crossfade
 import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.storage.LocalCache
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.PcDimens
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -80,6 +93,7 @@ import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
 import com.neekhar.pccontrol.core.ui.PcPill
 import com.neekhar.pccontrol.core.ui.PcProgressBar
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcStatItem
 import com.neekhar.pccontrol.core.ui.PcStatStrip
@@ -87,7 +101,11 @@ import com.neekhar.pccontrol.core.ui.PcStatusDot
 import com.neekhar.pccontrol.core.ui.PcTone
 import com.neekhar.pccontrol.feature.system.ServiceHelpers
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToInt
+
+/** Process-scoped last-frame cache for the 3 Home camera tiles so tab switches never flash blank. */
+private val homeCamLastPainters = ConcurrentHashMap<String, Painter>()
 
 @Composable
 fun HomeScreen(
@@ -150,10 +168,14 @@ fun HomeScreenContent(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val context = LocalContext.current
     val pullState = rememberPullToRefreshState()
+    val listState = rememberLazyListState()
 
-    val homeTitle = remember(state.info?.host) { formatHomeTitle(state.info?.host) }
+    val homeTitle = remember(state.info?.host, state.baseUrl) {
+        formatHomeTitle(state.info?.host, fallbackUrl = state.baseUrl)
+    }
     val uptimeSubtitle = remember(state.vitals?.uptime) { formatHomeUptimeSubtitle(state.vitals?.uptime) }
     val attention = remember(state.keyring, state.health) {
         buildHomeAttentionSummary(
@@ -164,11 +186,17 @@ fun HomeScreenContent(
     }
     val transfers = state.transfersSummary
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(colors.bg)
-            .statusBarsPadding(),
+    val headerStatusText = if (state.isOffline) "Offline" else uptimeSubtitle
+    val headerStatusTone = if (state.isOffline) PcTone.Bad else PcTone.Ok
+
+    PcScaffold(
+        title = homeTitle,
+        statusText = headerStatusText,
+        statusTone = headerStatusTone,
+        showStatusDot = state.isOffline || uptimeSubtitle != null,
+        listState = listState,
+        applyNavigationBarPadding = false,
+        modifier = modifier,
     ) {
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
@@ -186,19 +214,11 @@ fun HomeScreenContent(
             modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = PcDimens.Space8),
-                verticalArrangement = Arrangement.spacedBy(PcDimens.Space6),
+                contentPadding = PaddingValues(top = 4.dp, bottom = PcDimens.Space8),
+                verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
-                // Header: hostname with quiet uptime subtitle underneath
-                item(key = "header") {
-                    HomeHeader(
-                        title = homeTitle,
-                        uptimeSubtitle = uptimeSubtitle,
-                        isOffline = state.isOffline,
-                    )
-                }
-
                 // Offline banner
                 if (state.isOffline) {
                     item(key = "offline_banner") {
@@ -206,10 +226,14 @@ fun HomeScreenContent(
                             title = "Can't reach the laptop",
                             message = "Check the server address in Settings and make sure Tailscale is connected.",
                             tone = PcTone.Bad,
-                            icon = Icons.Filled.WifiOff,
+                            icon = Icons.Rounded.WifiOff,
                             actionLabel = "Open Settings",
                             onAction = onOpenSettings,
-                            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                            modifier = Modifier.padding(
+                                start = PcDimens.ScreenPad,
+                                end = PcDimens.ScreenPad,
+                                bottom = PcDimens.Space4,
+                            ),
                         )
                     }
                 }
@@ -228,13 +252,13 @@ fun HomeScreenContent(
                                         label = "CPU",
                                         value = "${v.cpu.roundToInt()}",
                                         unit = "%",
-                                        valueColor = if (v.cpu > 85.0) colors.warn else null,
+                                        valueColor = if (v.cpu >= 80.0) colors.warn else null,
                                     ),
                                     PcStatItem(
                                         label = "Memory",
                                         value = String.format(Locale.US, "%.1f", v.mem.used / gib),
-                                        unit = "/${(v.mem.total / gib).roundToInt()}G",
-                                        valueColor = if (v.mem.pct > 85.0) colors.warn else null,
+                                        unit = "/ ${(v.mem.total / gib).roundToInt()} GB",
+                                        valueColor = if (v.mem.pct >= 80.0) colors.warn else null,
                                     ),
                                     PcStatItem(
                                         label = "Temp",
@@ -254,7 +278,7 @@ fun HomeScreenContent(
                                 Text(
                                     text = "Loading vitals…",
                                     color = colors.textDim,
-                                    fontSize = 13.5.sp,
+                                    style = type.body,
                                 )
                             }
                         }
@@ -273,58 +297,50 @@ fun HomeScreenContent(
                                     HomeAttentionAction.OPEN_SETTINGS -> onOpenSettings()
                                 }
                             },
-                            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                            modifier = Modifier.padding(
+                                start = PcDimens.ScreenPad,
+                                end = PcDimens.ScreenPad,
+                                top = PcDimens.Space3,
+                            ),
                         )
                     }
                 }
 
-                // Cameras Card (Live mosaic when ON; compact "Cat cams off" card with one-tap enable when OFF)
+                // Cameras section: exact 24.dp above label, 8.dp from label to card, full 48.dp action touch targets
                 item(key = "cameras") {
-                    Column(
-                        modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
-                        verticalArrangement = Arrangement.spacedBy(if (state.catCamEnabled) 2.dp else PcDimens.Space2),
-                    ) {
-                        if (state.catCamEnabled) {
-                            PcSectionLabel(
-                                label = "Cameras",
-                                trailing = {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .defaultMinSize(minWidth = 48.dp, minHeight = 44.dp)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .clickable(role = Role.Button) { onOpenCams("replay") }
-                                                .padding(horizontal = 10.dp),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Text(
-                                                text = "Replay",
-                                                color = colors.textDim,
-                                                fontSize = 13.sp,
-                                                fontWeight = FontWeight.Medium,
-                                            )
-                                        }
-                                        Box(
-                                            modifier = Modifier
-                                                .defaultMinSize(minWidth = 48.dp, minHeight = 44.dp)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .clickable(role = Role.Button) { onOpenCams("music") }
-                                                .padding(horizontal = 10.dp),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Text(
-                                                text = "Music",
-                                                color = colors.textDim,
-                                                fontSize = 13.sp,
-                                                fontWeight = FontWeight.Medium,
-                                            )
-                                        }
-                                    }
-                                },
-                            )
+                    if (state.catCamEnabled) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp),
+                            ) {
+                                Text(
+                                    text = "Cameras",
+                                    style = type.sectionLabel,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .padding(start = 2.dp, bottom = PcDimens.Space2),
+                                )
+                                Row(
+                                    modifier = Modifier.align(Alignment.BottomEnd),
+                                    verticalAlignment = Alignment.Bottom,
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    HomeSectionActionButton(
+                                        label = "Replay",
+                                        onClick = { onOpenCams("replay") },
+                                    )
+                                    HomeSectionActionButton(
+                                        label = "Music",
+                                        onClick = { onOpenCams("music") },
+                                    )
+                                }
+                            }
                             CamerasMosaicCard(
                                 baseUrl = state.baseUrl,
                                 tick = state.camTick,
@@ -332,7 +348,15 @@ fun HomeScreenContent(
                                 latestSighting = state.latestSighting,
                                 onClick = { onOpenCams(null) },
                             )
-                        } else {
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier.padding(
+                                start = PcDimens.ScreenPad,
+                                end = PcDimens.ScreenPad,
+                                top = PcDimens.Space6,
+                            ),
+                        ) {
                             CatCamsOffCard(
                                 busy = state.catCamBusy,
                                 error = state.catCamError,
@@ -351,7 +375,11 @@ fun HomeScreenContent(
                             onClick = {
                                 if (transfers.isDriveOnly) onOpenSpace() else onOpenDownloads()
                             },
-                            modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                            modifier = Modifier.padding(
+                                start = PcDimens.ScreenPad,
+                                end = PcDimens.ScreenPad,
+                                top = PcDimens.Space6,
+                            ),
                         )
                     }
                 }
@@ -367,7 +395,11 @@ fun HomeScreenContent(
                         onOpenDownloads = onOpenDownloads,
                         onOpenAgentSettings = onOpenAgentSettings,
                         onOpenAgentView = onOpenAgentView,
-                        modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                        modifier = Modifier.padding(
+                            start = PcDimens.ScreenPad,
+                            end = PcDimens.ScreenPad,
+                            top = PcDimens.Space6,
+                        ),
                     )
                 }
             }
@@ -376,63 +408,40 @@ fun HomeScreenContent(
 }
 
 @Composable
-private fun HomeHeader(
-    title: String,
-    uptimeSubtitle: String?,
-    isOffline: Boolean,
+private fun HomeSectionActionButton(
+    label: String,
+    onClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
-    Column(
+    val type = LocalPcType.current
+    val interactionSource = remember { MutableInteractionSource() }
+
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(
-                start = PcDimens.ScreenPad,
-                end = PcDimens.ScreenPad,
-                top = PcDimens.Space4,
+            .defaultMinSize(minWidth = 48.dp)
+            .height(48.dp)
+            .clickable(
+                role = Role.Button,
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
             ),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+        contentAlignment = Alignment.BottomCenter,
     ) {
-        Text(
-            text = title,
-            color = colors.text,
-            fontSize = 30.sp,
-            lineHeight = 35.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = (-0.5).sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        when {
-            isOffline -> {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    PcStatusDot(tone = PcTone.Bad, size = 7.dp)
-                    Text(
-                        text = "Offline",
-                        color = colors.bad,
-                        style = TabularNumStyle.copy(
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.Medium,
-                        ),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            uptimeSubtitle != null -> {
-                Text(
-                    text = uptimeSubtitle,
-                    color = colors.textFaint,
-                    style = TabularNumStyle.copy(
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Normal,
-                    ),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+        Box(
+            modifier = Modifier
+                .padding(bottom = 4.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .indication(interactionSource = interactionSource, indication = ripple())
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = label,
+                color = colors.accent,
+                style = type.sectionLabel.copy(fontWeight = FontWeight.Medium),
+                maxLines = 1,
+            )
         }
     }
 }
@@ -444,6 +453,7 @@ private fun NeedsAttentionRow(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val isBad = summary.tone == HomeAttentionTone.BAD
     val fg = if (isBad) colors.bad else colors.warn
     val bg = if (isBad) colors.badSoft else colors.warnSoft
@@ -466,7 +476,7 @@ private fun NeedsAttentionRow(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    imageVector = Icons.Filled.Warning,
+                    imageVector = Icons.Rounded.Warning,
                     contentDescription = null,
                     tint = fg,
                     modifier = Modifier.size(16.dp),
@@ -479,22 +489,20 @@ private fun NeedsAttentionRow(
                 Text(
                     text = "Needs attention",
                     color = colors.text,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = summary.summaryText,
                     color = fg,
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Normal,
+                    style = type.caption,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
             Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                 contentDescription = null,
                 tint = colors.textFaint,
                 modifier = Modifier.size(20.dp),
@@ -512,6 +520,7 @@ private fun CamerasMosaicCard(
     onClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val loadedCams = remember { mutableStateMapOf<String, Boolean>() }
     val liveCount = HOME_CAMS.count { loadedCams[it.id] == true }
 
@@ -580,7 +589,7 @@ private fun CamerasMosaicCard(
                 Text(
                     text = if (liveCount > 0) "$liveCount live" else "${HOME_CAMS.size} cams",
                     color = colors.text,
-                    style = TabularNumStyle.copy(fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold),
+                    style = type.body.tabular().copy(fontWeight = FontWeight.SemiBold),
                 )
             }
             Spacer(modifier = Modifier.size(12.dp))
@@ -591,7 +600,7 @@ private fun CamerasMosaicCard(
                     else -> "Detector offline"
                 },
                 color = colors.textDim,
-                fontSize = 12.5.sp,
+                style = type.caption,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -608,9 +617,16 @@ private fun CameraSnapshotTile(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val context = LocalContext.current
-    var lastPainter by remember(cam.id) { mutableStateOf<Painter?>(null) }
+    var lastPainter by remember(cam.id) { mutableStateOf(homeCamLastPainters[cam.id]) }
     var failed by remember(cam.id) { mutableStateOf(false) }
+
+    LaunchedEffect(cam.id, lastPainter) {
+        if (lastPainter != null) {
+            onLoadState(true)
+        }
+    }
 
     val url = remember(baseUrl, cam.id, tick) {
         if (baseUrl.isBlank()) null else "$baseUrl/api/frame.jpeg?src=${cam.id}&t=$tick"
@@ -632,6 +648,26 @@ private fun CameraSnapshotTile(
             .background(colors.media)
             .clip(RoundedCornerShape(0.dp)),
     ) {
+        if (lastPainter == null) {
+            if (failed || request == null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF161616)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.VideocamOff,
+                        contentDescription = null,
+                        tint = colors.onMediaDim,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            } else {
+                CameraTileShimmer(modifier = Modifier.fillMaxSize())
+            }
+        }
+
         if (request != null) {
             AsyncImage(
                 model = request,
@@ -640,6 +676,7 @@ private fun CameraSnapshotTile(
                 placeholder = lastPainter,
                 error = lastPainter,
                 onSuccess = { result ->
+                    homeCamLastPainters[cam.id] = result.painter
                     lastPainter = result.painter
                     failed = false
                     onLoadState(true)
@@ -654,46 +691,50 @@ private fun CameraSnapshotTile(
             )
         }
 
-        if (lastPainter == null) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (failed || request == null) {
-                    Icon(
-                        imageVector = Icons.Filled.VideocamOff,
-                        contentDescription = null,
-                        tint = colors.onMediaDim,
-                        modifier = Modifier.size(18.dp),
-                    )
-                } else {
-                    CircularProgressIndicator(
-                        color = colors.onMediaDim,
-                        strokeWidth = 1.5.dp,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-            }
-        }
-
+        // Dark pill label always sits above both live frames and loading shimmer placeholders
         Box(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(6.dp)
-                .clip(RoundedCornerShape(6.dp))
+                .clip(CircleShape)
                 .background(colors.mediaChip)
-                .padding(horizontal = 6.dp, vertical = 2.dp),
+                .border(0.5.dp, colors.mediaChipBorder, CircleShape)
+                .padding(horizontal = 7.dp, vertical = 2.dp),
         ) {
             Text(
                 text = cam.name,
                 color = colors.onMedia,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
+                style = type.micro,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
     }
+}
+
+@Composable
+private fun CameraTileShimmer(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "home_cam_shimmer")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1350, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "home_cam_shimmer_progress",
+    )
+    val startX = -260f + progress * 720f
+    val brush = Brush.linearGradient(
+        colors = listOf(
+            Color(0xFF161616),
+            Color(0xFF252525),
+            Color(0xFF161616),
+        ),
+        start = Offset(startX, 0f),
+        end = Offset(startX + 260f, 160f),
+    )
+    Box(modifier = modifier.background(brush))
 }
 
 @Composable
@@ -704,6 +745,7 @@ private fun CatCamsOffCard(
     onOpenCams: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     PcCard(onClick = onOpenCams) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -711,7 +753,7 @@ private fun CatCamsOffCard(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Icon(
-                imageVector = Icons.Filled.VideocamOff,
+                imageVector = Icons.Rounded.VideocamOff,
                 contentDescription = null,
                 tint = colors.textFaint,
                 modifier = Modifier.size(22.dp),
@@ -723,13 +765,12 @@ private fun CatCamsOffCard(
                 Text(
                     text = "Cat cams off",
                     color = colors.text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                 )
                 Text(
                     text = error ?: "Streams & cat detection are paused",
                     color = if (error != null) colors.bad else colors.textFaint,
-                    fontSize = 12.5.sp,
+                    style = type.caption,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -752,15 +793,16 @@ private fun ActiveTransfersCard(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val pillTone = when (summary.trailingTone) {
         HomeTransfersTone.ACCENT -> PcTone.Accent
         HomeTransfersTone.WARN -> PcTone.Warn
         HomeTransfersTone.DIM, null -> PcTone.Dim
     }
     val icon = when {
-        summary.isDriveOnly && summary.uploadCount > 0 -> Icons.Filled.CloudUpload
-        summary.torrentCount > 0 && summary.uploadCount == 0 -> Icons.Filled.Download
-        else -> Icons.Filled.SwapVert
+        summary.isDriveOnly && summary.uploadCount > 0 -> Icons.Rounded.CloudUpload
+        summary.torrentCount > 0 && summary.uploadCount == 0 -> Icons.Rounded.Download
+        else -> Icons.Rounded.SwapVert
     }
     val title = when {
         summary.isDriveOnly && summary.uploadCount > 0 && summary.restoreCount == 0 -> "Drive offload"
@@ -794,14 +836,13 @@ private fun ActiveTransfersCard(
                     Text(
                         text = title,
                         color = colors.text,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = type.cardTitle,
                     )
                     if (!summary.subtitle.isNullOrBlank()) {
                         Text(
                             text = summary.subtitle,
                             color = colors.textDim,
-                            style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                            style = type.caption.tabular(),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -836,6 +877,7 @@ private fun OpenRoutesSection(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val jellyfinRoute = remember(state.routes) {
         state.routes.firstOrNull {
             it.name.contains("jellyfin", ignoreCase = true) || it.port == 8096
@@ -876,7 +918,7 @@ private fun OpenRoutesSection(
             PcListRow(
                 title = "Jellyfin",
                 subtitle = jellyfinRoute?.subtitle?.takeIf { it.isNotBlank() } ?: "Media server",
-                icon = Icons.Filled.LiveTv,
+                icon = Icons.Rounded.SmartDisplay,
                 showChevron = true,
                 showDivider = true,
                 onClick = {
@@ -892,7 +934,7 @@ private fun OpenRoutesSection(
             PcListRow(
                 title = "Seerr",
                 subtitle = "Search & request movies or TV",
-                icon = Icons.Filled.Movie,
+                icon = Icons.Rounded.Movie,
                 showChevron = true,
                 showDivider = true,
                 onClick = onOpenSeerr,
@@ -900,16 +942,13 @@ private fun OpenRoutesSection(
             PcListRow(
                 title = "Downloads",
                 subtitle = transfers.subtitle ?: "qBittorrent & Drive transfers",
-                icon = Icons.Filled.Download,
+                icon = Icons.Rounded.Download,
                 trailingContent = transfers.trailing?.let { badge ->
                     {
                         Text(
                             text = badge,
                             color = transfersTrailingColor,
-                            style = TabularNumStyle.copy(
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Medium,
-                            ),
+                            style = type.caption.tabular().copy(fontWeight = FontWeight.Medium),
                         )
                     }
                 },
@@ -920,13 +959,13 @@ private fun OpenRoutesSection(
             PcListRow(
                 title = "Space",
                 subtitle = "Media storage & Google Drive offload",
-                icon = Icons.Filled.Storage,
+                icon = Icons.Rounded.Storage,
                 trailingContent = hddFree?.let { freeBytes ->
                     {
                         Text(
-                            text = "${PcFormatters.formatBytes(freeBytes, digits = 0)} free",
+                            text = "${PcFormatters.formatBytes(freeBytes, digits = 1)} free",
                             color = if (hddWarn) colors.warn else colors.textDim,
-                            style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                            style = type.caption.tabular(),
                         )
                     }
                 },
@@ -939,7 +978,7 @@ private fun OpenRoutesSection(
             PcListRow(
                 title = "Agent settings",
                 subtitle = "Models, quotas & usage alerts",
-                icon = Icons.Filled.Tune,
+                icon = Icons.Rounded.Tune,
                 showChevron = true,
                 showDivider = true,
                 onClick = onOpenAgentSettings,
@@ -947,7 +986,7 @@ private fun OpenRoutesSection(
             PcListRow(
                 title = "Agent view",
                 subtitle = "Watcher rules & live activity",
-                icon = Icons.Filled.SmartToy,
+                icon = Icons.Rounded.SmartToy,
                 showChevron = true,
                 showDivider = remainingExternalRoutes.isNotEmpty(),
                 onClick = onOpenAgentView,

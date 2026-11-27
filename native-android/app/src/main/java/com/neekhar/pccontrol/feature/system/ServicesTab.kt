@@ -17,12 +17,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CloudOff
-import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -42,10 +44,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.PcDimens
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
@@ -88,8 +90,10 @@ fun ServicesTab(
     onOpenServiceDetail: (String) -> Unit,
     onOpenDownloads: () -> Unit = {},
     modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val h = state.health
     val pullState = rememberPullToRefreshState()
 
@@ -133,6 +137,7 @@ fun ServicesTab(
             .background(colors.bg),
     ) {
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
                 start = PcDimens.ScreenPad,
@@ -159,7 +164,7 @@ fun ServicesTab(
                             Text(
                                 text = "Checking services…",
                                 color = colors.textDim,
-                                fontSize = 14.sp,
+                                style = type.body,
                             )
                         }
                     }
@@ -170,8 +175,23 @@ fun ServicesTab(
             // 1. Summary Card with native Canvas status ring
             item(key = "summary") {
                 val problems = h.problems
-                val runningCount = h.services.counts?.running ?: allUnits.count { it.active == "active" }
+                val effectiveCounts = h.services.counts ?: allUnits.takeIf { it.isNotEmpty() }?.let { units ->
+                    ServiceCounts(
+                        running = units.count { it.active == "active" },
+                        failed = units.count { it.active == "failed" },
+                        inactive = units.count { it.active == "inactive" },
+                        other = units.count { it.active !in setOf("active", "failed", "inactive") },
+                    )
+                }
+                val runningCount = effectiveCounts?.running ?: allUnits.count { it.active == "active" }
                 val totalCount = allUnits.size.coerceAtLeast(runningCount)
+                val summaryCopy = remember(runningCount, effectiveCounts, problems.size) {
+                    ServiceHelpers.servicesSummaryCopy(
+                        runningCount = runningCount,
+                        counts = effectiveCounts,
+                        problemCount = problems.size,
+                    )
+                }
                 val ringColor = when (state.summaryTone) {
                     PcTone.Bad -> colors.bad
                     PcTone.Warn -> colors.warn
@@ -189,7 +209,7 @@ fun ServicesTab(
                             totalCount = totalCount,
                             problemCount = problems.size,
                             ringColor = ringColor,
-                            trackColor = colors.surfaceRaised,
+                            trackColor = vitalsProgressTrackColor(),
                             okColor = colors.ok,
                         )
                         Column(
@@ -197,25 +217,19 @@ fun ServicesTab(
                             verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
                             Text(
-                                text = if (problems.isEmpty()) {
-                                    "All $runningCount running"
-                                } else {
-                                    "${problems.size} problem${if (problems.size == 1) "" else "s"}"
-                                },
+                                text = summaryCopy.headline,
                                 color = colors.text,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.SemiBold,
+                                style = type.cardTitle.tabular().copy(fontWeight = FontWeight.SemiBold),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
-                            val counts = h.services.counts
-                            if (counts != null) {
+                            if (!summaryCopy.detail.isNullOrBlank()) {
                                 Text(
-                                    text = buildString {
-                                        append("${counts.running} active")
-                                        if (counts.failed > 0) append(" · ${counts.failed} failed")
-                                        if (counts.inactive > 0) append(" · ${counts.inactive} inactive")
-                                    },
+                                    text = summaryCopy.detail,
                                     color = colors.textDim,
-                                    style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                                    style = type.caption.tabular(),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
@@ -245,15 +259,13 @@ fun ServicesTab(
                                     Text(
                                         text = prob.title,
                                         color = if (prob.severity == "bad") colors.bad else colors.warn,
-                                        fontSize = 13.5.sp,
-                                        fontWeight = FontWeight.Medium,
+                                        style = type.body.copy(fontWeight = FontWeight.Medium),
                                     )
                                     if (!prob.detail.isNullOrBlank()) {
                                         Text(
                                             text = prob.detail,
                                             color = colors.textDim,
-                                            fontSize = 12.5.sp,
-                                            lineHeight = 17.sp,
+                                            style = type.caption,
                                             maxLines = 2,
                                             overflow = TextOverflow.Ellipsis,
                                         )
@@ -284,7 +296,7 @@ fun ServicesTab(
                                 Text(
                                     text = "No services in this group.",
                                     color = colors.textFaint,
-                                    fontSize = 13.sp,
+                                    style = type.caption,
                                     modifier = Modifier.padding(PcDimens.Space4),
                                 )
                             } else {
@@ -331,6 +343,7 @@ private fun ServiceFilterChipRow(
     onSelect: (ServiceGroup) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -358,8 +371,9 @@ private fun ServiceFilterChipRow(
                 Text(
                     text = group.label,
                     color = if (isSelected) colors.accent else colors.textDim,
-                    fontSize = 13.sp,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                    style = type.caption.copy(
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                    ),
                     maxLines = 1,
                 )
             }
@@ -370,13 +384,14 @@ private fun ServiceFilterChipRow(
 @Composable
 private fun UnavailableCard(label: String, error: String?) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     PcCard {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Icon(
-                imageVector = Icons.Filled.CloudOff,
+                imageVector = Icons.Rounded.CloudOff,
                 contentDescription = null,
                 tint = colors.textFaint,
                 modifier = Modifier.size(20.dp),
@@ -385,13 +400,12 @@ private fun UnavailableCard(label: String, error: String?) {
                 Text(
                     text = "$label unavailable",
                     color = colors.text,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.cardTitle,
                 )
                 Text(
                     text = error?.takeIf { it.isNotBlank() } ?: "No answer from the laptop",
                     color = colors.textFaint,
-                    fontSize = 12.5.sp,
+                    style = type.caption,
                 )
             }
         }
@@ -401,12 +415,18 @@ private fun UnavailableCard(label: String, error: String?) {
 @Composable
 private fun JellyfinHealthSection(jellyfin: HealthJellyfin) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val trackColor = vitalsProgressTrackColor()
     Column(verticalArrangement = Arrangement.spacedBy(PcDimens.Space2)) {
         PcSectionLabel(label = "Jellyfin")
         when {
             !jellyfin.available -> UnavailableCard(label = "Jellyfin", error = jellyfin.error)
             jellyfin.streams.isEmpty() -> PcCard {
-                Text(text = "No one watching.", color = colors.textFaint, fontSize = 13.sp)
+                Text(
+                    text = "No one watching.",
+                    color = colors.textFaint,
+                    style = type.caption,
+                )
             }
             else -> PcCard {
                 jellyfin.streams.forEachIndexed { idx, stream ->
@@ -423,7 +443,7 @@ private fun JellyfinHealthSection(jellyfin: HealthJellyfin) {
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Icon(
-                                imageVector = Icons.Filled.Person,
+                                imageVector = Icons.Rounded.Person,
                                 contentDescription = null,
                                 tint = colors.textDim,
                                 modifier = Modifier.size(16.dp),
@@ -431,8 +451,7 @@ private fun JellyfinHealthSection(jellyfin: HealthJellyfin) {
                             Text(
                                 text = stream.user,
                                 color = colors.text,
-                                fontSize = 13.5.sp,
-                                fontWeight = FontWeight.Medium,
+                                style = type.body.copy(fontWeight = FontWeight.Medium),
                             )
                             PcPill(
                                 label = when (stream.method) {
@@ -449,7 +468,7 @@ private fun JellyfinHealthSection(jellyfin: HealthJellyfin) {
                         Text(
                             text = stream.title,
                             color = colors.text,
-                            fontSize = 13.5.sp,
+                            style = type.body,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -457,7 +476,7 @@ private fun JellyfinHealthSection(jellyfin: HealthJellyfin) {
                             Text(
                                 text = stream.subtitle,
                                 color = colors.textFaint,
-                                fontSize = 12.sp,
+                                style = type.caption,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -466,7 +485,7 @@ private fun JellyfinHealthSection(jellyfin: HealthJellyfin) {
                             Spacer(modifier = Modifier.height(2.dp))
                             VitalsProgressBar(
                                 percent = stream.progress * 100.0,
-                                trackColor = colors.surfaceRaised,
+                                trackColor = trackColor,
                                 fillColor = colors.textFaint,
                                 height = 4.dp,
                             )

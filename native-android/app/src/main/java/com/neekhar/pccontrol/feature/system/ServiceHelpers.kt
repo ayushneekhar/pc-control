@@ -31,6 +31,11 @@ enum class ProcessSortKey(val label: String, val defaultDescending: Boolean) {
     GPU("GPU", true),
 }
 
+data class ServicesSummaryCopy(
+    val headline: String,
+    val detail: String?,
+)
+
 object ServiceHelpers {
     private val CAMS_REGEX = Regex("^(cam-|camrec|catcam|catdetect|cat-)")
     private val MEDIA_REGEX = Regex("^(jellyfin|qbittorrent|radarr|sonarr|seerr|bazarr|prowlarr|flaresolverr|import-watch|media)")
@@ -132,13 +137,72 @@ object ServiceHelpers {
         return sorted.take(limit) to filtered.size
     }
 
+    private val CPU_TEMP_ALIASES = setOf("tctl", "tdie", "package id 0", "coretemp", "k10temp")
+
+    fun servicesSummaryCopy(
+        runningCount: Int,
+        counts: ServiceCounts?,
+        problemCount: Int,
+    ): ServicesSummaryCopy {
+        if (problemCount > 0) {
+            val headline = "$problemCount problem${if (problemCount == 1) "" else "s"}"
+            val detail = counts?.let { c ->
+                buildList {
+                    add("${c.running} running")
+                    if (c.failed > 0) add("${c.failed} failed")
+                    if (c.inactive > 0) add("${c.inactive} inactive")
+                    if (c.other > 0) add("${c.other} other")
+                }.joinToString(" · ")
+            }
+            return ServicesSummaryCopy(headline = headline, detail = detail)
+        }
+
+        if (counts == null) {
+            return ServicesSummaryCopy(
+                headline = "$runningCount running",
+                detail = "0 failed · all healthy",
+            )
+        }
+
+        if (counts.failed > 0) {
+            val detail = buildList {
+                if (counts.inactive > 0) add("${counts.inactive} inactive")
+                if (counts.other > 0) add("${counts.other} other")
+            }.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+            return ServicesSummaryCopy(
+                headline = "${counts.running} running · ${counts.failed} failed",
+                detail = detail,
+            )
+        }
+
+        if (counts.inactive > 0 || counts.other > 0) {
+            val headline = if (counts.inactive > 0) {
+                "${counts.running} running · ${counts.inactive} inactive"
+            } else {
+                "${counts.running} running · ${counts.other} other"
+            }
+            val detail = buildList {
+                if (counts.inactive > 0 && counts.other > 0) add("${counts.other} other")
+                add("0 failed · all healthy")
+            }.joinToString(" · ")
+            return ServicesSummaryCopy(headline = headline, detail = detail)
+        }
+
+        return ServicesSummaryCopy(
+            headline = "All ${counts.running} running",
+            detail = "0 failed · all healthy",
+        )
+    }
+
     fun sortedTemperatures(temps: Map<String, Double?>): List<Pair<String, Double>> =
         temps.entries
             .mapNotNull { (k, v) -> if (v != null && v.isFinite()) k to v else null }
             .sortedWith { (a, _), (b, _) ->
+                val aCpu = a.equals("cpu", ignoreCase = true)
+                val bCpu = b.equals("cpu", ignoreCase = true)
                 when {
-                    a == "cpu" && b != "cpu" -> -1
-                    b == "cpu" && a != "cpu" -> 1
+                    aCpu && !bCpu -> -1
+                    bCpu && !aCpu -> 1
                     else -> a.compareTo(b)
                 }
             }
@@ -152,7 +216,13 @@ object ServiceHelpers {
 
     fun primaryCpuTemp(vitals: VitalsResponse?): Double? {
         if (vitals == null) return null
-        vitals.temps["cpu"]?.takeIf { it.isFinite() }?.let { return it }
-        return vitals.temps.values.filterNotNull().filter { it.isFinite() }.maxOrNull()
+        val valid = vitals.temps.entries.mapNotNull { (k, v) ->
+            if (v != null && v.isFinite()) k to v else null
+        }
+        if (valid.isEmpty()) return null
+        valid.firstOrNull { (k, _) -> k.equals("cpu", ignoreCase = true) }?.let { return it.second }
+        valid.firstOrNull { (k, _) -> k.contains("cpu", ignoreCase = true) }?.let { return it.second }
+        valid.firstOrNull { (k, _) -> k.lowercase(Locale.US) in CPU_TEMP_ALIASES }?.let { return it.second }
+        return valid.maxOfOrNull { it.second }
     }
 }

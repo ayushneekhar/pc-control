@@ -16,24 +16,23 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.RestartAlt
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.RestartAlt
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -50,16 +49,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.storage.LocalCache
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.MonoTextStyle
 import com.neekhar.pccontrol.core.theme.PcDimens
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
@@ -67,7 +66,7 @@ import com.neekhar.pccontrol.core.ui.PcConfirmDialog
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcKeyValueRow
 import com.neekhar.pccontrol.core.ui.PcPill
-import com.neekhar.pccontrol.core.ui.PcScreenHeader
+import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcTone
 import com.neekhar.pccontrol.feature.home.PcFormatters
 
@@ -110,7 +109,9 @@ fun ServiceDetailScreenContent(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val context = LocalContext.current
+    val listState = rememberLazyListState()
     var pendingConfirmAction by remember { mutableStateOf<ServiceAction?>(null) }
     var copiedFeedback by remember { mutableStateOf(false) }
 
@@ -129,40 +130,35 @@ fun ServiceDetailScreenContent(
         }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(colors.bg)
-            .statusBarsPadding()
-            .navigationBarsPadding(),
-    ) {
-        val headerAlert = if (state.unit.isNotBlank() && (statusTone == PcTone.Bad || statusTone == PcTone.Warn)) {
-            statusText
-        } else {
-            null
-        }
-        PcScreenHeader(
-            title = if (state.unit.isBlank()) "Service" else state.displayName,
-            statusText = headerAlert,
-            statusTone = statusTone,
-            showStatusDot = headerAlert != null,
-            onBack = onBack,
-        )
+    val headerAlert = if (state.unit.isNotBlank() && (statusTone == PcTone.Bad || statusTone == PcTone.Warn)) {
+        statusText
+    } else {
+        null
+    }
 
+    PcScaffold(
+        title = if (state.unit.isBlank()) "Service" else state.displayName,
+        statusText = headerAlert,
+        statusTone = statusTone,
+        showStatusDot = headerAlert != null,
+        onBack = onBack,
+        listState = listState,
+        modifier = modifier,
+    ) {
         if (state.unit.isBlank()) {
             PcErrorBanner(
                 title = "No service selected",
                 tone = PcTone.Bad,
-                modifier = Modifier.padding(horizontal = PcDimens.ScreenPad),
+                modifier = Modifier.padding(horizontal = PcDimens.ScreenPad, vertical = 4.dp),
             )
         } else {
             LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .weight(1f),
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
                     start = PcDimens.ScreenPad,
                     end = PcDimens.ScreenPad,
+                    top = 4.dp,
                     bottom = PcDimens.Space8,
                 ),
                 verticalArrangement = Arrangement.spacedBy(PcDimens.Space3),
@@ -202,8 +198,7 @@ fun ServiceDetailScreenContent(
                                 Text(
                                     text = svc?.active?.ifBlank { "unknown" } ?: "unknown",
                                     color = colors.text,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.SemiBold,
+                                    style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
                                 )
                                 val subDesc = svc?.sub?.takeIf { it.isNotBlank() }
                                     ?: svc?.description?.takeIf { it.isNotBlank() }
@@ -211,7 +206,7 @@ fun ServiceDetailScreenContent(
                                     Text(
                                         text = subDesc,
                                         color = colors.textDim,
-                                        fontSize = 12.5.sp,
+                                        style = type.caption,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis,
                                     )
@@ -258,7 +253,7 @@ fun ServiceDetailScreenContent(
                                 label = "Start",
                                 onClick = { onAction(ServiceAction.START) },
                                 variant = PcButtonVariant.Primary,
-                                icon = Icons.Filled.PlayArrow,
+                                icon = Icons.Rounded.PlayArrow,
                                 busy = state.busyAction == ServiceAction.START,
                                 enabled = state.busyAction == null,
                                 modifier = Modifier.weight(1f),
@@ -268,7 +263,7 @@ fun ServiceDetailScreenContent(
                                 label = "Stop",
                                 onClick = { pendingConfirmAction = ServiceAction.STOP },
                                 variant = PcButtonVariant.Danger,
-                                icon = Icons.Filled.Stop,
+                                icon = Icons.Rounded.Stop,
                                 busy = state.busyAction == ServiceAction.STOP,
                                 enabled = state.busyAction == null,
                                 modifier = Modifier.weight(1f),
@@ -278,7 +273,7 @@ fun ServiceDetailScreenContent(
                             label = "Restart",
                             onClick = { pendingConfirmAction = ServiceAction.RESTART },
                             variant = if (state.isActive && state.isProtected) PcButtonVariant.Primary else PcButtonVariant.Subtle,
-                            icon = Icons.Filled.RestartAlt,
+                            icon = Icons.Rounded.RestartAlt,
                             busy = state.busyAction == ServiceAction.RESTART,
                             enabled = state.busyAction == null,
                             modifier = Modifier.weight(1f),
@@ -299,9 +294,7 @@ fun ServiceDetailScreenContent(
                         ) {
                             Text(
                                 text = "Recent logs (journalctl)",
-                                color = colors.textDim,
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Medium,
+                                style = type.sectionLabel,
                             )
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -315,7 +308,7 @@ fun ServiceDetailScreenContent(
                                             "$totalLines lines"
                                         },
                                         color = colors.textFaint,
-                                        style = TabularNumStyle.copy(fontSize = 11.5.sp),
+                                        style = type.micro.tabular(),
                                     )
                                 }
                                 IconButton(
@@ -327,10 +320,10 @@ fun ServiceDetailScreenContent(
                                             copiedFeedback = true
                                         }
                                     },
-                                    modifier = Modifier.size(28.dp),
+                                    modifier = Modifier.size(32.dp),
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Filled.ContentCopy,
+                                        imageVector = Icons.Rounded.ContentCopy,
                                         contentDescription = "Copy logs",
                                         tint = if (copiedFeedback) colors.accent else colors.textDim,
                                         modifier = Modifier.size(16.dp),
@@ -354,7 +347,7 @@ fun ServiceDetailScreenContent(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             Icon(
-                                imageVector = Icons.Filled.Search,
+                                imageVector = Icons.Rounded.Search,
                                 contentDescription = null,
                                 tint = colors.textFaint,
                                 modifier = Modifier.size(15.dp),
@@ -364,7 +357,7 @@ fun ServiceDetailScreenContent(
                                     Text(
                                         text = "Filter log lines…",
                                         color = colors.textFaint,
-                                        fontSize = 12.5.sp,
+                                        style = type.caption,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
@@ -373,7 +366,11 @@ fun ServiceDetailScreenContent(
                                     value = state.logFilter,
                                     onValueChange = onLogFilterChange,
                                     singleLine = true,
-                                    textStyle = MonoTextStyle.copy(color = colors.text, fontSize = 12.5.sp),
+                                    textStyle = MonoTextStyle.copy(
+                                        color = colors.text,
+                                        fontSize = type.caption.fontSize,
+                                        lineHeight = type.caption.lineHeight,
+                                    ),
                                     cursorBrush = SolidColor(colors.accent),
                                     modifier = Modifier.fillMaxWidth(),
                                 )
@@ -384,7 +381,7 @@ fun ServiceDetailScreenContent(
                                     modifier = Modifier.size(22.dp),
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Filled.Close,
+                                        imageVector = Icons.Rounded.Close,
                                         contentDescription = "Clear filter",
                                         tint = colors.textDim,
                                         modifier = Modifier.size(14.dp),
@@ -417,7 +414,10 @@ fun ServiceDetailScreenContent(
                                 Text(
                                     text = consoleText,
                                     color = if (state.logs.isNullOrEmpty() || filtered.isEmpty()) colors.textFaint else colors.text,
-                                    style = MonoTextStyle.copy(fontSize = 11.5.sp, lineHeight = 16.sp),
+                                    style = MonoTextStyle.copy(
+                                        fontSize = type.micro.fontSize,
+                                        lineHeight = type.caption.lineHeight,
+                                    ),
                                 )
                             }
                         }
@@ -431,7 +431,7 @@ fun ServiceDetailScreenContent(
                                 onRefreshLogs()
                             },
                             variant = PcButtonVariant.Subtle,
-                            icon = Icons.Filled.Refresh,
+                            icon = Icons.Rounded.Refresh,
                             busy = state.logsLoading,
                             compact = true,
                             modifier = Modifier.fillMaxWidth(),

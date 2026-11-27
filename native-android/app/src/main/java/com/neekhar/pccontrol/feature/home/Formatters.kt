@@ -82,8 +82,15 @@ object PcFormatters {
         return if (days == 1L) "yesterday" else "$days days ago"
     }
 
-    fun formatShortHost(host: String): String =
-        HOST_PREFIX.replace(host.trim(), "").lowercase(Locale.US)
+    fun formatShortHost(host: String): String {
+        val trimmed = host.trim()
+        val withoutTailnet = if (trimmed.endsWith(".ts.net", ignoreCase = true)) {
+            trimmed.substringBefore('.')
+        } else {
+            trimmed
+        }
+        return HOST_PREFIX.replace(withoutTailnet, "").lowercase(Locale.US)
+    }
 
     fun formatClock(
         tsSeconds: Long,

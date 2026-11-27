@@ -22,16 +22,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -54,11 +56,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.neekhar.pccontrol.core.theme.LocalPcColors
+import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.MonoTextStyle
 import com.neekhar.pccontrol.core.theme.PcDimens
-import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcCard
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
@@ -97,11 +99,14 @@ fun VitalsTab(
     onProcessQueryChange: (String) -> Unit,
     onSelectSort: (ProcessSortKey) -> Unit,
     modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val v = state.vitals
 
     LazyColumn(
+        state = listState,
         modifier = modifier
             .fillMaxSize()
             .background(colors.bg),
@@ -130,7 +135,7 @@ fun VitalsTab(
                         Text(
                             text = "Connecting to vitals…",
                             color = colors.textDim,
-                            fontSize = 14.sp,
+                            style = type.body,
                         )
                     }
                 }
@@ -138,7 +143,7 @@ fun VitalsTab(
             return@LazyColumn
         }
 
-        // 1. Hero CPU Card (44sp tabular + auto-scaled Canvas sparkline)
+        // 1. Hero CPU Card (metricHero tabular + auto-scaled Canvas sparkline)
         item(key = "cpu_hero") {
             CpuHeroCard(vitals = v, history = state.history)
         }
@@ -190,7 +195,7 @@ fun VitalsTab(
                     value = gpu?.let { "${it.util.roundToInt()}" } ?: "–",
                     unit = if (gpu != null) "%" else null,
                     percent = gpu?.util,
-                    sub = gpu?.let { "${it.temp.roundToInt()}° · ${it.power.roundToInt()} W" } ?: "Not available",
+                    sub = gpu?.let { "${it.temp.roundToInt()}°C · ${it.power.roundToInt()} W" } ?: "Not available",
                     barColorOverride = colors.textDim,
                     modifier = Modifier
                         .weight(1f)
@@ -234,7 +239,7 @@ fun VitalsTab(
                                             withStyle(
                                                 SpanStyle(
                                                     color = tempColor,
-                                                    fontSize = 16.sp,
+                                                    fontSize = type.cardTitle.fontSize,
                                                     fontWeight = FontWeight.Medium,
                                                 ),
                                             ) {
@@ -243,14 +248,14 @@ fun VitalsTab(
                                             withStyle(
                                                 SpanStyle(
                                                     color = colors.textDim,
-                                                    fontSize = 12.5.sp,
+                                                    fontSize = type.caption.fontSize,
                                                     fontWeight = FontWeight.Normal,
                                                 ),
                                             ) {
                                                 append("°C")
                                             }
                                         },
-                                        style = TabularNumStyle,
+                                        style = type.cardTitle.tabular(),
                                     )
                                 },
                                 showChevron = false,
@@ -315,6 +320,7 @@ private fun CpuHeroCard(
     history: List<VitalsHistPoint>,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val cpuValues = remember(history) { history.map { it.cpu } }
 
     PcCard {
@@ -326,28 +332,18 @@ private fun CpuHeroCard(
             Column {
                 Text(
                     text = "CPU",
-                    color = colors.textDim,
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = type.sectionLabel,
                 )
                 Row(verticalAlignment = Alignment.Bottom) {
                     Text(
                         text = "${vitals.cpu.roundToInt()}",
-                        color = if (vitals.cpu > 85.0) colors.warn else colors.text,
-                        style = TabularNumStyle.copy(
-                            fontSize = 44.sp,
-                            lineHeight = 48.sp,
-                            fontWeight = FontWeight.Medium,
-                            letterSpacing = (-1.5).sp,
-                        ),
+                        color = if (vitals.cpu >= 80.0) colors.warn else colors.text,
+                        style = type.metricHero,
                     )
                     Text(
                         text = "%",
                         color = colors.textDim,
-                        style = TabularNumStyle.copy(
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Normal,
-                        ),
+                        style = type.metricValue.copy(fontWeight = FontWeight.Normal),
                         modifier = Modifier.padding(start = 2.dp, bottom = 6.dp),
                     )
                 }
@@ -356,12 +352,12 @@ private fun CpuHeroCard(
                 Text(
                     text = "${vitals.percpu.size} threads",
                     color = colors.textDim,
-                    style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                    style = type.caption.tabular(),
                 )
                 Text(
                     text = vitals.freq?.let { String.format(Locale.US, "%.2f GHz", it / 1000.0) } ?: "–",
                     color = colors.textFaint,
-                    style = TabularNumStyle.copy(fontSize = 12.sp),
+                    style = type.caption.tabular(),
                 )
             }
         }
@@ -388,7 +384,7 @@ private fun CpuHeroCard(
             Text(
                 text = "Load ${vitals.load.joinToString(" ") { String.format(Locale.US, "%.2f", it) }}",
                 color = colors.textFaint,
-                style = TabularNumStyle.copy(fontSize = 12.sp),
+                style = type.caption.tabular(),
             )
         }
     }
@@ -405,8 +401,10 @@ private fun MetricTile(
     barColorOverride: Color? = null,
 ) {
     val colors = LocalPcColors.current
-    val over = percent != null && percent > 85.0
+    val type = LocalPcType.current
+    val over = percent != null && percent >= 80.0
     val barColor = if (over) colors.warn else (barColorOverride ?: colors.text)
+    val trackColor = vitalsProgressTrackColor()
 
     PcCard(
         modifier = modifier,
@@ -414,9 +412,7 @@ private fun MetricTile(
     ) {
         Text(
             text = label,
-            color = colors.textDim,
-            fontSize = 12.5.sp,
-            fontWeight = FontWeight.Medium,
+            style = type.sectionLabel,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -426,9 +422,9 @@ private fun MetricTile(
                 withStyle(
                     SpanStyle(
                         color = if (over) colors.warn else colors.text,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Medium,
-                        letterSpacing = (-0.3).sp,
+                        fontSize = type.metricValue.fontSize,
+                        fontWeight = type.metricValue.fontWeight,
+                        letterSpacing = type.collapsedTitle.letterSpacing,
                     ),
                 ) {
                     append(value)
@@ -437,16 +433,15 @@ private fun MetricTile(
                     withStyle(
                         SpanStyle(
                             color = colors.textDim,
-                            fontSize = 12.5.sp,
+                            fontSize = type.caption.fontSize,
                             fontWeight = FontWeight.Normal,
-                            letterSpacing = 0.sp,
                         ),
                     ) {
                         append(unit)
                     }
                 }
             },
-            style = TabularNumStyle,
+            style = type.metricValue,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -454,7 +449,7 @@ private fun MetricTile(
             Spacer(modifier = Modifier.height(8.dp))
             VitalsProgressBar(
                 percent = percent,
-                trackColor = colors.surfaceRaised,
+                trackColor = trackColor,
                 fillColor = barColor,
                 height = 4.dp,
             )
@@ -463,7 +458,7 @@ private fun MetricTile(
         Text(
             text = sub,
             color = if (over && sub.contains('%')) colors.warn else colors.textFaint,
-            style = TabularNumStyle.copy(fontSize = 12.sp),
+            style = type.caption.tabular(),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -476,6 +471,7 @@ private fun NetworkVitalsSection(
     history: List<VitalsHistPoint>,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val nics = vitals.nics.entries.toList()
     val totalRx = nics.sumOf { it.value.rx }
     val totalTx = nics.sumOf { it.value.tx }
@@ -497,17 +493,17 @@ private fun NetworkVitalsSection(
                 Text(
                     text = "↓ ${PcFormatters.formatRate(totalRx)}",
                     color = colors.text,
-                    style = TabularNumStyle.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+                    style = type.collapsedTitle.tabular().copy(fontWeight = FontWeight.Medium),
                 )
                 Text(
                     text = "↑ ${PcFormatters.formatRate(totalTx)}",
                     color = colors.textDim,
-                    style = TabularNumStyle.copy(fontSize = 14.5.sp, fontWeight = FontWeight.Medium),
+                    style = type.body.tabular().copy(fontWeight = FontWeight.Medium),
                 )
                 Text(
                     text = if (activeNics.isNotEmpty()) activeNics.joinToString(", ") { it.key } else "idle",
                     color = colors.textFaint,
-                    fontSize = 12.sp,
+                    style = type.caption,
                     textAlign = TextAlign.End,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -539,13 +535,16 @@ private fun NetworkVitalsSection(
                             Text(
                                 text = name,
                                 color = colors.text,
-                                style = MonoTextStyle.copy(fontSize = 12.5.sp),
+                                style = MonoTextStyle.copy(
+                                    fontSize = type.caption.fontSize,
+                                    lineHeight = type.caption.lineHeight,
+                                ),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f),
                             )
                             Icon(
-                                imageVector = Icons.Filled.ArrowDownward,
+                                imageVector = Icons.Rounded.ArrowDownward,
                                 contentDescription = null,
                                 tint = colors.textDim,
                                 modifier = Modifier.size(13.dp),
@@ -553,12 +552,12 @@ private fun NetworkVitalsSection(
                             Text(
                                 text = PcFormatters.formatRate(stats.rx),
                                 color = colors.textDim,
-                                style = TabularNumStyle.copy(fontSize = 12.sp),
+                                style = type.caption.tabular(),
                                 textAlign = TextAlign.End,
                                 modifier = Modifier.width(78.dp),
                             )
                             Icon(
-                                imageVector = Icons.Filled.ArrowUpward,
+                                imageVector = Icons.Rounded.ArrowUpward,
                                 contentDescription = null,
                                 tint = colors.textDim,
                                 modifier = Modifier.size(13.dp),
@@ -566,7 +565,7 @@ private fun NetworkVitalsSection(
                             Text(
                                 text = PcFormatters.formatRate(stats.tx),
                                 color = colors.textDim,
-                                style = TabularNumStyle.copy(fontSize = 12.sp),
+                                style = type.caption.tabular(),
                                 textAlign = TextAlign.End,
                                 modifier = Modifier.width(78.dp),
                             )
@@ -581,6 +580,8 @@ private fun NetworkVitalsSection(
 @Composable
 private fun DisksVitalsSection(disks: List<DiskUsage>) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val trackColor = vitalsProgressTrackColor()
     Column(
         modifier = Modifier.padding(top = PcDimens.Space3),
         verticalArrangement = Arrangement.spacedBy(PcDimens.Space2),
@@ -591,7 +592,7 @@ private fun DisksVitalsSection(disks: List<DiskUsage>) {
                 Text(
                     text = "No disks reported.",
                     color = colors.textFaint,
-                    fontSize = 13.sp,
+                    style = type.caption,
                 )
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -599,7 +600,7 @@ private fun DisksVitalsSection(disks: List<DiskUsage>) {
                         val shortName = if (disk.mount == "/") "/" else disk.mount.substringAfterLast('/')
                         val fillColor = when {
                             disk.pct >= 90.0 -> colors.bad
-                            disk.pct > 85.0 -> colors.warn
+                            disk.pct >= 80.0 -> colors.warn
                             else -> colors.text
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -611,7 +612,7 @@ private fun DisksVitalsSection(disks: List<DiskUsage>) {
                                 Text(
                                     text = if (shortName == disk.mount) disk.mount else "$shortName · ${disk.mount}",
                                     color = colors.text,
-                                    fontSize = 13.5.sp,
+                                    style = type.body,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f),
@@ -620,12 +621,12 @@ private fun DisksVitalsSection(disks: List<DiskUsage>) {
                                 Text(
                                     text = "${PcFormatters.formatBytes(disk.used)} / ${PcFormatters.formatBytes(disk.total)}",
                                     color = colors.textDim,
-                                    style = TabularNumStyle.copy(fontSize = 12.5.sp),
+                                    style = type.caption.tabular(),
                                 )
                             }
                             VitalsProgressBar(
                                 percent = disk.pct,
-                                trackColor = colors.surfaceRaised,
+                                trackColor = trackColor,
                                 fillColor = fillColor,
                                 height = 4.dp,
                             )
@@ -645,6 +646,7 @@ private fun ProcessesVitalsSection(
     onSelectSort: (ProcessSortKey) -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val type = LocalPcType.current
     val allProcs = state.vitals?.procs
     val chevronRotation by animateFloatAsState(
         targetValue = if (state.showProcesses) 180f else 0f,
@@ -670,9 +672,7 @@ private fun ProcessesVitalsSection(
         ) {
             Text(
                 text = "Top processes",
-                color = colors.textDim,
-                fontSize = 12.5.sp,
-                fontWeight = FontWeight.Medium,
+                style = type.sectionLabel,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
@@ -681,11 +681,11 @@ private fun ProcessesVitalsSection(
                 Text(
                     text = "${allProcs.size}",
                     color = colors.textFaint,
-                    style = TabularNumStyle.copy(fontSize = 12.sp),
+                    style = type.caption.tabular(),
                 )
             }
             Icon(
-                imageVector = Icons.Filled.KeyboardArrowDown,
+                imageVector = Icons.Rounded.KeyboardArrowDown,
                 contentDescription = if (state.showProcesses) "Collapse top processes" else "Expand top processes",
                 tint = colors.textDim,
                 modifier = Modifier
@@ -700,7 +700,7 @@ private fun ProcessesVitalsSection(
                     Text(
                         text = "Sampling processes…",
                         color = colors.textDim,
-                        fontSize = 13.5.sp,
+                        style = type.body,
                     )
                 }
             } else {
@@ -732,7 +732,7 @@ private fun ProcessesVitalsSection(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             Icon(
-                                imageVector = Icons.Filled.Search,
+                                imageVector = Icons.Rounded.Search,
                                 contentDescription = null,
                                 tint = colors.textFaint,
                                 modifier = Modifier.size(16.dp),
@@ -742,7 +742,7 @@ private fun ProcessesVitalsSection(
                                     Text(
                                         text = "Filter name, command or PID",
                                         color = colors.textFaint,
-                                        fontSize = 13.sp,
+                                        style = type.caption,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
@@ -751,7 +751,7 @@ private fun ProcessesVitalsSection(
                                     value = state.processQuery,
                                     onValueChange = onProcessQueryChange,
                                     singleLine = true,
-                                    textStyle = TabularNumStyle.copy(color = colors.text, fontSize = 13.5.sp),
+                                    textStyle = type.body.tabular().copy(color = colors.text),
                                     cursorBrush = SolidColor(colors.accent),
                                     modifier = Modifier.fillMaxWidth(),
                                 )
@@ -762,7 +762,7 @@ private fun ProcessesVitalsSection(
                                     modifier = Modifier.size(22.dp),
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Filled.Close,
+                                        imageVector = Icons.Rounded.Close,
                                         contentDescription = "Clear filter",
                                         tint = colors.textDim,
                                         modifier = Modifier.size(14.dp),
@@ -773,7 +773,7 @@ private fun ProcessesVitalsSection(
                         Text(
                             text = "$filteredCount/${allProcs.size}",
                             color = colors.textFaint,
-                            style = TabularNumStyle.copy(fontSize = 12.sp),
+                            style = type.caption.tabular(),
                         )
                     }
 
@@ -804,8 +804,7 @@ private fun ProcessesVitalsSection(
                                 Text(
                                     text = "${key.label}$arrow",
                                     color = if (selected) colors.accent else colors.textDim,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
+                                    style = type.caption.copy(fontWeight = FontWeight.Medium),
                                 )
                             }
                         }
@@ -817,7 +816,7 @@ private fun ProcessesVitalsSection(
                         Text(
                             text = "No matching processes.",
                             color = colors.textFaint,
-                            fontSize = 13.sp,
+                            style = type.caption,
                         )
                     } else {
                         shown.forEachIndexed { idx, proc ->
@@ -837,8 +836,7 @@ private fun ProcessesVitalsSection(
                                     Text(
                                         text = proc.name,
                                         color = colors.text,
-                                        fontSize = 13.5.sp,
-                                        fontWeight = FontWeight.SemiBold,
+                                        style = type.body.copy(fontWeight = FontWeight.SemiBold),
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f),
@@ -846,14 +844,14 @@ private fun ProcessesVitalsSection(
                                     Text(
                                         text = String.format(Locale.US, "%.1f%%", proc.cpu),
                                         color = if (proc.cpu > 50.0) colors.bad else colors.text,
-                                        style = TabularNumStyle.copy(fontSize = 13.sp, fontWeight = FontWeight.Medium),
+                                        style = type.caption.tabular().copy(fontWeight = FontWeight.Medium),
                                         textAlign = TextAlign.End,
                                         modifier = Modifier.width(56.dp),
                                     )
                                     Text(
                                         text = PcFormatters.formatBytes(proc.rss, digits = 0),
                                         color = colors.textDim,
-                                        style = TabularNumStyle.copy(fontSize = 12.sp),
+                                        style = type.caption.tabular(),
                                         textAlign = TextAlign.End,
                                         modifier = Modifier.width(64.dp),
                                     )
@@ -867,7 +865,7 @@ private fun ProcessesVitalsSection(
                                 Text(
                                     text = meta,
                                     color = colors.textFaint,
-                                    style = TabularNumStyle.copy(fontSize = 11.5.sp),
+                                    style = type.micro.tabular(),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
@@ -875,7 +873,10 @@ private fun ProcessesVitalsSection(
                                     Text(
                                         text = proc.cmd.take(120),
                                         color = colors.textFaint,
-                                        style = MonoTextStyle.copy(fontSize = 10.5.sp, lineHeight = 14.sp),
+                                        style = MonoTextStyle.copy(
+                                            fontSize = type.micro.fontSize,
+                                            lineHeight = type.micro.lineHeight,
+                                        ),
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
@@ -887,7 +888,7 @@ private fun ProcessesVitalsSection(
                             Text(
                                 text = "Showing ${shown.size} of $filteredCount",
                                 color = colors.textFaint,
-                                style = TabularNumStyle.copy(fontSize = 12.sp),
+                                style = type.caption.tabular(),
                             )
                         }
                     }

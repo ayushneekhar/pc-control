@@ -2312,11 +2312,11 @@ def _default_activity_paths():
 
 
 class UsageAlertWatcher:
-    """Watches local agent activity mtimes and runs ai-usage at most once per min_interval (5 min)
+    """Watches local agent activity mtimes and runs ai-usage at most once per min_interval (30 min)
     when activity is seen. When nothing is running there are zero network calls."""
 
     def __init__(self, notify, usage_mgr, settings_mgr, state_file=None, watch_paths=None,
-                 min_interval=300.0, poll_interval=15.0, clock=time.monotonic):
+                 min_interval=1800.0, poll_interval=15.0, clock=time.monotonic):
         self.notify = notify
         self.usage_mgr = usage_mgr
         self.settings_mgr = settings_mgr

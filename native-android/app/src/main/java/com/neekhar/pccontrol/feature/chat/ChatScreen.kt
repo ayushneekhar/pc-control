@@ -61,6 +61,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -177,13 +178,28 @@ fun ChatScreen(
         }
     }
 
+    val totalLazyItems = listItems.size + if (state.hasMore) 1 else 0
+
+    suspend fun scrollToAbsoluteBottom(animated: Boolean) {
+        val currentState = viewModel.uiState.value
+        val count = currentState.listItems.size + if (currentState.hasMore) 1 else 0
+        if (count <= 0) return
+        val targetIndex = count - 1
+        if (animated) {
+            listState.animateScrollToItem(index = targetIndex, scrollOffset = Int.MAX_VALUE)
+        } else {
+            listState.scrollToItem(index = targetIndex, scrollOffset = Int.MAX_VALUE)
+        }
+    }
+
     // Track whether list is near bottom for sticky auto-scroll and unread pill visibility
-    val isNearBottom by remember(listItems.size) {
+    val isNearBottom by remember(totalLazyItems) {
         derivedStateOf {
-            if (listItems.isEmpty()) return@derivedStateOf true
+            if (totalLazyItems <= 0) return@derivedStateOf true
             val layoutInfo = listState.layoutInfo
             val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
-            lastVisible.index >= listItems.lastIndex - 1
+            val lastIdx = (layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+            lastVisible.index >= lastIdx - 1
         }
     }
 
@@ -192,19 +208,19 @@ fun ChatScreen(
     }
 
     // Initial jump to bottom as soon as cached or loaded messages appear
-    LaunchedEffect(listItems.size) {
+    LaunchedEffect(listItems.size, state.hasMore) {
         if (listItems.isNotEmpty() && !hasInitialScrolled) {
             hasInitialScrolled = true
-            listState.scrollToItem(listItems.lastIndex)
+            scrollToAbsoluteBottom(animated = false)
         } else if (listItems.isNotEmpty() && isNearBottom) {
-            listState.animateScrollToItem(listItems.lastIndex)
+            scrollToAbsoluteBottom(animated = true)
         }
     }
 
     // Keep live shimmer/activity steps anchored at bottom when near bottom
     LaunchedEffect(state.activeProgress?.steps?.size) {
         if (listItems.isNotEmpty() && isNearBottom) {
-            listState.animateScrollToItem(listItems.lastIndex)
+            scrollToAbsoluteBottom(animated = true)
         }
     }
 
@@ -213,17 +229,17 @@ fun ChatScreen(
         viewModel.events.collect { ev ->
             when (ev) {
                 is ChatUiEvent.ScrollToBottom -> {
-                    val lastIdx = viewModel.uiState.value.listItems.lastIndex
-                    if (lastIdx >= 0) {
-                        if (ev.animated) listState.animateScrollToItem(lastIdx)
-                        else listState.scrollToItem(lastIdx)
-                    }
+                    // Yield one composition frame so newly appended optimistic messages & shimmer are laid out
+                    withFrameNanos { }
+                    scrollToAbsoluteBottom(animated = ev.animated)
                 }
 
                 is ChatUiEvent.ScrollToMessageIndex -> {
-                    val size = viewModel.uiState.value.listItems.size
+                    val cur = viewModel.uiState.value
+                    val size = cur.listItems.size
                     if (ev.index in 0 until size) {
-                        listState.animateScrollToItem(ev.index)
+                        val lazyIdx = ev.index + if (cur.hasMore) 1 else 0
+                        listState.animateScrollToItem(lazyIdx)
                     }
                 }
 
@@ -550,10 +566,7 @@ fun ChatScreen(
                         )
                         .clickable {
                             scope.launch {
-                                val lastIdx = listItems.lastIndex
-                                if (lastIdx >= 0) {
-                                    listState.animateScrollToItem(lastIdx)
-                                }
+                                scrollToAbsoluteBottom(animated = true)
                             }
                             viewModel.onNearBottomChanged(true)
                         }

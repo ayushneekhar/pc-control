@@ -3,6 +3,9 @@ package com.neekhar.pccontrol.feature.seerr
 import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.storage.LocalCache
+import com.neekhar.pccontrol.feature.watch.player.WatchSubtitleDownloadRequest
+import com.neekhar.pccontrol.feature.watch.player.WatchSubtitleDownloadResponse
+import com.neekhar.pccontrol.feature.watch.player.WatchSubtitleSearchResponse
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
@@ -83,6 +86,65 @@ class SeerrRepository(
         return api.getJson<WatchEpisodesResponse>(
             "/pc/api/watch/episodes?tmdbId=$tmdbId&season=$season",
             timeoutMs = SEERR_TIMEOUT_MS,
+        )
+    }
+
+    suspend fun setWatched(jellyfinItemId: String, played: Boolean): ApiResult<WatchWatchedResponse> {
+        return api.postJson<WatchWatchedRequestBody, WatchWatchedResponse>(
+            pathOrUrl = "/pc/api/watch/watched",
+            body = WatchWatchedRequestBody(
+                jellyfinItemId = jellyfinItemId.trim(),
+                played = played,
+            ),
+            timeoutMs = 12_000L,
+        )
+    }
+
+    suspend fun getSurpriseMovie(): ApiResult<WatchSurpriseResponse> {
+        return api.getJson<WatchSurpriseResponse>(
+            "/pc/api/watch/surprise",
+            timeoutMs = 15_000L,
+        )
+    }
+
+    suspend fun getWatchCollections(): ApiResult<WatchBoxSetsResponse> {
+        return api.getJson<WatchBoxSetsResponse>(
+            "/pc/api/watch/collections",
+            timeoutMs = 15_000L,
+        )
+    }
+
+    suspend fun getWatchCollectionDetail(boxSetId: String): ApiResult<WatchBoxSetDetailResponse> {
+        val encId = URLEncoder.encode(boxSetId.trim(), "UTF-8")
+        return api.getJson<WatchBoxSetDetailResponse>(
+            "/pc/api/watch/collections/$encId",
+            timeoutMs = 15_000L,
+        )
+    }
+
+    suspend fun searchRemoteSubtitles(
+        jellyfinItemId: String,
+        language: String = "eng",
+    ): ApiResult<WatchSubtitleSearchResponse> {
+        val encId = URLEncoder.encode(jellyfinItemId.trim(), "UTF-8")
+        val encLang = URLEncoder.encode(language.trim().ifBlank { "eng" }, "UTF-8")
+        return api.getJson<WatchSubtitleSearchResponse>(
+            "/pc/api/watch/subtitles/search?jellyfinItemId=$encId&language=$encLang",
+            timeoutMs = 20_000L,
+        )
+    }
+
+    suspend fun downloadRemoteSubtitle(
+        jellyfinItemId: String,
+        subtitleId: String,
+    ): ApiResult<WatchSubtitleDownloadResponse> {
+        return api.postJson<WatchSubtitleDownloadRequest, WatchSubtitleDownloadResponse>(
+            pathOrUrl = "/pc/api/watch/subtitles/download",
+            body = WatchSubtitleDownloadRequest(
+                jellyfinItemId = jellyfinItemId.trim(),
+                subtitleId = subtitleId.trim(),
+            ),
+            timeoutMs = 20_000L,
         )
     }
 

@@ -57,6 +57,9 @@ data class SeerrUiState(
     val selectedNetworkLabel: String? = null,
     val libraryFilter: WatchLibraryFilter = WatchLibraryFilter.ALL,
     val librarySort: WatchLibrarySort = WatchLibrarySort.RECENT,
+    val libraryCollections: List<WatchBoxSet> = emptyList(),
+    val boxSetSheet: WatchBoxSetSheetState = WatchBoxSetSheetState(),
+    val loadingSurprise: Boolean = false,
     val discoverPage: Int = 1,
     val discoverTotalPages: Int = 1,
     val loadingDiscover: Boolean = false,
@@ -187,12 +190,16 @@ class SeerrViewModel(
     private val _openTvRemoteEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val openTvRemoteEvents: SharedFlow<Unit> = _openTvRemoteEvents.asSharedFlow()
 
+    private val _openSurpriseEvents = MutableSharedFlow<WatchItem>(extraBufferCapacity = 1)
+    val openSurpriseEvents: SharedFlow<WatchItem> = _openSurpriseEvents.asSharedFlow()
+
     private val queryFlow = MutableStateFlow("")
     private var searchJob: Job? = null
     private var homeJob: Job? = null
     private var discoverJob: Job? = null
     private var requestsJob: Job? = null
     private var collectionJob: Job? = null
+    private var boxSetJob: Job? = null
     private var noticeClearJob: Job? = null
 
     init {
@@ -685,6 +692,77 @@ class SeerrViewModel(
         _uiState.update { it.copy(collectionSheet = SeerrCollectionSheetState()) }
     }
 
+    fun pickSurpriseMovie() {
+        if (_uiState.value.loadingSurprise) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(loadingSurprise = true, error = null) }
+            try {
+                when (val res = repository.getSurpriseMovie()) {
+                    is ApiResult.Success -> {
+                        val picked = res.data.item
+                        if (picked != null) {
+                            _openSurpriseEvents.tryEmit(picked)
+                        } else {
+                            _uiState.update { it.copy(error = "No movies found in your Jellyfin library") }
+                        }
+                    }
+                    is ApiResult.Error -> {
+                        _uiState.update { it.copy(error = res.message) }
+                    }
+                }
+            } finally {
+                _uiState.update { it.copy(loadingSurprise = false) }
+            }
+        }
+    }
+
+    fun openLibraryBoxSet(boxSet: WatchBoxSet) {
+        if (boxSet.id.isBlank()) return
+        boxSetJob?.cancel()
+        _uiState.update {
+            it.copy(
+                boxSetSheet = WatchBoxSetSheetState(
+                    visible = true,
+                    boxSet = boxSet,
+                    items = emptyList(),
+                    loading = true,
+                    error = null,
+                ),
+            )
+        }
+        boxSetJob = viewModelScope.launch {
+            when (val res = repository.getWatchCollectionDetail(boxSet.id)) {
+                is ApiResult.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            boxSetSheet = it.boxSetSheet.copy(
+                                boxSet = res.data.collection,
+                                items = res.data.items,
+                                loading = false,
+                                error = null,
+                            ),
+                        )
+                    }
+                }
+                is ApiResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            boxSetSheet = it.boxSetSheet.copy(
+                                loading = false,
+                                error = res.message,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun closeLibraryBoxSet() {
+        boxSetJob?.cancel()
+        _uiState.update { it.copy(boxSetSheet = WatchBoxSetSheetState()) }
+    }
+
     fun requestCollectionMovie(movie: SeerrItem) {
         if (_uiState.value.collectionSheet.busyMovieId != null ||
             _uiState.value.collectionSheet.batchSubmitting
@@ -870,6 +948,11 @@ class SeerrViewModel(
                     cur.copy(
                         discoverItems = mergedItems,
                         discoverGenres = if (resp.genres.isNotEmpty()) resp.genres else cur.discoverGenres,
+                        libraryCollections = if (st.activeTab == WatchTab.LIBRARY && page == 1 && st.libraryFilter != WatchLibraryFilter.TV) {
+                            resp.collections
+                        } else {
+                            cur.libraryCollections
+                        },
                         discoverPage = resp.page,
                         discoverTotalPages = resp.totalPages,
                         error = null,

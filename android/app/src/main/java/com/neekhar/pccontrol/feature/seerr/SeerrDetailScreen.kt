@@ -59,6 +59,7 @@ import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.Verified
 import androidx.compose.material.icons.rounded.Warning
@@ -86,6 +87,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -361,14 +363,21 @@ fun SeerrDetailScreen(
                             .padding(top = if (hasBackdrop) 34.dp else 4.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text(
-                            text = item?.title?.takeIf { it.isNotBlank() }
-                                ?: if (state.loading) "Loading…" else "Untitled",
-                            color = colors.text,
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            lineHeight = 27.sp,
-                            letterSpacing = (-0.3).sp,
+                        val displayTitle = item?.title?.takeIf { it.isNotBlank() }
+                            ?: if (state.loading) "Loading…" else "Untitled"
+                        WatchClearLogoTitle(
+                            title = displayTitle,
+                            logoUrl = viewModel.resolveImageUrl(item?.logoUrl),
+                            fallbackStyle = TextStyle(
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                lineHeight = 27.sp,
+                                letterSpacing = (-0.3).sp,
+                            ),
+                            fallbackColor = colors.text,
+                            maxHeight = 56.dp,
+                            maxWidth = 220.dp,
+                            fallbackMaxLines = 3,
                         )
                         val showOriginal = !item?.originalTitle.isNullOrBlank() &&
                             !item!!.originalTitle.equals(item.title, ignoreCase = true)
@@ -424,6 +433,41 @@ fun SeerrDetailScreen(
                         ratings = item.ratings,
                         modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
                     )
+                }
+            }
+
+            // Media Quality, Codec & HDR technical badges (for Jellyfin library items)
+            val mediaPills = SeerrHelpers.mediaBadgePills(item?.mediaBadges)
+            if (mediaPills.isNotEmpty()) {
+                item(key = "media_badges") {
+                    FlowRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 18.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        mediaPills.forEach { pill ->
+                            val isHighlight = pill == "4K" || pill == "Dolby Vision" || pill == "HDR10+" || pill == "HDR10"
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(colors.surface)
+                                    .border(0.5.dp, colors.hairline, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                            ) {
+                                Text(
+                                    text = pill,
+                                    color = if (isHighlight) colors.text else colors.textDim,
+                                    style = TabularNumStyle.copy(
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                    ),
+                                    maxLines = 1,
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -634,6 +678,81 @@ fun SeerrDetailScreen(
                                 enabled = !state.togglingWatchlist,
                                 modifier = Modifier.weight(1f),
                             )
+                        }
+
+                        // Jellyfin utility row: Mark Watched / Unwatched + Online Subtitle Search (Movies)
+                        val watchedJfId = item.jellyfinItemId?.takeIf { it.isNotBlank() }
+                            ?: item.resumeJellyfinItemId?.takeIf { it.isNotBlank() && !state.isTv }
+                        val canToggleWatched = watchedJfId != null
+                        val canSearchSubtitles = !state.isTv && watchedJfId != null
+                        if (canToggleWatched) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(40.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(if (item.played) colors.accentSoft else colors.surfaceRaised)
+                                        .clickable(enabled = !state.togglingWatched, onClick = viewModel::toggleWatched)
+                                        .padding(horizontal = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally),
+                                ) {
+                                    if (state.togglingWatched) {
+                                        CircularProgressIndicator(
+                                            color = colors.accent,
+                                            strokeWidth = 2.dp,
+                                            modifier = Modifier.size(15.dp),
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Rounded.CheckCircle,
+                                            contentDescription = null,
+                                            tint = if (item.played) colors.accent else colors.textDim,
+                                            modifier = Modifier.size(17.dp),
+                                        )
+                                    }
+                                    Text(
+                                        text = if (item.played) "Watched" else "Mark watched",
+                                        color = if (item.played) colors.accent else colors.text,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                if (canSearchSubtitles) {
+                                    Row(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(40.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(colors.surfaceRaised)
+                                            .clickable { viewModel.openSubtitleSearch(watchedJfId) }
+                                            .padding(horizontal = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Subtitles,
+                                            contentDescription = null,
+                                            tint = colors.textDim,
+                                            modifier = Modifier.size(17.dp),
+                                        )
+                                        Text(
+                                            text = "Subtitles",
+                                            color = colors.text,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
                         }
 
                         if (!state.playOnTvError.isNullOrBlank()) {
@@ -867,6 +986,7 @@ fun SeerrDetailScreen(
                                         episode = ep,
                                         offlineItem = epOffline,
                                         enqueuingDownload = ep.jellyfinItemId != null && state.enqueuingDownloadKey == ep.jellyfinItemId,
+                                        togglingWatched = ep.jellyfinItemId != null && state.busyEpisodeWatchedId == ep.jellyfinItemId,
                                         resolveImageUrl = viewModel::resolveImageUrl,
                                         playingOnTv = state.playingEpisodeId == ep.jellyfinItemId,
                                         playEnabled = state.playingEpisodeId == null && !state.playingOnTv,
@@ -879,6 +999,7 @@ fun SeerrDetailScreen(
                                                 ep.episodeNumber,
                                             )
                                         },
+                                        onToggleWatched = { viewModel.toggleEpisodeWatched(ep) },
                                         onDownloadAction = {
                                             when (epOffline?.status) {
                                                 OfflineDownloadStatus.COMPLETED -> pendingDeleteOffline = epOffline
@@ -1264,6 +1385,19 @@ fun SeerrDetailScreen(
             }
         },
         onDismiss = viewModel::closeCollection,
+    )
+
+    // Online Subtitles Search & Download Sheet
+    WatchSubtitleSearchSheet(
+        state = state.subtitleSheet,
+        onSelectLanguage = { lang ->
+            viewModel.openSubtitleSearch(
+                jellyfinItemId = state.subtitleSheet.jellyfinItemId,
+                language = lang,
+            )
+        },
+        onDownloadSubtitle = viewModel::downloadRemoteSubtitle,
+        onDismiss = viewModel::closeSubtitleSearch,
     )
 
     pendingDeleteOffline?.let { del ->
@@ -1877,10 +2011,12 @@ private fun WatchEpisodeRow(
     episode: WatchEpisode,
     offlineItem: OfflineWatchItem?,
     enqueuingDownload: Boolean,
+    togglingWatched: Boolean,
     resolveImageUrl: (String?) -> String?,
     playingOnTv: Boolean,
     playEnabled: Boolean,
     onPlayOnPhone: () -> Unit,
+    onToggleWatched: () -> Unit,
     onDownloadAction: () -> Unit,
     onPlayOnTv: (forcePicker: Boolean) -> Unit,
 ) {
@@ -2047,12 +2183,40 @@ private fun WatchEpisodeRow(
                 }
             }
 
-            // Per-episode actions: Offline Download (with progress ring / downloaded checkmark) + Play on TV
+            // Per-episode actions: Mark Watched + Offline Download + Play on TV
             if (canPlay) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    if (episode.available && !episode.jellyfinItemId.isNullOrBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (episode.played) colors.accentSoft else colors.surfaceRaised,
+                                )
+                                .clickable(enabled = !togglingWatched, onClick = onToggleWatched),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (togglingWatched) {
+                                CircularProgressIndicator(
+                                    color = colors.accent,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.CheckCircle,
+                                    contentDescription = if (episode.played) "Mark unwatched" else "Mark watched",
+                                    tint = if (episode.played) colors.ok else colors.textDim,
+                                    modifier = Modifier.size(17.dp),
+                                )
+                            }
+                        }
+                    }
+
                     // Download / Progress / Downloaded action button
                     Box(
                         modifier = Modifier

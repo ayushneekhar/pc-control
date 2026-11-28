@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -42,16 +43,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.FormatListBulleted
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Audiotrack
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.HighQuality
@@ -63,6 +68,7 @@ import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Replay10
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Subtitles
@@ -93,6 +99,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
@@ -106,6 +113,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import coil3.compose.AsyncImage
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -1003,6 +1011,16 @@ fun WatchPlayerScreen(
                                         bumpHud()
                                     },
                                 )
+                                if (state.chapters.isNotEmpty()) {
+                                    PlayerBottomAction(
+                                        icon = Icons.AutoMirrored.Rounded.FormatListBulleted,
+                                        label = "Chapters",
+                                        onClick = {
+                                            viewModel.openSheet(WatchPlayerSheet.CHAPTERS)
+                                            bumpHud()
+                                        },
+                                    )
+                                }
                                 PlayerBottomAction(
                                     icon = Icons.Rounded.Speed,
                                     label = "Speed (${WatchPlayerHelpers.formatSpeed(state.playbackSpeed)})",
@@ -1146,7 +1164,7 @@ fun WatchPlayerScreen(
             }
         }
 
-        // 10. Landscape-friendly Bottom/Overlay Sheets (Quality / Audio & Subtitles / Speed)
+        // 10. Landscape-friendly Bottom/Overlay Sheets (Quality / Audio & Subtitles / Chapters / Speed)
         if (!isInPictureInPictureMode && state.activeSheet != WatchPlayerSheet.NONE) {
             PlayerSelectionOverlay(
                 sheet = state.activeSheet,
@@ -1154,6 +1172,17 @@ fun WatchPlayerScreen(
                 onSelectQuality = viewModel::selectQuality,
                 onSelectAudio = viewModel::selectAudioTrack,
                 onSelectSubtitle = viewModel::selectSubtitleTrack,
+                onSelectChapter = { startMs ->
+                    val dur = state.durationMs.takeIf { it > 0L } ?: state.runtimeMs
+                    val target = if (dur > 0L) startMs.coerceIn(0L, dur) else startMs.coerceAtLeast(0L)
+                    exoPlayer.seekTo(target)
+                    viewModel.onUserSeek(target)
+                    viewModel.closeSheet()
+                    bumpHud()
+                },
+                onOpenSubtitleSearch = viewModel::openSubtitleSearch,
+                onCloseSubtitleSearch = viewModel::closeSubtitleSearch,
+                onDownloadRemoteSubtitle = viewModel::downloadRemoteSubtitle,
                 onSelectSpeed = viewModel::selectPlaybackSpeed,
                 onDismiss = viewModel::closeSheet,
             )
@@ -1408,16 +1437,21 @@ private fun WatchScrubberBar(
                     cornerRadius = radius,
                 )
             }
-            // Subtle chapter tick marks
-            if (durationMs > 0L && chapters.isNotEmpty()) {
+            // Subtle crisp vertical chapter tick markers (when 2+ chapters)
+            if (durationMs > 0L && chapters.size >= 2) {
+                val tickW = 1.5.dp.toPx()
+                val tickH = trackH + 4.dp.toPx()
+                val tickTop = cy - tickH / 2f
                 chapters.forEach { ch ->
                     val chMs = WatchPlayerHelpers.ticksToMs(ch.startPositionTicks)
                     val cf = (chMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
                     if (cf > 0.01f && cf < 0.99f) {
-                        drawCircle(
-                            color = Color.Black.copy(alpha = 0.7f),
-                            radius = 2.dp.toPx(),
-                            center = Offset(size.width * cf, cy),
+                        val x = size.width * cf
+                        drawRoundRect(
+                            color = if (cf <= playedFrac) Color.Black.copy(alpha = 0.72f) else Color.White.copy(alpha = 0.72f),
+                            topLeft = Offset(x - tickW / 2f, tickTop),
+                            size = Size(tickW, tickH),
+                            cornerRadius = CornerRadius(tickW / 2f, tickW / 2f),
                         )
                     }
                 }
@@ -1906,6 +1940,10 @@ private fun PlayerSelectionOverlay(
     onSelectQuality: (String) -> Unit,
     onSelectAudio: (Int) -> Unit,
     onSelectSubtitle: (String?) -> Unit,
+    onSelectChapter: (Long) -> Unit,
+    onOpenSubtitleSearch: (String) -> Unit,
+    onCloseSubtitleSearch: () -> Unit,
+    onDownloadRemoteSubtitle: (WatchRemoteSubtitle) -> Unit,
     onSelectSpeed: (Float) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1918,7 +1956,7 @@ private fun PlayerSelectionOverlay(
     ) {
         Column(
             modifier = Modifier
-                .widthIn(min = 320.dp, max = 560.dp)
+                .widthIn(min = 320.dp, max = 580.dp)
                 .fillMaxHeight(0.84f)
                 .clip(RoundedCornerShape(16.dp))
                 .background(DarkPcColors.surface)
@@ -1931,18 +1969,41 @@ private fun PlayerSelectionOverlay(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                val sheetTitle = when (sheet) {
-                    WatchPlayerSheet.QUALITY -> "Video quality"
-                    WatchPlayerSheet.TRACKS -> "Audio & Subtitles"
-                    WatchPlayerSheet.SPEED -> "Playback speed"
-                    WatchPlayerSheet.NONE -> ""
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (sheet == WatchPlayerSheet.TRACKS && state.subtitleSearchOpen) {
+                        Box(
+                            modifier = Modifier
+                                .size(30.dp)
+                                .clip(CircleShape)
+                                .background(DarkPcColors.surfaceRaised)
+                                .clickable(onClick = onCloseSubtitleSearch),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                contentDescription = "Back to tracks",
+                                tint = DarkPcColors.text,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                    val sheetTitle = when (sheet) {
+                        WatchPlayerSheet.QUALITY -> "Video quality"
+                        WatchPlayerSheet.TRACKS -> if (state.subtitleSearchOpen) "Online subtitles" else "Audio & Subtitles"
+                        WatchPlayerSheet.CHAPTERS -> "Chapters"
+                        WatchPlayerSheet.SPEED -> "Playback speed"
+                        WatchPlayerSheet.NONE -> ""
+                    }
+                    Text(
+                        text = sheetTitle,
+                        color = DarkPcColors.text,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                 }
-                Text(
-                    text = sheetTitle,
-                    color = DarkPcColors.text,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
                 Box(
                     modifier = Modifier
                         .size(32.dp)
@@ -1992,101 +2053,376 @@ private fun PlayerSelectionOverlay(
                     }
                 }
 
-                WatchPlayerSheet.TRACKS -> {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                WatchPlayerSheet.CHAPTERS -> {
+                    val activeIdx = WatchPlayerHelpers.activeChapterIndex(
+                        state.chapters,
+                        state.currentPositionMs,
+                    )
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        // Left column: Audio
+                        itemsIndexed(
+                            items = state.chapters,
+                            key = { idx, ch -> "ch_${idx}_${ch.startPositionTicks}" },
+                        ) { idx, chapter ->
+                            val isActive = idx == activeIdx
+                            val startMs = WatchPlayerHelpers.ticksToMs(chapter.startPositionTicks)
+                            val timeStr = WatchPlayerHelpers.formatTimeMs(startMs)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isActive) DarkPcColors.accentSoft else DarkPcColors.surfaceRaised)
+                                    .clickable { onSelectChapter(startMs) }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                if (!chapter.imageUrl.isNullOrBlank()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(92.dp)
+                                            .aspectRatio(16f / 9f)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(Color.Black),
+                                    ) {
+                                        AsyncImage(
+                                            model = chapter.imageUrl,
+                                            contentDescription = chapter.name,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize(),
+                                        )
+                                    }
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(width = 34.dp, height = 28.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(
+                                                if (isActive) DarkPcColors.accent.copy(alpha = 0.22f)
+                                                else DarkPcColors.surface,
+                                            ),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(
+                                            text = String.format(java.util.Locale.US, "%02d", idx + 1),
+                                            color = if (isActive) DarkPcColors.accent else DarkPcColors.textFaint,
+                                            style = TabularNumStyle.copy(
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium,
+                                            ),
+                                        )
+                                    }
+                                }
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    Text(
+                                        text = chapter.name.ifBlank { "Chapter ${idx + 1}" },
+                                        color = if (isActive) DarkPcColors.accent else DarkPcColors.text,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = timeStr,
+                                        color = if (isActive) DarkPcColors.accent.copy(alpha = 0.85f) else DarkPcColors.textDim,
+                                        style = TabularNumStyle.copy(fontSize = 12.sp),
+                                    )
+                                }
+                                if (isActive) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PlayArrow,
+                                        contentDescription = "Current chapter",
+                                        tint = DarkPcColors.accent,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                WatchPlayerSheet.TRACKS -> {
+                    if (state.subtitleSearchOpen) {
                         Column(
                             modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                                .fillMaxWidth()
+                                .weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
+                            LazyRow(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Audiotrack,
-                                    contentDescription = null,
-                                    tint = DarkPcColors.textDim,
-                                    modifier = Modifier.size(15.dp),
-                                )
-                                Text(
-                                    text = "Audio",
-                                    color = DarkPcColors.textDim,
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                )
-                            }
-                            if (state.audioTracks.isEmpty()) {
-                                Text(
-                                    text = "Default audio",
-                                    color = DarkPcColors.textFaint,
-                                    fontSize = 13.sp,
-                                    modifier = Modifier.padding(top = 6.dp),
-                                )
-                            } else {
-                                LazyColumn(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    items(state.audioTracks, key = { it.id }) { track ->
-                                        PlayerSheetOptionRow(
-                                            label = track.label,
-                                            selected = state.selectedAudioIndex == track.index,
-                                            onClick = { onSelectAudio(track.index) },
+                                items(WatchPlayerHelpers.SUBTITLE_LANGUAGES, key = { it.first }) { (code, label) ->
+                                    val selected = state.subtitleSearchLanguage.equals(code, ignoreCase = true)
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(999.dp))
+                                            .background(if (selected) DarkPcColors.accentSoft else DarkPcColors.surfaceRaised)
+                                            .clickable(enabled = !state.subtitleSearchLoading) {
+                                                onOpenSubtitleSearch(code)
+                                            }
+                                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            color = if (selected) DarkPcColors.accent else DarkPcColors.textDim,
+                                            fontSize = 12.5.sp,
+                                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                                         )
                                     }
                                 }
                             }
-                        }
 
-                        // Right column: Subtitles
-                        Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Subtitles,
-                                    contentDescription = null,
-                                    tint = DarkPcColors.textDim,
-                                    modifier = Modifier.size(15.dp),
-                                )
+                            if (!state.subtitleSearchError.isNullOrBlank()) {
                                 Text(
-                                    text = "Subtitles",
-                                    color = DarkPcColors.textDim,
+                                    text = state.subtitleSearchError,
+                                    color = DarkPcColors.bad,
                                     fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Medium,
                                 )
                             }
-                            LazyColumn(
-                                modifier = Modifier.weight(1f),
+
+                            when {
+                                state.subtitleSearchLoading -> {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .weight(1f),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        CircularProgressIndicator(
+                                            color = DarkPcColors.accent,
+                                            strokeWidth = 2.5.dp,
+                                            modifier = Modifier.size(26.dp),
+                                        )
+                                    }
+                                }
+                                state.subtitleSearchResults.isEmpty() -> {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .weight(1f),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(
+                                            text = "No online subtitles found for this language",
+                                            color = DarkPcColors.textDim,
+                                            fontSize = 13.sp,
+                                        )
+                                    }
+                                }
+                                else -> {
+                                    LazyColumn(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        items(state.subtitleSearchResults, key = { it.id }) { sub ->
+                                            val downloading = state.downloadingSubtitleId == sub.id
+                                            val meta = WatchPlayerHelpers.formatSubtitleMeta(sub)
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .background(DarkPcColors.surfaceRaised)
+                                                    .clickable(enabled = state.downloadingSubtitleId == null) {
+                                                        onDownloadRemoteSubtitle(sub)
+                                                    }
+                                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier.weight(1f),
+                                                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                                                ) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                    ) {
+                                                        if (sub.isHashMatch) {
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .clip(RoundedCornerShape(999.dp))
+                                                                    .background(DarkPcColors.accentSoft)
+                                                                    .padding(horizontal = 7.dp, vertical = 2.dp),
+                                                            ) {
+                                                                Text(
+                                                                    text = "Exact match",
+                                                                    color = DarkPcColors.accent,
+                                                                    fontSize = 10.5.sp,
+                                                                    fontWeight = FontWeight.Medium,
+                                                                )
+                                                            }
+                                                        }
+                                                        Text(
+                                                            text = sub.name.ifBlank { "Subtitle" },
+                                                            color = DarkPcColors.text,
+                                                            fontSize = 13.sp,
+                                                            fontWeight = FontWeight.Medium,
+                                                            maxLines = 2,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                        )
+                                                    }
+                                                    if (meta.isNotEmpty()) {
+                                                        Text(
+                                                            text = meta,
+                                                            color = DarkPcColors.textDim,
+                                                            style = TabularNumStyle.copy(fontSize = 11.5.sp),
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                        )
+                                                    }
+                                                }
+                                                if (downloading) {
+                                                    CircularProgressIndicator(
+                                                        color = DarkPcColors.accent,
+                                                        strokeWidth = 2.dp,
+                                                        modifier = Modifier.size(18.dp),
+                                                    )
+                                                } else {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Download,
+                                                        contentDescription = "Download subtitle",
+                                                        tint = if (sub.isHashMatch) DarkPcColors.accent else DarkPcColors.textDim,
+                                                        modifier = Modifier.size(18.dp),
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            // Left column: Audio
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight(),
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
-                                item(key = "sub_off") {
-                                    PlayerSheetOptionRow(
-                                        label = "Off",
-                                        selected = state.selectedSubtitleId == null,
-                                        onClick = { onSelectSubtitle(null) },
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Audiotrack,
+                                        contentDescription = null,
+                                        tint = DarkPcColors.textDim,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                    Text(
+                                        text = "Audio",
+                                        color = DarkPcColors.textDim,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Medium,
                                     )
                                 }
-                                items(state.subtitleTracks, key = { it.id }) { sub ->
-                                    PlayerSheetOptionRow(
-                                        label = sub.label,
-                                        selected = state.selectedSubtitleId == sub.id,
-                                        onClick = { onSelectSubtitle(sub.id) },
+                                if (state.audioTracks.isEmpty()) {
+                                    Text(
+                                        text = "Default audio",
+                                        color = DarkPcColors.textFaint,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier.padding(top = 6.dp),
                                     )
+                                } else {
+                                    LazyColumn(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        items(state.audioTracks, key = { it.id }) { track ->
+                                            PlayerSheetOptionRow(
+                                                label = track.label,
+                                                selected = state.selectedAudioIndex == track.index,
+                                                onClick = { onSelectAudio(track.index) },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Right column: Subtitles + Search online subtitles
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight(),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Subtitles,
+                                        contentDescription = null,
+                                        tint = DarkPcColors.textDim,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                    Text(
+                                        text = "Subtitles",
+                                        color = DarkPcColors.textDim,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                }
+                                LazyColumn(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    item(key = "sub_off") {
+                                        PlayerSheetOptionRow(
+                                            label = "Off",
+                                            selected = state.selectedSubtitleId == null,
+                                            onClick = { onSelectSubtitle(null) },
+                                        )
+                                    }
+                                    items(state.subtitleTracks, key = { it.id }) { sub ->
+                                        PlayerSheetOptionRow(
+                                            label = sub.label,
+                                            selected = state.selectedSubtitleId == sub.id,
+                                            onClick = { onSelectSubtitle(sub.id) },
+                                        )
+                                    }
+                                    if (!state.isOffline && state.jellyfinItemId.isNotBlank()) {
+                                        item(key = "sub_search_online") {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .background(DarkPcColors.surfaceRaised)
+                                                    .border(0.5.dp, DarkPcColors.hairline, RoundedCornerShape(10.dp))
+                                                    .clickable { onOpenSubtitleSearch(state.subtitleSearchLanguage) }
+                                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Search,
+                                                    contentDescription = null,
+                                                    tint = DarkPcColors.accent,
+                                                    modifier = Modifier.size(16.dp),
+                                                )
+                                                Text(
+                                                    text = "Search online subtitles",
+                                                    color = DarkPcColors.text,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

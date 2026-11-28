@@ -12,6 +12,7 @@ import concurrent.futures
 import json
 import mimetypes
 import os
+import random
 import re
 import secrets
 import tempfile
@@ -46,7 +47,7 @@ TMDB_ORIG_RE = re.compile(r"^https?://image\.tmdb\.org/t/p/original(/.*)$")
 
 PLAYER_DEVICE_ID = "pc-control-watch"
 PLAYER_CLIENT_NAME = "PC Control"
-PLAYER_CLIENT_VERSION = "2.4.0"
+PLAYER_CLIENT_VERSION = "2.5.0"
 MAX_HERO_ITEMS = 6
 USERDATA_PROGRESS_THROTTLE_SEC = 2.0
 
@@ -218,15 +219,195 @@ def _tmdb_img(path, size="w300"):
     return f"{TMDB_IMG_BASE}/{size}{path}"
 
 
-def _jf_img_url(item_id, image_type="Primary", series_id=None, max_width=None):
+def _jf_img_url(item_id, image_type="Primary", series_id=None, max_width=None, image_index=None):
     if not isinstance(item_id, str) or not JELLYFIN_ITEM_ID_RE.match(item_id):
         return None
     params = {"type": image_type}
     if isinstance(series_id, str) and JELLYFIN_ITEM_ID_RE.match(series_id) and series_id != item_id:
         params["seriesId"] = series_id
+    if isinstance(image_index, int) and not isinstance(image_index, bool) and image_index >= 0:
+        params["imageIndex"] = str(image_index)
     if isinstance(max_width, int) and max_width > 0:
         params["maxWidth"] = str(max_width)
     return f"/pc/api/jellyfin/image/{item_id}?{urllib.parse.urlencode(params)}"
+
+
+def _logo_url_from_item(item, jf_id):
+    if not isinstance(item, dict) or not jf_id:
+        return None
+    img_tags = item.get("ImageTags")
+    if isinstance(img_tags, dict) and img_tags.get("Logo"):
+        return _jf_img_url(jf_id, "Logo", max_width=600)
+    return None
+
+
+def _format_media_size(size_bytes):
+    sz = _safe_int(size_bytes)
+    if not sz or sz <= 0:
+        return None
+    gb = 1024.0 ** 3
+    mb = 1024.0 ** 2
+    if sz >= gb:
+        return f"{sz / gb:.1f} GB"
+    if sz >= mb:
+        return f"{int(round(sz / mb))} MB"
+    return f"{max(1, sz // 1024)} KB"
+
+
+def _normalize_resolution(width, height):
+    w = _safe_int(width) or 0
+    h = _safe_int(height) or 0
+    if w >= 3800 or h >= 2100:
+        return "4K"
+    if w >= 2500 or h >= 1400:
+        return "1440p"
+    if w >= 1800 or h >= 1000:
+        return "1080p"
+    if w >= 1200 or h >= 700:
+        return "720p"
+    if w >= 800 or h >= 480:
+        return "480p"
+    if h > 0:
+        return f"{h}p"
+    return None
+
+
+def _normalize_video_codec(codec):
+    c = str(codec or "").strip().lower()
+    if not c:
+        return None
+    return {
+        "hevc": "HEVC",
+        "h265": "HEVC",
+        "h264": "H.264",
+        "avc": "H.264",
+        "av1": "AV1",
+        "vp9": "VP9",
+        "vp8": "VP8",
+        "mpeg4": "MPEG-4",
+        "mpeg2video": "MPEG-2",
+        "vc1": "VC-1",
+    }.get(c, c.upper())
+
+
+def _normalize_hdr(stream):
+    if not isinstance(stream, dict):
+        return None
+    vrange = str(stream.get("VideoRange") or "").strip().lower()
+    vtype = str(stream.get("VideoRangeType") or "").strip().lower()
+    dovi = str(stream.get("VideoDoViTitle") or "").strip().lower()
+    disp = str(stream.get("DisplayTitle") or "").strip().lower()
+    combined = " ".join(p for p in (vtype, dovi, disp) if p)
+    if "dovi" in combined or "dolby vision" in combined:
+        return "Dolby Vision"
+    if "hdr10+" in combined or "hdr10plus" in combined:
+        return "HDR10+"
+    if "hdr10" in combined:
+        return "HDR10"
+    if "hlg" in combined:
+        return "HLG"
+    if vrange == "hdr":
+        return "HDR"
+    return None
+
+
+def _normalize_audio_badge(stream):
+    if not isinstance(stream, dict):
+        return None
+    raw_codec = str(stream.get("Codec") or "").strip().lower()
+    profile = str(stream.get("Profile") or "").strip().lower()
+    disp = str(stream.get("DisplayTitle") or "").strip().lower()
+    if not raw_codec:
+        return None
+    if raw_codec == "truehd":
+        codec_lbl = "TrueHD"
+    elif raw_codec == "dtshd" or (raw_codec in ("dts", "dca") and ("hd" in profile or "dts-hd" in disp)):
+        codec_lbl = "DTS-HD"
+    elif raw_codec in ("dts", "dca"):
+        codec_lbl = "DTS"
+    elif raw_codec in ("eac3", "ec3"):
+        codec_lbl = "EAC3"
+    elif raw_codec == "ac3":
+        codec_lbl = "AC3"
+    elif raw_codec == "aac":
+        codec_lbl = "AAC"
+    elif raw_codec == "opus":
+        codec_lbl = "Opus"
+    elif raw_codec == "flac":
+        codec_lbl = "FLAC"
+    elif raw_codec == "alac":
+        codec_lbl = "ALAC"
+    elif raw_codec == "mp3":
+        codec_lbl = "MP3"
+    elif raw_codec == "vorbis":
+        codec_lbl = "Vorbis"
+    elif raw_codec.startswith("pcm"):
+        codec_lbl = "PCM"
+    else:
+        codec_lbl = raw_codec.upper()
+
+    layout = str(stream.get("ChannelLayout") or "").strip().lower()
+    channels = _safe_int(stream.get("Channels"))
+    ch_lbl = None
+    if layout:
+        m = re.match(r"^(\d+\.\d+)", layout)
+        if m:
+            ch_lbl = m.group(1)
+        elif layout == "stereo":
+            ch_lbl = "2.0"
+        elif layout == "mono":
+            ch_lbl = "1.0"
+    if not ch_lbl and channels:
+        ch_lbl = {8: "7.1", 6: "5.1", 2: "2.0", 1: "1.0"}.get(channels)
+
+    if ch_lbl and codec_lbl != "Opus":
+        return f"{codec_lbl} {ch_lbl}"
+    if ch_lbl and codec_lbl == "Opus" and ch_lbl not in ("2.0", "1.0"):
+        return f"{codec_lbl} {ch_lbl}"
+    return codec_lbl
+
+
+def extract_media_badges(media_source, include_size=True):
+    """Build a concise mediaBadges summary dict from a Jellyfin MediaSource."""
+    if not isinstance(media_source, dict):
+        return None
+    streams = media_source.get("MediaStreams")
+    if not isinstance(streams, list):
+        streams = []
+
+    video_stream = None
+    audio_stream = None
+    for st in streams:
+        if not isinstance(st, dict):
+            continue
+        stype = str(st.get("Type") or "")
+        if stype == "Video" and video_stream is None:
+            video_stream = st
+        elif stype == "Audio":
+            if audio_stream is None or (bool(st.get("IsDefault")) and not bool(audio_stream.get("IsDefault"))):
+                audio_stream = st
+
+    resolution = _normalize_resolution(
+        video_stream.get("Width") if video_stream else None,
+        video_stream.get("Height") if video_stream else None,
+    )
+    video_codec = _normalize_video_codec(video_stream.get("Codec") if video_stream else None)
+    hdr = _normalize_hdr(video_stream)
+    audio_codec = _normalize_audio_badge(audio_stream)
+    raw_size = _safe_int(media_source.get("Size")) if include_size else None
+    size_bytes = raw_size if (raw_size and raw_size > 0) else None
+    size_label = _format_media_size(size_bytes) if size_bytes else None
+
+    if not any((resolution, video_codec, hdr, audio_codec, size_bytes)):
+        return None
+    return {
+        "resolution": resolution,
+        "videoCodec": video_codec,
+        "hdr": hdr,
+        "audioCodec": audio_codec,
+        "sizeBytes": size_bytes,
+        "sizeLabel": size_label,
+    }
 
 
 def _parse_provider_tmdb(provider_ids):
@@ -586,7 +767,7 @@ class WatchService:
         return self._seerr_client_fn()._req("GET", path, timeout=timeout)
 
     def _library_index(self, force_refresh=False):
-        """Returns dict: by_tmdb {(mediaType, tmdbId): jfId}, series_tmdb {jfSeriesId: tmdbId}, total int."""
+        """Returns dict: by_tmdb {(mediaType, tmdbId): jfId}, series_tmdb {jfSeriesId: tmdbId}, has_logo set, total int."""
         now = time.time()
         if not force_refresh:
             with self._lock:
@@ -598,13 +779,14 @@ class WatchService:
         qs = urllib.parse.urlencode({
             "IncludeItemTypes": "Movie,Series",
             "Recursive": "true",
-            "Fields": "ProviderIds",
+            "Fields": "ProviderIds,ImageTags",
             "Limit": "1000",
         })
         data = self._jf_get(f"/Users/{uid}/Items?{qs}", timeout=8)
         items = data.get("Items") if isinstance(data, dict) else []
         by_tmdb = {}
         series_tmdb = {}
+        has_logo = set()
         for it in items if isinstance(items, list) else []:
             if not isinstance(it, dict):
                 continue
@@ -615,6 +797,9 @@ class WatchService:
             mtype = "tv" if itype == "Series" else "movie" if itype == "Movie" else None
             if not mtype:
                 continue
+            img_tags = it.get("ImageTags")
+            if isinstance(img_tags, dict) and img_tags.get("Logo"):
+                has_logo.add(jf_id)
             tid = _parse_provider_tmdb(it.get("ProviderIds"))
             if tid:
                 by_tmdb[(mtype, tid)] = jf_id
@@ -624,6 +809,7 @@ class WatchService:
         index = {
             "by_tmdb": by_tmdb,
             "series_tmdb": series_tmdb,
+            "has_logo": has_logo,
             "total": int(data.get("TotalRecordCount") or len(items or [])),
         }
         with self._lock:
@@ -664,10 +850,13 @@ class WatchService:
         title = x.get("title") or x.get("name") or x.get("originalTitle") or x.get("originalName") or "Untitled"
         status = _seerr_media_status(x.get("mediaInfo"))
         jf_id = None
+        logo_url = None
         if lib_index:
             jf_id = lib_index.get("by_tmdb", {}).get((mtype, tid))
             if jf_id and status in ("none", "deleted", "requested", "partial"):
                 status = "available"
+            if jf_id and jf_id in (lib_index.get("has_logo") or ()):
+                logo_url = _jf_img_url(jf_id, "Logo", max_width=600)
 
         key = _watchlist_key(mtype, tid)
         return {
@@ -678,6 +867,7 @@ class WatchService:
             "overview": _clip(x.get("overview") or "", 280),
             "poster": _tmdb_img(x.get("posterPath"), size="w500" if hero_quality else "w300"),
             "backdrop": _tmdb_img(x.get("backdropPath"), size="w1280" if hero_quality else "w780"),
+            "logoUrl": logo_url,
             "voteAverage": _vote_avg(x.get("voteAverage")),
             "status": status,
             "jellyfinItemId": jf_id,
@@ -705,6 +895,7 @@ class WatchService:
         poster_w = 500 if hero_quality else 400
         poster_url = _jf_img_url(jf_id, "Primary", max_width=poster_w)
         backdrop_url = _jf_img_url(jf_id, "Backdrop", max_width=backdrop_w) if has_backdrop else None
+        logo_url = _logo_url_from_item(it, jf_id)
         genres = [str(g) for g in (it.get("Genres") or []) if isinstance(g, str) and g.strip()][:5]
 
         key = _watchlist_key(mtype, tid) if tid > 0 else ""
@@ -720,9 +911,11 @@ class WatchService:
             "overview": _clip(it.get("Overview") or "", 280),
             "poster": poster_url,
             "backdrop": backdrop_url,
+            "logoUrl": logo_url,
             "voteAverage": _vote_avg(it.get("CommunityRating")),
             "status": "available",
             "jellyfinItemId": jf_id,
+            "played": played,
             "inWatchlist": bool(key and watchlist_ids is not None and key in watchlist_ids),
             "genres": genres,
             "positionTicks": pos_ticks,
@@ -880,7 +1073,7 @@ class WatchService:
     def _fetch_recently_added(self, uid, watchlist_ids):
         qs = urllib.parse.urlencode({
             "Limit": "18",
-            "Fields": "ProviderIds,Overview,Genres,CommunityRating,ProductionYear,RunTimeTicks,UserData",
+            "Fields": "ProviderIds,Overview,Genres,CommunityRating,ProductionYear,RunTimeTicks,UserData,ImageTags",
             "IncludeItemTypes": "Movie,Series",
         })
         data = self._jf_get(f"/Users/{uid}/Items/Latest?{qs}", timeout=6)
@@ -1234,7 +1427,7 @@ class WatchService:
         return items[0] if items else None
 
     def get_resume_state(self, media_type, tmdb_id):
-        """Best-effort live Jellyfin resume position lookup for detail screens."""
+        """Best-effort live Jellyfin enrichment for detail screens (resume, ClearLogo, mediaBadges, watched state)."""
         mt = "tv" if str(media_type or "").strip().lower() == "tv" else "movie"
         tid = _safe_int(tmdb_id)
         if not tid or tid <= 0:
@@ -1247,14 +1440,23 @@ class WatchService:
                 return None
 
             if mt == "movie":
-                it = self._jf_get(f"/Users/{uid}/Items/{jf_id}?Fields=UserData,RunTimeTicks", timeout=4)
+                it = self._jf_get(
+                    f"/Users/{uid}/Items/{jf_id}?Fields=UserData,RunTimeTicks,ImageTags,MediaSources,MediaStreams",
+                    timeout=4,
+                )
                 if not isinstance(it, dict):
                     return None
                 ud = it.get("UserData") if isinstance(it.get("UserData"), dict) else {}
                 played = bool(ud.get("Played"))
                 pos_ticks = 0 if played else max(0, _safe_int(ud.get("PlaybackPositionTicks")) or 0)
                 run_ticks = max(0, _safe_int(it.get("RunTimeTicks")) or 0)
+                ms_list = it.get("MediaSources") if isinstance(it.get("MediaSources"), list) else []
+                ms = ms_list[0] if ms_list and isinstance(ms_list[0], dict) else None
                 return {
+                    "jellyfinItemId": jf_id,
+                    "played": played,
+                    "logoUrl": _logo_url_from_item(it, jf_id),
+                    "mediaBadges": extract_media_badges(ms, include_size=True),
                     "resumePositionTicks": pos_ticks,
                     "resumeRuntimeTicks": run_ticks,
                     "resumeJellyfinItemId": jf_id,
@@ -1263,51 +1465,93 @@ class WatchService:
                     "resumeEpisodeNumber": None,
                 }
 
-            # TV show: check in-progress Resume episode for this series first
-            qs_res = urllib.parse.urlencode({
-                "ParentId": jf_id,
-                "IncludeItemTypes": "Episode",
-                "Recursive": "true",
-                "Limit": "1",
-                "Fields": "UserData,RunTimeTicks",
-            })
-            rdata = self._jf_get(f"/Users/{uid}/Items/Resume?{qs_res}", timeout=4)
-            ritems = rdata.get("Items") if isinstance(rdata, dict) else []
-            ep = ritems[0] if isinstance(ritems, list) and ritems and isinstance(ritems[0], dict) else None
-            if ep is None:
-                # Fall back to NextUp (may also carry partial progress or next episode info)
-                qs_nu = urllib.parse.urlencode({
-                    "UserId": uid,
-                    "SeriesId": jf_id,
+            # TV show: fetch series metadata (ClearLogo + watched) alongside Resume/NextUp episode
+            def _fetch_series_meta():
+                try:
+                    return self._jf_get(f"/Users/{uid}/Items/{jf_id}?Fields=UserData,ImageTags", timeout=4)
+                except Exception:
+                    return None
+
+            def _fetch_tv_episode():
+                qs_res = urllib.parse.urlencode({
+                    "ParentId": jf_id,
+                    "IncludeItemTypes": "Episode",
+                    "Recursive": "true",
                     "Limit": "1",
-                    "Fields": "UserData,RunTimeTicks",
+                    "Fields": "UserData,RunTimeTicks,MediaSources,MediaStreams",
                 })
-                ndata = self._jf_get(f"/Shows/NextUp?{qs_nu}", timeout=4)
-                nitems = ndata.get("Items") if isinstance(ndata, dict) else []
-                ep = nitems[0] if isinstance(nitems, list) and nitems and isinstance(nitems[0], dict) else None
-            if ep is None:
-                return None
-            ep_id = normalize_jf_id(ep.get("Id"))
-            ud = ep.get("UserData") if isinstance(ep.get("UserData"), dict) else {}
-            played = bool(ud.get("Played"))
-            pos_ticks = 0 if played else max(0, _safe_int(ud.get("PlaybackPositionTicks")) or 0)
-            run_ticks = max(0, _safe_int(ep.get("RunTimeTicks")) or 0)
-            sn = _safe_int(ep.get("ParentIndexNumber"))
-            en = _safe_int(ep.get("IndexNumber"))
-            if sn is not None and en is not None:
-                ep_label = f"S{sn} · E{en}"
-            elif en is not None:
-                ep_label = f"E{en}"
-            else:
-                ep_label = None
-            return {
-                "resumePositionTicks": pos_ticks,
-                "resumeRuntimeTicks": run_ticks,
-                "resumeJellyfinItemId": ep_id,
-                "resumeEpisodeLabel": ep_label,
-                "resumeSeasonNumber": sn,
-                "resumeEpisodeNumber": en,
+                rdata = self._jf_get(f"/Users/{uid}/Items/Resume?{qs_res}", timeout=4)
+                ritems = rdata.get("Items") if isinstance(rdata, dict) else []
+                ep = ritems[0] if isinstance(ritems, list) and ritems and isinstance(ritems[0], dict) else None
+                if ep is None:
+                    qs_nu = urllib.parse.urlencode({
+                        "UserId": uid,
+                        "SeriesId": jf_id,
+                        "Limit": "1",
+                        "Fields": "UserData,RunTimeTicks,MediaSources,MediaStreams",
+                    })
+                    ndata = self._jf_get(f"/Shows/NextUp?{qs_nu}", timeout=4)
+                    nitems = ndata.get("Items") if isinstance(ndata, dict) else []
+                    ep = nitems[0] if isinstance(nitems, list) and nitems and isinstance(nitems[0], dict) else None
+                if ep is None:
+                    qs_first = urllib.parse.urlencode({
+                        "UserId": uid,
+                        "Limit": "1",
+                        "Fields": "UserData,RunTimeTicks,MediaSources,MediaStreams",
+                    })
+                    fdata = self._jf_get(f"/Shows/{jf_id}/Episodes?{qs_first}", timeout=4)
+                    fitems = fdata.get("Items") if isinstance(fdata, dict) else []
+                    ep = fitems[0] if isinstance(fitems, list) and fitems and isinstance(fitems[0], dict) else None
+                    if ep is not None:
+                        return ep, False
+                return ep, True
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                f_series = pool.submit(_fetch_series_meta)
+                f_ep = pool.submit(_fetch_tv_episode)
+                series_meta = f_series.result()
+                try:
+                    ep, is_resume_or_nextup = f_ep.result()
+                except Exception:
+                    ep, is_resume_or_nextup = None, False
+
+            series_ud = series_meta.get("UserData") if isinstance(series_meta, dict) and isinstance(series_meta.get("UserData"), dict) else {}
+            logo_url = _logo_url_from_item(series_meta, jf_id) if isinstance(series_meta, dict) else (
+                _jf_img_url(jf_id, "Logo", max_width=600) if jf_id in (lib_index.get("has_logo") or ()) else None
+            )
+            ms_list = ep.get("MediaSources") if isinstance(ep, dict) and isinstance(ep.get("MediaSources"), list) else []
+            ms = ms_list[0] if ms_list and isinstance(ms_list[0], dict) else None
+            media_badges = extract_media_badges(ms, include_size=False)
+
+            out = {
+                "jellyfinItemId": jf_id,
+                "played": bool(series_ud.get("Played")),
+                "logoUrl": logo_url,
+                "mediaBadges": media_badges,
             }
+            if ep is not None and is_resume_or_nextup:
+                ep_id = normalize_jf_id(ep.get("Id"))
+                ud = ep.get("UserData") if isinstance(ep.get("UserData"), dict) else {}
+                played = bool(ud.get("Played"))
+                pos_ticks = 0 if played else max(0, _safe_int(ud.get("PlaybackPositionTicks")) or 0)
+                run_ticks = max(0, _safe_int(ep.get("RunTimeTicks")) or 0)
+                sn = _safe_int(ep.get("ParentIndexNumber"))
+                en = _safe_int(ep.get("IndexNumber"))
+                if sn is not None and en is not None:
+                    ep_label = f"S{sn} · E{en}"
+                elif en is not None:
+                    ep_label = f"E{en}"
+                else:
+                    ep_label = None
+                out.update({
+                    "resumePositionTicks": pos_ticks,
+                    "resumeRuntimeTicks": run_ticks,
+                    "resumeJellyfinItemId": ep_id,
+                    "resumeEpisodeLabel": ep_label,
+                    "resumeSeasonNumber": sn,
+                    "resumeEpisodeNumber": en,
+                })
+            return out
         except Exception:
             return None
 
@@ -1503,6 +1747,42 @@ class WatchService:
             "genres": genres,
         }
 
+    def _normalize_box_set(self, it):
+        if not isinstance(it, dict):
+            return None
+        jf_id = normalize_jf_id(it.get("Id"))
+        if not jf_id:
+            return None
+        img_tags = it.get("ImageTags") if isinstance(it.get("ImageTags"), dict) else {}
+        has_bd = bool(it.get("BackdropImageTags"))
+        return {
+            "id": jf_id,
+            "name": _clip(it.get("Name") or "Collection", 160),
+            "overview": _clip(it.get("Overview") or "", 400),
+            "itemCount": max(0, _safe_int(it.get("ChildCount")) or 0),
+            "poster": _jf_img_url(jf_id, "Primary", max_width=400) if img_tags.get("Primary") else None,
+            "backdrop": _jf_img_url(jf_id, "Backdrop", max_width=780) if has_bd else None,
+            "logoUrl": _jf_img_url(jf_id, "Logo", max_width=600) if img_tags.get("Logo") else None,
+        }
+
+    def _fetch_box_sets(self, uid):
+        qs = urllib.parse.urlencode({
+            "Recursive": "true",
+            "IncludeItemTypes": "BoxSet",
+            "Fields": "Overview,ChildCount,ImageTags,BackdropImageTags",
+            "SortBy": "SortName",
+            "SortOrder": "Ascending",
+            "Limit": "100",
+        })
+        data = self._jf_get(f"/Users/{uid}/Items?{qs}", timeout=8)
+        raw_items = data.get("Items") if isinstance(data, dict) else []
+        out = []
+        for raw in raw_items if isinstance(raw_items, list) else []:
+            norm = self._normalize_box_set(raw)
+            if norm:
+                out.append(norm)
+        return out
+
     def _discover_library(self, mtype=None, page=1, sort="recent", watchlist_ids=None):
         page_size = 30
         start_index = (page - 1) * page_size
@@ -1514,18 +1794,29 @@ class WatchService:
         else:
             sort_by, sort_order = "DateCreated,SortName", "Descending"
 
+        collections = []
         try:
             uid = self._jf_user_id(timeout=6)
             qs = urllib.parse.urlencode({
                 "IncludeItemTypes": include_types,
                 "Recursive": "true",
-                "Fields": "ProviderIds,Overview,Genres,CommunityRating,ProductionYear,DateCreated",
+                "Fields": "ProviderIds,Overview,Genres,CommunityRating,ProductionYear,DateCreated,ImageTags,UserData,RunTimeTicks",
                 "SortBy": sort_by,
                 "SortOrder": sort_order,
                 "StartIndex": str(start_index),
                 "Limit": str(page_size),
             })
-            data = self._jf_get(f"/Users/{uid}/Items?{qs}", timeout=8)
+            if page == 1 and mtype != "tv":
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    f_items = pool.submit(self._jf_get, f"/Users/{uid}/Items?{qs}", 8)
+                    f_cols = pool.submit(self._fetch_box_sets, uid)
+                    data = f_items.result()
+                    try:
+                        collections = f_cols.result()
+                    except Exception:
+                        collections = []
+            else:
+                data = self._jf_get(f"/Users/{uid}/Items?{qs}", timeout=8)
         except (OSError, ValueError) as e:
             return 502, {"error": _clip(f"Jellyfin library failed: {e}", 240)}
 
@@ -1544,6 +1835,7 @@ class WatchService:
             "totalResults": total,
             "items": items,
             "genres": [],
+            "collections": collections,
         }
 
     def _discover_watchlist(self, lib_index, watchlist_ids):
@@ -1799,6 +2091,240 @@ class WatchService:
         mt = mt_raw if mt_raw in ("movie", "tv") else None
         items = self._fetch_active_downloads(filter_tmdb=tid, filter_media_type=mt)
         return 200, {"items": items, "ts": int(time.time())}
+
+    # ------------------------------------------------------------------ Power Pack (v2.5.0)
+
+    def set_watched(self, body):
+        """POST /pc/api/watch/watched"""
+        if not isinstance(body, dict):
+            return 400, {"error": "JSON object required"}
+        item_id = normalize_jf_id(body.get("jellyfinItemId"))
+        if not item_id:
+            return 400, {"error": "Valid jellyfinItemId is required"}
+        played = body.get("played")
+        if not isinstance(played, bool):
+            return 400, {"error": "played must be true or false"}
+
+        try:
+            uid = self._jf_user_id(timeout=5)
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin user lookup failed: {e}", 240)}
+
+        method = "POST" if played else "DELETE"
+        try:
+            self._jf_request(
+                method,
+                f"/Users/{uid}/PlayedItems/{item_id}",
+                body=None,
+                timeout=8,
+                include_client_meta=True,
+            )
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return 404, {"error": "Jellyfin item not found"}
+            return 502, {"error": f"Jellyfin watched update failed: HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin watched update failed: {e}", 240)}
+
+        self.invalidate_caches()
+        return 200, {"ok": True, "jellyfinItemId": item_id, "played": played}
+
+    def surprise_me(self):
+        """GET /pc/api/watch/surprise"""
+        watchlist_ids = self.watchlist.id_set()
+        try:
+            uid = self._jf_user_id(timeout=5)
+            qs = urllib.parse.urlencode({
+                "IncludeItemTypes": "Movie",
+                "Recursive": "true",
+                "Fields": "ProviderIds,Overview,Genres,CommunityRating,ProductionYear,RunTimeTicks,UserData,ImageTags",
+                "Limit": "500",
+            })
+            data = self._jf_get(f"/Users/{uid}/Items?{qs}", timeout=8)
+        except urllib.error.HTTPError as e:
+            return 502, {"error": f"Jellyfin surprise lookup failed: HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin surprise lookup failed: {e}", 240)}
+
+        raw_items = data.get("Items") if isinstance(data, dict) else []
+        movies = []
+        for raw in raw_items if isinstance(raw_items, list) else []:
+            norm = self._normalize_jf_library_item(raw, watchlist_ids=watchlist_ids, hero_quality=True)
+            if norm and norm.get("mediaType") == "movie":
+                movies.append(norm)
+
+        if not movies:
+            return 404, {"error": "No movies found in Jellyfin library"}
+
+        unwatched = [m for m in movies if not m.get("played")]
+        # Prefer items with valid TMDB ID so tapping opens rich Detail screen seamlessly
+        unwatched_with_tmdb = [m for m in unwatched if (m.get("id") or 0) > 0]
+        all_with_tmdb = [m for m in movies if (m.get("id") or 0) > 0]
+        pool = unwatched_with_tmdb or unwatched or all_with_tmdb or movies
+        chosen = random.choice(pool)
+        return 200, {
+            "item": chosen,
+            "unwatchedCount": len(unwatched),
+            "totalMovies": len(movies),
+        }
+
+    def list_collections(self):
+        """GET /pc/api/watch/collections"""
+        try:
+            uid = self._jf_user_id(timeout=5)
+            cols = self._fetch_box_sets(uid)
+        except urllib.error.HTTPError as e:
+            return 502, {"error": f"Jellyfin collections failed: HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin collections failed: {e}", 240)}
+        return 200, {"collections": cols, "count": len(cols)}
+
+    def collection_items(self, box_set_id_raw):
+        """GET /pc/api/watch/collections/{boxSetId}"""
+        box_id = normalize_jf_id(box_set_id_raw)
+        if not box_id:
+            return 400, {"error": "Valid collection ID is required"}
+        watchlist_ids = self.watchlist.id_set()
+        try:
+            uid = self._jf_user_id(timeout=5)
+            qs_children = urllib.parse.urlencode({
+                "ParentId": box_id,
+                "Fields": "ProviderIds,Overview,Genres,CommunityRating,ProductionYear,RunTimeTicks,UserData,ImageTags",
+                "SortBy": "PremiereDate,ProductionYear,SortName",
+                "SortOrder": "Ascending",
+                "Limit": "200",
+            })
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                f_meta = pool.submit(
+                    self._jf_get,
+                    f"/Users/{uid}/Items/{box_id}?Fields=Overview,ChildCount,ImageTags,BackdropImageTags",
+                    8,
+                )
+                f_kids = pool.submit(self._jf_get, f"/Users/{uid}/Items?{qs_children}", 8)
+                meta_raw = f_meta.result()
+                kids_raw = f_kids.result()
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return 404, {"error": "Collection not found"}
+            return 502, {"error": f"Jellyfin collection lookup failed: HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin collection lookup failed: {e}", 240)}
+
+        col_meta = self._normalize_box_set(meta_raw)
+        if not col_meta:
+            return 404, {"error": "Collection not found"}
+
+        raw_kids = kids_raw.get("Items") if isinstance(kids_raw, dict) else []
+        items = []
+        for raw in raw_kids if isinstance(raw_kids, list) else []:
+            norm = self._normalize_jf_library_item(raw, watchlist_ids=watchlist_ids)
+            if norm:
+                items.append(norm)
+        if col_meta["itemCount"] == 0 and items:
+            col_meta["itemCount"] = len(items)
+        return 200, {"collection": col_meta, "items": items}
+
+    def search_subtitles(self, jellyfin_item_id_raw, language_raw="eng"):
+        """GET /pc/api/watch/subtitles/search?jellyfinItemId=<id>&language=eng"""
+        item_id = normalize_jf_id(jellyfin_item_id_raw)
+        if not item_id:
+            return 400, {"error": "Valid jellyfinItemId is required"}
+        lang = str(language_raw or "eng").strip().lower()
+        if not re.fullmatch(r"[a-z]{2,3}", lang):
+            lang = "eng"
+
+        try:
+            raw_results = self._jf_get(f"/Items/{item_id}/RemoteSearch/Subtitles/{lang}", timeout=15)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return 404, {"error": "Jellyfin item not found"}
+            return 502, {"error": f"Jellyfin subtitle search failed: HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin subtitle search failed: {e}", 240)}
+
+        results = []
+        for entry in raw_results if isinstance(raw_results, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            sid = str(entry.get("Id") or "").strip()
+            if not sid:
+                continue
+            results.append({
+                "id": sid,
+                "name": _clip(entry.get("Name") or "Subtitle", 180),
+                "format": str(entry.get("Format") or "").strip().lower(),
+                "language": str(entry.get("ThreeLetterISOLanguageName") or entry.get("Language") or lang).strip().lower(),
+                "downloadCount": _safe_int(entry.get("DownloadCount")),
+                "communityRating": _vote_avg(entry.get("CommunityRating")),
+                "isHashMatch": bool(entry.get("IsHashMatch")),
+                "providerName": _clip(entry.get("ProviderName") or "", 60),
+            })
+
+        results.sort(
+            key=lambda s: (
+                0 if s["isHashMatch"] else 1,
+                -(s["downloadCount"] or 0),
+                -(s["communityRating"] or 0.0),
+                s["name"].lower(),
+            )
+        )
+        return 200, {
+            "jellyfinItemId": item_id,
+            "language": lang,
+            "results": results[:25],
+        }
+
+    def download_subtitle(self, body):
+        """POST /pc/api/watch/subtitles/download"""
+        if not isinstance(body, dict):
+            return 400, {"error": "JSON object required"}
+        item_id = normalize_jf_id(body.get("jellyfinItemId"))
+        if not item_id:
+            return 400, {"error": "Valid jellyfinItemId is required"}
+        sub_id = str(body.get("subtitleId") or "").strip()
+        if not sub_id or len(sub_id) > 512:
+            return 400, {"error": "Valid subtitleId is required"}
+
+        try:
+            uid = self._jf_user_id(timeout=5)
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin user lookup failed: {e}", 240)}
+
+        quoted_sub = urllib.parse.quote(sub_id, safe="")
+        try:
+            self._jf_request(
+                "POST",
+                f"/Items/{item_id}/RemoteSearch/Subtitles/{quoted_sub}",
+                body=None,
+                timeout=15,
+                include_client_meta=True,
+            )
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return 404, {"error": "Subtitle or Jellyfin item not found"}
+            return 502, {"error": f"Jellyfin subtitle download failed: HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin subtitle download failed: {e}", 240)}
+
+        # Re-read updated subtitleTracks so the player can immediately attach the newly downloaded subtitle
+        subtitle_tracks = []
+        try:
+            fields = "MediaSources,MediaStreams,Overview,ProviderIds,ImageTags,ParentBackdropItemId,SeriesId"
+            item = self._jf_get(f"/Users/{uid}/Items/{item_id}?Fields={fields}", timeout=8)
+            if isinstance(item, dict) and item.get("Id"):
+                media_sources = item.get("MediaSources") if isinstance(item.get("MediaSources"), list) else []
+                ms = media_sources[0] if media_sources and isinstance(media_sources[0], dict) else {}
+                ctx = self._extract_item_media_context(uid, item, ms)
+                subtitle_tracks = ctx["subtitleTracks"]
+        except Exception:
+            subtitle_tracks = []
+
+        return 200, {
+            "ok": True,
+            "jellyfinItemId": item_id,
+            "subtitleId": sub_id,
+            "subtitleTracks": subtitle_tracks,
+        }
 
     # ------------------------------------------------------------------ Phase 2: Native Playback & Offline Downloads
 
@@ -2241,15 +2767,23 @@ class WatchService:
         resume_ticks = max(0, _safe_int(ud.get("PlaybackPositionTicks")) or 0)
 
         chapters = []
-        for ch in item.get("Chapters") if isinstance(item.get("Chapters"), list) else []:
+        raw_chapters = item.get("Chapters") if isinstance(item.get("Chapters"), list) else []
+        for raw_idx, ch in enumerate(raw_chapters):
             if not isinstance(ch, dict):
                 continue
             st_ticks = _safe_int(ch.get("StartPositionTicks"))
             if st_ticks is None or st_ticks < 0:
                 continue
+            img_tag = ch.get("ImageTag")
+            ch_img = (
+                _jf_img_url(item_id, "Chapter", max_width=320, image_index=raw_idx)
+                if isinstance(img_tag, str) and img_tag.strip()
+                else None
+            )
             chapters.append({
                 "name": _clip(ch.get("Name") or f"Chapter {len(chapters) + 1}", 120),
                 "startPositionTicks": st_ticks,
+                "imageUrl": ch_img,
             })
 
         next_ep = None

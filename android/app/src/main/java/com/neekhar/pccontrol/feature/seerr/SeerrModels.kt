@@ -186,6 +186,16 @@ data class SeerrMediaRequestRef(
 )
 
 @Serializable
+data class WatchMediaBadges(
+    val resolution: String? = null,
+    val videoCodec: String? = null,
+    val hdr: String? = null,
+    val audioCodec: String? = null,
+    val sizeBytes: Long? = null,
+    val sizeLabel: String? = null,
+)
+
+@Serializable
 data class SeerrItem(
     val id: Int,
     val mediaType: String = "movie",
@@ -197,6 +207,10 @@ data class SeerrItem(
     val voteAverage: Double? = null,
     val voteCount: Int? = null,
     val backdrop: String? = null,
+    val logoUrl: String? = null,
+    val jellyfinItemId: String? = null,
+    val played: Boolean = false,
+    val mediaBadges: WatchMediaBadges? = null,
     val originalTitle: String? = null,
     val tagline: String? = null,
     val releaseDate: String? = null,
@@ -390,9 +404,11 @@ data class WatchItem(
     val overview: String = "",
     val poster: String? = null,
     val backdrop: String? = null,
+    val logoUrl: String? = null,
     val voteAverage: Double? = null,
     val status: SeerrStatus = SeerrStatus.NONE,
     val jellyfinItemId: String? = null,
+    val played: Boolean = false,
     val inWatchlist: Boolean = false,
     val genres: List<String> = emptyList(),
     val positionTicks: Long = 0L,
@@ -410,6 +426,9 @@ data class WatchItem(
         year = year,
         poster = resolveUrl(poster),
         backdrop = resolveUrl(backdrop),
+        logoUrl = resolveUrl(logoUrl),
+        jellyfinItemId = jellyfinItemId,
+        played = played,
         overview = overview,
         status = status,
         voteAverage = voteAverage,
@@ -514,6 +533,49 @@ data class WatchGenre(
 )
 
 @Serializable
+data class WatchBoxSet(
+    val id: String = "",
+    val name: String = "",
+    val overview: String = "",
+    val itemCount: Int = 0,
+    val poster: String? = null,
+    val backdrop: String? = null,
+    val logoUrl: String? = null,
+)
+
+@Serializable
+data class WatchBoxSetsResponse(
+    val collections: List<WatchBoxSet> = emptyList(),
+    val count: Int = 0,
+)
+
+@Serializable
+data class WatchBoxSetDetailResponse(
+    val collection: WatchBoxSet = WatchBoxSet(),
+    val items: List<WatchItem> = emptyList(),
+)
+
+@Serializable
+data class WatchWatchedRequestBody(
+    val jellyfinItemId: String,
+    val played: Boolean,
+)
+
+@Serializable
+data class WatchWatchedResponse(
+    val ok: Boolean = false,
+    val jellyfinItemId: String = "",
+    val played: Boolean = false,
+)
+
+@Serializable
+data class WatchSurpriseResponse(
+    val item: WatchItem? = null,
+    val unwatchedCount: Int = 0,
+    val totalMovies: Int = 0,
+)
+
+@Serializable
 data class WatchDiscoverResponse(
     val category: String = "all",
     val page: Int = 1,
@@ -521,6 +583,7 @@ data class WatchDiscoverResponse(
     val totalResults: Int = 0,
     val items: List<WatchItem> = emptyList(),
     val genres: List<WatchGenre> = emptyList(),
+    val collections: List<WatchBoxSet> = emptyList(),
 )
 
 @Serializable

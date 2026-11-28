@@ -53,6 +53,7 @@ import androidx.compose.material.icons.rounded.OfflinePin
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -81,6 +82,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -183,6 +185,14 @@ fun SeerrScreen(
     val openWatchItem: (WatchItem) -> Unit = { item ->
         if (item.id > 0) {
             onOpenDetail(item.mediaType, item.id, item.toSeedItem(viewModel::resolveImageUrl))
+        } else if (!item.jellyfinItemId.isNullOrBlank()) {
+            tryPlayOnlineOrOffline(item.jellyfinItemId, null, item.mediaType, null, null)
+        }
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.openSurpriseEvents.collect { picked ->
+            openWatchItem(picked)
         }
     }
 
@@ -416,6 +426,12 @@ fun SeerrScreen(
                                     count = badgeCount,
                                     selected = state.activeTab == tab,
                                     onClick = { viewModel.selectTab(tab) },
+                                )
+                            }
+                            item(key = "surprise_me_top_chip") {
+                                WatchSurpriseChip(
+                                    loading = state.loadingSurprise,
+                                    onClick = viewModel::pickSurpriseMovie,
                                 )
                             }
                         }
@@ -802,6 +818,42 @@ fun SeerrScreen(
                                                 onClick = { viewModel.selectLibrarySort(s) },
                                             )
                                         }
+                                        item(key = "library_surprise_chip") {
+                                            WatchSurpriseChip(
+                                                loading = state.loadingSurprise,
+                                                onClick = viewModel::pickSurpriseMovie,
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Library Box Sets ("Collections" horizontal rail)
+                                if (state.libraryCollections.isNotEmpty() && state.libraryFilter != WatchLibraryFilter.TV) {
+                                    item(key = "library_collections_rail") {
+                                        Column(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                                PcSectionLabel(label = "Collections")
+                                            }
+                                            LazyRow(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                contentPadding = PaddingValues(horizontal = PcDimens.ScreenPad),
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            ) {
+                                                items(
+                                                    items = state.libraryCollections,
+                                                    key = { "boxset:${it.id}" },
+                                                ) { boxSet ->
+                                                    WatchBoxSetRailCard(
+                                                        boxSet = boxSet,
+                                                        resolveImageUrl = viewModel::resolveImageUrl,
+                                                        onClick = { viewModel.openLibraryBoxSet(boxSet) },
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1044,6 +1096,16 @@ fun SeerrScreen(
         onDismiss = viewModel::closeCollection,
     )
 
+    WatchBoxSetSheet(
+        state = state.boxSetSheet,
+        resolveImageUrl = viewModel::resolveImageUrl,
+        onSelectItem = { movie ->
+            viewModel.closeLibraryBoxSet()
+            openWatchItem(movie)
+        },
+        onDismiss = viewModel::closeLibraryBoxSet,
+    )
+
     pendingDeleteItem?.let { del ->
         PcConfirmDialog(
             title = "Delete offline download?",
@@ -1103,7 +1165,7 @@ private fun WatchHeroCarousel(
     val safeIndex = currentIndex.coerceIn(0, items.lastIndex)
     val currentItem = items[safeIndex]
 
-    // Preload the next slide's backdrop into Coil so the crossfade dissolve has zero pop-in
+    // Preload the next slide's backdrop & ClearLogo into Coil so the crossfade dissolve has zero pop-in
     LaunchedEffect(items, safeIndex) {
         if (items.size <= 1) return@LaunchedEffect
         val nextItem = items[(safeIndex + 1) % items.size]
@@ -1112,6 +1174,14 @@ private fun WatchHeroCarousel(
             SingletonImageLoader.get(context).enqueue(
                 ImageRequest.Builder(context)
                     .data(nextArtUrl)
+                    .build(),
+            )
+        }
+        val nextLogoUrl = resolveImageUrl(nextItem.logoUrl)
+        if (!nextLogoUrl.isNullOrBlank()) {
+            SingletonImageLoader.get(context).enqueue(
+                ImageRequest.Builder(context)
+                    .data(nextLogoUrl)
                     .build(),
             )
         }
@@ -1236,6 +1306,7 @@ private fun WatchHeroCarousel(
             val heroOffline = findCompletedOffline(slideItem.jellyfinItemId, slideItem.id, slideItem.mediaType)
             WatchHeroSlideForeground(
                 item = slideItem,
+                resolvedLogoUrl = resolveImageUrl(slideItem.logoUrl),
                 offlineItem = heroOffline,
                 inWatchlist = inWatchlist,
                 busyWatchlist = busyWatchlistKey == heroKey,
@@ -1296,6 +1367,7 @@ private fun WatchHeroCarousel(
 @Composable
 private fun WatchHeroSlideForeground(
     item: WatchItem,
+    resolvedLogoUrl: String?,
     offlineItem: OfflineWatchItem?,
     inWatchlist: Boolean,
     busyWatchlist: Boolean,
@@ -1376,15 +1448,19 @@ private fun WatchHeroSlideForeground(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    text = item.title,
-                    color = colors.onMedia,
-                    fontSize = 26.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    lineHeight = 30.sp,
-                    letterSpacing = (-0.4).sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+                WatchClearLogoTitle(
+                    title = item.title,
+                    logoUrl = resolvedLogoUrl,
+                    fallbackStyle = TextStyle(
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        lineHeight = 30.sp,
+                        letterSpacing = (-0.4).sp,
+                    ),
+                    fallbackColor = colors.onMedia,
+                    maxHeight = 62.dp,
+                    maxWidth = 240.dp,
+                    fallbackMaxLines = 2,
                 )
                 if (metaLine.isNotEmpty()) {
                     Text(
@@ -2561,3 +2637,125 @@ private fun SeerrRequestItem.toSeedItem(): SeerrItem = SeerrItem(
     overview = "",
     status = status,
 )
+
+@Composable
+private fun WatchSurpriseChip(
+    loading: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    Row(
+        modifier = modifier
+            .height(34.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(colors.surface)
+            .border(0.5.dp, colors.hairline, RoundedCornerShape(999.dp))
+            .clickable(enabled = !loading, onClick = onClick)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (loading) {
+            CircularProgressIndicator(
+                color = colors.accent,
+                strokeWidth = 1.75.dp,
+                modifier = Modifier.size(13.dp),
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Rounded.Shuffle,
+                contentDescription = null,
+                tint = colors.accent,
+                modifier = Modifier.size(15.dp),
+            )
+        }
+        Text(
+            text = "Surprise me",
+            color = colors.text,
+            style = type.caption.copy(fontWeight = FontWeight.Medium),
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun WatchBoxSetRailCard(
+    boxSet: WatchBoxSet,
+    resolveImageUrl: (String?) -> String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val posterUrl = resolveImageUrl(boxSet.poster ?: boxSet.backdrop)
+
+    Column(
+        modifier = modifier
+            .width(114.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(colors.surfaceRaised),
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.CollectionsBookmark,
+                contentDescription = null,
+                tint = colors.textFaint,
+                modifier = Modifier
+                    .size(26.dp)
+                    .align(Alignment.Center),
+            )
+            if (!posterUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = posterUrl,
+                    contentDescription = boxSet.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (boxSet.itemCount > 0) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(colors.mediaChip)
+                        .border(0.5.dp, colors.mediaChipBorder, RoundedCornerShape(999.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        text = boxSet.itemCount.toString(),
+                        color = colors.onMedia,
+                        style = type.micro.tabular(),
+                    )
+                }
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = boxSet.name.ifBlank { "Collection" },
+                color = colors.text,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (boxSet.itemCount > 0) {
+                Text(
+                    text = SeerrHelpers.boxSetCountLabel(boxSet.itemCount),
+                    color = colors.textFaint,
+                    style = type.micro.tabular(),
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}

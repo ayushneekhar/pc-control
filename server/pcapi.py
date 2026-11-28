@@ -4269,6 +4269,7 @@ JELLYFIN_IMAGE_TYPES = {
     "backdrop": "Backdrop",
     "thumb": "Thumb",
     "logo": "Logo",
+    "chapter": "Chapter",
 }
 JELLYFIN_PLAYSTATE_COMMANDS = {
     c.lower(): c for c in (
@@ -4747,8 +4748,8 @@ def jellyfin_tv_command(body):
         return 502, {"ok": False, "error": clip(f"Jellyfin TV command failed: {e}", 240)}
 
 
-def jellyfin_proxy_image(item_id, image_type_name="Primary", series_id=None, max_width=None, quality=None, include_etag=False):
-    """Fetch a Jellyfin item image (Primary/Backdrop/Thumb/Logo) server-side without exposing API credentials."""
+def jellyfin_proxy_image(item_id, image_type_name="Primary", series_id=None, max_width=None, quality=None, include_etag=False, image_index=None):
+    """Fetch a Jellyfin item image (Primary/Backdrop/Thumb/Logo/Chapter) server-side without exposing API credentials."""
     def _ret(code, payload, ctype, etag=None):
         return (code, payload, ctype, etag) if include_etag else (code, payload, ctype)
 
@@ -4757,6 +4758,12 @@ def jellyfin_proxy_image(item_id, image_type_name="Primary", series_id=None, max
     img_type = JELLYFIN_IMAGE_TYPES.get(str(image_type_name or "Primary").strip().lower())
     if not img_type:
         return _ret(400, {"error": "unsupported image type"}, None)
+
+    chapter_idx = None
+    if img_type == "Chapter":
+        chapter_idx = _jellyfin_safe_int(image_index)
+        if chapter_idx is None or chapter_idx < 0 or chapter_idx > 10000:
+            return _ret(400, {"error": "invalid chapter imageIndex"}, None)
 
     mw = _jellyfin_safe_int(max_width)
     mw = max(64, min(1920, mw)) if mw is not None else 600
@@ -4779,7 +4786,10 @@ def jellyfin_proxy_image(item_id, image_type_name="Primary", series_id=None, max
     candidates = [item_id] + ([fallback_series_id] if fallback_series_id else [])
 
     for idx, candidate in enumerate(candidates):
-        url = f"{JELLYFIN_URL}/Items/{candidate}/Images/{img_type}?{qs}"
+        if img_type == "Chapter":
+            url = f"{JELLYFIN_URL}/Items/{candidate}/Images/Chapter/{chapter_idx}?{qs}"
+        else:
+            url = f"{JELLYFIN_URL}/Items/{candidate}/Images/{img_type}?{qs}"
         req = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
@@ -6072,6 +6082,18 @@ def route_round4_get(path, qs):
             season_raw=(qs.get("season") or [None])[0],
             episode_raw=(qs.get("episode") or [None])[0],
         )
+    if path == "/api/watch/surprise":
+        return _watch_service().surprise_me()
+    if path == "/api/watch/collections":
+        return _watch_service().list_collections()
+    m = re.fullmatch(r"/api/watch/collections/([^/]+)", path)
+    if m:
+        return _watch_service().collection_items(m.group(1))
+    if path == "/api/watch/subtitles/search":
+        return _watch_service().search_subtitles(
+            jellyfin_item_id_raw=(qs.get("jellyfinItemId") or [None])[0],
+            language_raw=(qs.get("language") or ["eng"])[0],
+        )
     return None
 
 
@@ -6117,6 +6139,10 @@ def route_round4_post(path, b):
         return _watch_service().playback_info(b)
     if path == "/api/watch/progress":
         return _watch_service().report_progress(b)
+    if path == "/api/watch/watched":
+        return _watch_service().set_watched(b)
+    if path == "/api/watch/subtitles/download":
+        return _watch_service().download_subtitle(b)
     return None
 
 
@@ -6127,6 +6153,8 @@ TAILSCALE_REQUIRED_ERROR = {
 
 
 def _is_watch_tailscale_only_path(path):
+    if path in ("/pc/api/watch/subtitles/search", "/pc/api/watch/subtitles/download"):
+        return False
     return (
         path == "/pc/api/watch/playback-info"
         or path == "/pc/api/watch/download-info"
@@ -6662,6 +6690,7 @@ class H(BaseHTTPRequestHandler):
                     max_width=(qs.get("maxWidth") or [None])[0],
                     quality=(qs.get("quality") or [None])[0],
                     include_etag=True,
+                    image_index=(qs.get("imageIndex") or [None])[0],
                 )
                 if code != 200:
                     return self.send_json(code, data_or_err)

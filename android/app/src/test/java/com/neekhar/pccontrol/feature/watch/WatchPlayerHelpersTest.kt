@@ -5,6 +5,7 @@ import com.neekhar.pccontrol.feature.watch.player.WatchChapter
 import com.neekhar.pccontrol.feature.watch.player.WatchMediaSegment
 import com.neekhar.pccontrol.feature.watch.player.WatchPlayerHelpers
 import com.neekhar.pccontrol.feature.watch.player.WatchQualityOption
+import com.neekhar.pccontrol.feature.watch.player.WatchRemoteSubtitle
 import com.neekhar.pccontrol.feature.watch.player.WatchTrickplayInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -346,5 +347,30 @@ class WatchPlayerHelpersTest {
         assertEquals("Title Sequence", WatchPlayerHelpers.activeChapterTitle(chapters, 300_000L))
         assertEquals("Act I", WatchPlayerHelpers.activeChapterTitle(chapters, 550_000L))
         assertNull(WatchPlayerHelpers.activeChapterTitle(emptyList(), 100_000L))
+
+        assertEquals(0, WatchPlayerHelpers.activeChapterIndex(chapters, 0L))
+        assertEquals(0, WatchPlayerHelpers.activeChapterIndex(chapters, 299_999L))
+        assertEquals(1, WatchPlayerHelpers.activeChapterIndex(chapters, 300_000L))
+        assertEquals(2, WatchPlayerHelpers.activeChapterIndex(chapters, 550_000L))
+        assertEquals(-1, WatchPlayerHelpers.activeChapterIndex(emptyList(), 100_000L))
+    }
+
+    @Test
+    fun `formatSubtitleMeta formats format provider downloads and rating concisely`() {
+        val sub = WatchRemoteSubtitle(
+            id = "sub1",
+            name = "Movie.2024.1080p",
+            format = "srt",
+            providerName = "OpenSubtitles",
+            downloadCount = 1_500,
+            communityRating = 8.7,
+            isHashMatch = true,
+        )
+        assertEquals(
+            "SRT · OpenSubtitles · 1.5k dl · ★ 8.7",
+            WatchPlayerHelpers.formatSubtitleMeta(sub),
+        )
+        val minimal = WatchRemoteSubtitle(id = "sub2", format = "ass", downloadCount = 42)
+        assertEquals("ASS · 42 dl", WatchPlayerHelpers.formatSubtitleMeta(minimal))
     }
 }

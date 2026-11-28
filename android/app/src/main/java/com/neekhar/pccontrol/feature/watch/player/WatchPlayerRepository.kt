@@ -5,6 +5,7 @@ import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.feature.seerr.PlayOnTvRequestBody
 import com.neekhar.pccontrol.feature.seerr.PlayOnTvResponse
 import kotlinx.coroutines.CancellationException
+import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
@@ -191,6 +192,32 @@ class WatchPlayerRepository(
             pathOrUrl = "/pc/api/watch/progress",
             body = request,
             timeoutMs = 8_000L,
+        )
+    }
+
+    suspend fun searchRemoteSubtitles(
+        jellyfinItemId: String,
+        language: String = "eng",
+    ): ApiResult<WatchSubtitleSearchResponse> {
+        val encId = URLEncoder.encode(jellyfinItemId.trim(), "UTF-8")
+        val encLang = URLEncoder.encode(language.trim().ifBlank { "eng" }, "UTF-8")
+        return api.getJson<WatchSubtitleSearchResponse>(
+            "/pc/api/watch/subtitles/search?jellyfinItemId=$encId&language=$encLang",
+            timeoutMs = 20_000L,
+        )
+    }
+
+    suspend fun downloadRemoteSubtitle(
+        jellyfinItemId: String,
+        subtitleId: String,
+    ): ApiResult<WatchSubtitleDownloadResponse> {
+        return api.postJson<WatchSubtitleDownloadRequest, WatchSubtitleDownloadResponse>(
+            pathOrUrl = "/pc/api/watch/subtitles/download",
+            body = WatchSubtitleDownloadRequest(
+                jellyfinItemId = jellyfinItemId.trim(),
+                subtitleId = subtitleId.trim(),
+            ),
+            timeoutMs = 20_000L,
         )
     }
 

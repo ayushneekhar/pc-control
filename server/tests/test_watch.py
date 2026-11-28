@@ -1275,6 +1275,504 @@ class WatchEndpointsTests(unittest.TestCase):
                 self.assertEqual(r.headers.get("ETag"), '"etag-poster-123"')
                 self.assertEqual(r.read(), fake_jpeg)
 
+    # ------------------------------------------------------------------ Watch v2.5.0 Power Pack tests
+
+    def test_clearlogo_in_home_library_and_details(self):
+        # Add Logo ImageTag to Movie 1 and Series 1 in /Items and /Items/Latest
+        box_id = "1b34fe696adcb672bdaa8528c8911b58"
+        def _items_handler(qs):
+            inc = (qs.get("IncludeItemTypes") or [""])[0]
+            if inc == "BoxSet":
+                return 200, {"Items": [], "TotalRecordCount": 0}
+            return 200, {
+                "Items": [
+                    {
+                        "Id": MOVIE_JF_ID,
+                        "Type": "Movie",
+                        "Name": "Dune: Part Two",
+                        "ProductionYear": 2024,
+                        "Overview": "Paul Atreides unites with the Fremen.",
+                        "CommunityRating": 8.6,
+                        "ProviderIds": {"Tmdb": "693134"},
+                        "BackdropImageTags": ["bd1"],
+                        "ImageTags": {"Primary": "p1", "Logo": "logo123"},
+                    },
+                    {
+                        "Id": MOVIE2_JF_ID,
+                        "Type": "Movie",
+                        "Name": "No Logo Movie",
+                        "ProductionYear": 2023,
+                        "Overview": "Plain title movie.",
+                        "ProviderIds": {"Tmdb": "999999"},
+                        "BackdropImageTags": ["bd2"],
+                        "ImageTags": {"Primary": "p2"},
+                    },
+                ],
+                "TotalRecordCount": 2,
+            }
+
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items")] = _items_handler
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items/Latest")] = (200, [
+            {
+                "Id": MOVIE_JF_ID,
+                "Type": "Movie",
+                "Name": "Dune: Part Two",
+                "ProductionYear": 2024,
+                "Overview": "Paul Atreides unites with the Fremen.",
+                "CommunityRating": 8.6,
+                "ProviderIds": {"Tmdb": "693134"},
+                "BackdropImageTags": ["bd1"],
+                "ImageTags": {"Primary": "p1", "Logo": "logo123"},
+            },
+            {
+                "Id": MOVIE2_JF_ID,
+                "Type": "Movie",
+                "Name": "No Logo Movie",
+                "ProductionYear": 2023,
+                "Overview": "Plain title movie.",
+                "ProviderIds": {"Tmdb": "999999"},
+                "BackdropImageTags": ["bd2"],
+                "ImageTags": {"Primary": "p2"},
+            },
+        ])
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items/{MOVIE_JF_ID}")] = (200, {
+            "Id": MOVIE_JF_ID,
+            "Type": "Movie",
+            "Name": "Dune: Part Two",
+            "RunTimeTicks": 99_600_000_000,
+            "ImageTags": {"Primary": "p1", "Logo": "logo123"},
+            "UserData": {"Played": False, "PlaybackPositionTicks": 12_000_000_000},
+            "MediaSources": [
+                {
+                    "Id": MOVIE_JF_ID,
+                    "Size": 19_649_475_379,  # ~18.3 GB
+                    "MediaStreams": [
+                        {
+                            "Type": "Video",
+                            "Index": 0,
+                            "Codec": "hevc",
+                            "Width": 3840,
+                            "Height": 2160,
+                            "VideoRange": "HDR",
+                            "VideoRangeType": "DOVIWithHDR10",
+                        },
+                        {
+                            "Type": "Audio",
+                            "Index": 1,
+                            "Codec": "truehd",
+                            "Channels": 8,
+                            "ChannelLayout": "7.1",
+                            "IsDefault": True,
+                        },
+                    ],
+                }
+            ],
+        })
+
+        self.service.invalidate_caches()
+        code, home = self.service.home(force_refresh=True)
+        self.assertEqual(code, 200)
+        hero_dune = next((h for h in home["heroItems"] if h.get("jellyfinItemId") == MOVIE_JF_ID), None)
+        self.assertIsNotNone(hero_dune)
+        self.assertEqual(
+            hero_dune["logoUrl"],
+            f"/pc/api/jellyfin/image/{MOVIE_JF_ID}?type=Logo&maxWidth=600",
+        )
+        no_logo = next((x for x in home["recentlyAdded"] if x.get("jellyfinItemId") == MOVIE2_JF_ID), None)
+        self.assertIsNotNone(no_logo)
+        self.assertIsNone(no_logo["logoUrl"])
+
+        # get_resume_state enriches detail with logoUrl, mediaBadges, jellyfinItemId, played
+        enrichment = self.service.get_resume_state("movie", 693134)
+        self.assertIsNotNone(enrichment)
+        self.assertEqual(enrichment["jellyfinItemId"], MOVIE_JF_ID)
+        self.assertFalse(enrichment["played"])
+        self.assertEqual(
+            enrichment["logoUrl"],
+            f"/pc/api/jellyfin/image/{MOVIE_JF_ID}?type=Logo&maxWidth=600",
+        )
+        badges = enrichment["mediaBadges"]
+        self.assertEqual(badges["resolution"], "4K")
+        self.assertEqual(badges["videoCodec"], "HEVC")
+        self.assertEqual(badges["hdr"], "Dolby Vision")
+        self.assertEqual(badges["audioCodec"], "TrueHD 7.1")
+        self.assertEqual(badges["sizeLabel"], "18.3 GB")
+        self.assertEqual(badges["sizeBytes"], 19_649_475_379)
+
+    def test_extract_media_badges_formats_all_codec_hdr_and_audio_variants(self):
+        # 1080p HEVC HDR10+ DTS-HD 5.1
+        b1 = watch_mod.extract_media_badges(
+            {
+                "Size": 8_589_934_592,
+                "MediaStreams": [
+                    {"Type": "Video", "Codec": "hevc", "Width": 1920, "Height": 804, "VideoRange": "HDR", "VideoRangeType": "HDR10Plus"},
+                    {"Type": "Audio", "Codec": "dts", "Profile": "DTS-HD MA", "Channels": 6, "ChannelLayout": "5.1(side)", "IsDefault": True},
+                ],
+            },
+            include_size=True,
+        )
+        self.assertEqual(b1["resolution"], "1080p")
+        self.assertEqual(b1["videoCodec"], "HEVC")
+        self.assertEqual(b1["hdr"], "HDR10+")
+        self.assertEqual(b1["audioCodec"], "DTS-HD 5.1")
+        self.assertEqual(b1["sizeLabel"], "8.0 GB")
+
+        # 720p H.264 SDR EAC3 5.1 (no size for TV)
+        b2 = watch_mod.extract_media_badges(
+            {
+                "Size": 1_500_000_000,
+                "MediaStreams": [
+                    {"Type": "Video", "Codec": "h264", "Width": 1280, "Height": 720, "VideoRange": "SDR", "VideoRangeType": "SDR"},
+                    {"Type": "Audio", "Codec": "eac3", "Channels": 6, "ChannelLayout": "5.1"},
+                ],
+            },
+            include_size=False,
+        )
+        self.assertEqual(b2["resolution"], "720p")
+        self.assertEqual(b2["videoCodec"], "H.264")
+        self.assertIsNone(b2["hdr"])
+        self.assertEqual(b2["audioCodec"], "EAC3 5.1")
+        self.assertIsNone(b2["sizeBytes"])
+        self.assertIsNone(b2["sizeLabel"])
+
+        # AV1 + Opus stereo
+        b3 = watch_mod.extract_media_badges(
+            {
+                "MediaStreams": [
+                    {"Type": "Video", "Codec": "av1", "Width": 1920, "Height": 1080, "VideoRange": "HDR", "VideoRangeType": "HDR10"},
+                    {"Type": "Audio", "Codec": "opus", "Channels": 2, "ChannelLayout": "stereo"},
+                ],
+            },
+            include_size=True,
+        )
+        self.assertEqual(b3["videoCodec"], "AV1")
+        self.assertEqual(b3["hdr"], "HDR10")
+        self.assertEqual(b3["audioCodec"], "Opus")
+
+    def test_playback_info_chapter_images_and_chapter_image_proxy(self):
+        self._install_phase2_mocks()
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items/{MOVIE_JF_ID}")] = (200, {
+            "Id": MOVIE_JF_ID,
+            "Type": "Movie",
+            "Name": "Dune: Part Two",
+            "ProductionYear": 2024,
+            "RunTimeTicks": 99_600_000_000,
+            "ProviderIds": {"Tmdb": "693134"},
+            "BackdropImageTags": ["bd1"],
+            "UserData": {"PlaybackPositionTicks": 0},
+            "MediaSources": [
+                {
+                    "Id": MOVIE_JF_ID,
+                    "Container": "mkv",
+                    "RunTimeTicks": 99_600_000_000,
+                    "MediaStreams": [
+                        {"Type": "Video", "Index": 0, "Codec": "h264"},
+                        {"Type": "Audio", "Index": 1, "Codec": "aac", "Language": "eng", "IsDefault": True},
+                    ],
+                }
+            ],
+            "Chapters": [
+                {"Name": "Opening", "StartPositionTicks": 0, "ImageTag": "chtag0"},
+                {"Name": "The Desert", "StartPositionTicks": 6_000_000_000},
+                {"Name": "Sandworm Ride", "StartPositionTicks": 18_000_000_000, "ImageTag": "chtag2"},
+            ],
+        })
+
+        code, pb = self.service.playback_info({"jellyfinItemId": MOVIE_JF_ID})
+        self.assertEqual(code, 200)
+        self.assertEqual(len(pb["chapters"]), 3)
+        self.assertEqual(
+            pb["chapters"][0]["imageUrl"],
+            f"/pc/api/jellyfin/image/{MOVIE_JF_ID}?type=Chapter&imageIndex=0&maxWidth=320",
+        )
+        self.assertIsNone(pb["chapters"][1]["imageUrl"])
+        self.assertEqual(
+            pb["chapters"][2]["imageUrl"],
+            f"/pc/api/jellyfin/image/{MOVIE_JF_ID}?type=Chapter&imageIndex=2&maxWidth=320",
+        )
+
+        # Verify jellyfin_proxy_image serves Logo and Chapter images with Cache-Control: public, max-age=86400
+        fake_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        fake_jpg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+        self.jf_srv.routes[("GET", f"/Items/{MOVIE_JF_ID}/Images/Logo")] = ("raw", 200, fake_png, "image/png", {"ETag": '"logo-1"'})
+        self.jf_srv.routes[("GET", f"/Items/{MOVIE_JF_ID}/Images/Chapter/2")] = ("raw", 200, fake_jpg, "image/jpeg", {"ETag": '"ch-2"'})
+
+        with mock.patch.object(pcapi, "JELLYFIN_URL", self.jf_srv.base_url), \
+             mock.patch.object(pcapi, "JELLYFIN_KEY_FILE", self.jf_key_file):
+            c_logo, d_logo, ct_logo, et_logo = pcapi.jellyfin_proxy_image(
+                MOVIE_JF_ID, image_type_name="Logo", max_width="600", include_etag=True
+            )
+            self.assertEqual(c_logo, 200)
+            self.assertEqual(d_logo, fake_png)
+            self.assertEqual(ct_logo, "image/png")
+            self.assertEqual(et_logo, '"logo-1"')
+
+            c_ch, d_ch, ct_ch, et_ch = pcapi.jellyfin_proxy_image(
+                MOVIE_JF_ID, image_type_name="Chapter", max_width="320", image_index="2", include_etag=True
+            )
+            self.assertEqual(c_ch, 200)
+            self.assertEqual(d_ch, fake_jpg)
+            self.assertEqual(ct_ch, "image/jpeg")
+            self.assertEqual(et_ch, '"ch-2"')
+
+            # Missing or negative imageIndex on Chapter returns 400
+            c_bad, _, _ = pcapi.jellyfin_proxy_image(MOVIE_JF_ID, image_type_name="Chapter", image_index=None)
+            self.assertEqual(c_bad, 400)
+            c_neg, _, _ = pcapi.jellyfin_proxy_image(MOVIE_JF_ID, image_type_name="Chapter", image_index="-1")
+            self.assertEqual(c_neg, 400)
+
+    def test_set_watched_unwatched_invalidates_cache(self):
+        played_calls = []
+        self.jf_srv.routes[("POST", f"/Users/{USER_AYUSH_ID}/PlayedItems/{MOVIE_JF_ID}")] = (
+            lambda qs, hdrs, body: (played_calls.append("POST"), (200, {"Played": True}))[1]
+        )
+        self.jf_srv.routes[("DELETE", f"/Users/{USER_AYUSH_ID}/PlayedItems/{MOVIE_JF_ID}")] = (
+            lambda qs, hdrs, body: (played_calls.append("DELETE"), (200, {"Played": False}))[1]
+        )
+
+        # Seed home cache first
+        self.service.home(force_refresh=True)
+        self.assertIsNotNone(self.service._home_cache[1])
+
+        code, res = self.service.set_watched({"jellyfinItemId": MOVIE_JF_ID, "played": True})
+        self.assertEqual(code, 200)
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["played"])
+        self.assertEqual(played_calls, ["POST"])
+        self.assertIsNone(self.service._home_cache[1])
+
+        code2, res2 = self.service.set_watched({"jellyfinItemId": MOVIE_JF_ID, "played": False})
+        self.assertEqual(code2, 200)
+        self.assertTrue(res2["ok"])
+        self.assertFalse(res2["played"])
+        self.assertEqual(played_calls, ["POST", "DELETE"])
+
+        # Validation
+        self.assertEqual(self.service.set_watched({"jellyfinItemId": "bad", "played": True})[0], 400)
+        self.assertEqual(self.service.set_watched({"jellyfinItemId": MOVIE_JF_ID, "played": "yes"})[0], 400)
+
+    def test_surprise_me_prefers_unwatched_and_falls_back_when_all_watched(self):
+        movies_payload = [
+            {
+                "Id": MOVIE_JF_ID,
+                "Type": "Movie",
+                "Name": "Watched Classic",
+                "ProductionYear": 1999,
+                "ProviderIds": {"Tmdb": "603"},
+                "UserData": {"Played": True},
+                "ImageTags": {"Primary": "p1"},
+            },
+            {
+                "Id": MOVIE2_JF_ID,
+                "Type": "Movie",
+                "Name": "Unwatched Gem",
+                "ProductionYear": 2024,
+                "ProviderIds": {"Tmdb": "693134"},
+                "UserData": {"Played": False},
+                "ImageTags": {"Primary": "p2", "Logo": "l2"},
+            },
+        ]
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items")] = (200, {"Items": movies_payload, "TotalRecordCount": 2})
+
+        code, res = self.service.surprise_me()
+        self.assertEqual(code, 200)
+        self.assertEqual(res["item"]["jellyfinItemId"], MOVIE2_JF_ID)
+        self.assertEqual(res["item"]["title"], "Unwatched Gem")
+        self.assertEqual(res["unwatchedCount"], 1)
+        self.assertEqual(res["totalMovies"], 2)
+        self.assertIsNotNone(res["item"]["logoUrl"])
+
+        # When all movies are watched, fallback still returns a library movie
+        movies_payload[1]["UserData"]["Played"] = True
+        code2, res2 = self.service.surprise_me()
+        self.assertEqual(code2, 200)
+        self.assertEqual(res2["unwatchedCount"], 0)
+        self.assertIn(res2["item"]["jellyfinItemId"], (MOVIE_JF_ID, MOVIE2_JF_ID))
+
+        # Empty library returns 404
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items")] = (200, {"Items": [], "TotalRecordCount": 0})
+        self.assertEqual(self.service.surprise_me()[0], 404)
+
+    def test_library_box_sets_list_detail_and_discover_library(self):
+        box_id = "1b34fe696adcb672bdaa8528c8911b58"
+
+        def _items_handler(qs):
+            inc = (qs.get("IncludeItemTypes") or [""])[0]
+            parent = (qs.get("ParentId") or [""])[0]
+            if inc == "BoxSet":
+                return 200, {
+                    "Items": [
+                        {
+                            "Id": box_id,
+                            "Type": "BoxSet",
+                            "Name": "Kill Bill Collection",
+                            "Overview": "Tarantino revenge saga.",
+                            "ChildCount": 2,
+                            "ImageTags": {"Primary": "bp1", "Logo": "bl1"},
+                            "BackdropImageTags": ["bbd1"],
+                        }
+                    ],
+                    "TotalRecordCount": 1,
+                }
+            if parent == box_id:
+                return 200, {
+                    "Items": [
+                        {
+                            "Id": MOVIE_JF_ID,
+                            "Type": "Movie",
+                            "Name": "Kill Bill: Vol. 1",
+                            "ProductionYear": 2003,
+                            "ProviderIds": {"Tmdb": "24"},
+                            "UserData": {"Played": True},
+                            "ImageTags": {"Primary": "p1"},
+                        },
+                        {
+                            "Id": MOVIE2_JF_ID,
+                            "Type": "Movie",
+                            "Name": "Kill Bill: Vol. 2",
+                            "ProductionYear": 2004,
+                            "ProviderIds": {"Tmdb": "393"},
+                            "UserData": {"Played": False},
+                            "ImageTags": {"Primary": "p2"},
+                        },
+                    ],
+                    "TotalRecordCount": 2,
+                }
+            return 200, {
+                "Items": [
+                    {
+                        "Id": MOVIE_JF_ID,
+                        "Type": "Movie",
+                        "Name": "Kill Bill: Vol. 1",
+                        "ProductionYear": 2003,
+                        "ProviderIds": {"Tmdb": "24"},
+                        "ImageTags": {"Primary": "p1"},
+                    }
+                ],
+                "TotalRecordCount": 1,
+            }
+
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items")] = _items_handler
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items/{box_id}")] = (200, {
+            "Id": box_id,
+            "Type": "BoxSet",
+            "Name": "Kill Bill Collection",
+            "Overview": "Tarantino revenge saga.",
+            "ChildCount": 2,
+            "ImageTags": {"Primary": "bp1", "Logo": "bl1"},
+            "BackdropImageTags": ["bbd1"],
+        })
+
+        c_list, r_list = self.service.list_collections()
+        self.assertEqual(c_list, 200)
+        self.assertEqual(r_list["count"], 1)
+        self.assertEqual(r_list["collections"][0]["id"], box_id)
+        self.assertEqual(r_list["collections"][0]["name"], "Kill Bill Collection")
+        self.assertEqual(r_list["collections"][0]["itemCount"], 2)
+        self.assertIn("type=Primary", r_list["collections"][0]["poster"])
+        self.assertIn("type=Backdrop", r_list["collections"][0]["backdrop"])
+
+        c_det, r_det = self.service.collection_items(box_id)
+        self.assertEqual(c_det, 200)
+        self.assertEqual(r_det["collection"]["name"], "Kill Bill Collection")
+        self.assertEqual([x["title"] for x in r_det["items"]], ["Kill Bill: Vol. 1", "Kill Bill: Vol. 2"])
+        self.assertTrue(r_det["items"][0]["played"])
+        self.assertFalse(r_det["items"][1]["played"])
+
+        # discover?category=library also surfaces collections on page 1
+        c_disc, r_disc = self.service.discover(category="library", page=1)
+        self.assertEqual(c_disc, 200)
+        self.assertEqual(len(r_disc["collections"]), 1)
+        self.assertEqual(r_disc["collections"][0]["id"], box_id)
+
+        # Invalid boxSetId returns 400
+        self.assertEqual(self.service.collection_items("not-valid")[0], 400)
+
+    def test_subtitle_search_and_download_flow_and_routing(self):
+        sub_remote_id = "opensub_12345"
+        downloaded_calls = []
+        self.jf_srv.routes[("GET", f"/Items/{MOVIE_JF_ID}/RemoteSearch/Subtitles/eng")] = (200, [
+            {
+                "Id": "sub_low",
+                "Name": "Movie.2024.WEB-DL.eng",
+                "Format": "srt",
+                "ThreeLetterISOLanguageName": "eng",
+                "DownloadCount": 120,
+                "CommunityRating": 7.5,
+                "IsHashMatch": False,
+                "ProviderName": "OpenSubtitles",
+            },
+            {
+                "Id": sub_remote_id,
+                "Name": "Movie.2024.BluRay.x265.HASHMATCH",
+                "Format": "srt",
+                "ThreeLetterISOLanguageName": "eng",
+                "DownloadCount": 42,
+                "CommunityRating": 9.0,
+                "IsHashMatch": True,
+                "ProviderName": "OpenSubtitles",
+            },
+            {
+                "Id": "sub_high",
+                "Name": "Movie.2024.REMUX.eng",
+                "Format": "ass",
+                "ThreeLetterISOLanguageName": "eng",
+                "DownloadCount": 5400,
+                "CommunityRating": 8.8,
+                "IsHashMatch": False,
+                "ProviderName": "Subscene",
+            },
+        ])
+        self.jf_srv.routes[("POST", f"/Items/{MOVIE_JF_ID}/RemoteSearch/Subtitles/{sub_remote_id}")] = (
+            lambda qs, hdrs, body: (downloaded_calls.append(sub_remote_id), (204, {}))[1]
+        )
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items/{MOVIE_JF_ID}")] = (200, {
+            "Id": MOVIE_JF_ID,
+            "Type": "Movie",
+            "Name": "Dune: Part Two",
+            "MediaSources": [
+                {
+                    "Id": MOVIE_JF_ID,
+                    "MediaStreams": [
+                        {"Type": "Video", "Index": 0, "Codec": "hevc"},
+                        {"Type": "Audio", "Index": 1, "Codec": "aac", "Language": "eng", "IsDefault": True},
+                        {
+                            "Type": "Subtitle",
+                            "Index": 2,
+                            "Codec": "subrip",
+                            "Language": "eng",
+                            "DisplayTitle": "English (External)",
+                            "IsTextSubtitleStream": True,
+                            "IsExternal": True,
+                            "IsDefault": False,
+                        },
+                    ],
+                }
+            ],
+        })
+
+        c_search, r_search = self.service.search_subtitles(MOVIE_JF_ID, "eng")
+        self.assertEqual(c_search, 200)
+        # Hash-matched entry MUST sort first, followed by highest downloadCount
+        self.assertEqual([x["id"] for x in r_search["results"]], [sub_remote_id, "sub_high", "sub_low"])
+        self.assertTrue(r_search["results"][0]["isHashMatch"])
+
+        c_dl, r_dl = self.service.download_subtitle({
+            "jellyfinItemId": MOVIE_JF_ID,
+            "subtitleId": sub_remote_id,
+        })
+        self.assertEqual(c_dl, 200)
+        self.assertTrue(r_dl["ok"])
+        self.assertEqual(downloaded_calls, [sub_remote_id])
+        self.assertEqual(len(r_dl["subtitleTracks"]), 1)
+        self.assertTrue(r_dl["subtitleTracks"][0]["isExternal"])
+        self.assertIn(f"/pc/api/watch/subtitles/{MOVIE_JF_ID}/{MOVIE_JF_ID}/2.vtt", r_dl["subtitleTracks"][0]["deliveryUrl"])
+
+        # Verify _is_watch_tailscale_only_path allows search/download JSON endpoints while keeping .vtt Tailscale-only
+        self.assertFalse(pcapi._is_watch_tailscale_only_path("/pc/api/watch/subtitles/search"))
+        self.assertFalse(pcapi._is_watch_tailscale_only_path("/pc/api/watch/subtitles/download"))
+        self.assertTrue(pcapi._is_watch_tailscale_only_path(f"/pc/api/watch/subtitles/{MOVIE_JF_ID}/{MOVIE_JF_ID}/2.vtt"))
+
 
 if __name__ == "__main__":
     unittest.main()

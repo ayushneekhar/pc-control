@@ -86,6 +86,13 @@ data class WatchPlayerUiState(
     val activeSheet: WatchPlayerSheet = WatchPlayerSheet.NONE,
     val castingToTv: Boolean = false,
     val toastMessage: String? = null,
+    // Online subtitle search & download (Jellyfin remote providers)
+    val subtitleSearchOpen: Boolean = false,
+    val subtitleSearchLanguage: String = "eng",
+    val subtitleSearchLoading: Boolean = false,
+    val subtitleSearchError: String? = null,
+    val subtitleSearchResults: List<WatchRemoteSubtitle> = emptyList(),
+    val downloadingSubtitleId: String? = null,
 ) {
     val activeSegment: WatchMediaSegment?
         get() = WatchPlayerHelpers.activeSegment(segments, currentPositionMs)
@@ -135,6 +142,7 @@ class WatchPlayerViewModel(
     private var seekDebounceJob: Job? = null
     private var nextEpCountdownJob: Job? = null
     private var toastClearJob: Job? = null
+    private var subtitleSearchJob: Job? = null
     private var startedReported = false
     private var fallbackAttempted = false
     private var lastLocalSaveMs = 0L
@@ -385,6 +393,12 @@ class WatchPlayerViewModel(
             tp.copy(tileUrlTemplate = playerRepo.resolveTailscaleUrl(tp.tileUrlTemplate))
         }
 
+        val resolvedChapters = info.chapters.map { ch ->
+            ch.copy(
+                imageUrl = ch.imageUrl?.takeIf { it.isNotBlank() }?.let { playerRepo.resolveTailscaleUrl(it) },
+            )
+        }
+
         val startMs = WatchPlayerHelpers.ticksToMs(info.resumePositionTicks)
         val runtimeMs = WatchPlayerHelpers.ticksToMs(info.runtimeTicks)
         pendingInitialSeekMs = startMs
@@ -416,12 +430,17 @@ class WatchPlayerViewModel(
                 subtitleTracks = subEntries,
                 selectedSubtitleId = defaultSubId,
                 hlsAttachedSubtitleId = null,
-                chapters = info.chapters,
+                chapters = resolvedChapters,
                 segments = info.segments,
                 dismissedSegmentKeys = emptySet(),
                 trickplay = resolvedTrickplay,
                 nextEpisode = info.nextEpisode,
                 isBuffering = true,
+                subtitleSearchOpen = false,
+                subtitleSearchLoading = false,
+                subtitleSearchError = null,
+                subtitleSearchResults = emptyList(),
+                downloadingSubtitleId = null,
             )
         }
         startPeriodicProgressSync()
@@ -697,11 +716,126 @@ class WatchPlayerViewModel(
     }
 
     fun openSheet(sheet: WatchPlayerSheet) {
-        _uiState.update { it.copy(activeSheet = sheet, controlsVisible = true) }
+        _uiState.update {
+            it.copy(
+                activeSheet = sheet,
+                controlsVisible = true,
+                subtitleSearchOpen = if (sheet == WatchPlayerSheet.TRACKS) it.subtitleSearchOpen else false,
+            )
+        }
     }
 
     fun closeSheet() {
-        _uiState.update { it.copy(activeSheet = WatchPlayerSheet.NONE) }
+        subtitleSearchJob?.cancel()
+        _uiState.update {
+            it.copy(
+                activeSheet = WatchPlayerSheet.NONE,
+                subtitleSearchOpen = false,
+                subtitleSearchLoading = false,
+            )
+        }
+    }
+
+    fun openSubtitleSearch(language: String = _uiState.value.subtitleSearchLanguage) {
+        val st = _uiState.value
+        val itemId = st.jellyfinItemId.trim()
+        if (st.isOffline || itemId.isEmpty()) return
+        val lang = language.trim().lowercase().ifBlank { "eng" }
+        subtitleSearchJob?.cancel()
+        _uiState.update {
+            it.copy(
+                subtitleSearchOpen = true,
+                subtitleSearchLanguage = lang,
+                subtitleSearchLoading = true,
+                subtitleSearchError = null,
+            )
+        }
+        subtitleSearchJob = viewModelScope.launch {
+            when (val res = playerRepo.searchRemoteSubtitles(itemId, lang)) {
+                is ApiResult.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            subtitleSearchLoading = false,
+                            subtitleSearchError = null,
+                            subtitleSearchResults = res.data.results,
+                        )
+                    }
+                }
+                is ApiResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            subtitleSearchLoading = false,
+                            subtitleSearchError = res.message,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun closeSubtitleSearch() {
+        subtitleSearchJob?.cancel()
+        _uiState.update {
+            it.copy(
+                subtitleSearchOpen = false,
+                subtitleSearchLoading = false,
+                subtitleSearchError = null,
+            )
+        }
+    }
+
+    fun downloadRemoteSubtitle(sub: WatchRemoteSubtitle) {
+        val st = _uiState.value
+        val itemId = st.jellyfinItemId.trim()
+        if (st.isOffline || itemId.isEmpty() || sub.id.isBlank() || st.downloadingSubtitleId != null) return
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(downloadingSubtitleId = sub.id, subtitleSearchError = null) }
+            when (val res = playerRepo.downloadRemoteSubtitle(itemId, sub.id)) {
+                is ApiResult.Success -> {
+                    val prevIds = st.subtitleTracks.map { it.id }.toSet()
+                    val updatedEntries = res.data.subtitleTracks.map { tr ->
+                        PlayerSubtitleEntry(
+                            id = "sub:${tr.index}",
+                            label = tr.displayTitle.ifBlank { tr.language.uppercase().ifBlank { "Subtitle ${tr.index}" } },
+                            language = tr.language,
+                            uri = playerRepo.resolveTailscaleUrl(tr.deliveryUrl),
+                            format = "vtt",
+                            isExternal = tr.isExternal,
+                            isDefault = tr.isDefault,
+                            isForced = tr.isForced,
+                        )
+                    }
+                    val newlyAdded = updatedEntries.firstOrNull { it.id !in prevIds && it.isExternal }
+                        ?: updatedEntries.firstOrNull { it.id !in prevIds }
+                        ?: updatedEntries.lastOrNull { it.isExternal }
+                    playerRepo.clearPlaybackCache()
+                    _uiState.update { cur ->
+                        val nextTracks = if (updatedEntries.isNotEmpty()) updatedEntries else cur.subtitleTracks
+                        val nextSelected = newlyAdded?.id ?: cur.selectedSubtitleId
+                        cur.copy(
+                            subtitleTracks = nextTracks,
+                            selectedSubtitleId = nextSelected,
+                            startPositionMs = cur.currentPositionMs.coerceAtLeast(0L),
+                            streamVersion = if (updatedEntries.isNotEmpty()) cur.streamVersion + 1 else cur.streamVersion,
+                            downloadingSubtitleId = null,
+                            subtitleSearchOpen = false,
+                            activeSheet = WatchPlayerSheet.NONE,
+                            isBuffering = if (updatedEntries.isNotEmpty()) true else cur.isBuffering,
+                        )
+                    }
+                    showToast("Subtitle downloaded")
+                }
+                is ApiResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            downloadingSubtitleId = null,
+                            subtitleSearchError = res.message,
+                        )
+                    }
+                }
+            }
+        }
     }
 
     fun dismissNextEpisode() {

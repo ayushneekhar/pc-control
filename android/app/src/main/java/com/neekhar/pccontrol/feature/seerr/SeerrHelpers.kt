@@ -347,4 +347,22 @@ object SeerrHelpers {
             it.status == SeerrStatus.AVAILABLE || it.status == SeerrStatus.PARTIAL
         }?.seasonNumber ?: pool.first().seasonNumber
     }
+
+    fun mediaBadgePills(badges: WatchMediaBadges?): List<String> {
+        if (badges == null) return emptyList()
+        return buildList {
+            badges.resolution?.trim()?.takeIf { it.isNotEmpty() }?.let { add(it) }
+            badges.videoCodec?.trim()?.takeIf { it.isNotEmpty() }?.let { add(it) }
+            badges.hdr?.trim()?.takeIf { it.isNotEmpty() }?.let { add(it) }
+            badges.audioCodec?.trim()?.takeIf { it.isNotEmpty() }?.let { add(it) }
+            val sizeText = badges.sizeLabel?.trim()?.takeIf { it.isNotEmpty() }
+                ?: badges.sizeBytes?.takeIf { it > 0L }?.let { formatDownloadBytes(it) }
+            if (!sizeText.isNullOrBlank()) add(sizeText)
+        }
+    }
+
+    fun boxSetCountLabel(count: Int): String {
+        val safe = count.coerceAtLeast(0)
+        return if (safe == 1) "1 movie" else "$safe movies"
+    }
 }

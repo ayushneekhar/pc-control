@@ -9,6 +9,7 @@ import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
 import com.neekhar.pccontrol.feature.watch.downloads.WatchDownloadEnqueueResult
 import com.neekhar.pccontrol.feature.watch.downloads.WatchDownloadManager
 import com.neekhar.pccontrol.feature.watch.player.WatchPlayerRepository
+import com.neekhar.pccontrol.feature.watch.player.WatchRemoteSubtitle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -31,9 +32,11 @@ data class SeerrDetailUiState(
     val error: String? = null,
     val overviewExpanded: Boolean = false,
     val submitting: Boolean = false,
-    // Watchlist (My List)
+    // Watchlist (My List) & Watched state
     val inWatchlist: Boolean = false,
     val togglingWatchlist: Boolean = false,
+    val togglingWatched: Boolean = false,
+    val busyEpisodeWatchedId: String? = null,
     // Active Radarr/Sonarr download progress
     val activeDownload: WatchDownloadItem? = null,
     // TV Episode Browser
@@ -54,6 +57,7 @@ data class SeerrDetailUiState(
     val selectedSeasons: Set<Int> = emptySet(),
     val showSeasonSheet: Boolean = false,
     val collectionSheet: SeerrCollectionSheetState = SeerrCollectionSheetState(),
+    val subtitleSheet: WatchSubtitleSheetState = WatchSubtitleSheetState(),
 ) {
     val isTv: Boolean get() = mediaType == "tv"
 
@@ -116,6 +120,7 @@ class SeerrDetailViewModel(
     private var playOnTvClearJob: Job? = null
     private var tailscaleNoticeJob: Job? = null
     private var prefetchJob: Job? = null
+    private var subtitleSearchJob: Job? = null
 
     fun isTailscaleActive(): Boolean =
         transportManager?.resolveTransport()?.let { it == ApiTransport.TAILSCALE } ?: true
@@ -268,6 +273,194 @@ class SeerrDetailViewModel(
                             inWatchlist = wasIn,
                             togglingWatchlist = false,
                             error = res.message,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun toggleWatched() {
+        val current = _uiState.value.item ?: return
+        val jfId = current.jellyfinItemId?.takeIf { it.isNotBlank() }
+            ?: current.resumeJellyfinItemId?.takeIf { it.isNotBlank() && !current.isTv }
+            ?: return
+        if (_uiState.value.togglingWatched) return
+        val wasPlayed = current.played
+        val targetPlayed = !wasPlayed
+
+        _uiState.update { st ->
+            st.copy(
+                togglingWatched = true,
+                item = st.item?.copy(
+                    played = targetPlayed,
+                    resumePositionTicks = if (targetPlayed) 0L else st.item.resumePositionTicks,
+                ),
+            )
+        }
+        viewModelScope.launch {
+            when (val res = repository.setWatched(jfId, targetPlayed)) {
+                is ApiResult.Success -> {
+                    watchPlayerRepository?.clearPlaybackCache()
+                    _uiState.update { st ->
+                        st.copy(
+                            togglingWatched = false,
+                            item = st.item?.copy(
+                                played = res.data.played,
+                                resumePositionTicks = if (res.data.played) 0L else st.item.resumePositionTicks,
+                            ),
+                        )
+                    }
+                    if (normalizedType == "tv") {
+                        val season = _uiState.value.selectedEpisodeSeason
+                        if (season != null) {
+                            loadSeasonEpisodes(season)
+                        }
+                    }
+                }
+                is ApiResult.Error -> {
+                    _uiState.update { st ->
+                        st.copy(
+                            togglingWatched = false,
+                            item = st.item?.copy(played = wasPlayed),
+                            error = res.message,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun toggleEpisodeWatched(episode: WatchEpisode) {
+        val jfId = episode.jellyfinItemId?.takeIf { it.isNotBlank() } ?: return
+        if (_uiState.value.busyEpisodeWatchedId != null) return
+        val wasPlayed = episode.played
+        val targetPlayed = !wasPlayed
+        val season = episode.seasonNumber
+
+        fun applyEpisodePlayed(playedVal: Boolean) {
+            _uiState.update { st ->
+                val curResp = st.episodesBySeason[season] ?: return@update st
+                val updatedEps = curResp.episodes.map { ep ->
+                    if (ep.jellyfinItemId == jfId) {
+                        ep.copy(
+                            played = playedVal,
+                            progressPct = if (playedVal) 0.0 else ep.progressPct,
+                            positionTicks = if (playedVal) 0L else ep.positionTicks,
+                        )
+                    } else {
+                        ep
+                    }
+                }
+                st.copy(
+                    episodesBySeason = st.episodesBySeason + (season to curResp.copy(episodes = updatedEps)),
+                )
+            }
+        }
+
+        _uiState.update { it.copy(busyEpisodeWatchedId = jfId) }
+        applyEpisodePlayed(targetPlayed)
+
+        viewModelScope.launch {
+            when (val res = repository.setWatched(jfId, targetPlayed)) {
+                is ApiResult.Success -> {
+                    watchPlayerRepository?.clearPlaybackCache()
+                    applyEpisodePlayed(res.data.played)
+                    _uiState.update { it.copy(busyEpisodeWatchedId = null) }
+                }
+                is ApiResult.Error -> {
+                    applyEpisodePlayed(wasPlayed)
+                    _uiState.update { it.copy(busyEpisodeWatchedId = null, error = res.message) }
+                }
+            }
+        }
+    }
+
+    fun openSubtitleSearch(jellyfinItemId: String? = null, language: String = _uiState.value.subtitleSheet.language) {
+        val current = _uiState.value.item
+        val targetId = jellyfinItemId?.takeIf { it.isNotBlank() }
+            ?: current?.jellyfinItemId?.takeIf { it.isNotBlank() }
+            ?: current?.resumeJellyfinItemId?.takeIf { it.isNotBlank() }
+            ?: return
+        val lang = language.trim().lowercase().ifBlank { "eng" }
+        subtitleSearchJob?.cancel()
+        _uiState.update {
+            it.copy(
+                subtitleSheet = it.subtitleSheet.copy(
+                    visible = true,
+                    jellyfinItemId = targetId,
+                    language = lang,
+                    loading = true,
+                    error = null,
+                    notice = null,
+                ),
+            )
+        }
+        subtitleSearchJob = viewModelScope.launch {
+            when (val res = repository.searchRemoteSubtitles(targetId, lang)) {
+                is ApiResult.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            subtitleSheet = it.subtitleSheet.copy(
+                                loading = false,
+                                error = null,
+                                results = res.data.results,
+                            ),
+                        )
+                    }
+                }
+                is ApiResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            subtitleSheet = it.subtitleSheet.copy(
+                                loading = false,
+                                error = res.message,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun closeSubtitleSearch() {
+        if (_uiState.value.subtitleSheet.downloadingSubtitleId != null) return
+        subtitleSearchJob?.cancel()
+        _uiState.update { it.copy(subtitleSheet = WatchSubtitleSheetState()) }
+    }
+
+    fun downloadRemoteSubtitle(sub: WatchRemoteSubtitle) {
+        val sheet = _uiState.value.subtitleSheet
+        if (sheet.jellyfinItemId.isBlank() || sub.id.isBlank() || sheet.downloadingSubtitleId != null) return
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    subtitleSheet = it.subtitleSheet.copy(
+                        downloadingSubtitleId = sub.id,
+                        error = null,
+                        notice = null,
+                    ),
+                )
+            }
+            when (val res = repository.downloadRemoteSubtitle(sheet.jellyfinItemId, sub.id)) {
+                is ApiResult.Success -> {
+                    watchPlayerRepository?.clearPlaybackCache()
+                    _uiState.update {
+                        it.copy(
+                            subtitleSheet = it.subtitleSheet.copy(
+                                downloadingSubtitleId = null,
+                                notice = "Subtitle downloaded (${res.data.subtitleTracks.size} tracks available)",
+                            ),
+                        )
+                    }
+                }
+                is ApiResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            subtitleSheet = it.subtitleSheet.copy(
+                                downloadingSubtitleId = null,
+                                error = res.message,
+                            ),
                         )
                     }
                 }

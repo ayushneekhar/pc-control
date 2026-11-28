@@ -236,4 +236,36 @@ class SeerrHelpersTest {
             ),
         )
     }
+
+    @Test
+    fun mediaBadgePills_and_boxSetCountLabel_formatCleanly() {
+        assertEquals(emptyList<String>(), SeerrHelpers.mediaBadgePills(null))
+        val full = WatchMediaBadges(
+            resolution = "4K",
+            videoCodec = "HEVC",
+            hdr = "Dolby Vision",
+            audioCodec = "TrueHD 7.1",
+            sizeBytes = 19_649_475_379L,
+            sizeLabel = "18.3 GB",
+        )
+        assertEquals(
+            listOf("4K", "HEVC", "Dolby Vision", "TrueHD 7.1", "18.3 GB"),
+            SeerrHelpers.mediaBadgePills(full),
+        )
+        val fallbackSize = WatchMediaBadges(
+            resolution = "1080p",
+            videoCodec = "H.264",
+            hdr = null,
+            audioCodec = "EAC3 5.1",
+            sizeBytes = 2L * 1024L * 1024L * 1024L,
+            sizeLabel = null,
+        )
+        assertEquals(
+            listOf("1080p", "H.264", "EAC3 5.1", "2.0 GB"),
+            SeerrHelpers.mediaBadgePills(fallbackSize),
+        )
+        assertEquals("0 movies", SeerrHelpers.boxSetCountLabel(0))
+        assertEquals("1 movie", SeerrHelpers.boxSetCountLabel(1))
+        assertEquals("6 movies", SeerrHelpers.boxSetCountLabel(6))
+    }
 }

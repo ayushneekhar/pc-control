@@ -50,6 +50,40 @@ data class WatchSubtitleTrack(
 data class WatchChapter(
     val name: String = "",
     val startPositionTicks: Long = 0L,
+    val imageUrl: String? = null,
+)
+
+@Serializable
+data class WatchRemoteSubtitle(
+    val id: String = "",
+    val name: String = "",
+    val format: String = "",
+    val language: String = "eng",
+    val downloadCount: Int? = null,
+    val communityRating: Double? = null,
+    val isHashMatch: Boolean = false,
+    val providerName: String = "",
+)
+
+@Serializable
+data class WatchSubtitleSearchResponse(
+    val jellyfinItemId: String = "",
+    val language: String = "eng",
+    val results: List<WatchRemoteSubtitle> = emptyList(),
+)
+
+@Serializable
+data class WatchSubtitleDownloadRequest(
+    val jellyfinItemId: String,
+    val subtitleId: String,
+)
+
+@Serializable
+data class WatchSubtitleDownloadResponse(
+    val ok: Boolean = false,
+    val jellyfinItemId: String = "",
+    val subtitleId: String = "",
+    val subtitleTracks: List<WatchSubtitleTrack> = emptyList(),
 )
 
 @Serializable
@@ -144,6 +178,7 @@ enum class WatchPlayerSheet {
     NONE,
     QUALITY,
     TRACKS,
+    CHAPTERS,
     SPEED,
 }
 
@@ -151,6 +186,13 @@ object WatchPlayerHelpers {
     const val TICKS_PER_MS = 10_000L
     const val NEXT_EPISODE_THRESHOLD_MS = 15_000L
     val SPEED_OPTIONS: List<Float> = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+    val SUBTITLE_LANGUAGES: List<Pair<String, String>> = listOf(
+        "eng" to "English",
+        "hin" to "Hindi",
+        "spa" to "Spanish",
+        "jpn" to "Japanese",
+        "fre" to "French",
+    )
 
     private val UNSUPPORTED_DIRECT_AUDIO_CODECS: Set<String> = setOf(
         "truehd",
@@ -327,6 +369,23 @@ object WatchPlayerHelpers {
         )
     }
 
+    fun activeChapterIndex(
+        chapters: List<WatchChapter>,
+        positionMs: Long,
+    ): Int {
+        if (chapters.isEmpty() || positionMs < 0L) return -1
+        var matchedIdx = -1
+        var bestStart = Long.MIN_VALUE
+        chapters.forEachIndexed { idx, ch ->
+            val startMs = ticksToMs(ch.startPositionTicks)
+            if (startMs <= positionMs && startMs >= bestStart) {
+                bestStart = startMs
+                matchedIdx = idx
+            }
+        }
+        return matchedIdx
+    }
+
     fun activeChapterTitle(
         chapters: List<WatchChapter>,
         positionMs: Long,
@@ -342,6 +401,26 @@ object WatchPlayerHelpers {
             }
         }
         return matched?.name?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    fun formatSubtitleMeta(sub: WatchRemoteSubtitle): String {
+        return buildList {
+            sub.format.trim().takeIf { it.isNotEmpty() }?.let { add(it.uppercase(Locale.US)) }
+            sub.providerName.trim().takeIf { it.isNotEmpty() }?.let { add(it) }
+            val dl = sub.downloadCount
+            if (dl != null && dl > 0) {
+                val formatted = when {
+                    dl >= 1_000_000 -> String.format(Locale.US, "%.1fM", dl / 1_000_000.0)
+                    dl >= 1_000 -> String.format(Locale.US, "%.1fk", dl / 1_000.0)
+                    else -> dl.toString()
+                }
+                add("$formatted dl")
+            }
+            val rating = sub.communityRating
+            if (rating != null && rating > 0.0) {
+                add(String.format(Locale.US, "★ %.1f", rating))
+            }
+        }.joinToString(" · ")
     }
 
     fun selectInitialQuality(

@@ -84,3 +84,9 @@ data class ResolvedChatTarget(
     val headers: Map<String, String>,
     val isCustom: Boolean,
 )
+
+data class ResolvedApiTarget(
+    val transport: ApiTransport,
+    val baseUrl: String,
+    val headers: Map<String, String>,
+)

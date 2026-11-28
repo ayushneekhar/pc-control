@@ -254,7 +254,11 @@ fun SettingsScreen(
                             PcListRow(
                                 icon = Icons.Rounded.Dns,
                                 title = "Connection",
-                                subtitle = if (!state.connectionError.isNullOrBlank()) "Offline" else null,
+                                subtitle = if (!state.connectionError.isNullOrBlank()) {
+                                    "Offline · ${state.activeTransport.label}"
+                                } else {
+                                    state.activeTransport.label
+                                },
                                 trailing = hostSummary,
                                 showChevron = true,
                                 showDivider = true,

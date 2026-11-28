@@ -498,6 +498,22 @@ class ChatHistoryStore:
             self._append_raw_locked({"id": aid, "_deleted": True})
             return aid
 
+    def delete_message(self, msg_id: str) -> dict[str, Any] | None:
+        """Delete a message by id from memory and persist a tombstone record."""
+        if not msg_id:
+            return None
+        with self._lock:
+            idx = next((i for i, m in enumerate(self._messages) if m.get("id") == msg_id), None)
+            if idx is None:
+                return None
+            removed = self._messages.pop(idx)
+            self._by_id.pop(msg_id, None)
+            cid = removed.get("client_id")
+            if isinstance(cid, str) and cid and self._by_client_id.get(cid) == msg_id:
+                self._by_client_id.pop(cid, None)
+            self._append_raw_locked({"id": msg_id, "_deleted": True})
+            return dict(removed)
+
 
 # ---------------------------------------------------------------- Gemini (T3 Code MCP) adapter
 
@@ -1420,6 +1436,27 @@ class T3ThreadAdapter:
         if trid:
             args["targetRunId"] = trid
         res = self.client.call_tool("t3_queue", args)
+        return res if isinstance(res, dict) else {}
+
+    def cancel_queued_run(
+        self,
+        *,
+        thread_id: str,
+        queued_run_id: str,
+    ) -> dict[str, Any]:
+        """Cancel an already-submitted T3 queued run before it starts running."""
+        tid = thread_id.strip()
+        qrid = queued_run_id.strip()
+        if not tid or not qrid:
+            raise RuntimeError("thread_id and queued_run_id are required")
+        res = self.client.call_tool(
+            "t3_queue",
+            {
+                "action": "cancel",
+                "threadId": tid,
+                "queuedRunId": qrid,
+            },
+        )
         return res if isinstance(res, dict) else {}
 
     def send(
@@ -2491,24 +2528,27 @@ class ChatManager:
             if self._callable_accepts_param(getattr(adapter, "send", None), "get_promoted_run_id"):
                 send_kwargs["get_promoted_run_id"] = get_promoted_run_id
             raw_reply = adapter.send(text, **send_kwargs)
-            reply = str(raw_reply or "").strip() or "(no response)"
-            final_progress = _build_final_progress()
-            msg_rec = {
-                "id": self._new_id(),
-                "role": "assistant",
-                "engine": engine,
-                "text": reply,
-                "created_at": float(self.clock()),
-                "status": "done",
-                "error": None,
-                "reply_to": user_id,
-            }
-            if final_progress is not None:
-                msg_rec["progress"] = final_progress
-            self.store.append(msg_rec)
-            self._push_reply(label, reply, is_error=False)
+            if job.get("cancelled") or job.get("stopped"):
+                msg_rec = None
+            else:
+                reply = str(raw_reply or "").strip() or "(no response)"
+                final_progress = _build_final_progress()
+                msg_rec = {
+                    "id": self._new_id(),
+                    "role": "assistant",
+                    "engine": engine,
+                    "text": reply,
+                    "created_at": float(self.clock()),
+                    "status": "done",
+                    "error": None,
+                    "reply_to": user_id,
+                }
+                if final_progress is not None:
+                    msg_rec["progress"] = final_progress
+                self.store.append(msg_rec)
+                self._push_reply(label, reply, is_error=False)
         except Exception as exc:
-            if job.get("stopped"):
+            if job.get("stopped") or job.get("cancelled"):
                 msg_rec = None
             else:
                 err = _clip(str(exc) or type(exc).__name__, 300)
@@ -3131,6 +3171,149 @@ class ChatManager:
             "user_message": pub,
             "running": still_running,
         }
+
+    def delete_queued(self, msg_id: str) -> tuple[int, dict[str, Any]]:
+        """Delete a queued user message (either from the local queue or a T3-queued active run)."""
+        if not isinstance(msg_id, str) or not msg_id.strip():
+            return 400, {"error": "id is required"}
+        msg_id = msg_id.strip()
+
+        msg = self.store.get_by_id(msg_id)
+        if msg is None or msg.get("role") != "user":
+            return 404, {"error": "message not found"}
+
+        mode = ""
+        active_job: dict[str, Any] | None = None
+        t3_thread_id: str | None = None
+        t3_queued_run_id: str | None = None
+        engine = str(msg.get("engine") or self._current_engine())
+
+        with self._lock:
+            queued_idx = next(
+                (i for i, j in enumerate(self._queue) if j.get("user_id") == msg_id),
+                None,
+            )
+            if queued_idx is not None:
+                job = self._queue[queued_idx]
+                engine = str(job.get("engine") or engine)
+                del self._queue[queued_idx]
+                if not job.get("in_flight_released"):
+                    job["in_flight_released"] = True
+                    self._in_flight = max(0, self._in_flight - 1)
+                self.store.delete_message(msg_id)
+                self.store.remove_pending_assistant_for(msg_id)
+                queued_ids = self._queued_message_ids_locked()
+                still_running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+                mode = "local_deleted"
+            elif self._active_job is not None and self._active_job.get("user_id") == msg_id:
+                active_job = self._active_job
+                t3_queued_run_id = active_job.get("t3_queued_run_id")
+                t3_thread_id = active_job.get("t3_thread_id")
+                engine = str(active_job.get("engine") or engine)
+                if t3_queued_run_id and t3_thread_id:
+                    mode = "t3_cancel"
+                else:
+                    return 409, {"error": "Message already started running"}
+            else:
+                return 409, {"error": "Message is not queued"}
+
+        if mode == "local_deleted":
+            now_ts = int(self.clock())
+            self._emit("message_deleted", {"id": msg_id, "ts": now_ts})
+            self._emit(
+                "state",
+                {
+                    "running": still_running,
+                    "engine": engine,
+                    "queued_ids": queued_ids,
+                    "ts": now_ts,
+                },
+            )
+            return 200, {
+                "ok": True,
+                "id": msg_id,
+                "deleted": True,
+                "queued_ids": queued_ids,
+                "running": still_running,
+            }
+
+        # mode == "t3_cancel"
+        assert active_job is not None and t3_thread_id and t3_queued_run_id
+        adapter = self.gemini_adapter if engine == "gemini" else self.claude_adapter
+        try:
+            if hasattr(adapter, "cancel_queued_run"):
+                adapter.cancel_queued_run(thread_id=t3_thread_id, queued_run_id=t3_queued_run_id)
+            elif hasattr(adapter, "client") and hasattr(adapter.client, "call_tool"):
+                adapter.client.call_tool(
+                    "t3_queue",
+                    {
+                        "action": "cancel",
+                        "threadId": t3_thread_id,
+                        "queuedRunId": t3_queued_run_id,
+                    },
+                )
+            else:
+                return 409, {"error": "Message cannot be cancelled"}
+        except Exception as exc:
+            err_lower = str(exc).lower()
+            is_not_queued = _is_not_running_steer_error(exc) or any(
+                p in err_lower for p in ("already running", "no longer queued", "not queued", "not found")
+            )
+            if is_not_queued:
+                with self._lock:
+                    if self._active_job is active_job:
+                        active_job["t3_queued_run_id"] = None
+                    cur_u = self.store.get_by_id(msg_id)
+                    updated_u = self.store.update(msg_id, queued=False) if (cur_u and cur_u.get("queued")) else None
+                    still_running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+                if updated_u is not None:
+                    self._emit(
+                        "message",
+                        {
+                            "message": _public_message(updated_u),
+                            "running": still_running,
+                            "engine": engine,
+                            "ts": int(self.clock()),
+                        },
+                    )
+                return 409, {"error": "Message already started running"}
+            return 502, {"error": _clip(str(exc) or "Failed to cancel queued run", 240)}
+
+        with self._lock:
+            active_job["cancelled"] = True
+            active_job["stopped"] = True
+            active_job["t3_queued_run_id"] = None
+            self.store.delete_message(msg_id)
+            self.store.remove_pending_assistant_for(msg_id)
+            queued_ids = self._queued_message_ids_locked()
+            still_running = self._in_flight > 0 or bool(self._queue) or self.store.has_pending()
+
+        now_ts = int(self.clock())
+        self._emit("message_deleted", {"id": msg_id, "ts": now_ts})
+        self._emit(
+            "state",
+            {
+                "running": still_running,
+                "engine": engine,
+                "queued_ids": queued_ids,
+                "ts": now_ts,
+            },
+        )
+        return 200, {
+            "ok": True,
+            "id": msg_id,
+            "deleted": True,
+            "queued_ids": queued_ids,
+            "running": still_running,
+        }
+
+    def handle_delete_queued(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        raw_id = body.get("id")
+        if raw_id is None:
+            raw_id = body.get("message_id")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            return 400, {"error": "id is required"}
+        return self.delete_queued(raw_id.strip())
 
     def handle_push(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         raw_text = body.get("text")

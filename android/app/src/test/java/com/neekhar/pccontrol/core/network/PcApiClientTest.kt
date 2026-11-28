@@ -81,12 +81,20 @@ class PcApiClientTest {
             AppPrefs.normalizeServerUrl(" https://my-host.ts.net/// "),
         )
         assertEquals(
-            "https://agent.neekhar.dev",
-            AppPrefs.normalizeChatUrl("https://agent.neekhar.dev/pc/api/chat/messages"),
+            "https://api.neekhar.dev",
+            AppPrefs.normalizeApiUrl("https://api.neekhar.dev/pc/api/info"),
         )
         assertEquals(
-            "https://agent.neekhar.dev",
-            AppPrefs.normalizeChatUrl("https://agent.neekhar.dev///"),
+            "https://api.neekhar.dev",
+            AppPrefs.normalizeApiUrl("   "),
+        )
+        assertEquals(
+            "https://api.neekhar.dev",
+            AppPrefs.normalizeChatUrl("https://api.neekhar.dev/pc/api/chat/messages"),
+        )
+        assertEquals(
+            "https://api.neekhar.dev",
+            AppPrefs.normalizeChatUrl("https://api.neekhar.dev///"),
         )
         assertEquals("", AppPrefs.normalizeChatUrl("  "))
     }
@@ -104,10 +112,10 @@ class PcApiClientTest {
 
         val customTarget = PcApiClient.resolveChatTarget(
             defaultBaseUrl = "https://hp.ts.net",
-            customChatUrl = "https://agent.neekhar.dev/pc/api/chat",
+            customChatUrl = "https://api.neekhar.dev/pc/api/chat",
             chatToken = "secret-tok",
         )
-        assertEquals("https://agent.neekhar.dev", customTarget.baseUrl)
+        assertEquals("https://api.neekhar.dev", customTarget.baseUrl)
         assertEquals(mapOf("Authorization" to "Bearer secret-tok"), customTarget.headers)
         assertTrue(customTarget.isCustom)
 
@@ -116,7 +124,7 @@ class PcApiClientTest {
             url = "/pc/api/chat/file/abc",
             target = customTarget,
         )
-        assertEquals("https://agent.neekhar.dev/pc/api/chat/file/abc", relUrl)
+        assertEquals("https://api.neekhar.dev/pc/api/chat/file/abc", relUrl)
         assertEquals(mapOf("Authorization" to "Bearer secret-tok"), relHeaders)
 
         // Third-party absolute URL does NOT receive bearer token
@@ -126,6 +134,11 @@ class PcApiClientTest {
         )
         assertEquals("https://cdn.example.com/pic.png", extUrl)
         assertTrue(extHeaders.isEmpty())
+
+        // Strict origin check prevents prefix spoofing
+        assertTrue(PcApiClient.isSameOrigin("https://api.neekhar.dev/pc/api/info", "https://api.neekhar.dev"))
+        assertFalse(PcApiClient.isSameOrigin("https://api.neekhar.dev.evil.com/pc/api/info", "https://api.neekhar.dev"))
+        assertFalse(PcApiClient.isSameOrigin("https://hp.ts.net/pc/api/info", "https://api.neekhar.dev"))
     }
 
     @Test
@@ -329,6 +342,70 @@ class PcApiClientTest {
             assertTrue(gwRes is ApiResult.Error)
             assertEquals(503, (gwRes as ApiResult.Error).statusCode)
             assertEquals(1, gatewayAttempts.get())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun cloudflareFirst_attachesScopedHeadersAndNeverLeaksToExternalOrTailscale() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val prefs = AppPrefs(
+                dataStore = FakePreferencesDataStore(
+                    initial = preferencesOf(
+                        stringPreferencesKey("server_url") to "https://host.ts.net",
+                        stringPreferencesKey("api_url") to "https://api.neekhar.dev",
+                        stringPreferencesKey("api_token") to "my-api-tok",
+                        stringPreferencesKey("cf_access_client_id") to "cf-id",
+                        stringPreferencesKey("cf_access_client_secret") to "cf-sec",
+                    ),
+                ),
+                scope = scope,
+            )
+            val seen = mutableListOf<Triple<String, String?, String?>>()
+            val okHttp = OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    val r = chain.request()
+                    seen += Triple(r.url.toString(), r.header("Authorization"), r.header("CF-Access-Client-Id"))
+                    jsonResponse(chain, 200, """{"ok":true}""")
+                }
+                .build()
+            val transport = ApiTransportManager(
+                prefs = prefs,
+                probeClient = okHttp,
+                scope = scope,
+                vpnDetector = { false },
+            )
+            val client = PcApiClient(
+                prefs = prefs,
+                okHttpClient = okHttp,
+                getRetryBackoffMs = 0L,
+                transportManager = transport,
+            )
+
+            // 1. Relative /pc/api/* goes to Cloudflare with both tokens
+            val apiRes = withTimeout(5_000L) { client.getJson<Map<String, Boolean>>("/pc/api/info") }
+            assertTrue(apiRes is ApiResult.Success)
+            assertEquals(ApiTransport.CLOUDFLARE, client.activeTransport.value)
+            assertEquals(Triple("https://api.neekhar.dev/pc/api/info", "Bearer my-api-tok", "cf-id"), seen.last())
+
+            // 2. forceTailscale goes to serverUrl with ZERO Cloudflare auth headers
+            val tsRes = withTimeout(5_000L) {
+                client.getJson<Map<String, Boolean>>("/pc/api/public-config", forceTailscale = true)
+            }
+            assertTrue(tsRes is ApiResult.Success)
+            assertEquals(Triple("https://host.ts.net/pc/api/public-config", null, null), seen.last())
+
+            // 3. External URL (e.g. GitHub) receives ZERO Cloudflare auth headers
+            val extRes = withTimeout(5_000L) {
+                client.getJson<Map<String, Boolean>>("https://github.com/ayushneekhar/pc-control/releases/latest/download/version.json")
+            }
+            assertTrue(extRes is ApiResult.Success)
+            assertEquals(
+                Triple("https://github.com/ayushneekhar/pc-control/releases/latest/download/version.json", null, null),
+                seen.last(),
+            )
         } finally {
             scope.cancel()
         }

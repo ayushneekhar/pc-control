@@ -93,10 +93,21 @@ class AppPrefsTest {
             assertEquals("https://initial.ts.net", initial.serverUrl)
 
             prefs.setServerUrl("https://updated.ts.net///")
+            prefs.setPublicApiConfig(
+                rawUrl = "https://api.neekhar.dev/pc/api/info",
+                rawApiToken = "tok-1",
+                rawCfClientId = "cf-id-1",
+                rawCfClientSecret = "cf-sec-1",
+            )
             prefs.setPushStatus(token = "fcm-updated", error = null)
 
             val afterUpdate = withTimeout(5_000L) { prefs.awaitLoaded() }
             assertEquals("https://updated.ts.net", afterUpdate.serverUrl)
+            assertEquals("https://api.neekhar.dev", afterUpdate.apiUrl)
+            assertEquals("tok-1", afterUpdate.apiToken)
+            assertEquals("cf-id-1", afterUpdate.cfAccessClientId)
+            assertEquals("cf-sec-1", afterUpdate.cfAccessClientSecret)
+            assertTrue(afterUpdate.isPublicApiConfigured)
             assertEquals("fcm-updated", afterUpdate.pushToken)
         } finally {
             scope.cancel()

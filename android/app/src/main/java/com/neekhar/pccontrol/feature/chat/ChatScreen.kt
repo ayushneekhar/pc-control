@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.ErrorOutline
@@ -120,22 +121,6 @@ fun ChatScreen(
     var focusTrigger by remember { mutableIntStateOf(0) }
     var hasInitialScrolled by remember { mutableStateOf(false) }
 
-    val openUrl: (String) -> Unit = remember(onOpenExternalUrl, context) {
-        { url ->
-            val resolved = ChatLogic.resolveChatLinkUrl(url)
-            if (resolved != null) {
-                if (onOpenExternalUrl != null) {
-                    onOpenExternalUrl(resolved)
-                } else {
-                    runCatching {
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(resolved))
-                        context.startActivity(intent)
-                    }
-                }
-            }
-        }
-    }
-
     fun copyToClipboard(text: String, toastLabel: String = "Copied") {
         val clean = text.trim()
         if (clean.isEmpty()) return
@@ -143,6 +128,27 @@ fun ChatScreen(
         cm?.setPrimaryClip(ClipData.newPlainText("PC Control", clean))
         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
         viewModel.notifyCopied(toastLabel)
+    }
+
+    val openUrl: (String) -> Unit = remember(onOpenExternalUrl, context) {
+        { url ->
+            val localFilePath = ChatLogic.resolveLocalFilePath(url)
+            if (localFilePath != null) {
+                copyToClipboard(localFilePath, "Copied path")
+            } else {
+                val resolved = ChatLogic.resolveChatLinkUrl(url)
+                if (resolved != null) {
+                    if (onOpenExternalUrl != null) {
+                        onOpenExternalUrl(resolved)
+                    } else {
+                        runCatching {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(resolved))
+                            context.startActivity(intent)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Foreground push suppression + live SSE lifecycle management
@@ -321,7 +327,7 @@ fun ChatScreen(
                         start = 18.dp,
                         end = 18.dp,
                         top = statusBarTop + 56.dp,
-                        bottom = composerHeightDp + 8.dp + if (hasFloatingAttachments) 76.dp else 0.dp,
+                        bottom = (composerHeightDp - 4.dp).coerceAtLeast(0.dp) + if (hasFloatingAttachments) 76.dp else 0.dp,
                     ),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                     modifier = Modifier.fillMaxSize(),
@@ -369,8 +375,11 @@ fun ChatScreen(
                             val canRetry = item.isAssistant &&
                                 item.isError &&
                                 ChatLogic.findPrecedingUserMessage(listItems, index) != null
-                            val isQueued = state.running && item.isUser && item.queued
-                            val canSteer = ChatLogic.canSteerQueuedMessage(item, state.running)
+                            val isQueued = state.running && item.isUser && (item.queued || item.id in state.queuedIds)
+                            val canSteer = ChatLogic.canSteerQueuedMessage(
+                                if (isQueued && !item.queued) item.copy(queued = true) else item,
+                                state.running,
+                            )
 
                             ChatMessageItem(
                                 msg = item,
@@ -660,6 +669,7 @@ fun ChatScreen(
                 uploadingCount = state.uploadingCount,
                 replyTo = state.replyTo,
                 editingState = state.editingState,
+                editingQueued = state.editingQueuedMessageId != null,
                 focusTrigger = focusTrigger,
                 onDraftChange = viewModel::onDraftChanged,
                 onSend = viewModel::sendCurrentDraft,
@@ -783,16 +793,33 @@ fun ChatScreen(
                 )
 
                 if (target.isUser) {
+                    val isTargetQueued = !target.optimistic && (target.queued || target.id in state.queuedIds)
                     MessageActionRow(
                         icon = Icons.Rounded.Edit,
                         iconTint = colors.accent,
                         title = "Edit & resend",
-                        subtitle = "Modify in composer before sending",
+                        subtitle = if (isTargetQueued) {
+                            "Replace this queued message in composer"
+                        } else {
+                            "Modify in composer before sending"
+                        },
                         onClick = {
                             actionSheetMsg = null
                             viewModel.startEditMessage(target)
                         },
                     )
+                    if (isTargetQueued) {
+                        MessageActionRow(
+                            icon = Icons.Rounded.DeleteOutline,
+                            iconTint = colors.bad,
+                            title = "Delete",
+                            subtitle = "Remove this queued message",
+                            onClick = {
+                                actionSheetMsg = null
+                                viewModel.deleteQueuedMessage(target)
+                            },
+                        )
+                    }
                     MessageActionRow(
                         icon = Icons.Rounded.Refresh,
                         iconTint = colors.textDim,

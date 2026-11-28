@@ -1,6 +1,8 @@
 package com.neekhar.pccontrol.feature.chat
 
 import android.util.Base64
+import com.neekhar.pccontrol.core.network.ApiResult
+import com.neekhar.pccontrol.core.network.ApiTransport
 import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.storage.LocalCache
 import kotlinx.coroutines.CancellationException
@@ -8,13 +10,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -24,6 +29,8 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
 class ChatApiException(
@@ -65,21 +72,12 @@ class ChatRepository(
 
     // ---------------------------------------------------------------- Target resolution
 
-    private fun resolveTarget(): ChatTarget {
-        val resolved = apiClient.resolveChatTarget()
-        return ChatTarget(
-            baseUrl = resolved.baseUrl,
-            headers = resolved.headers,
-            custom = resolved.isCustom,
-        )
-    }
-
     /**
-     * Resolves an attachment or inline image URL against the active chat target, attaching the
-     * Bearer token ONLY when the resolved URL belongs to the chat origin.
+     * Resolves an attachment or inline image URL against the active API target, attaching
+     * Cloudflare auth headers ONLY when the resolved URL belongs to `apiUrl`.
      */
     fun resolveAttachmentSource(url: String): ChatAttachmentSource {
-        val (uri, headers) = apiClient.resolveChatAttachment(url)
+        val (uri, headers) = apiClient.resolveAuthenticatedImage(url)
         return ChatAttachmentSource(uri = uri, headers = headers)
     }
 
@@ -111,59 +109,29 @@ class ChatRepository(
         path: String,
         jsonBody: String? = null,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
-    ): String = withContext(Dispatchers.IO) {
-        val target = resolveTarget()
-        val url = "${target.baseUrl}$path"
-        val reqBuilder = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-        for ((k, v) in target.headers) {
-            reqBuilder.header(k, v)
+    ): String {
+        val reqBody = when (method) {
+            "POST", "PUT" -> (jsonBody ?: "{}").toRequestBody(jsonMediaType)
+            else -> null
         }
-        when (method) {
-            "GET" -> reqBuilder.get()
-            "POST" -> {
-                val body = (jsonBody ?: "{}").toRequestBody(jsonMediaType)
-                reqBuilder.post(body)
+        return when (val res = apiClient.executeRaw(
+            method = method,
+            pathOrUrl = path,
+            requestBody = reqBody,
+            timeoutMs = timeoutMs,
+        )) {
+            is ApiResult.Success -> res.data
+            is ApiResult.Error -> {
+                val serverMsg = runCatching {
+                    val raw = res.rawBody
+                    if (!raw.isNullOrBlank()) json.decodeFromString<ChatErrorPayload>(raw).error else null
+                }.getOrNull()
+                throw ChatApiException(
+                    statusCode = res.statusCode,
+                    message = serverMsg?.takeIf { it.isNotBlank() } ?: res.message,
+                    rawBody = res.rawBody?.takeIf { it.isNotBlank() },
+                )
             }
-
-            "DELETE" -> reqBuilder.delete()
-            else -> error("Unsupported HTTP method: $method")
-        }
-
-        val client = baseHttpClient.newBuilder()
-            .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
-            .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
-            .writeTimeout(timeoutMs, TimeUnit.MILLISECONDS)
-            .callTimeout(timeoutMs, TimeUnit.MILLISECONDS)
-            .build()
-
-        try {
-            client.newCall(reqBuilder.build()).execute().use { resp ->
-                val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) {
-                    val serverMsg = runCatching {
-                        if (text.isNotBlank()) json.decodeFromString<ChatErrorPayload>(text).error else null
-                    }.getOrNull()
-                    throw ChatApiException(
-                        statusCode = resp.code,
-                        message = serverMsg?.takeIf { it.isNotBlank() } ?: "HTTP ${resp.code}",
-                        rawBody = text.takeIf { it.isNotBlank() },
-                    )
-                }
-                text
-            }
-        } catch (e: ChatApiException) {
-            throw e
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            val friendly = if (target.custom) {
-                "Can't reach chat endpoint (${e.message ?: e.javaClass.simpleName})"
-            } else {
-                "Can't reach the laptop. Is Tailscale connected? (${e.message ?: e.javaClass.simpleName})"
-            }
-            throw ChatApiException(statusCode = 0, message = friendly)
         }
     }
 
@@ -199,6 +167,12 @@ class ChatRepository(
     suspend fun steerMessage(messageId: String): ChatSteerResponse {
         val req = ChatSteerRequest(messageId = messageId)
         val raw = executeRequest("POST", "/pc/api/chat/steer", json.encodeToString(req))
+        return json.decodeFromString(raw)
+    }
+
+    suspend fun deleteQueuedMessage(messageId: String): ChatDeleteQueuedResponse {
+        val req = ChatDeleteQueuedRequest(id = messageId)
+        val raw = executeRequest("POST", "/pc/api/chat/queued/delete", json.encodeToString(req))
         return json.decodeFromString(raw)
     }
 
@@ -324,69 +298,109 @@ class ChatRepository(
 
     /**
      * Opens a resilient Server-Sent Events stream to `/pc/api/chat/events` with automatic
-     * reconnect backoff (1.5s -> 15s) and watchdog read timeout (65s).
+     * reconnect backoff (1.5s -> 15s), immediate reconnect on Cloudflare/Tailscale transport
+     * switches, and a watchdog read timeout (65s).
      */
-    fun observeChatEvents(): Flow<ChatEventStreamItem> = flow {
-        var retryDelayMs = SSE_INITIAL_RETRY_MS
-        while (currentCoroutineContext().isActive) {
-            val target = resolveTarget()
-            val reqBuilder = Request.Builder()
-                .url("${target.baseUrl}/pc/api/chat/events")
-                .header("Accept", "text/event-stream")
-                .header("Cache-Control", "no-cache")
-            for ((k, v) in target.headers) {
-                reqBuilder.header(k, v)
+    fun observeChatEvents(): Flow<ChatEventStreamItem> = channelFlow {
+        val activeCallRef = AtomicReference<Call?>(null)
+        val activeTransportRef = AtomicReference<ApiTransport?>(null)
+        val transportSwitched = AtomicBoolean(false)
+
+        val transportWatcher = launch(Dispatchers.IO) {
+            apiClient.activeTransport.drop(1).collect { newTransport ->
+                val opened = activeTransportRef.get()
+                if (opened != null && newTransport != opened) {
+                    transportSwitched.set(true)
+                    activeCallRef.get()?.cancel()
+                }
             }
+        }
 
-            val sseClient = baseHttpClient.newBuilder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(SSE_READ_WATCHDOG_SEC, TimeUnit.SECONDS)
-                .writeTimeout(15, TimeUnit.SECONDS)
-                .callTimeout(0, TimeUnit.MILLISECONDS)
-                .build()
+        try {
+            var retryDelayMs = SSE_INITIAL_RETRY_MS
+            while (currentCoroutineContext().isActive) {
+                transportSwitched.set(false)
+                val target = apiClient.resolveApiTarget()
+                activeTransportRef.set(target.transport)
+                val reqBuilder = Request.Builder()
+                    .url("${target.baseUrl}/pc/api/chat/events")
+                    .header("Accept", "text/event-stream")
+                    .header("Cache-Control", "no-cache")
+                    .header("User-Agent", PcApiClient.USER_AGENT)
+                for ((k, v) in target.headers) {
+                    reqBuilder.header(k, v)
+                }
 
-            val call = sseClient.newCall(reqBuilder.build())
-            var connectedEmitted = false
-            try {
-                call.execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        throw IOException("SSE HTTP ${resp.code}")
-                    }
-                    val source = resp.body?.source() ?: throw IOException("Empty SSE body")
-                    val buf = StringBuilder()
+                val sseClient = baseHttpClient.newBuilder()
+                    .connectTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(SSE_READ_WATCHDOG_SEC, TimeUnit.SECONDS)
+                    .writeTimeout(15, TimeUnit.SECONDS)
+                    .callTimeout(0, TimeUnit.MILLISECONDS)
+                    .build()
 
-                    while (currentCoroutineContext().isActive && !source.exhausted()) {
-                        val line = source.readUtf8Line() ?: break
-                        buf.append(line).append('\n')
-                        if (line.isEmpty()) {
-                            val parsed = ChatLogic.parseChatSseBlocks(buf.toString(), json)
-                            buf.clear()
-                            buf.append(parsed.rest)
-                            for (ev in parsed.events) {
-                                retryDelayMs = SSE_INITIAL_RETRY_MS
-                                if (!connectedEmitted) {
-                                    connectedEmitted = true
-                                    emit(ChatEventStreamItem.ConnectionChanged(true))
+                val call = sseClient.newCall(reqBuilder.build())
+                activeCallRef.set(call)
+                var connectedEmitted = false
+                var sawHttpResponse = false
+                try {
+                    call.execute().use { resp ->
+                        sawHttpResponse = true
+                        if (!resp.isSuccessful) {
+                            throw IOException("SSE HTTP ${resp.code}")
+                        }
+                        val source = resp.body?.source() ?: throw IOException("Empty SSE body")
+                        val buf = StringBuilder()
+
+                        while (currentCoroutineContext().isActive && !source.exhausted()) {
+                            val line = source.readUtf8Line() ?: break
+                            buf.append(line).append('\n')
+                            if (line.isEmpty()) {
+                                val parsed = ChatLogic.parseChatSseBlocks(buf.toString(), json)
+                                buf.clear()
+                                buf.append(parsed.rest)
+                                for (ev in parsed.events) {
+                                    retryDelayMs = SSE_INITIAL_RETRY_MS
+                                    if (!connectedEmitted) {
+                                        connectedEmitted = true
+                                        send(ChatEventStreamItem.ConnectionChanged(true))
+                                    }
+                                    send(ChatEventStreamItem.Event(ev))
                                 }
-                                emit(ChatEventStreamItem.Event(ev))
                             }
                         }
                     }
+                } catch (e: CancellationException) {
+                    call.cancel()
+                    throw e
+                } catch (_: Exception) {
+                    // If Tailscale failed at transport level (before HTTP response), flip immediately to Cloudflare.
+                    if (!sawHttpResponse &&
+                        !transportSwitched.get() &&
+                        target.transport == ApiTransport.TAILSCALE
+                    ) {
+                        apiClient.reportTailscaleFailure()
+                        if (apiClient.activeTransport.value == ApiTransport.CLOUDFLARE) {
+                            transportSwitched.set(true)
+                        }
+                    }
+                } finally {
+                    activeCallRef.compareAndSet(call, null)
+                    if (connectedEmitted) {
+                        send(ChatEventStreamItem.ConnectionChanged(false))
+                    }
                 }
-            } catch (e: CancellationException) {
-                call.cancel()
-                throw e
-            } catch (_: Exception) {
-                // Reconnect with backoff below.
-            } finally {
-                if (connectedEmitted) {
-                    emit(ChatEventStreamItem.ConnectionChanged(false))
-                }
-            }
 
-            if (!currentCoroutineContext().isActive) break
-            delay(retryDelayMs)
-            retryDelayMs = min(retryDelayMs * 2L, SSE_MAX_RETRY_MS)
+                if (!currentCoroutineContext().isActive) break
+                if (transportSwitched.getAndSet(false)) {
+                    retryDelayMs = SSE_INITIAL_RETRY_MS
+                    continue
+                }
+                delay(retryDelayMs)
+                retryDelayMs = min(retryDelayMs * 2L, SSE_MAX_RETRY_MS)
+            }
+        } finally {
+            transportWatcher.cancel()
+            activeCallRef.getAndSet(null)?.cancel()
         }
     }.flowOn(Dispatchers.IO)
 

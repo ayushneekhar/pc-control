@@ -36,6 +36,16 @@ data class ServerInfo(
 @Serializable
 data class WhoAmIResponse(
     val login: String? = null,
+    val name: String? = null,
+    val auth: String? = null,
+)
+
+@Serializable
+data class PublicConfigResponse(
+    @SerialName("api_url") val apiUrl: String = "",
+    @SerialName("api_token") val apiToken: String = "",
+    @SerialName("cf_access_client_id") val cfAccessClientId: String = "",
+    @SerialName("cf_access_client_secret") val cfAccessClientSecret: String = "",
 )
 
 @Serializable

@@ -3,6 +3,7 @@ package com.neekhar.pccontrol.feature.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
+import com.neekhar.pccontrol.core.network.ApiTransport
 import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.platform.ApkUpdateState
 import com.neekhar.pccontrol.core.storage.AppPrefs
@@ -21,17 +22,27 @@ import java.net.URLEncoder
 data class SettingsUiState(
     // Agent summary
     val agentSummary: AgentSummaryState? = null,
-    // Connection
+    // Connection & Public API (Cloudflare)
+    val activeTransport: ApiTransport = ApiTransport.TAILSCALE,
     val serverUrlInput: String = "",
-    val chatBaseUrlInput: String = "",
-    val chatTokenInput: String = "",
+    val apiUrlInput: String = AppPrefs.DEFAULT_API_URL,
+    val apiTokenInput: String = "",
+    val cfAccessClientIdInput: String = "",
+    val cfAccessClientSecretInput: String = "",
     val savedServerUrl: String = "",
-    val savedChatBaseUrl: String = "",
-    val savedChatToken: String = "",
+    val savedApiUrl: String = AppPrefs.DEFAULT_API_URL,
+    val savedApiToken: String = "",
+    val savedCfAccessClientId: String = "",
+    val savedCfAccessClientSecret: String = "",
     val serverInfo: ServerInfo? = null,
     val whoAmI: String? = null,
+    val whoAmIAuth: String? = null,
     val connectionTesting: Boolean = false,
     val connectionError: String? = null,
+    val publicApiSyncing: Boolean = false,
+    val publicApiTesting: Boolean = false,
+    val publicApiNotice: String? = null,
+    val publicApiError: String? = null,
     // PC Controls: VPN
     val vpnState: VpnState? = null,
     val vpnPending: Boolean? = null,
@@ -77,8 +88,13 @@ data class SettingsUiState(
 
     val connectionDirty: Boolean
         get() = serverUrlInput.trim().trimEnd('/') != savedServerUrl ||
-            chatBaseUrlInput.trim().trimEnd('/') != savedChatBaseUrl ||
-            chatTokenInput.trim() != savedChatToken
+            apiUrlInput.trim().trimEnd('/') != savedApiUrl ||
+            apiTokenInput.trim() != savedApiToken ||
+            cfAccessClientIdInput.trim() != savedCfAccessClientId ||
+            cfAccessClientSecretInput.trim() != savedCfAccessClientSecret
+
+    val publicApiConfigured: Boolean
+        get() = savedApiUrl.isNotBlank() && savedApiToken.isNotBlank()
 }
 
 enum class KeyringSheetMode {
@@ -95,12 +111,17 @@ class SettingsViewModel(
 
     private val _uiState = MutableStateFlow(
         SettingsUiState(
+            activeTransport = api.activeTransport.value,
             serverUrlInput = prefs.current.value.serverUrl,
-            chatBaseUrlInput = prefs.current.value.chatUrl,
-            chatTokenInput = prefs.current.value.chatToken,
+            apiUrlInput = prefs.current.value.apiUrl,
+            apiTokenInput = prefs.current.value.apiToken,
+            cfAccessClientIdInput = prefs.current.value.cfAccessClientId,
+            cfAccessClientSecretInput = prefs.current.value.cfAccessClientSecret,
             savedServerUrl = prefs.current.value.serverUrl,
-            savedChatBaseUrl = prefs.current.value.chatUrl,
-            savedChatToken = prefs.current.value.chatToken,
+            savedApiUrl = prefs.current.value.apiUrl,
+            savedApiToken = prefs.current.value.apiToken,
+            savedCfAccessClientId = prefs.current.value.cfAccessClientId,
+            savedCfAccessClientSecret = prefs.current.value.cfAccessClientSecret,
             keyringVaultSupported = platform.keyringVaultSupported(),
             keyringHasSaved = platform.keyringHasSaved(),
             themeMode = ThemeMode.fromId(prefs.current.value.themeMode.storageValue),
@@ -135,11 +156,15 @@ class SettingsViewModel(
                     val shouldUpdateInputs = !cur.connectionDirty
                     cur.copy(
                         serverUrlInput = if (shouldUpdateInputs) snap.serverUrl else cur.serverUrlInput,
-                        chatBaseUrlInput = if (shouldUpdateInputs) snap.chatUrl else cur.chatBaseUrlInput,
-                        chatTokenInput = if (shouldUpdateInputs) snap.chatToken else cur.chatTokenInput,
+                        apiUrlInput = if (shouldUpdateInputs) snap.apiUrl else cur.apiUrlInput,
+                        apiTokenInput = if (shouldUpdateInputs) snap.apiToken else cur.apiTokenInput,
+                        cfAccessClientIdInput = if (shouldUpdateInputs) snap.cfAccessClientId else cur.cfAccessClientIdInput,
+                        cfAccessClientSecretInput = if (shouldUpdateInputs) snap.cfAccessClientSecret else cur.cfAccessClientSecretInput,
                         savedServerUrl = snap.serverUrl,
-                        savedChatBaseUrl = snap.chatUrl,
-                        savedChatToken = snap.chatToken,
+                        savedApiUrl = snap.apiUrl,
+                        savedApiToken = snap.apiToken,
+                        savedCfAccessClientId = snap.cfAccessClientId,
+                        savedCfAccessClientSecret = snap.cfAccessClientSecret,
                         themeMode = ThemeMode.fromId(snap.themeMode.storageValue),
                         fcmDiagnostics = mergedFcm,
                     )
@@ -165,6 +190,11 @@ class SettingsViewModel(
         viewModelScope.launch {
             platform.apkUpdateState.collect { updateState ->
                 _uiState.update { it.copy(apkUpdateState = updateState) }
+            }
+        }
+        viewModelScope.launch {
+            api.activeTransport.collect { transport ->
+                _uiState.update { it.copy(activeTransport = transport) }
             }
         }
         if (autoLoad) {
@@ -210,47 +240,224 @@ class SettingsViewModel(
         }
     }
 
-    // ---- Connection ----
+    // ---- Connection & Public API ----
 
     fun onServerUrlChange(v: String) {
         _uiState.update { it.copy(serverUrlInput = v) }
     }
 
-    fun onChatBaseUrlChange(v: String) {
-        _uiState.update { it.copy(chatBaseUrlInput = v) }
+    fun onApiUrlChange(v: String) {
+        _uiState.update { it.copy(apiUrlInput = v) }
     }
 
-    fun onChatTokenChange(v: String) {
-        _uiState.update { it.copy(chatTokenInput = v) }
+    fun onApiTokenChange(v: String) {
+        _uiState.update { it.copy(apiTokenInput = v) }
+    }
+
+    fun onCfAccessClientIdChange(v: String) {
+        _uiState.update { it.copy(cfAccessClientIdInput = v) }
+    }
+
+    fun onCfAccessClientSecretChange(v: String) {
+        _uiState.update { it.copy(cfAccessClientSecretInput = v) }
     }
 
     fun saveConnection() {
         val cleanServer = _uiState.value.serverUrlInput.trim().trimEnd('/')
-        val cleanChat = _uiState.value.chatBaseUrlInput.trim().trimEnd('/')
-        val cleanToken = _uiState.value.chatTokenInput.trim()
+        val cleanApiUrl = AppPrefs.normalizeApiUrl(_uiState.value.apiUrlInput)
+        val cleanApiToken = _uiState.value.apiTokenInput.trim()
+        val cleanCfId = _uiState.value.cfAccessClientIdInput.trim()
+        val cleanCfSecret = _uiState.value.cfAccessClientSecretInput.trim()
 
         if (!cleanServer.startsWith("https://") && !cleanServer.startsWith("http://")) {
-            _uiState.update { it.copy(connectionError = "Server URL must start with https:// or http://") }
+            _uiState.update { it.copy(connectionError = "Tailscale server URL must start with https:// or http://") }
+            return
+        }
+        if (!cleanApiUrl.startsWith("https://") && !cleanApiUrl.startsWith("http://")) {
+            _uiState.update { it.copy(publicApiError = "Public API URL must start with https:// or http://") }
             return
         }
 
         _uiState.update {
             it.copy(
                 serverUrlInput = cleanServer,
-                chatBaseUrlInput = cleanChat,
-                chatTokenInput = cleanToken,
+                apiUrlInput = cleanApiUrl,
+                apiTokenInput = cleanApiToken,
+                cfAccessClientIdInput = cleanCfId,
+                cfAccessClientSecretInput = cleanCfSecret,
                 savedServerUrl = cleanServer,
-                savedChatBaseUrl = cleanChat,
-                savedChatToken = cleanToken,
+                savedApiUrl = cleanApiUrl,
+                savedApiToken = cleanApiToken,
+                savedCfAccessClientId = cleanCfId,
+                savedCfAccessClientSecret = cleanCfSecret,
                 connectionError = null,
+                publicApiError = null,
+                publicApiNotice = "Saved connection settings.",
             )
         }
         viewModelScope.launch {
             prefs.setServerUrl(cleanServer)
-            prefs.setChatConfig(cleanChat, cleanToken)
-            testConnection()
+            prefs.setPublicApiConfig(
+                rawUrl = cleanApiUrl,
+                rawApiToken = cleanApiToken,
+                rawCfClientId = cleanCfId,
+                rawCfClientSecret = cleanCfSecret,
+            )
+            api.reprobeTransport()
+            testConnectionSuspend()
             platform.registerFcmToken()
             loadPushDiagnostics(allowAutoRegister = false)
+        }
+    }
+
+    /**
+     * Fetches `GET /pc/api/public-config` directly over Tailscale `serverUrl` and populates +
+     * saves all 4 Public API fields in one tap.
+     */
+    fun syncPublicApiFromTailscale() {
+        if (_uiState.value.publicApiSyncing) return
+        val cleanServer = _uiState.value.serverUrlInput.trim().trimEnd('/')
+        if (!cleanServer.startsWith("https://") && !cleanServer.startsWith("http://")) {
+            _uiState.update {
+                it.copy(publicApiError = "Set a valid Tailscale server URL first.", publicApiNotice = null)
+            }
+            return
+        }
+        _uiState.update {
+            it.copy(publicApiSyncing = true, publicApiError = null, publicApiNotice = null)
+        }
+        viewModelScope.launch {
+            if (cleanServer != prefs.current.value.serverUrl) {
+                prefs.setServerUrl(cleanServer)
+            }
+            when (val res = api.getJson<PublicConfigResponse>(
+                pathOrUrl = "/pc/api/public-config",
+                timeoutMs = 8_000L,
+                forceTailscale = true,
+            )) {
+                is ApiResult.Success -> {
+                    val cfg = res.data
+                    val syncedUrl = AppPrefs.normalizeApiUrl(cfg.apiUrl)
+                    val syncedToken = cfg.apiToken.trim()
+                    val syncedCfId = cfg.cfAccessClientId.trim()
+                    val syncedCfSecret = cfg.cfAccessClientSecret.trim()
+
+                    if (syncedToken.isEmpty()) {
+                        _uiState.update {
+                            it.copy(
+                                publicApiSyncing = false,
+                                publicApiError = "Laptop has no ~/.config/pc-control/api-token configured yet.",
+                            )
+                        }
+                        return@launch
+                    }
+
+                    prefs.setPublicApiConfig(
+                        rawUrl = syncedUrl,
+                        rawApiToken = syncedToken,
+                        rawCfClientId = syncedCfId,
+                        rawCfClientSecret = syncedCfSecret,
+                    )
+                    api.reprobeTransport()
+                    _uiState.update {
+                        it.copy(
+                            serverUrlInput = cleanServer,
+                            savedServerUrl = cleanServer,
+                            apiUrlInput = syncedUrl,
+                            apiTokenInput = syncedToken,
+                            cfAccessClientIdInput = syncedCfId,
+                            cfAccessClientSecretInput = syncedCfSecret,
+                            savedApiUrl = syncedUrl,
+                            savedApiToken = syncedToken,
+                            savedCfAccessClientId = syncedCfId,
+                            savedCfAccessClientSecret = syncedCfSecret,
+                            publicApiSyncing = false,
+                            publicApiError = null,
+                            publicApiNotice = if (syncedCfId.isNotEmpty() && syncedCfSecret.isNotEmpty()) {
+                                "Synced public API & Cloudflare Access tokens from Tailscale."
+                            } else {
+                                "Synced API token from Tailscale (CF Access token missing on laptop)."
+                            },
+                        )
+                    }
+                    testConnectionSuspend()
+                }
+                is ApiResult.Error -> {
+                    val hint = if (res.statusCode == 0) {
+                        "Connect Tailscale on this phone to sync credentials from the laptop."
+                    } else {
+                        res.message
+                    }
+                    _uiState.update {
+                        it.copy(
+                            publicApiSyncing = false,
+                            publicApiError = "Sync failed: $hint",
+                            publicApiNotice = null,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Verifies `GET /pc/api/info` directly against the entered `apiUrl` with both tokens and
+     * displays measured latency and host result.
+     */
+    fun testPublicApi() {
+        if (_uiState.value.publicApiTesting) return
+        val cur = _uiState.value
+        val cleanUrl = AppPrefs.normalizeApiUrl(cur.apiUrlInput)
+        val cleanToken = cur.apiTokenInput.trim()
+        val cleanCfId = cur.cfAccessClientIdInput.trim()
+        val cleanCfSecret = cur.cfAccessClientSecretInput.trim()
+
+        if (!cleanUrl.startsWith("https://") && !cleanUrl.startsWith("http://")) {
+            _uiState.update { it.copy(publicApiError = "API URL must start with https:// or http://", publicApiNotice = null) }
+            return
+        }
+        if (cleanToken.isEmpty()) {
+            _uiState.update { it.copy(publicApiError = "Enter an API Bearer token or sync from Tailscale first.", publicApiNotice = null) }
+            return
+        }
+
+        _uiState.update { it.copy(publicApiTesting = true, publicApiError = null, publicApiNotice = null) }
+        viewModelScope.launch {
+            val (rawRes, latencyMs) = api.testDirectPublicApi(
+                apiUrl = cleanUrl,
+                apiToken = cleanToken,
+                cfAccessClientId = cleanCfId,
+                cfAccessClientSecret = cleanCfSecret,
+                timeoutMs = 10_000L,
+            )
+            when (rawRes) {
+                is ApiResult.Success -> {
+                    val parsedHost = runCatching {
+                        api.json.decodeFromString(ServerInfo.serializer(), rawRes.data).host
+                    }.getOrNull()?.let { formatShortHostname(it) }?.takeIf { it.isNotBlank() }
+                    val summary = if (parsedHost != null) {
+                        "Public API OK · $parsedHost · ${latencyMs} ms"
+                    } else {
+                        "Public API OK · ${latencyMs} ms"
+                    }
+                    _uiState.update {
+                        it.copy(
+                            publicApiTesting = false,
+                            publicApiNotice = summary,
+                            publicApiError = null,
+                        )
+                    }
+                }
+                is ApiResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            publicApiTesting = false,
+                            publicApiError = "Public API check failed (${latencyMs} ms): ${rawRes.message}",
+                            publicApiNotice = null,
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -266,11 +473,12 @@ class SettingsViewModel(
         val whoRes = api.getJson<WhoAmIResponse>("/pc/api/whoami")
         when (infoRes) {
             is ApiResult.Success -> {
-                val login = (whoRes as? ApiResult.Success)?.data?.login
+                val who = (whoRes as? ApiResult.Success)?.data
                 _uiState.update {
                     it.copy(
                         serverInfo = infoRes.data,
-                        whoAmI = login,
+                        whoAmI = who?.login,
+                        whoAmIAuth = who?.auth,
                         connectionTesting = false,
                         connectionError = null,
                     )

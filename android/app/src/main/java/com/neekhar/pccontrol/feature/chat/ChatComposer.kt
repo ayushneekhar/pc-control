@@ -103,6 +103,7 @@ fun ChatComposer(
     uploadingCount: Int,
     replyTo: ChatReplyRef?,
     editingState: EditingMessageState?,
+    editingQueued: Boolean = false,
     focusTrigger: Int,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
@@ -325,7 +326,7 @@ fun ChatComposer(
                     modifier = Modifier.size(15.dp),
                 )
                 Text(
-                    text = "Editing",
+                    text = if (editingQueued) "Editing queued message" else "Editing",
                     color = colors.accent,
                     style = type.caption.copy(fontWeight = FontWeight.SemiBold),
                 )

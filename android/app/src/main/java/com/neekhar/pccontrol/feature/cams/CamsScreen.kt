@@ -553,7 +553,7 @@ fun CamsScreen(
         Box(modifier = Modifier.fillMaxSize()) {
             LiveFullscreenOverlay(
                 feed = fsFeed,
-                snapshotBaseUrl = apiClient.baseUrl,
+                snapshotBaseUrl = apiClient.tailscaleBaseUrl,
                 cat3Hd = cat3Hd,
                 camMicOn = camMicOn,
                 ptzOpen = ptzOpen,
@@ -693,7 +693,7 @@ fun CamsScreen(
                                     CamsTab.MUSIC -> "#music"
                                     else -> ""
                                 }
-                                val uri = Uri.parse(apiClient.baseUrl.trimEnd('/') + CamsConfig.WEB_PATH + hash)
+                                val uri = Uri.parse(apiClient.tailscaleBaseUrl.trimEnd('/') + CamsConfig.WEB_PATH + hash)
                                 runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
                             },
                         )
@@ -849,7 +849,7 @@ fun CamsScreen(
 
                             LiveTab(
                                 feeds = feeds,
-                                snapshotBaseUrl = apiClient.baseUrl,
+                                snapshotBaseUrl = apiClient.tailscaleBaseUrl,
                                 heroCam = heroCam,
                                 stackedLayout = stackedLayout,
                                 cat3Hd = cat3Hd,
@@ -1249,7 +1249,7 @@ private fun rememberLiveCamFeed(
     onStateChange: ((LinkState) -> Unit)? = null,
 ): LiveCamFeed {
     val context = LocalContext.current
-    val baseUrl = apiClient.baseUrl
+    val baseUrl = apiClient.tailscaleBaseUrl
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val latestCallback by rememberUpdatedState(onStateChange)
     val idleState = remember { kotlinx.coroutines.flow.MutableStateFlow(LinkState()) }
@@ -1298,7 +1298,7 @@ private fun rememberAudioWebRtcLink(
     onStateChange: ((LinkState) -> Unit)? = null,
 ): LinkState {
     val context = LocalContext.current
-    val baseUrl = apiClient.baseUrl
+    val baseUrl = apiClient.tailscaleBaseUrl
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val latestCallback by rememberUpdatedState(onStateChange)
     val idleState = remember { kotlinx.coroutines.flow.MutableStateFlow(LinkState()) }

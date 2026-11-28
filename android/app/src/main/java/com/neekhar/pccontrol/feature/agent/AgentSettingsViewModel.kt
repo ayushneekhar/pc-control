@@ -20,6 +20,7 @@ data class AgentSettingsUiState(
     val agentError: String? = null,
     val usage: AgentUsageResponse? = null,
     val usageLoading: Boolean = true,
+    val usageUpdating: Boolean = false,
     val usageError: String? = null,
     val settings: AgentSettings? = null,
     val settingsError: String? = null,
@@ -127,29 +128,38 @@ class AgentSettingsViewModel(
 
     private suspend fun loadUsageSuspend(force: Boolean = false, silent: Boolean = false) {
         staleRepollJob?.cancel()
-        if (force) staleAttempts = 0
-        if (!silent) _uiState.update { it.copy(usageLoading = true) }
+        if (!silent) {
+            staleAttempts = 0
+            _uiState.update { it.copy(usageLoading = true) }
+        }
         val path = if (force) "/pc/api/agent/usage?refresh=1" else "/pc/api/agent/usage"
         when (val res = api.getJson<AgentUsageResponse>(path, timeoutMs = USAGE_TIMEOUT_MS)) {
             is ApiResult.Success -> {
+                val shouldRepoll = res.data.stale == true && staleAttempts < STALE_REPOLL_MAX
                 _uiState.update {
-                    it.copy(usage = res.data, usageLoading = false, usageError = null)
+                    it.copy(
+                        usage = res.data,
+                        usageLoading = false,
+                        usageUpdating = shouldRepoll,
+                        usageError = null,
+                    )
                 }
                 // Reload settings so newly discovered emails appear in the Gemini account picker.
                 loadSettingsSuspend()
-                if (res.data.stale == true && staleAttempts < STALE_REPOLL_MAX) {
+                if (shouldRepoll) {
                     staleAttempts++
                     staleRepollJob = viewModelScope.launch {
                         delay(STALE_REPOLL_MS)
                         loadUsageSuspend(force = false, silent = true)
                     }
-                } else if (res.data.stale != true) {
+                } else {
                     staleAttempts = 0
                 }
             }
             is ApiResult.Error -> {
+                staleAttempts = 0
                 _uiState.update {
-                    it.copy(usageLoading = false, usageError = res.message)
+                    it.copy(usageLoading = false, usageUpdating = false, usageError = res.message)
                 }
             }
         }
@@ -272,7 +282,7 @@ class AgentSettingsViewModel(
         private const val AGENT_POLL_MS = 2_000L
         private const val AGENT_POLL_MAX_ATTEMPTS = 15
         private const val STALE_REPOLL_MS = 2_500L
-        private const val STALE_REPOLL_MAX = 4
+        private const val STALE_REPOLL_MAX = 18
         private const val USAGE_TIMEOUT_MS = 25_000L
     }
 }

@@ -210,7 +210,7 @@ fun AgentSettingsScreen(
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             PcSectionLabel(
                                 label = "AI usage",
-                                trailing = if (state.usage?.stale == true) {
+                                trailing = if (state.usageUpdating) {
                                     {
                                         Text(
                                             text = "updating…",

@@ -252,9 +252,7 @@ object LiveDownloadsController {
     ctx: Context,
     client: OkHttpClient,
   ): TransferPollSnapshot? {
-    val server = PlatformPrefs.serverUrl(ctx)
-    val dlReq = Request.Builder()
-      .url("$server/pc/api/downloads")
+    val dlReq = PlatformHttp.apiRequestBuilder(ctx, "/pc/api/downloads")
       .get()
       .header("Accept", "application/json")
       .build()
@@ -281,7 +279,7 @@ object LiveDownloadsController {
       )
     }
 
-    val driveTransfers = fetchDriveTransfersBestEffort(server, client)
+    val driveTransfers = fetchDriveTransfersBestEffort(ctx, client)
     val combined = downloads + driveTransfers
     val totalProgress = when {
       driveTransfers.isEmpty() -> dlResp.total?.progress
@@ -297,12 +295,11 @@ object LiveDownloadsController {
   }
 
   private fun fetchDriveTransfersBestEffort(
-    serverUrl: String,
+    ctx: Context,
     client: OkHttpClient,
   ): List<ActiveDownload> {
     val activeStatuses = setOf("queued", "copying", "verifying", "cleaning")
-    val req = Request.Builder()
-      .url("$serverUrl/pc/api/space/drive")
+    val req = PlatformHttp.apiRequestBuilder(ctx, "/pc/api/space/drive")
       .get()
       .header("Accept", "application/json")
       .build()

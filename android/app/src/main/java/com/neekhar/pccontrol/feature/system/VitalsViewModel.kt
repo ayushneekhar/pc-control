@@ -44,7 +44,7 @@ class VitalsViewModel(
                     if (requestFull) add("full=1")
                     if (wantProcs) add("procs=1")
                 }.joinToString("&")
-                val path = if (query.isNotEmpty()) "/vitals/api?$query" else "/vitals/api"
+                val path = if (query.isNotEmpty()) "/pc/api/vitals?$query" else "/pc/api/vitals"
 
                 when (val res = api.getJson<VitalsResponse>(path, timeoutMs = 10_000L)) {
                     is ApiResult.Success -> {
@@ -99,7 +99,7 @@ class VitalsViewModel(
         if (enabled && pollingJob?.isActive == true) {
             // Trigger an immediate sample with procs=1
             viewModelScope.launch {
-                val res = api.getJson<VitalsResponse>("/vitals/api?procs=1", timeoutMs = 10_000L)
+                val res = api.getJson<VitalsResponse>("/pc/api/vitals?procs=1", timeoutMs = 10_000L)
                 if (res is ApiResult.Success) {
                     _uiState.update { cur -> cur.copy(vitals = res.data, error = null, isLive = true) }
                 }

@@ -169,6 +169,20 @@ data class ChatSteerErrorBody(
 )
 
 @Serializable
+data class ChatDeleteQueuedRequest(
+    val id: String,
+)
+
+@Serializable
+data class ChatDeleteQueuedResponse(
+    val ok: Boolean = true,
+    val id: String = "",
+    val deleted: Boolean = false,
+    @SerialName("queued_ids") val queuedIds: List<String> = emptyList(),
+    val running: Boolean = false,
+)
+
+@Serializable
 data class ChatNewResponse(
     val ok: Boolean = true,
     val engine: String = ChatEngines.CLAUDE,
@@ -206,6 +220,18 @@ sealed interface ChatSseEvent {
     data class Progress(
         val running: Boolean,
         val progress: ChatProgress?,
+        val ts: Long,
+    ) : ChatSseEvent
+
+    data class MessageDeleted(
+        val id: String,
+        val ts: Long,
+    ) : ChatSseEvent
+
+    data class State(
+        val running: Boolean,
+        val engine: String?,
+        val queuedIds: List<String>,
         val ts: Long,
     ) : ChatSseEvent
 }

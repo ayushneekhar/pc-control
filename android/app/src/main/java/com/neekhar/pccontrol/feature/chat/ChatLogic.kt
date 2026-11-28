@@ -148,8 +148,11 @@ object ChatLogic {
     }
 
     /**
-     * Builds the rendered list, appending a trailing synthetic thinking/activity item whenever a
-     * reply is in flight and no pending assistant message already exists.
+     * Builds the rendered list, inserting a synthetic thinking/activity item whenever a reply is
+     * in flight and no pending assistant message already exists.
+     *
+     * Any trailing run of queued user messages (`msg.isUser && (msg.queued || msg.id in queuedIds)`)
+     * renders BELOW the active turn's live thinking trace so visual order matches execution order.
      */
     fun buildChatListItems(
         messages: List<ChatMessage>,
@@ -157,6 +160,7 @@ object ChatLogic {
         sending: Boolean,
         engine: String,
         activeProgress: ChatProgress? = null,
+        queuedIds: Set<String> = emptySet(),
     ): List<ChatMessage> {
         val hasPendingMsg = messages.any { it.status == ChatStatuses.PENDING }
         if ((!running && !sending) || hasPendingMsg) {
@@ -172,7 +176,23 @@ object ChatLogic {
             progress = activeProgress,
             optimistic = true,
         )
-        return messages + thinkingItem
+        var insertIdx = messages.size
+        while (insertIdx > 0) {
+            val candidate = messages[insertIdx - 1]
+            if (candidate.isUser && (candidate.queued || candidate.id in queuedIds)) {
+                insertIdx -= 1
+            } else {
+                break
+            }
+        }
+        if (insertIdx == messages.size) {
+            return messages + thinkingItem
+        }
+        val out = ArrayList<ChatMessage>(messages.size + 1)
+        out.addAll(messages.subList(0, insertIdx))
+        out.add(thinkingItem)
+        out.addAll(messages.subList(insertIdx, messages.size))
+        return out
     }
 
     fun normalizeChatUrl(raw: String): String {
@@ -519,6 +539,36 @@ object ChatLogic {
                         )
                     )
                 }
+
+                "message_deleted" -> {
+                    val id = (obj["id"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+                    if (id.isNotEmpty()) {
+                        val ts = (obj["ts"] as? JsonPrimitive)?.longOrNull ?: 0L
+                        events.add(ChatSseEvent.MessageDeleted(id = id, ts = ts))
+                    }
+                }
+
+                "state" -> {
+                    val running = (obj["running"] as? JsonPrimitive)?.booleanOrNull ?: false
+                    val engineRaw = (obj["engine"] as? JsonPrimitive)?.contentOrNull
+                    val engine = when (engineRaw?.lowercase(Locale.US)) {
+                        ChatEngines.GEMINI -> ChatEngines.GEMINI
+                        ChatEngines.CLAUDE -> ChatEngines.CLAUDE
+                        else -> null
+                    }
+                    val queuedIds = (obj["queued_ids"] as? JsonArray)
+                        ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+                        ?: emptyList()
+                    val ts = (obj["ts"] as? JsonPrimitive)?.longOrNull ?: 0L
+                    events.add(
+                        ChatSseEvent.State(
+                            running = running,
+                            engine = engine,
+                            queuedIds = queuedIds,
+                            ts = ts,
+                        )
+                    )
+                }
             }
         }
         return ChatSseParseResult(events = events, rest = rem)
@@ -553,6 +603,20 @@ object ChatLogic {
         if (trimmed.isEmpty()) return null
         if (isHttpUrl(trimmed)) return trimmed
         return resolveT3ThreadUrl(trimmed)
+    }
+
+    /**
+     * Resolve a local file link target (`/abs/path...` or `file:///abs/path...`) into a clean
+     * copyable file path (stripping `file://` if present), or null if not a local file link.
+     */
+    fun resolveLocalFilePath(url: String): String? {
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.startsWith("file://", ignoreCase = true)) {
+            return trimmed.substring(7).takeIf { it.isNotEmpty() }
+        }
+        if (trimmed.startsWith("/")) return trimmed
+        return null
     }
 
     /** Convert leading Unicode bullet markers (`• item`) into CommonMark `- item`. */
@@ -751,7 +815,7 @@ object ChatLogic {
         }
         if (closeParen <= urlStart) return null
         val url = text.substring(urlStart, closeParen)
-        if (!linkUrlSchemeRe.containsMatchIn(url)) return null
+        if (!linkUrlSchemeRe.containsMatchIn(url) && resolveLocalFilePath(url) == null) return null
         val labelRaw = text.substring(openBracket + 1, closeBracket)
         return Triple(labelRaw, url, closeParen + 1)
     }

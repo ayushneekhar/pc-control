@@ -9,7 +9,9 @@ import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
+import com.neekhar.pccontrol.core.network.ApiTransportManager
 import com.neekhar.pccontrol.core.network.PcApiClient
+import okhttp3.OkHttpClient
 import com.neekhar.pccontrol.core.platform.ApkInstallCoordinator
 import com.neekhar.pccontrol.core.platform.ApkRelease
 import com.neekhar.pccontrol.core.platform.ApkUpdateState
@@ -65,7 +67,18 @@ class AppContainer(
     val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
     val prefs: AppPrefs = AppPrefs(appContext)
-    val apiClient: PcApiClient = PcApiClient(prefs)
+    val transportManager: ApiTransportManager = ApiTransportManager(
+        prefs = prefs,
+        probeClient = OkHttpClient.Builder()
+            .retryOnConnectionFailure(false)
+            .build(),
+        context = appContext,
+        scope = appScope,
+    )
+    val apiClient: PcApiClient = PcApiClient(
+        prefs = prefs,
+        transportManager = transportManager,
+    )
     val cache: LocalCache = LocalCache(appContext, apiClient.json)
 
     // Platform services
@@ -138,10 +151,17 @@ class AppContainer(
 
     private fun installPlatformPrefHooks() {
         PlatformPrefs.serverUrlProvider = { prefs.current.value.serverUrl }
-        PlatformPrefs.chatBaseUrlProvider = {
-            prefs.current.value.chatUrl.takeIf { it.isNotBlank() } ?: prefs.current.value.serverUrl
+        PlatformPrefs.apiTargetProvider = {
+            apiClient.resolveApiTarget().let { it.baseUrl to it.headers }
         }
-        PlatformPrefs.chatTokenProvider = { prefs.current.value.chatToken }
+        PlatformPrefs.apiUrlProvider = { prefs.current.value.apiUrl }
+        PlatformPrefs.apiTokenProvider = { prefs.current.value.apiToken }
+        PlatformPrefs.cfAccessClientIdProvider = { prefs.current.value.cfAccessClientId }
+        PlatformPrefs.cfAccessClientSecretProvider = { prefs.current.value.cfAccessClientSecret }
+        PlatformPrefs.chatBaseUrlProvider = { apiClient.apiBaseUrl }
+        PlatformPrefs.chatTokenProvider = {
+            prefs.current.value.apiToken.ifBlank { prefs.current.value.chatToken }
+        }
         PlatformPrefs.deviceFingerprintProvider = {
             prefs.current.value.deviceFingerprint ?: biometricSigner.info()?.fingerprint
         }
@@ -152,6 +172,13 @@ class AppContainer(
             var seededPushFromPlatform = false
             prefs.snapshots.collect { snap ->
                 PlatformPrefs.setServerUrl(appContext, snap.serverUrl)
+                PlatformPrefs.setPublicApiConfig(
+                    ctx = appContext,
+                    apiUrl = snap.apiUrl,
+                    apiToken = snap.apiToken,
+                    cfAccessClientId = snap.cfAccessClientId,
+                    cfAccessClientSecret = snap.cfAccessClientSecret,
+                )
                 PlatformPrefs.setChatConfig(appContext, snap.chatUrl, snap.chatToken)
                 if (!snap.deviceFingerprint.isNullOrBlank()) {
                     PlatformPrefs.setDeviceFingerprint(appContext, snap.deviceFingerprint)

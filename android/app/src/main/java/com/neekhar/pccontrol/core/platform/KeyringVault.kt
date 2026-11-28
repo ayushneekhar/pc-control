@@ -459,8 +459,7 @@ object KeyringVault {
     val saved = hasSaved(ctx)
     return withContext(Dispatchers.IO) {
       try {
-        val req = Request.Builder()
-          .url("${PlatformPrefs.serverUrl(ctx)}/pc/api/keyring")
+        val req = PlatformHttp.apiRequestBuilder(ctx, "/pc/api/keyring")
           .get()
           .header("Accept", "application/json")
           .build()
@@ -491,8 +490,7 @@ object KeyringVault {
         KeyringUnlockBody.serializer(),
         KeyringUnlockBody(password),
       )
-      val req = Request.Builder()
-        .url("${PlatformPrefs.serverUrl(ctx)}/pc/api/keyring/unlock")
+      val req = PlatformHttp.apiRequestBuilder(ctx, "/pc/api/keyring/unlock")
         .post(payload.toRequestBody(JSON_MEDIA))
         .header("Accept", "application/json")
         .build()

@@ -169,7 +169,7 @@ class HomeViewModel(
         val wasCamEnabled = _uiState.value.catCamEnabled
 
         val infoDef = async { api.getJson<InfoResponse>("/pc/api/info").getOrNull() }
-        val vitalsDef = async { api.getJson<VitalsResponse>("/vitals/api").getOrNull() }
+        val vitalsDef = async { api.getJson<VitalsResponse>("/pc/api/vitals").getOrNull() }
         val healthDef = async { api.getJson<HealthResponse>("/pc/api/health").getOrNull() }
         val routesDef = async { api.getJson<RoutesResponse>("/pc/api/routes").getOrNull() }
         val downloadsDef = async { api.getJson<DownloadsReply>("/pc/api/downloads").getOrNull() }
@@ -177,7 +177,7 @@ class HomeViewModel(
         val keyringDef = async { api.getJson<KeyringStatus>("/pc/api/keyring").getOrNull() }
         val driveDef = async { api.getJson<DriveStatusResponse>("/pc/api/space/drive", timeoutMs = 15_000L).getOrNull() }
         val detDef = async {
-            if (wasCamEnabled) api.getJson<DetectState>("/detect/state").getOrNull() else null
+            if (wasCamEnabled) api.getJson<DetectState>("/pc/api/detect/state").getOrNull() else null
         }
 
         val info = infoDef.await()

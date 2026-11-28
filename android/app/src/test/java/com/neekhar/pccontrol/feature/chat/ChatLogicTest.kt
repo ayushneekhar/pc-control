@@ -439,12 +439,12 @@ class ChatLogicTest {
 
     @Test
     fun buildChatAttachmentSource_sendsBearerTokenOnlyToChatOrigin() {
-        val customUrl = "https://agent.neekhar.dev/"
+        val customUrl = "https://api.neekhar.dev/"
         val token = "tok-123"
         val defaultBase = "https://tailnet.ts.net/"
 
         val rel = ChatLogic.buildChatAttachmentSource("/pc/api/chat/file/0123456789abcdef", defaultBase, customUrl, token)
-        assertEquals("https://agent.neekhar.dev/pc/api/chat/file/0123456789abcdef", rel.uri)
+        assertEquals("https://api.neekhar.dev/pc/api/chat/file/0123456789abcdef", rel.uri)
         assertEquals(mapOf("Authorization" to "Bearer tok-123"), rel.headers)
 
         val external = ChatLogic.buildChatAttachmentSource("https://cdn.example.com/photo.png", defaultBase, customUrl, token)
@@ -592,5 +592,79 @@ class ChatLogicTest {
             ),
             ChatLogic.parseActivityStepTokens("Inspecting [`LiveTab.kt`](https://example.com/LiveTab.kt)"),
         )
+    }
+
+    @Test
+    fun parseInlineTokens_acceptsLocalFileLinksAndResolvesCleanPath() {
+        val absTokens = ChatLogic.parseInlineTokens(
+            "Edited [pcapi.py:5879-5881](/home/ayushlive/code/pc-control/server/pcapi.py#L5879-L5881)."
+        )
+        assertEquals(
+            listOf(
+                InlineToken.Text("Edited "),
+                InlineToken.Link(
+                    url = "/home/ayushlive/code/pc-control/server/pcapi.py#L5879-L5881",
+                    children = listOf(InlineToken.Text("pcapi.py:5879-5881")),
+                ),
+                InlineToken.Text("."),
+            ),
+            absTokens,
+        )
+        assertEquals(
+            "/home/ayushlive/code/pc-control/server/pcapi.py#L5879-L5881",
+            ChatLogic.resolveLocalFilePath("/home/ayushlive/code/pc-control/server/pcapi.py#L5879-L5881"),
+        )
+        assertEquals(
+            "/tmp/notes.md",
+            ChatLogic.resolveLocalFilePath("file:///tmp/notes.md"),
+        )
+        assertNull(ChatLogic.resolveLocalFilePath("https://example.com/foo"))
+    }
+
+    @Test
+    fun buildChatListItems_placesTrailingQueuedMessagesBelowThinkingIndicator() {
+        val activeUser = ChatMessage(
+            id = "u1",
+            role = ChatRoles.USER,
+            engine = ChatEngines.CLAUDE,
+            text = "active turn",
+            createdAt = 1.0,
+        )
+        val queuedUser = ChatMessage(
+            id = "u2",
+            role = ChatRoles.USER,
+            engine = ChatEngines.CLAUDE,
+            text = "queued follow-up",
+            createdAt = 2.0,
+            queued = true,
+        )
+        val items = ChatLogic.buildChatListItems(
+            messages = listOf(activeUser, queuedUser),
+            running = true,
+            sending = false,
+            engine = ChatEngines.CLAUDE,
+            queuedIds = setOf("u2"),
+        )
+        assertEquals(listOf("u1", ChatLogic.THINKING_INDICATOR_ID, "u2"), items.map { it.id })
+    }
+
+    @Test
+    fun parseChatSseBlocks_handlesMessageDeletedAndStateEvents() {
+        val raw = listOf(
+            "event: message_deleted",
+            """data: {"id":"u2","ts":123}""",
+            "",
+            "event: state",
+            """data: {"running":true,"engine":"claude","queued_ids":[],"ts":124}""",
+            "",
+            "",
+        ).joinToString("\n")
+        val parsed = ChatLogic.parseChatSseBlocks(raw)
+        assertEquals(2, parsed.events.size)
+        val del = parsed.events[0] as ChatSseEvent.MessageDeleted
+        assertEquals("u2", del.id)
+        val st = parsed.events[1] as ChatSseEvent.State
+        assertTrue(st.running)
+        assertEquals(emptyList<String>(), st.queuedIds)
     }
 }

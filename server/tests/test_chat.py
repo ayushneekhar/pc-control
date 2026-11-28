@@ -2758,5 +2758,181 @@ class ChatStopEndpointTests(unittest.TestCase):
         self.assertEqual(data["threadId"], "claude-idle-2")
 
 
+class QueuedMessageDeleteTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = chat_mod.ChatHistoryStore(os.path.join(self.tmp.name, "chat.jsonl"))
+        self.uploads_dir = os.path.join(self.tmp.name, "uploads")
+
+    def test_delete_from_local_queue_removes_message_and_broadcasts(self):
+        first_started = threading.Event()
+        release_first = threading.Event()
+        seen_texts = []
+
+        class BlockingAdapter:
+            def send(self, text, fresh=False, attachments=None):
+                seen_texts.append(text)
+                if text == "first":
+                    first_started.set()
+                    release_first.wait(timeout=5.0)
+                return f"reply:{text}"
+
+        mgr = chat_mod.ChatManager(
+            store=self.store,
+            claude_adapter=BlockingAdapter(),
+            gemini_adapter=BlockingAdapter(),
+            engine_fn=lambda: "claude",
+            uploads_dir=self.uploads_dir,
+        )
+        q = mgr.subscribe()
+        self.addCleanup(mgr.unsubscribe, q)
+
+        c1, r1 = mgr.handle_send({"text": "first"})
+        self.assertEqual(c1, 202)
+        self.assertTrue(first_started.wait(timeout=3.0))
+
+        c2, r2 = mgr.handle_send({"text": "queued-second"})
+        self.assertEqual(c2, 202)
+        queued_id = r2["user_message"]["id"]
+        self.assertTrue(r2["user_message"].get("queued"))
+
+        # Delete the locally queued message before the first turn finishes
+        cd, rd = mgr.handle_delete_queued({"id": queued_id})
+        self.assertEqual(cd, 200, rd)
+        self.assertTrue(rd["ok"])
+        self.assertTrue(rd["deleted"])
+        self.assertEqual(rd["id"], queued_id)
+        self.assertEqual(rd["queued_ids"], [])
+
+        # Message removed from store and persists removal across reload
+        self.assertIsNone(self.store.get_by_id(queued_id))
+        reloaded = chat_mod.ChatHistoryStore(os.path.join(self.tmp.name, "chat.jsonl"))
+        self.assertIsNone(reloaded.get_by_id(queued_id))
+
+        # SSE events include message_deleted and updated state
+        events = []
+        while True:
+            try:
+                events.append(q.get_nowait())
+            except Exception:
+                break
+        deleted_evs = [d for ev, d in events if ev == "message_deleted"]
+        self.assertTrue(any(d.get("id") == queued_id for d in deleted_evs), events)
+        state_evs = [d for ev, d in events if ev == "state" and d.get("queued_ids") == []]
+        self.assertTrue(state_evs, events)
+
+        # Release first turn and confirm deleted queued message NEVER runs
+        release_first.set()
+        self.assertTrue(mgr.wait_idle(timeout=3.0))
+        self.assertEqual(seen_texts, ["first"])
+
+    def test_delete_t3_queued_run_cancels_and_suppresses_worker_output(self):
+        queued_ready = threading.Event()
+        release_send = threading.Event()
+        cancel_calls = []
+
+        class FakeT3Adapter:
+            def send(self, text, fresh=False, attachments=None, on_t3_state=None):
+                if on_t3_state:
+                    on_t3_state(
+                        {
+                            "thread_id": "thr-42",
+                            "run_id": "run-q1",
+                            "queued_run_id": "run-q1",
+                            "active_run_id": "run-active",
+                            "queued": True,
+                        }
+                    )
+                queued_ready.set()
+                release_send.wait(timeout=5.0)
+                raise RuntimeError("Queued run was cancelled")
+
+            def cancel_queued_run(self, *, thread_id, queued_run_id):
+                cancel_calls.append((thread_id, queued_run_id))
+                return {"cancelled": True}
+
+        mgr = chat_mod.ChatManager(
+            store=self.store,
+            claude_adapter=FakeT3Adapter(),
+            gemini_adapter=FakeT3Adapter(),
+            engine_fn=lambda: "claude",
+            uploads_dir=self.uploads_dir,
+        )
+        q = mgr.subscribe()
+        self.addCleanup(mgr.unsubscribe, q)
+
+        c1, r1 = mgr.handle_send({"text": "t3-queued-msg"})
+        self.assertEqual(c1, 202)
+        msg_id = r1["user_message"]["id"]
+        self.assertTrue(queued_ready.wait(timeout=3.0))
+
+        cd, rd = mgr.delete_queued(msg_id)
+        self.assertEqual(cd, 200, rd)
+        self.assertEqual(cancel_calls, [("thr-42", "run-q1")])
+        self.assertIsNone(self.store.get_by_id(msg_id))
+
+        release_send.set()
+        self.assertTrue(mgr.wait_idle(timeout=3.0))
+
+        # No error or assistant reply should have been stored for the cancelled job
+        msgs, _ = self.store.get_messages()
+        self.assertEqual(msgs, [])
+
+    def test_delete_t3_queued_already_running_returns_409_and_non_queued_rejected(self):
+        queued_ready = threading.Event()
+        release_send = threading.Event()
+
+        class FakeT3RaceAdapter:
+            def send(self, text, fresh=False, attachments=None, on_t3_state=None):
+                if text == "race":
+                    if on_t3_state:
+                        on_t3_state(
+                            {
+                                "thread_id": "thr-99",
+                                "run_id": "run-q9",
+                                "queued_run_id": "run-q9",
+                                "active_run_id": "run-a",
+                                "queued": True,
+                            }
+                        )
+                    queued_ready.set()
+                    release_send.wait(timeout=5.0)
+                return "done"
+
+            def cancel_queued_run(self, *, thread_id, queued_run_id):
+                raise RuntimeError("Run is no longer queued")
+
+        mgr = chat_mod.ChatManager(
+            store=self.store,
+            claude_adapter=FakeT3RaceAdapter(),
+            gemini_adapter=FakeT3RaceAdapter(),
+            engine_fn=lambda: "claude",
+            uploads_dir=self.uploads_dir,
+        )
+
+        # Missing id -> 400; unknown id -> 404
+        self.assertEqual(mgr.handle_delete_queued({})[0], 400)
+        self.assertEqual(mgr.handle_delete_queued({"id": "missing"})[0], 404)
+
+        # Already completed message -> 409
+        c_done, r_done = mgr.handle_send({"text": "completed"})
+        self.assertEqual(c_done, 202)
+        self.assertTrue(mgr.wait_idle(timeout=3.0))
+        c_rej, _ = mgr.delete_queued(r_done["user_message"]["id"])
+        self.assertEqual(c_rej, 409)
+
+        # T3 race (no longer queued) -> 409
+        c_race, r_race = mgr.handle_send({"text": "race"})
+        self.assertEqual(c_race, 202)
+        self.assertTrue(queued_ready.wait(timeout=3.0))
+        c_409, d_409 = mgr.delete_queued(r_race["user_message"]["id"])
+        self.assertEqual(c_409, 409)
+        self.assertIn("already started running", d_409["error"].lower())
+
+        release_send.set()
+        self.assertTrue(mgr.wait_idle(timeout=3.0))
+
+
 if __name__ == "__main__":
     unittest.main()

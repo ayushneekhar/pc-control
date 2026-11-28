@@ -134,6 +134,21 @@ def tailnet_owner():
 ALLOWED_LOGINS = set(CONFIG.get("allowed_logins") or filter(None, [tailnet_owner()]))
 ALLOW_UNAUTH_LOCAL = os.environ.get("PCAPI_ALLOW_LOCAL", "1") == "1"
 LOCAL_TOKEN_FILE = os.environ.get("PCAPI_LOCAL_TOKEN", os.path.join(CONF_DIR, "local-token"))
+API_TOKEN_FILE = os.path.join(CONF_DIR, "api-token")
+CF_ACCESS_TOKEN_FILE = os.path.join(CONF_DIR, "cf-access-token.json")
+DEFAULT_PUBLIC_API_URL = "https://api.neekhar.dev"
+SSE_KEEPALIVE_SEC = 20
+
+PROXY_UPSTREAMS = {
+    "vitals": os.environ.get("PCAPI_VITALS_URL", "http://127.0.0.1:1989/vitals/api").rstrip("/"),
+    "detect": os.environ.get("PCAPI_DETECT_URL", "http://127.0.0.1:1986/detect").rstrip("/"),
+    "ptz": os.environ.get("PCAPI_PTZ_URL", "http://127.0.0.1:1985/ptz").rstrip("/"),
+    "music": os.environ.get("PCAPI_MUSIC_URL", "http://127.0.0.1:1988/music").rstrip("/"),
+}
+PROXY_TIMEOUT = 15
+PROXY_MUSIC_PLAY_TIMEOUT = 60
+PROXY_MAX_REQ_BODY = 2 * 1024 * 1024
+PROXY_MAX_RESP_BODY = 16 * 1024 * 1024
 
 
 def local_token():
@@ -158,6 +173,92 @@ def local_token_authorized(headers):
     if a.lower().startswith("bearer "):
         cands.append(a[7:].strip())
     return any(c and secrets.compare_digest(c, tok) for c in cands)
+
+
+def load_api_token():
+    """Read unified API bearer token from PCAPI_API_TOKEN env var (path or literal) or ~/.config/pc-control/api-token."""
+    env_val = os.environ.get("PCAPI_API_TOKEN")
+    if env_val is not None:
+        raw = env_val.strip()
+        if not raw:
+            return None
+        if os.path.sep in raw:
+            try:
+                with open(raw, encoding="utf-8") as f:
+                    s = f.read().strip()
+                    return s if s else None
+            except OSError:
+                return None
+        return raw
+    try:
+        with open(API_TOKEN_FILE, encoding="utf-8") as f:
+            s = f.read().strip()
+            return s if s else None
+    except OSError:
+        return None
+
+
+def api_token_authorized(headers):
+    """Verify `Authorization: Bearer <token>` against the unified public API bearer token."""
+    tok = load_api_token()
+    if not tok:
+        return False
+    auth = (headers.get("Authorization") or "").strip() if headers is not None else ""
+    if not auth.lower().startswith("bearer "):
+        return False
+    cand = auth[7:].strip()
+    return bool(cand) and secrets.compare_digest(cand, tok)
+
+
+def load_cf_access_token():
+    """Read Cloudflare Access service token JSON from PCAPI_CF_ACCESS_TOKEN (JSON or path) or ~/.config/pc-control/cf-access-token.json."""
+    env_val = os.environ.get("PCAPI_CF_ACCESS_TOKEN")
+    if env_val is not None:
+        raw = env_val.strip()
+        if not raw:
+            return {}
+        if raw.startswith("{"):
+            try:
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, dict) else {}
+            except ValueError:
+                return {}
+        data = load_json(raw, {})
+        return data if isinstance(data, dict) else {}
+    data = load_json(CF_ACCESS_TOKEN_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
+def public_config():
+    """Build the Tailscale/local-only public API sync payload for the Android app."""
+    tok = load_api_token() or ""
+    cf = load_cf_access_token()
+    client_id = str(cf.get("client_id") or cf.get("cf_access_client_id") or "").strip()
+    client_secret = str(cf.get("client_secret") or cf.get("cf_access_client_secret") or "").strip()
+    hostname = str(cf.get("hostname") or "").strip()
+    cfg_url = str(os.environ.get("PCAPI_PUBLIC_API_URL") or CONFIG.get("public_api_url") or "").strip()
+    if cfg_url:
+        api_url = cfg_url.rstrip("/")
+    elif hostname:
+        api_url = hostname.rstrip("/") if hostname.startswith(("http://", "https://")) else f"https://{hostname.rstrip('/')}"
+    else:
+        api_url = DEFAULT_PUBLIC_API_URL
+    return {
+        "api_url": api_url,
+        "api_token": tok,
+        "cf_access_client_id": client_id,
+        "cf_access_client_secret": client_secret,
+    }
+
+
+def _has_path_traversal(raw_path):
+    """Return True if raw or percent-decoded path contains '..' segments, backslashes, or NUL bytes."""
+    for candidate in (raw_path, urllib.parse.unquote(raw_path)):
+        if "\\" in candidate or "\x00" in candidate:
+            return True
+        if any(seg == ".." for seg in candidate.split("/")):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------- rootd client
@@ -5835,9 +5936,19 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, fmt, *a):
         if os.environ.get("PCAPI_LOG"): super().log_message(fmt, *a)
 
+    def _is_plain_local(self):
+        return bool(
+            ALLOW_UNAUTH_LOCAL
+            and not self.headers.get("X-Forwarded-For")
+            and not self.headers.get("Tailscale-User-Login")
+            and self.client_address[0] in ("127.0.0.1", "::1")
+        )
+
     def authorized(self, is_hook=False):
         login = self.headers.get("Tailscale-User-Login")
         if login:
+            if is_hook:
+                return False
             return login in ALLOWED_LOGINS
         # No tailnet identity: only plain local requests (never proxied ones from tagged/shared nodes).
         if not (ALLOW_UNAUTH_LOCAL and not self.headers.get("X-Forwarded-For") and
@@ -5864,26 +5975,144 @@ class H(BaseHTTPRequestHandler):
         if not isinstance(data, dict): raise ValueError("body must be an object")
         return data
 
+    def _proxy_local(self, service_key, method, subpath, query):
+        """Reverse-proxy a local auxiliary service under /pc/api/* so it inherits pc-api auth."""
+        base = PROXY_UPSTREAMS.get(service_key)
+        if not base:
+            return self.send_json(404, {"error": "unknown proxy target"})
+        if subpath is not None:
+            if _has_path_traversal(subpath):
+                return self.send_json(400, {"error": "invalid proxy path"})
+            clean_sub = subpath.lstrip("/")
+            if not clean_sub:
+                return self.send_json(404, {"error": "not found"})
+            target_url = f"{base}/{clean_sub}"
+        else:
+            target_url = base
+        if query:
+            target_url = f"{target_url}?{query}"
+
+        req_body = None
+        if method == "POST":
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self.send_json(400, {"error": "invalid content-length"})
+            if n < 0 or n > PROXY_MAX_REQ_BODY:
+                return self.send_json(413, {"error": "body too large"})
+            req_body = self.rfile.read(n) if n > 0 else b""
+
+        fwd_headers = {}
+        ct = self.headers.get("Content-Type")
+        if ct:
+            fwd_headers["Content-Type"] = ct
+        accept = self.headers.get("Accept")
+        if accept:
+            fwd_headers["Accept"] = accept
+
+        timeout = PROXY_MUSIC_PLAY_TIMEOUT if (
+            service_key == "music" and method == "POST" and (subpath or "").strip("/") == "api/play"
+        ) else PROXY_TIMEOUT
+
+        req = urllib.request.Request(target_url, data=req_body, headers=fwd_headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                status = getattr(resp, "status", 200)
+                resp_ct = resp.headers.get("Content-Type") or "application/octet-stream"
+                resp_cc = resp.headers.get("Cache-Control") or "no-store"
+                data = resp.read(PROXY_MAX_RESP_BODY + 1)
+        except urllib.error.HTTPError as e:
+            status = e.code
+            resp_ct = (e.headers.get("Content-Type") if e.headers else None) or "application/octet-stream"
+            resp_cc = (e.headers.get("Cache-Control") if e.headers else None) or "no-store"
+            try:
+                data = e.read(PROXY_MAX_RESP_BODY + 1)
+            finally:
+                e.close()
+        except urllib.error.URLError as e:
+            reason = getattr(e, "reason", e)
+            code = 503 if isinstance(reason, ConnectionRefusedError) else 502
+            return self.send_json(code, {"error": clip(f"upstream {service_key} unreachable: {reason}", 240)})
+        except (TimeoutError, socket.timeout):
+            return self.send_json(502, {"error": f"upstream {service_key} timed out"})
+        except OSError as e:
+            code = 503 if isinstance(e, ConnectionRefusedError) else 502
+            return self.send_json(code, {"error": clip(f"upstream {service_key} error: {e}", 240)})
+
+        if len(data) > PROXY_MAX_RESP_BODY:
+            return self.send_json(502, {"error": f"upstream {service_key} response too large"})
+
+        self.send_response(status)
+        self.send_header("Content-Type", resp_ct)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", resp_cc)
+        self.end_headers()
+        self.wfile.write(data)
+
     def route(self, method):
         u = urllib.parse.urlsplit(self.path)
-        path, qs = u.path.rstrip("/"), urllib.parse.parse_qs(u.query)
+        raw_path = u.path
+        path, qs = raw_path.rstrip("/"), urllib.parse.parse_qs(u.query)
+        has_traversal = _has_path_traversal(raw_path)
+
         is_hook = method == "POST" and bool(re.fullmatch(r"/pc/api/hook/(radarr|sonarr|seerr)", path))
         is_chat_push = method == "POST" and path == "/pc/api/chat/push"
         is_ota_trigger = method == "POST" and path == "/pc/api/ota/trigger"
+        is_public_config = method == "GET" and path == "/pc/api/public-config"
+
+        auth_mode = None
         if is_chat_push or is_ota_trigger:
-            if not (ALLOW_UNAUTH_LOCAL and not self.headers.get("X-Forwarded-For") and
-                    self.client_address[0] in ("127.0.0.1", "::1") and
-                    local_token_authorized(self.headers)):
+            if not (self._is_plain_local() and local_token_authorized(self.headers)):
                 return self.send_json(403, {"error": "local token required"})
+            auth_mode = "local"
+        elif is_hook:
+            if not self._is_plain_local():
+                return self.send_json(403, {"error": "localhost required for webhook"})
+            auth_mode = "local"
+        elif is_public_config:
+            login = self.headers.get("Tailscale-User-Login")
+            if login and login in ALLOWED_LOGINS:
+                auth_mode = "tailscale"
+            elif self._is_plain_local() and local_token_authorized(self.headers):
+                auth_mode = "local"
+            else:
+                return self.send_json(403, {"error": "tailscale or local auth required"})
         else:
-            is_chat = (path == "/pc/api/chat" or path.startswith("/pc/api/chat/")) and ".." not in path.split("/")
-            if not self.authorized(is_hook=is_hook) and not (is_chat and chat_mod.chat_token_authorized(self.headers)):
+            login = self.headers.get("Tailscale-User-Login")
+            if login:
+                if login in ALLOWED_LOGINS:
+                    auth_mode = "tailscale"
+            elif self._is_plain_local() and local_token_authorized(self.headers):
+                auth_mode = "local"
+
+            if auth_mode is None:
+                is_api_path = path == "/pc/api" or path.startswith("/pc/api/")
+                is_chat = (path == "/pc/api/chat" or path.startswith("/pc/api/chat/")) and not has_traversal
+                if not login and is_api_path and api_token_authorized(self.headers):
+                    auth_mode = "api_token"
+                elif not login and is_chat and chat_mod.chat_token_authorized(self.headers):
+                    auth_mode = "chat_token"
+
+            if auth_mode is None:
                 return self.send_json(403, {"error": "not allowed for this tailnet identity"})
+
         if not path.startswith("/pc"):
             return self.send_json(404, {"error": "not found"})
+
         path = path[3:]
+
+        # Proxied local auxiliary services under /pc/api/* (handled before JSON body parsing).
+        if method == "GET" and path == "/api/vitals":
+            return self._proxy_local("vitals", "GET", None, u.query)
+        for proxy_key in ("detect", "ptz", "music"):
+            prefix = f"/pc/api/{proxy_key}/"
+            if raw_path.startswith(prefix) and method in ("GET", "POST"):
+                return self._proxy_local(proxy_key, method, raw_path[len(prefix):], u.query)
+
         if method == "GET":
             if path == "/app.apk": return self.send_apk()
+            if path == "/api/public-config":
+                return self.send_json(200, public_config())
             if path == "/api/notify/settings": return self.send_json(200, NOTIFY.settings())
             m = re.fullmatch(r"/api/notify/image/([0-9a-f]{16})", path)
             if m:
@@ -5896,9 +6125,20 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/push/status":
                 return self.send_json(200, PUSH.status(qs.get("token", [""])[0]))
             if path == "/api/whoami":
-                return self.send_json(200, {"login": self.headers.get("Tailscale-User-Login"),
-                                            "name": self.headers.get("Tailscale-User-Name"),
-                                            "proxied": bool(self.headers.get("X-Forwarded-For"))})
+                if auth_mode == "api_token":
+                    owner = next(iter(sorted(ALLOWED_LOGINS)), None) or "api-token"
+                    who_login, who_name = owner, "API Token"
+                elif auth_mode == "chat_token":
+                    who_login, who_name = "chat-token", "Chat Token"
+                else:
+                    who_login = self.headers.get("Tailscale-User-Login")
+                    who_name = self.headers.get("Tailscale-User-Name")
+                return self.send_json(200, {
+                    "login": who_login,
+                    "name": who_name,
+                    "auth": auth_mode,
+                    "proxied": bool(self.headers.get("X-Forwarded-For")),
+                })
             if path == "/api/routes":
                 return self.send_json(200, {"routes": list_routes(qs.get("all", ["0"])[0] == "1")})
             if path == "/api/services": return self.send_json(200, {"services": list_services()})
@@ -6083,6 +6323,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(*_chat_manager().handle_send(b))
             if path == "/api/chat/steer":
                 return self.send_json(*_chat_manager().handle_steer(b))
+            if path == "/api/chat/queued/delete":
+                return self.send_json(*_chat_manager().handle_delete_queued(b))
             if path == "/api/chat/push":
                 return self.send_json(*_chat_manager().handle_push(b))
             if path == "/api/chat/new":
@@ -6194,7 +6436,12 @@ class H(BaseHTTPRequestHandler):
             self.write_event("hello", {"rootd": st, "pending": pending, "ota_trigger": OTA_TRIGGER.get(), "ts": int(time.time())})
             self.wfile.write(b"retry: 3000\n\n"); self.wfile.flush()
             while True:
-                msg = q.get()
+                try:
+                    msg = q.get(timeout=SSE_KEEPALIVE_SEC)
+                except queue.Empty:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
                 if msg is None: break
                 self.write_event(*msg)
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -6218,9 +6465,9 @@ class H(BaseHTTPRequestHandler):
             self.wfile.flush()
             while True:
                 try:
-                    msg = q.get(timeout=20)
+                    msg = q.get(timeout=SSE_KEEPALIVE_SEC)
                 except queue.Empty:
-                    self.wfile.write(b": ping\n\n")
+                    self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
                     continue
                 if msg is None:
@@ -6247,9 +6494,9 @@ class H(BaseHTTPRequestHandler):
             self.wfile.flush()
             while True:
                 try:
-                    msg = q.get(timeout=20)
+                    msg = q.get(timeout=SSE_KEEPALIVE_SEC)
                 except queue.Empty:
-                    self.wfile.write(b": ping\n\n")
+                    self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
                     continue
                 if msg is None:

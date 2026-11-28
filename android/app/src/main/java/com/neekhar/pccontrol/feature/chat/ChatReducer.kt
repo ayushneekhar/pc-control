@@ -2,6 +2,7 @@ package com.neekhar.pccontrol.feature.chat
 
 data class ChatUiState(
     val messages: List<ChatMessage> = emptyList(),
+    val queuedIds: Set<String> = emptySet(),
     val engine: String = ChatEngines.CLAUDE,
     val hasMore: Boolean = false,
     val running: Boolean = false,
@@ -16,6 +17,7 @@ data class ChatUiState(
     val uploadingCount: Int = 0,
     val replyTo: ChatReplyRef? = null,
     val editingState: EditingMessageState? = null,
+    val editingQueuedMessageId: String? = null,
     val error: String? = null,
     val agentSettings: ChatAgentSettings? = null,
     val settingsLoading: Boolean = false,
@@ -32,6 +34,7 @@ data class ChatUiState(
             sending = sending,
             engine = engine,
             activeProgress = activeProgress,
+            queuedIds = queuedIds,
         )
 
     val canSend: Boolean
@@ -69,6 +72,11 @@ data class ChatUiState(
  */
 object ChatReducer {
 
+    private fun deriveQueuedIds(messages: List<ChatMessage>, running: Boolean): Set<String> {
+        if (!running) return emptySet()
+        return messages.filter { it.isUser && it.queued }.mapTo(LinkedHashSet()) { it.id }
+    }
+
     fun onMessagesLoaded(
         state: ChatUiState,
         response: ChatMessagesResponse,
@@ -80,6 +88,7 @@ object ChatReducer {
         )
         return state.copy(
             messages = merged,
+            queuedIds = deriveQueuedIds(merged, response.running),
             engine = ChatEngines.normalize(response.engine),
             running = response.running,
             activeProgress = if (response.running) ChatLogic.mergeProgress(state.activeProgress, response.progress) else null,
@@ -105,8 +114,10 @@ object ChatReducer {
         clearComposer: Boolean,
     ): ChatUiState {
         val wasRunning = state.running
+        val nextMessages = state.messages + optUser
         return state.copy(
-            messages = state.messages + optUser,
+            messages = nextMessages,
+            queuedIds = if (optUser.queued) state.queuedIds + optUser.id else state.queuedIds,
             sending = true,
             running = true,
             activeProgress = if (!wasRunning) {
@@ -117,6 +128,7 @@ object ChatReducer {
             draft = if (clearComposer) "" else state.draft,
             pendingAttachments = if (clearComposer) emptyList() else state.pendingAttachments,
             editingState = if (clearComposer) null else state.editingState,
+            editingQueuedMessageId = if (clearComposer) null else state.editingQueuedMessageId,
             replyTo = if (clearComposer) null else state.replyTo,
             unreadCount = 0,
             error = null,
@@ -141,6 +153,7 @@ object ChatReducer {
         )
         return state.copy(
             messages = nextMessages,
+            queuedIds = deriveQueuedIds(nextMessages, response.running),
             engine = ChatEngines.normalize(response.engine),
             running = response.running,
             activeProgress = if (response.running) state.activeProgress else null,
@@ -158,23 +171,31 @@ object ChatReducer {
         restoreEdit: EditingMessageState?,
         restoreReply: ChatReplyRef?,
         error: String,
-    ): ChatUiState = state.copy(
-        messages = state.messages.filterNot { it.id == optUserId },
-        draft = if (restoreComposer) restoreDraft else state.draft,
-        pendingAttachments = if (restoreComposer) restoreAttachments else state.pendingAttachments,
-        editingState = if (restoreComposer) restoreEdit else state.editingState,
-        replyTo = if (restoreComposer) restoreReply else state.replyTo,
-        running = if (!wasRunning) false else state.running,
-        activeProgress = if (!wasRunning) null else state.activeProgress,
-        sending = false,
-        error = error,
-    )
+        restoreEditingQueuedId: String? = null,
+    ): ChatUiState {
+        val nextMessages = state.messages.filterNot { it.id == optUserId }
+        val nextRunning = if (!wasRunning) false else state.running
+        return state.copy(
+            messages = nextMessages,
+            queuedIds = deriveQueuedIds(nextMessages, nextRunning),
+            draft = if (restoreComposer) restoreDraft else state.draft,
+            pendingAttachments = if (restoreComposer) restoreAttachments else state.pendingAttachments,
+            editingState = if (restoreComposer) restoreEdit else state.editingState,
+            editingQueuedMessageId = if (restoreComposer) restoreEditingQueuedId else state.editingQueuedMessageId,
+            replyTo = if (restoreComposer) restoreReply else state.replyTo,
+            running = nextRunning,
+            activeProgress = if (!wasRunning) null else state.activeProgress,
+            sending = false,
+            error = error,
+        )
+    }
 
     fun onOptimisticSteer(
         state: ChatUiState,
         messageId: String,
     ): ChatUiState = state.copy(
         messages = ChatLogic.applyOptimisticSteer(state.messages, messageId),
+        queuedIds = state.queuedIds - messageId,
         error = null,
     )
 
@@ -189,6 +210,7 @@ object ChatReducer {
         )
         return state.copy(
             messages = nextMessages,
+            queuedIds = deriveQueuedIds(nextMessages, response.running),
             running = response.running,
             activeProgress = if (response.running) state.activeProgress else null,
         )
@@ -208,11 +230,42 @@ object ChatReducer {
         } else {
             ChatLogic.rollbackOptimisticSteer(state.messages, messageId, stillRunning = nextRunning)
         }
+        val nextMessages = ChatLogic.preserveOptimisticSteers(restored, optimisticSteeredIds)
         return state.copy(
-            messages = ChatLogic.preserveOptimisticSteers(restored, optimisticSteeredIds),
+            messages = nextMessages,
+            queuedIds = deriveQueuedIds(nextMessages, nextRunning),
             running = nextRunning,
             activeProgress = if (nextRunning) state.activeProgress else null,
             error = error,
+        )
+    }
+
+    fun onMessageDeleted(
+        state: ChatUiState,
+        deletedId: String,
+        serverQueuedIds: List<String>? = null,
+        serverRunning: Boolean? = null,
+    ): ChatUiState {
+        val nextRunning = serverRunning ?: state.running
+        val filtered = state.messages.filterNot { it.id == deletedId }
+        val nextQueuedIds = serverQueuedIds?.toSet() ?: (state.queuedIds - deletedId)
+        val reconciled = if (serverQueuedIds != null) {
+            ChatLogic.reconcileQueuedMessages(
+                current = filtered,
+                queuedIds = serverQueuedIds,
+                running = nextRunning,
+            )
+        } else {
+            filtered
+        }
+        val clearEdit = state.editingQueuedMessageId == deletedId || state.editingState?.messageId == deletedId
+        return state.copy(
+            messages = reconciled,
+            queuedIds = if (nextRunning) nextQueuedIds else emptySet(),
+            running = nextRunning,
+            activeProgress = if (nextRunning) state.activeProgress else null,
+            editingState = if (clearEdit) null else state.editingState,
+            editingQueuedMessageId = if (clearEdit) null else state.editingQueuedMessageId,
         )
     }
 
@@ -238,6 +291,7 @@ object ChatReducer {
                     null
                 },
                 messages = reconciled,
+                queuedIds = if (event.running) event.queuedIds.toSet() else emptySet(),
             )
         }
 
@@ -262,6 +316,7 @@ object ChatReducer {
                 running = event.running,
                 activeProgress = nextProgress,
                 messages = nextMessages,
+                queuedIds = deriveQueuedIds(nextMessages, event.running),
                 unreadCount = if (shouldIncrementUnread) state.unreadCount + 1 else state.unreadCount,
             )
         }
@@ -273,7 +328,29 @@ object ChatReducer {
             } else {
                 null
             },
+            queuedIds = if (event.running) state.queuedIds else emptySet(),
         )
+
+        is ChatSseEvent.MessageDeleted -> onMessageDeleted(
+            state = state,
+            deletedId = event.id,
+        )
+
+        is ChatSseEvent.State -> {
+            val reconciled = ChatLogic.reconcileQueuedMessages(
+                current = state.messages,
+                queuedIds = event.queuedIds,
+                running = event.running,
+                optimisticSteeredIds = optimisticSteeredIds,
+            )
+            state.copy(
+                engine = event.engine?.let { ChatEngines.normalize(it) } ?: state.engine,
+                running = event.running,
+                activeProgress = if (event.running) state.activeProgress else null,
+                messages = reconciled,
+                queuedIds = if (event.running) event.queuedIds.toSet() else emptySet(),
+            )
+        }
     }
 
     fun onNewChatSuccess(

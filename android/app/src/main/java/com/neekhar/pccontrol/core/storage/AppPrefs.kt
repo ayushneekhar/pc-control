@@ -31,6 +31,10 @@ private val Context.pcControlDataStore: DataStore<Preferences> by preferencesDat
 
 data class AppPrefsSnapshot(
     val serverUrl: String = AppPrefs.DEFAULT_SERVER_URL,
+    val apiUrl: String = AppPrefs.DEFAULT_API_URL,
+    val apiToken: String = "",
+    val cfAccessClientId: String = "",
+    val cfAccessClientSecret: String = "",
     val chatUrl: String = "",
     val chatToken: String = "",
     val themeMode: ThemeMode = ThemeMode.System,
@@ -46,7 +50,11 @@ data class AppPrefsSnapshot(
     val liveDismissedIds: Set<String> = emptySet(),
     val keyringCiphertext: String? = null,
     val keyringIv: String? = null,
-)
+) {
+    /** True when the unified off-Tailscale Cloudflare Public API has both URL and Bearer token set. */
+    val isPublicApiConfigured: Boolean
+        get() = apiUrl.isNotBlank() && apiToken.isNotBlank()
+}
 
 /**
  * Persistent application preferences backed by Jetpack DataStore Preferences.
@@ -60,6 +68,10 @@ class AppPrefs internal constructor(
 
     private object Keys {
         val SERVER_URL = stringPreferencesKey("server_url")
+        val API_URL = stringPreferencesKey("api_url")
+        val API_TOKEN = stringPreferencesKey("api_token")
+        val CF_ACCESS_CLIENT_ID = stringPreferencesKey("cf_access_client_id")
+        val CF_ACCESS_CLIENT_SECRET = stringPreferencesKey("cf_access_client_secret")
         val CHAT_URL = stringPreferencesKey("chat_url")
         val CHAT_TOKEN = stringPreferencesKey("chat_token")
         val THEME_MODE = stringPreferencesKey("theme_mode")
@@ -91,6 +103,10 @@ class AppPrefs internal constructor(
         .distinctUntilChanged()
 
     val serverUrl: Flow<String> = snapshots.map { it.serverUrl }.distinctUntilChanged()
+    val apiUrl: Flow<String> = snapshots.map { it.apiUrl }.distinctUntilChanged()
+    val apiToken: Flow<String> = snapshots.map { it.apiToken }.distinctUntilChanged()
+    val cfAccessClientId: Flow<String> = snapshots.map { it.cfAccessClientId }.distinctUntilChanged()
+    val cfAccessClientSecret: Flow<String> = snapshots.map { it.cfAccessClientSecret }.distinctUntilChanged()
     val chatUrl: Flow<String> = snapshots.map { it.chatUrl }.distinctUntilChanged()
     val chatToken: Flow<String> = snapshots.map { it.chatToken }.distinctUntilChanged()
     val themeMode: Flow<ThemeMode> = snapshots.map { it.themeMode }.distinctUntilChanged()
@@ -143,6 +159,31 @@ class AppPrefs internal constructor(
         }
     }
 
+    suspend fun setPublicApiConfig(
+        rawUrl: String,
+        rawApiToken: String,
+        rawCfClientId: String,
+        rawCfClientSecret: String,
+    ) {
+        val cleanUrl = normalizeApiUrl(rawUrl)
+        val cleanToken = rawApiToken.trim()
+        val cleanCfId = rawCfClientId.trim()
+        val cleanCfSecret = rawCfClientSecret.trim()
+        _current.value = _current.value.copy(
+            apiUrl = cleanUrl,
+            apiToken = cleanToken,
+            cfAccessClientId = cleanCfId,
+            cfAccessClientSecret = cleanCfSecret,
+        )
+        dataStore.edit { prefs ->
+            prefs[Keys.API_URL] = cleanUrl
+            if (cleanToken.isEmpty()) prefs.remove(Keys.API_TOKEN) else prefs[Keys.API_TOKEN] = cleanToken
+            if (cleanCfId.isEmpty()) prefs.remove(Keys.CF_ACCESS_CLIENT_ID) else prefs[Keys.CF_ACCESS_CLIENT_ID] = cleanCfId
+            if (cleanCfSecret.isEmpty()) prefs.remove(Keys.CF_ACCESS_CLIENT_SECRET) else prefs[Keys.CF_ACCESS_CLIENT_SECRET] = cleanCfSecret
+        }
+    }
+
+    @Deprecated("Replaced by unified setPublicApiConfig")
     suspend fun setChatConfig(rawUrl: String, rawToken: String) {
         val cleanUrl = normalizeChatUrl(rawUrl)
         val cleanToken = rawToken.trim()
@@ -236,6 +277,10 @@ class AppPrefs internal constructor(
 
     private fun Preferences.toSnapshot(): AppPrefsSnapshot = AppPrefsSnapshot(
         serverUrl = normalizeServerUrl(this[Keys.SERVER_URL] ?: DEFAULT_SERVER_URL),
+        apiUrl = normalizeApiUrl(this[Keys.API_URL] ?: DEFAULT_API_URL),
+        apiToken = (this[Keys.API_TOKEN] ?: "").trim(),
+        cfAccessClientId = (this[Keys.CF_ACCESS_CLIENT_ID] ?: "").trim(),
+        cfAccessClientSecret = (this[Keys.CF_ACCESS_CLIENT_SECRET] ?: "").trim(),
         chatUrl = normalizeChatUrl(this[Keys.CHAT_URL] ?: ""),
         chatToken = (this[Keys.CHAT_TOKEN] ?: "").trim(),
         themeMode = ThemeMode.fromStorage(this[Keys.THEME_MODE]),
@@ -255,10 +300,10 @@ class AppPrefs internal constructor(
 
     companion object {
         const val DEFAULT_SERVER_URL = "https://ayushlive-hp-pavilion.tail65e4a4.ts.net"
-        const val CLOUDFLARE_CHAT_ORIGIN = "https://agent.neekhar.dev"
-        const val CLOUDFLARE_CHAT_API_URL = "https://agent.neekhar.dev/pc/api/chat"
+        const val DEFAULT_API_URL = "https://api.neekhar.dev"
         const val DEFAULT_CAM = "cat"
 
+        private val PC_API_SUFFIX_REGEX = Regex("/pc/api(?:/.*)?$", RegexOption.IGNORE_CASE)
         private val CHAT_SUFFIX_REGEX = Regex("/pc/api/chat.*$", RegexOption.IGNORE_CASE)
 
         fun normalizeServerUrl(raw: String): String {
@@ -267,8 +312,18 @@ class AppPrefs internal constructor(
         }
 
         /**
-         * Strips trailing slashes and any pasted `/pc/api/chat...` suffix so the stored value is
-         * always the bare origin (matching `src/lib/chatLogic.ts#normalizeChatUrl`).
+         * Strips trailing slashes and any pasted `/pc/api...` suffix so the stored public API URL is
+         * always the bare origin (defaulting to [DEFAULT_API_URL]).
+         */
+        fun normalizeApiUrl(raw: String): String {
+            val trimmed = raw.trim().trimEnd('/')
+            if (trimmed.isEmpty()) return DEFAULT_API_URL
+            return PC_API_SUFFIX_REGEX.replace(trimmed, "").trimEnd('/').ifEmpty { DEFAULT_API_URL }
+        }
+
+        /**
+         * Strips trailing slashes and any pasted `/pc/api/chat...` suffix so legacy stored values
+         * remain bare origins.
          */
         fun normalizeChatUrl(raw: String): String {
             val trimmed = raw.trim().trimEnd('/')

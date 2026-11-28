@@ -638,7 +638,7 @@ fun LiveStreamingActivityCard(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 40.dp)
+                .heightIn(min = 32.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .then(
                     if (steps.isNotEmpty()) {
@@ -651,7 +651,7 @@ fun LiveStreamingActivityCard(
                         Modifier
                     },
                 )
-                .padding(vertical = 8.dp),
+                .padding(vertical = 4.dp),
         ) {
             // Subtle pulsing status dot
             Box(
@@ -1133,6 +1133,20 @@ private fun InlineToken.firstPlainChar(): Char? = when (this) {
     is InlineToken.Link -> children.firstNotNullOfOrNull { it.firstPlainChar() }
 }
 
+private fun extractInlinePlainText(tokens: List<InlineToken>): String = buildString {
+    fun appendPlain(tok: InlineToken) {
+        when (tok) {
+            is InlineToken.Text -> append(tok.text)
+            is InlineToken.Code -> append(tok.code)
+            is InlineToken.Bold -> tok.children.forEach(::appendPlain)
+            is InlineToken.Italic -> tok.children.forEach(::appendPlain)
+            is InlineToken.Strike -> tok.children.forEach(::appendPlain)
+            is InlineToken.Link -> tok.children.forEach(::appendPlain)
+        }
+    }
+    tokens.forEach(::appendPlain)
+}
+
 private fun buildInlineAnnotatedString(
     raw: String,
     textColor: Color,
@@ -1248,43 +1262,79 @@ private fun AnnotatedString.Builder.appendInlineTokens(
             }
 
             is InlineToken.Link -> {
-                val resolved = ChatLogic.resolveChatLinkUrl(tok.url)
-                if (resolved != null) {
+                val localFilePath = ChatLogic.resolveLocalFilePath(tok.url)
+                if (localFilePath != null) {
+                    val hasPillBg = codeBg != Color.Transparent && codeBg != Color.Unspecified
+                    val labelText = extractInlinePlainText(tok.children).ifBlank { localFilePath }
+                    if (hasPillBg && lastChar?.isWhitespace() == false) {
+                        append(INLINE_CODE_OUTER_GAP)
+                    }
                     withLink(
                         LinkAnnotation.Clickable(
-                            tag = resolved,
+                            tag = tok.url,
                             styles = TextLinkStyles(
                                 style = SpanStyle(
-                                    color = accentColor,
-                                    textDecoration = TextDecoration.Underline,
+                                    color = codeColor,
+                                    background = if (hasPillBg) codeBg else Color.Unspecified,
+                                    fontFamily = PcMonoFontFamily,
+                                    fontSize = codeFontSize,
+                                    letterSpacing = 0.sp,
                                 )
                             ),
-                            linkInteractionListener = { onOpenUrl(resolved) },
+                            linkInteractionListener = { onOpenUrl(tok.url) },
                         )
                     ) {
-                        lastChar = appendInlineTokens(
-                            tokens = tok.children,
-                            accentColor = accentColor,
-                            codeBg = codeBg,
-                            codeColor = codeColor,
-                            codeFontSize = codeFontSize,
-                            initialLastChar = lastChar,
-                            followingChar = nextChar,
-                            onOpenUrl = onOpenUrl,
-                        )
+                        if (hasPillBg) {
+                            append("$INLINE_CODE_INNER_PAD$labelText$INLINE_CODE_INNER_PAD")
+                        } else {
+                            append(labelText)
+                        }
+                    }
+                    if (hasPillBg && nextChar != null && !nextChar.isWhitespace()) {
+                        append(INLINE_CODE_OUTER_GAP)
+                        lastChar = INLINE_CODE_OUTER_GAP[0]
+                    } else {
+                        lastChar = labelText.lastOrNull() ?: lastChar
                     }
                 } else {
-                    withStyle(SpanStyle(color = accentColor)) {
-                        lastChar = appendInlineTokens(
-                            tokens = tok.children,
-                            accentColor = accentColor,
-                            codeBg = codeBg,
-                            codeColor = codeColor,
-                            codeFontSize = codeFontSize,
-                            initialLastChar = lastChar,
-                            followingChar = nextChar,
-                            onOpenUrl = onOpenUrl,
-                        )
+                    val resolved = ChatLogic.resolveChatLinkUrl(tok.url)
+                    if (resolved != null) {
+                        withLink(
+                            LinkAnnotation.Clickable(
+                                tag = resolved,
+                                styles = TextLinkStyles(
+                                    style = SpanStyle(
+                                        color = accentColor,
+                                        textDecoration = TextDecoration.Underline,
+                                    )
+                                ),
+                                linkInteractionListener = { onOpenUrl(resolved) },
+                            )
+                        ) {
+                            lastChar = appendInlineTokens(
+                                tokens = tok.children,
+                                accentColor = accentColor,
+                                codeBg = codeBg,
+                                codeColor = codeColor,
+                                codeFontSize = codeFontSize,
+                                initialLastChar = lastChar,
+                                followingChar = nextChar,
+                                onOpenUrl = onOpenUrl,
+                            )
+                        }
+                    } else {
+                        withStyle(SpanStyle(color = accentColor)) {
+                            lastChar = appendInlineTokens(
+                                tokens = tok.children,
+                                accentColor = accentColor,
+                                codeBg = codeBg,
+                                codeColor = codeColor,
+                                codeFontSize = codeFontSize,
+                                initialLastChar = lastChar,
+                                followingChar = nextChar,
+                                onOpenUrl = onOpenUrl,
+                            )
+                        }
                     }
                 }
             }

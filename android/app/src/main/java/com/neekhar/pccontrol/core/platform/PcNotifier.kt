@@ -179,7 +179,12 @@ object PcNotifier {
     } catch (_: Exception) {
       null
     }
-    return serverHost != null && host == serverHost
+    val apiHost = try {
+      Uri.parse(PlatformPrefs.apiUrl(ctx)).host?.lowercase()
+    } catch (_: Exception) {
+      null
+    }
+    return (serverHost != null && host == serverHost) || (apiHost != null && host == apiHost)
   }
 
   fun showMessage(
@@ -303,8 +308,7 @@ object PcNotifier {
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
-      val req = Request.Builder()
-        .url(PlatformPrefs.serverUrl(ctx) + path)
+      val req = PlatformHttp.apiRequestBuilder(ctx, path)
         .get()
         .build()
       imageClient.newCall(req).execute().use { resp ->

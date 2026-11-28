@@ -147,8 +147,7 @@ object PushManager {
     for (attempt in 0..1) {
       var retryable = false
       try {
-        val req = Request.Builder()
-          .url("${PlatformPrefs.serverUrl(ctx)}/pc/api/push/register")
+        val req = PlatformHttp.apiRequestBuilder(ctx, "/pc/api/push/register")
           .post(payload.toRequestBody(JSON_MEDIA))
           .header("Accept", "application/json")
           .build()

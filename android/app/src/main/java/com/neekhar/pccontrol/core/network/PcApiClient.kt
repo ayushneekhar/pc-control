@@ -10,7 +10,9 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
@@ -39,6 +41,7 @@ import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.net.URI
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -46,16 +49,24 @@ import kotlin.coroutines.resumeWithException
 /**
  * Shared HTTP & SSE client for PC Control.
  *
- * Conventions (matching `src/lib/api.ts` & `src/lib/chatApi.ts`):
- * - Tailscale base URL serves `/pc/...` and `/vitals/api`.
- * - Chat endpoints support either a custom URL + Bearer token, or the Tailscale base URL with
- *   automatic fallback to Cloudflare (`https://agent.neekhar.dev/pc/api/chat`) when a chat Bearer
- *   token is configured and Tailscale is unreachable.
+ * Transport rules:
+ * - All `/pc/api/*` requests route through the unified dynamic transport ([ApiTransport.CLOUDFLARE]
+ *   at `apiUrl` with dual Cloudflare Access + API Bearer auth, or [ApiTransport.TAILSCALE] at
+ *   `serverUrl` when promoted via a one-shot 500 ms probe while Tailscale VPN is active).
+ * - If a request over [ApiTransport.TAILSCALE] fails with a network/connection error
+ *   (`statusCode == 0`), the client immediately flips active transport to [ApiTransport.CLOUDFLARE]
+ *   and retries seamlessly.
+ * - Auth headers (`Authorization`, `CF-Access-Client-Id`, `CF-Access-Client-Secret`) are strictly
+ *   scoped to `apiUrl`'s exact origin (scheme + host + port) and never sent to Tailscale or
+ *   external hosts.
+ * - Video streaming (go2rtc WebRTC `/api/ws`, `/api/frame.jpeg`, HLS replay `/rec/...`) stays
+ *   explicitly pinned to [tailscaleBaseUrl].
  */
 class PcApiClient(
     private val prefs: AppPrefs,
     okHttpClient: OkHttpClient? = null,
     private val getRetryBackoffMs: Long = GET_RETRY_BACKOFF_MS,
+    transportManager: ApiTransportManager? = null,
 ) {
     val json: Json = DefaultJson
 
@@ -66,6 +77,22 @@ class PcApiClient(
                 maxRequestsPerHost = 20
             },
         )
+        .addInterceptor { chain ->
+            val original = chain.request()
+            val builder = original.newBuilder()
+            if (original.header("User-Agent").isNullOrBlank()) {
+                builder.header("User-Agent", USER_AGENT)
+            }
+            val snap = prefs.current.value
+            if (snap.isPublicApiConfigured && isSameOrigin(original.url.toString(), snap.apiUrl)) {
+                buildCloudflareAuthHeaders(snap).forEach { (k, v) ->
+                    if (original.header(k) == null) {
+                        builder.header(k, v)
+                    }
+                }
+            }
+            chain.proceed(builder.build())
+        }
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
@@ -79,45 +106,138 @@ class PcApiClient(
         .retryOnConnectionFailure(true)
         .build()
 
-    /** Active Tailscale / primary server origin (no trailing slash). */
-    val baseUrl: String
+    private val transportManager: ApiTransportManager = transportManager ?: ApiTransportManager(
+        prefs = prefs,
+        probeClient = this.okHttpClient,
+    )
+
+    /** Live active API transport ([ApiTransport.CLOUDFLARE] vs [ApiTransport.TAILSCALE]). */
+    val activeTransport: StateFlow<ApiTransport>
+        get() = transportManager.activeTransport
+
+    fun reprobeTransport() {
+        transportManager.reprobeNow()
+    }
+
+    fun reportTailscaleFailure() {
+        transportManager.reportTailscaleFailure()
+    }
+
+    /** Explicit Tailscale Serve origin (no trailing slash) for WebRTC cams, HLS replay & port links. */
+    val tailscaleBaseUrl: String
         get() = prefs.current.value.serverUrl
 
-    /** Active chat origin (custom chat URL if configured, otherwise [baseUrl]). */
+    /**
+     * Tailscale Serve origin (alias of [tailscaleBaseUrl]) kept for direct-media & port-link callers
+     * (`/api/ws`, `/api/frame.jpeg`, `/rec/...`, `:7878`, `:8989`).
+     */
+    val baseUrl: String
+        get() = tailscaleBaseUrl
+
+    /** Active API origin for `/pc/api/*` calls (Cloudflare `apiUrl` or Tailscale `serverUrl`). */
+    val apiBaseUrl: String
+        get() = resolveApiTarget(prefs.current.value).baseUrl
+
+    /** Active chat origin (now unified with [apiBaseUrl]). */
     val chatBaseUrl: String
-        get() = resolveChatTarget(prefs.current.value).baseUrl
+        get() = apiBaseUrl
 
-    /** Configured Bearer token for off-Tailscale chat endpoints, or empty string. */
+    /** Configured public API Bearer token (falls back to legacy chatToken if unset). */
     val chatToken: String
-        get() = prefs.current.value.chatToken
+        get() = prefs.current.value.apiToken.ifBlank { prefs.current.value.chatToken }
 
-    fun resolveChatTarget(snapshot: AppPrefsSnapshot = prefs.current.value): ResolvedChatTarget =
-        resolveChatTarget(
-            defaultBaseUrl = snapshot.serverUrl,
-            customChatUrl = snapshot.chatUrl,
-            chatToken = snapshot.chatToken,
+    /**
+     * Resolves the current unified API target (transport + origin + strictly scoped auth headers).
+     */
+    fun resolveApiTarget(
+        snapshot: AppPrefsSnapshot = prefs.current.value,
+        forceTailscale: Boolean = false,
+    ): ResolvedApiTarget {
+        if (forceTailscale || !snapshot.isPublicApiConfigured) {
+            return ResolvedApiTarget(
+                transport = ApiTransport.TAILSCALE,
+                baseUrl = snapshot.serverUrl.trim().trimEnd('/'),
+                headers = emptyMap(),
+            )
+        }
+        return when (transportManager.resolveTransport(snapshot)) {
+            ApiTransport.CLOUDFLARE -> ResolvedApiTarget(
+                transport = ApiTransport.CLOUDFLARE,
+                baseUrl = snapshot.apiUrl.trim().trimEnd('/'),
+                headers = buildCloudflareAuthHeaders(snapshot),
+            )
+            ApiTransport.TAILSCALE -> ResolvedApiTarget(
+                transport = ApiTransport.TAILSCALE,
+                baseUrl = snapshot.serverUrl.trim().trimEnd('/'),
+                headers = emptyMap(),
+            )
+        }
+    }
+
+    fun resolveChatTarget(snapshot: AppPrefsSnapshot = prefs.current.value): ResolvedChatTarget {
+        val target = resolveApiTarget(snapshot)
+        return ResolvedChatTarget(
+            baseUrl = target.baseUrl,
+            headers = target.headers,
+            isCustom = target.transport == ApiTransport.CLOUDFLARE,
         )
+    }
 
+    /**
+     * Resolves a relative or absolute path:
+     * - Relative `/pc/...` paths use the active API origin ([apiBaseUrl]).
+     * - Other relative paths (e.g. `/api/frame.jpeg`, `/rec/...`) use [tailscaleBaseUrl].
+     */
     fun resolveUrl(pathOrUrl: String, useChatTarget: Boolean = false): String {
         val trimmed = pathOrUrl.trim()
         if (HTTP_PREFIX.containsMatchIn(trimmed)) return trimmed
-        val origin = if (useChatTarget) chatBaseUrl else baseUrl
         val normalizedPath = if (trimmed.startsWith("/")) trimmed else "/$trimmed"
+        val origin = if (useChatTarget || isPcApiPath(normalizedPath)) apiBaseUrl else tailscaleBaseUrl
         return "$origin$normalizedPath"
     }
 
     /**
+     * Resolves an authenticated API image URL (e.g. `/pc/api/notify/image/...`,
+     * `/pc/api/catdetect/snaps/...`, `/pc/api/chat/file/...`, `/pc/api/jellyfin/image/...`)
+     * returning `(url, headers)` with Cloudflare auth headers attached ONLY when targeting `apiUrl`.
+     */
+    fun resolveAuthenticatedImage(
+        pathOrUrl: String,
+        snapshot: AppPrefsSnapshot = prefs.current.value,
+    ): Pair<String, Map<String, String>> {
+        val trimmed = pathOrUrl.trim()
+        if (trimmed.isEmpty()) return "" to emptyMap()
+        val isAbsolute = HTTP_PREFIX.containsMatchIn(trimmed)
+        if (isAbsolute) {
+            val headers = if (snapshot.isPublicApiConfigured && isSameOrigin(trimmed, snapshot.apiUrl)) {
+                buildCloudflareAuthHeaders(snapshot)
+            } else {
+                emptyMap()
+            }
+            return trimmed to headers
+        }
+        val normalizedPath = if (trimmed.startsWith("/")) trimmed else "/$trimmed"
+        return if (isPcApiPath(normalizedPath)) {
+            val target = resolveApiTarget(snapshot)
+            "${target.baseUrl}$normalizedPath" to target.headers
+        } else {
+            "${snapshot.serverUrl.trim().trimEnd('/')}$normalizedPath" to emptyMap()
+        }
+    }
+
+    /**
      * Resolves a chat attachment URL (relative or absolute) and returns its URL plus any
-     * `Authorization` header required (scoped strictly to the chat origin).
+     * auth headers required (scoped strictly to the Cloudflare API origin).
      */
     fun resolveChatAttachment(url: String): Pair<String, Map<String, String>> =
-        resolveChatAttachmentSource(url = url, target = resolveChatTarget())
+        resolveAuthenticatedImage(url)
 
     suspend inline fun <reified T> getJson(
         pathOrUrl: String,
         headers: Map<String, String> = emptyMap(),
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
         useChatTarget: Boolean = false,
+        forceTailscale: Boolean = false,
     ): ApiResult<T> = executeJson(
         method = "GET",
         pathOrUrl = pathOrUrl,
@@ -125,6 +245,7 @@ class PcApiClient(
         headers = headers,
         timeoutMs = timeoutMs,
         useChatTarget = useChatTarget,
+        forceTailscale = forceTailscale,
     )
 
     suspend inline fun <reified Req, reified Res> postJson(
@@ -133,6 +254,7 @@ class PcApiClient(
         headers: Map<String, String> = emptyMap(),
         timeoutMs: Long = DEFAULT_POST_TIMEOUT_MS,
         useChatTarget: Boolean = false,
+        forceTailscale: Boolean = false,
     ): ApiResult<Res> {
         val bodyStr = json.encodeToString(body)
         return executeJson(
@@ -142,6 +264,7 @@ class PcApiClient(
             headers = headers,
             timeoutMs = timeoutMs,
             useChatTarget = useChatTarget,
+            forceTailscale = forceTailscale,
         )
     }
 
@@ -151,6 +274,7 @@ class PcApiClient(
         headers: Map<String, String> = emptyMap(),
         timeoutMs: Long = DEFAULT_POST_TIMEOUT_MS,
         useChatTarget: Boolean = false,
+        forceTailscale: Boolean = false,
     ): ApiResult<Res> = executeJson(
         method = "POST",
         pathOrUrl = pathOrUrl,
@@ -158,6 +282,7 @@ class PcApiClient(
         headers = headers,
         timeoutMs = timeoutMs,
         useChatTarget = useChatTarget,
+        forceTailscale = forceTailscale,
     )
 
     suspend inline fun <reified Req, reified Res> putJson(
@@ -166,6 +291,7 @@ class PcApiClient(
         headers: Map<String, String> = emptyMap(),
         timeoutMs: Long = DEFAULT_POST_TIMEOUT_MS,
         useChatTarget: Boolean = false,
+        forceTailscale: Boolean = false,
     ): ApiResult<Res> {
         val bodyStr = json.encodeToString(body)
         return executeJson(
@@ -175,6 +301,7 @@ class PcApiClient(
             headers = headers,
             timeoutMs = timeoutMs,
             useChatTarget = useChatTarget,
+            forceTailscale = forceTailscale,
         )
     }
 
@@ -183,6 +310,7 @@ class PcApiClient(
         headers: Map<String, String> = emptyMap(),
         timeoutMs: Long = DEFAULT_POST_TIMEOUT_MS,
         useChatTarget: Boolean = false,
+        forceTailscale: Boolean = false,
     ): ApiResult<Res> = executeJson(
         method = "DELETE",
         pathOrUrl = pathOrUrl,
@@ -190,6 +318,7 @@ class PcApiClient(
         headers = headers,
         timeoutMs = timeoutMs,
         useChatTarget = useChatTarget,
+        forceTailscale = forceTailscale,
     )
 
     suspend inline fun <reified Res> postMultipart(
@@ -198,6 +327,7 @@ class PcApiClient(
         headers: Map<String, String> = emptyMap(),
         timeoutMs: Long = DEFAULT_UPLOAD_TIMEOUT_MS,
         useChatTarget: Boolean = false,
+        forceTailscale: Boolean = false,
     ): ApiResult<Res> = executeJson(
         method = "POST",
         pathOrUrl = pathOrUrl,
@@ -205,6 +335,7 @@ class PcApiClient(
         headers = headers,
         timeoutMs = timeoutMs,
         useChatTarget = useChatTarget,
+        forceTailscale = forceTailscale,
     )
 
     suspend fun getBytes(
@@ -212,34 +343,73 @@ class PcApiClient(
         headers: Map<String, String> = emptyMap(),
         timeoutMs: Long = DEFAULT_BYTES_TIMEOUT_MS,
         useChatTarget: Boolean = false,
+        forceTailscale: Boolean = false,
     ): ApiResult<ByteArray> {
         val snap = prefs.awaitLoaded()
-        val target = if (useChatTarget) resolveChatTarget(snap) else null
-        val url = buildTargetUrl(pathOrUrl, target?.baseUrl ?: snap.serverUrl)
+        val trimmed = pathOrUrl.trim()
+        val isAbsolute = HTTP_PREFIX.containsMatchIn(trimmed)
+        val useUnifiedTransport = !isAbsolute && !forceTailscale && (useChatTarget || isPcApiPath(trimmed))
+
+        if (!useUnifiedTransport) {
+            val url = if (isAbsolute) trimmed else buildTargetUrl(trimmed, snap.serverUrl)
+            val scopedHeaders = if (isAbsolute && snap.isPublicApiConfigured && isSameOrigin(url, snap.apiUrl)) {
+                buildCloudflareAuthHeaders(snap)
+            } else {
+                emptyMap()
+            }
+            val merged = buildMap {
+                put("Accept", "*/*")
+                putAll(scopedHeaders)
+                putAll(headers)
+            }
+            val first = executeBytesOnce(url, merged, timeoutMs, isCloudflare = scopedHeaders.isNotEmpty())
+            if (isRetryableGetError("GET", first)) {
+                delay(getRetryBackoffMs)
+                return executeBytesOnce(url, merged, timeoutMs, isCloudflare = scopedHeaders.isNotEmpty())
+            }
+            return first
+        }
+
+        val target = resolveApiTarget(snap)
+        val url = buildTargetUrl(trimmed, target.baseUrl)
         val mergedHeaders = buildMap {
             put("Accept", "*/*")
-            if (target != null) putAll(target.headers)
+            putAll(target.headers)
             putAll(headers)
         }
-        val shouldFallbackToCloudflare = useChatTarget &&
-            target?.isCustom == false &&
-            snap.chatToken.isNotBlank() &&
-            !HTTP_PREFIX.containsMatchIn(pathOrUrl.trim())
-
-        val first = executeBytesOnce(url, mergedHeaders, timeoutMs, isCustomChat = target?.isCustom == true)
-        if (first is ApiResult.Error && first.statusCode == 0 && shouldFallbackToCloudflare) {
-            val fallbackUrl = buildTargetUrl(pathOrUrl, AppPrefs.CLOUDFLARE_CHAT_ORIGIN)
-            val fallbackHeaders = mergedHeaders + ("Authorization" to "Bearer ${snap.chatToken}")
-            val fallbackFirst = executeBytesOnce(fallbackUrl, fallbackHeaders, timeoutMs, isCustomChat = true)
-            if (isRetryableGetError("GET", fallbackFirst)) {
-                delay(getRetryBackoffMs)
-                return executeBytesOnce(fallbackUrl, fallbackHeaders, timeoutMs, isCustomChat = true)
+        val first = executeBytesOnce(
+            url = url,
+            headers = mergedHeaders,
+            timeoutMs = timeoutMs,
+            isCloudflare = target.transport == ApiTransport.CLOUDFLARE,
+        )
+        if (first is ApiResult.Error &&
+            first.statusCode == 0 &&
+            target.transport == ApiTransport.TAILSCALE &&
+            snap.isPublicApiConfigured
+        ) {
+            transportManager.reportTailscaleFailure()
+            val cfUrl = buildTargetUrl(trimmed, snap.apiUrl)
+            val cfHeaders = buildMap {
+                put("Accept", "*/*")
+                putAll(buildCloudflareAuthHeaders(snap))
+                putAll(headers)
             }
-            return fallbackFirst
+            val cfFirst = executeBytesOnce(cfUrl, cfHeaders, timeoutMs, isCloudflare = true)
+            if (isRetryableGetError("GET", cfFirst)) {
+                delay(getRetryBackoffMs)
+                return executeBytesOnce(cfUrl, cfHeaders, timeoutMs, isCloudflare = true)
+            }
+            return cfFirst
         }
         if (isRetryableGetError("GET", first)) {
             delay(getRetryBackoffMs)
-            return executeBytesOnce(url, mergedHeaders, timeoutMs, isCustomChat = target?.isCustom == true)
+            return executeBytesOnce(
+                url = url,
+                headers = mergedHeaders,
+                timeoutMs = timeoutMs,
+                isCloudflare = target.transport == ApiTransport.CLOUDFLARE,
+            )
         }
         return first
     }
@@ -252,8 +422,9 @@ class PcApiClient(
         headers: Map<String, String>,
         timeoutMs: Long,
         useChatTarget: Boolean,
+        forceTailscale: Boolean = false,
     ): ApiResult<T> {
-        return when (val raw = executeRaw(method, pathOrUrl, requestBody, headers, timeoutMs, useChatTarget)) {
+        return when (val raw = executeRaw(method, pathOrUrl, requestBody, headers, timeoutMs, useChatTarget, forceTailscale)) {
             is ApiResult.Error -> raw
             is ApiResult.Success -> {
                 if (T::class == Unit::class) {
@@ -288,41 +459,147 @@ class PcApiClient(
         headers: Map<String, String> = emptyMap(),
         timeoutMs: Long = DEFAULT_POST_TIMEOUT_MS,
         useChatTarget: Boolean = false,
+        forceTailscale: Boolean = false,
     ): ApiResult<String> {
         val snap = prefs.awaitLoaded()
-        val target = if (useChatTarget) resolveChatTarget(snap) else null
-        val url = buildTargetUrl(pathOrUrl, target?.baseUrl ?: snap.serverUrl)
+        val trimmed = pathOrUrl.trim()
+        val isAbsolute = HTTP_PREFIX.containsMatchIn(trimmed)
+        val useUnifiedTransport = !isAbsolute && !forceTailscale && (useChatTarget || isPcApiPath(trimmed))
+
+        if (!useUnifiedTransport) {
+            val url = if (isAbsolute) trimmed else buildTargetUrl(trimmed, snap.serverUrl)
+            val scopedHeaders = if (isAbsolute && snap.isPublicApiConfigured && isSameOrigin(url, snap.apiUrl)) {
+                buildCloudflareAuthHeaders(snap)
+            } else {
+                emptyMap()
+            }
+            val merged = buildMap {
+                put("Accept", "application/json")
+                putAll(scopedHeaders)
+                putAll(headers)
+            }
+            val first = executeStringOnce(
+                method = method,
+                url = url,
+                requestBody = requestBody,
+                headers = merged,
+                timeoutMs = timeoutMs,
+                isCloudflare = scopedHeaders.isNotEmpty(),
+            )
+            if (isRetryableGetError(method, first)) {
+                delay(getRetryBackoffMs)
+                return executeStringOnce(
+                    method = method,
+                    url = url,
+                    requestBody = requestBody,
+                    headers = merged,
+                    timeoutMs = timeoutMs,
+                    isCloudflare = scopedHeaders.isNotEmpty(),
+                )
+            }
+            return first
+        }
+
+        val target = resolveApiTarget(snap)
+        val url = buildTargetUrl(trimmed, target.baseUrl)
         val mergedHeaders = buildMap {
             put("Accept", "application/json")
-            if (target != null) putAll(target.headers)
+            putAll(target.headers)
             putAll(headers)
         }
-        val shouldFallbackToCloudflare = useChatTarget &&
-            target?.isCustom == false &&
-            snap.chatToken.isNotBlank() &&
-            !HTTP_PREFIX.containsMatchIn(pathOrUrl.trim())
-
-        val first = executeStringOnce(method, url, requestBody, mergedHeaders, timeoutMs, isCustomChat = target?.isCustom == true)
-        if (first is ApiResult.Error && first.statusCode == 0 && shouldFallbackToCloudflare) {
-            val fallbackUrl = buildTargetUrl(pathOrUrl, AppPrefs.CLOUDFLARE_CHAT_ORIGIN)
-            val fallbackHeaders = mergedHeaders + ("Authorization" to "Bearer ${snap.chatToken}")
-            val fallbackFirst = executeStringOnce(method, fallbackUrl, requestBody, fallbackHeaders, timeoutMs, isCustomChat = true)
-            if (isRetryableGetError(method, fallbackFirst)) {
-                delay(getRetryBackoffMs)
-                return executeStringOnce(method, fallbackUrl, requestBody, fallbackHeaders, timeoutMs, isCustomChat = true)
+        val first = executeStringOnce(
+            method = method,
+            url = url,
+            requestBody = requestBody,
+            headers = mergedHeaders,
+            timeoutMs = timeoutMs,
+            isCloudflare = target.transport == ApiTransport.CLOUDFLARE,
+        )
+        // If Tailscale failed with a network/connection error, flip immediately to Cloudflare and retry.
+        if (first is ApiResult.Error &&
+            first.statusCode == 0 &&
+            target.transport == ApiTransport.TAILSCALE &&
+            snap.isPublicApiConfigured
+        ) {
+            transportManager.reportTailscaleFailure()
+            val cfUrl = buildTargetUrl(trimmed, snap.apiUrl)
+            val cfHeaders = buildMap {
+                put("Accept", "application/json")
+                putAll(buildCloudflareAuthHeaders(snap))
+                putAll(headers)
             }
-            return fallbackFirst
+            val cfFirst = executeStringOnce(
+                method = method,
+                url = cfUrl,
+                requestBody = requestBody,
+                headers = cfHeaders,
+                timeoutMs = timeoutMs,
+                isCloudflare = true,
+            )
+            if (isRetryableGetError(method, cfFirst)) {
+                delay(getRetryBackoffMs)
+                return executeStringOnce(
+                    method = method,
+                    url = cfUrl,
+                    requestBody = requestBody,
+                    headers = cfHeaders,
+                    timeoutMs = timeoutMs,
+                    isCloudflare = true,
+                )
+            }
+            return cfFirst
         }
         if (isRetryableGetError(method, first)) {
             delay(getRetryBackoffMs)
-            return executeStringOnce(method, url, requestBody, mergedHeaders, timeoutMs, isCustomChat = target?.isCustom == true)
+            return executeStringOnce(
+                method = method,
+                url = url,
+                requestBody = requestBody,
+                headers = mergedHeaders,
+                timeoutMs = timeoutMs,
+                isCloudflare = target.transport == ApiTransport.CLOUDFLARE,
+            )
         }
         return first
     }
 
     /**
+     * Tests `GET <apiUrl>/pc/api/info` directly with explicit credentials (without mutating
+     * saved prefs or sending headers to any other origin). Returns `(ApiResult<String>, latencyMs)`.
+     */
+    suspend fun testDirectPublicApi(
+        apiUrl: String,
+        apiToken: String,
+        cfAccessClientId: String,
+        cfAccessClientSecret: String,
+        timeoutMs: Long = 10_000L,
+    ): Pair<ApiResult<String>, Long> {
+        val cleanUrl = AppPrefs.normalizeApiUrl(apiUrl)
+        val headers = buildMap {
+            put("Accept", "application/json")
+            val tok = apiToken.trim()
+            if (tok.isNotEmpty()) put("Authorization", "Bearer $tok")
+            val cfId = cfAccessClientId.trim()
+            if (cfId.isNotEmpty()) put("CF-Access-Client-Id", cfId)
+            val cfSecret = cfAccessClientSecret.trim()
+            if (cfSecret.isNotEmpty()) put("CF-Access-Client-Secret", cfSecret)
+        }
+        val startMs = System.currentTimeMillis()
+        val result = executeStringOnce(
+            method = "GET",
+            url = "$cleanUrl/pc/api/info",
+            requestBody = null,
+            headers = headers,
+            timeoutMs = timeoutMs,
+            isCloudflare = true,
+        )
+        val elapsedMs = (System.currentTimeMillis() - startMs).coerceAtLeast(0L)
+        return result to elapsedMs
+    }
+
+    /**
      * Cold Flow of Server-Sent Events from [url] (absolute or relative path).
-     * Automatically reconnects with exponential backoff until the collector cancels.
+     * Automatically reconnects on transport switches and with exponential backoff until cancelled.
      */
     fun sseFlow(
         url: String,
@@ -342,7 +619,7 @@ class PcApiClient(
 
     /**
      * Cold Flow emitting connection lifecycle ([SseMessage.Connected], [SseMessage.Reconnecting])
-     * alongside parsed [SseMessage.Event] items.
+     * alongside parsed [SseMessage.Event] items. Reconnects immediately when [activeTransport] switches.
      */
     fun sseStatusFlow(
         url: String,
@@ -354,6 +631,17 @@ class PcApiClient(
     ): Flow<SseMessage> = callbackFlow {
         val factory = EventSources.createFactory(sseOkHttpClient)
         var currentSource: EventSource? = null
+        var currentStreamEnded: CompletableDeferred<SseEndReason>? = null
+        var activeOpenedTransport: ApiTransport? = null
+
+        val transportWatcher = launch(Dispatchers.IO) {
+            activeTransport.drop(1).collect { newTransport ->
+                if (activeOpenedTransport != null && newTransport != activeOpenedTransport) {
+                    currentStreamEnded?.complete(SseEndReason.TransportSwitched)
+                    currentSource?.cancel()
+                }
+            }
+        }
 
         val runner = launch(Dispatchers.IO) {
             var attempt = 0
@@ -361,16 +649,35 @@ class PcApiClient(
 
             while (currentCoroutineContext().isActive) {
                 val snap = prefs.awaitLoaded()
-                val target = if (useChatTarget) resolveChatTarget(snap) else null
-                val resolvedUrl = buildTargetUrl(url, target?.baseUrl ?: snap.serverUrl)
+                val trimmed = url.trim()
+                val isAbsolute = HTTP_PREFIX.containsMatchIn(trimmed)
+                val target = if (!isAbsolute && (useChatTarget || isPcApiPath(trimmed))) {
+                    resolveApiTarget(snap)
+                } else {
+                    null
+                }
+                val resolvedUrl = if (isAbsolute) {
+                    trimmed
+                } else {
+                    buildTargetUrl(trimmed, target?.baseUrl ?: snap.serverUrl)
+                }
+                activeOpenedTransport = target?.transport
+
                 val reqBuilder = Request.Builder()
                     .url(resolvedUrl)
                     .header("Accept", "text/event-stream")
                     .header("Cache-Control", "no-cache")
-                target?.headers?.forEach { (k, v) -> reqBuilder.header(k, v) }
+                    .header("User-Agent", USER_AGENT)
+                if (target != null) {
+                    target.headers.forEach { (k, v) -> reqBuilder.header(k, v) }
+                } else if (isAbsolute && snap.isPublicApiConfigured && isSameOrigin(resolvedUrl, snap.apiUrl)) {
+                    buildCloudflareAuthHeaders(snap).forEach { (k, v) -> reqBuilder.header(k, v) }
+                }
                 headers.forEach { (k, v) -> reqBuilder.header(k, v) }
 
-                val streamEnded = CompletableDeferred<String?>()
+                val streamEnded = CompletableDeferred<SseEndReason>()
+                currentStreamEnded = streamEnded
+
                 val listener = object : EventSourceListener() {
                     override fun onOpen(eventSource: EventSource, response: Response) {
                         attempt = 0
@@ -396,7 +703,7 @@ class PcApiClient(
                     }
 
                     override fun onClosed(eventSource: EventSource) {
-                        streamEnded.complete(null)
+                        streamEnded.complete(SseEndReason.Closed)
                     }
 
                     override fun onFailure(
@@ -404,25 +711,42 @@ class PcApiClient(
                         t: Throwable?,
                         response: Response?,
                     ) {
+                        val isTransportError = response == null
+                        if (isTransportError &&
+                            target?.transport == ApiTransport.TAILSCALE &&
+                            snap.isPublicApiConfigured
+                        ) {
+                            transportManager.reportTailscaleFailure()
+                            streamEnded.complete(SseEndReason.TransportSwitched)
+                            return
+                        }
                         val reason = t?.message ?: response?.let { "HTTP ${it.code}" }
-                        streamEnded.complete(reason)
+                        streamEnded.complete(SseEndReason.Failed(reason))
                     }
                 }
 
                 val source = factory.newEventSource(reqBuilder.build(), listener)
                 currentSource = source
 
-                val failureReason = try {
+                val endReason = try {
                     streamEnded.await()
                 } finally {
                     source.cancel()
                     if (currentSource === source) currentSource = null
+                    if (currentStreamEnded === streamEnded) currentStreamEnded = null
                 }
 
                 if (!autoReconnect || !currentCoroutineContext().isActive) {
                     break
                 }
 
+                if (endReason == SseEndReason.TransportSwitched) {
+                    attempt = 0
+                    retryDelay = initialRetryMs.coerceAtLeast(250L)
+                    continue
+                }
+
+                val failureReason = (endReason as? SseEndReason.Failed)?.reason
                 attempt += 1
                 trySend(SseMessage.Reconnecting(attempt = attempt, delayMs = retryDelay, error = failureReason))
                 delay(retryDelay)
@@ -432,9 +756,16 @@ class PcApiClient(
         }
 
         awaitClose {
+            transportWatcher.cancel()
             currentSource?.cancel()
             runner.cancel()
         }
+    }
+
+    private sealed interface SseEndReason {
+        data object Closed : SseEndReason
+        data object TransportSwitched : SseEndReason
+        data class Failed(val reason: String?) : SseEndReason
     }
 
     private suspend fun executeStringOnce(
@@ -443,7 +774,7 @@ class PcApiClient(
         requestBody: RequestBody?,
         headers: Map<String, String>,
         timeoutMs: Long,
-        isCustomChat: Boolean,
+        isCloudflare: Boolean,
     ): ApiResult<String> = withContext(Dispatchers.IO) {
         val request = buildRequest(method, url, requestBody, headers)
         val client = clientWithTimeout(timeoutMs)
@@ -465,15 +796,15 @@ class PcApiClient(
             currentCoroutineContext().ensureActive()
             ApiResult.Error(
                 statusCode = 0,
-                message = if (isCustomChat) "Chat endpoint timed out." else "Timed out. Is Tailscale connected?",
+                message = if (isCloudflare) "Public API timed out." else "Timed out. Is Tailscale connected?",
                 cause = e,
             )
         } catch (e: IOException) {
             currentCoroutineContext().ensureActive()
             ApiResult.Error(
                 statusCode = 0,
-                message = if (isCustomChat) {
-                    "Can't reach chat endpoint (${e.message ?: e::class.simpleName})"
+                message = if (isCloudflare) {
+                    "Can't reach public API (${e.message ?: e::class.simpleName})"
                 } else {
                     "Can't reach the laptop. Is Tailscale connected? (${e.message ?: e::class.simpleName})"
                 },
@@ -486,7 +817,7 @@ class PcApiClient(
         url: String,
         headers: Map<String, String>,
         timeoutMs: Long,
-        isCustomChat: Boolean,
+        isCloudflare: Boolean,
     ): ApiResult<ByteArray> = withContext(Dispatchers.IO) {
         val request = buildRequest("GET", url, null, headers)
         val client = clientWithTimeout(timeoutMs)
@@ -509,15 +840,15 @@ class PcApiClient(
             currentCoroutineContext().ensureActive()
             ApiResult.Error(
                 statusCode = 0,
-                message = if (isCustomChat) "Chat endpoint timed out." else "Timed out. Is Tailscale connected?",
+                message = if (isCloudflare) "Public API timed out." else "Timed out. Is Tailscale connected?",
                 cause = e,
             )
         } catch (e: IOException) {
             currentCoroutineContext().ensureActive()
             ApiResult.Error(
                 statusCode = 0,
-                message = if (isCustomChat) {
-                    "Can't reach chat endpoint (${e.message ?: e::class.simpleName})"
+                message = if (isCloudflare) {
+                    "Can't reach public API (${e.message ?: e::class.simpleName})"
                 } else {
                     "Can't reach the laptop. Is Tailscale connected? (${e.message ?: e::class.simpleName})"
                 },
@@ -532,7 +863,9 @@ class PcApiClient(
         requestBody: RequestBody?,
         headers: Map<String, String>,
     ): Request {
-        val builder = Request.Builder().url(url)
+        val builder = Request.Builder()
+            .url(url)
+            .header("User-Agent", USER_AGENT)
         headers.forEach { (k, v) -> builder.header(k, v) }
         when (method.uppercase()) {
             "GET" -> builder.get()
@@ -580,6 +913,8 @@ class PcApiClient(
     }
 
     companion object {
+        const val USER_AGENT = "PCControl-Android"
+
         @OptIn(ExperimentalSerializationApi::class)
         val DefaultJson: Json = Json {
             ignoreUnknownKeys = true
@@ -607,12 +942,67 @@ class PcApiClient(
         internal val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val HTTP_PREFIX = Regex("^https?://", RegexOption.IGNORE_CASE)
 
+        internal fun isPcApiPath(path: String): Boolean {
+            val normalized = if (path.startsWith("/")) path else "/$path"
+            return normalized == "/pc/api" || normalized.startsWith("/pc/api/")
+        }
+
         internal fun buildTargetUrl(pathOrUrl: String, origin: String): String {
             val trimmed = pathOrUrl.trim()
             if (HTTP_PREFIX.containsMatchIn(trimmed)) return trimmed
             val cleanOrigin = origin.trim().trimEnd('/')
             val normalizedPath = if (trimmed.startsWith("/")) trimmed else "/$trimmed"
             return "$cleanOrigin$normalizedPath"
+        }
+
+        fun buildCloudflareAuthHeaders(snapshot: AppPrefsSnapshot): Map<String, String> =
+            buildCloudflareAuthHeaders(
+                apiToken = snapshot.apiToken,
+                cfAccessClientId = snapshot.cfAccessClientId,
+                cfAccessClientSecret = snapshot.cfAccessClientSecret,
+            )
+
+        fun buildCloudflareAuthHeaders(
+            apiToken: String,
+            cfAccessClientId: String,
+            cfAccessClientSecret: String,
+        ): Map<String, String> = buildMap {
+            val token = apiToken.trim()
+            if (token.isNotEmpty()) {
+                put("Authorization", "Bearer $token")
+            }
+            val cfId = cfAccessClientId.trim()
+            if (cfId.isNotEmpty()) {
+                put("CF-Access-Client-Id", cfId)
+            }
+            val cfSecret = cfAccessClientSecret.trim()
+            if (cfSecret.isNotEmpty()) {
+                put("CF-Access-Client-Secret", cfSecret)
+            }
+        }
+
+        /**
+         * Strict origin equality check (scheme + lowercase host + effective port) to guarantee
+         * Cloudflare Access and API Bearer credentials are never leaked to Tailscale or third parties.
+         */
+        fun isSameOrigin(url: String, origin: String): Boolean {
+            val cleanOrigin = origin.trim().trimEnd('/')
+            if (cleanOrigin.isEmpty()) return false
+            val targetUri = runCatching { URI(url.trim()) }.getOrNull() ?: return false
+            val originUri = runCatching { URI(cleanOrigin) }.getOrNull() ?: return false
+            val tScheme = targetUri.scheme?.lowercase() ?: return false
+            val oScheme = originUri.scheme?.lowercase() ?: return false
+            val tHost = targetUri.host?.lowercase() ?: return false
+            val oHost = originUri.host?.lowercase() ?: return false
+            if (tScheme != oScheme || tHost != oHost) return false
+            return effectivePort(tScheme, targetUri.port) == effectivePort(oScheme, originUri.port)
+        }
+
+        private fun effectivePort(scheme: String, port: Int): Int = when {
+            port > 0 -> port
+            scheme == "https" -> 443
+            scheme == "http" -> 80
+            else -> -1
         }
 
         fun resolveChatTarget(
@@ -651,11 +1041,7 @@ class PcApiClient(
             }
             if (target.headers.isEmpty()) return resolved to emptyMap()
             if (!isAbsolute) return resolved to target.headers
-
-            val baseLower = target.baseUrl.lowercase()
-            val uriLower = resolved.lowercase()
-            val matchesOrigin = uriLower == baseLower || uriLower.startsWith("$baseLower/")
-            return if (matchesOrigin) resolved to target.headers else resolved to emptyMap()
+            return if (isSameOrigin(resolved, target.baseUrl)) resolved to target.headers else resolved to emptyMap()
         }
     }
 }

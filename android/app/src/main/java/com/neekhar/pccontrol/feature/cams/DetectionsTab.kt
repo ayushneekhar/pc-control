@@ -57,9 +57,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
+import coil3.network.NetworkHeaders
+import coil3.network.httpHeaders
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
@@ -99,7 +105,7 @@ fun DetectionsTab(
     val colors = LocalPcColors.current
     val type = LocalPcType.current
     val scope = rememberCoroutineScope()
-    val baseUrl = repository.baseUrl().trimEnd('/')
+    val activeTransport by repository.apiClient.activeTransport.collectAsState()
 
     var camFilter by remember { mutableStateOf("all") }
     var snaps by remember { mutableStateOf<List<DetectionSnap>>(emptyList()) }
@@ -299,9 +305,13 @@ fun DetectionsTab(
                                     items = snaps,
                                     key = { _, snap -> snap.filename },
                                 ) { index, snap ->
+                                    val (resolvedUrl, authHeaders) = remember(snap.url, activeTransport) {
+                                        repository.resolveDetectionImage(snap.url)
+                                    }
                                     DetectionGridTile(
                                         snap = snap,
-                                        imageUrl = "$baseUrl${snap.url}",
+                                        imageUrl = resolvedUrl,
+                                        imageHeaders = authHeaders,
                                         nowMs = loadedAtMs,
                                         onClick = {
                                             viewerNowMs = System.currentTimeMillis()
@@ -333,9 +343,13 @@ fun DetectionsTab(
     val activeIdx = selectedIdx
     val selectedSnap = if (activeIdx != null && activeIdx in snaps.indices) snaps[activeIdx] else null
     if (selectedSnap != null && activeIdx != null) {
+        val (viewerUrl, viewerHeaders) = remember(selectedSnap.url, activeTransport) {
+            repository.resolveDetectionImage(selectedSnap.url)
+        }
         DetectionFullScreenViewer(
             snap = selectedSnap,
-            imageUrl = "$baseUrl${selectedSnap.url}",
+            imageUrl = viewerUrl,
+            imageHeaders = viewerHeaders,
             index = activeIdx,
             total = snaps.size,
             canJumpToReplay = RecCam.fromAny(selectedSnap.cam) != null &&
@@ -356,12 +370,28 @@ fun DetectionsTab(
 private fun DetectionGridTile(
     snap: DetectionSnap,
     imageUrl: String,
+    imageHeaders: Map<String, String>,
     nowMs: Long,
     onClick: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val context = LocalContext.current
     val timeText = remember(snap.tsMs, nowMs) { formatThumbTime(snap.tsMs, nowMs) }
     val confPct = snap.confidence?.let { (it * 100.0).roundToInt().coerceIn(0, 100) }
+    val imageRequest = remember(imageUrl, imageHeaders) {
+        ImageRequest.Builder(context)
+            .data(imageUrl)
+            .apply {
+                if (imageHeaders.isNotEmpty()) {
+                    val h = NetworkHeaders.Builder().apply {
+                        imageHeaders.forEach { (k, v) -> set(k, v) }
+                    }.build()
+                    httpHeaders(h)
+                }
+            }
+            .crossfade(true)
+            .build()
+    }
 
     Box(
         modifier = Modifier
@@ -372,7 +402,7 @@ private fun DetectionGridTile(
             .clickable(onClick = onClick),
     ) {
         AsyncImage(
-            model = imageUrl,
+            model = imageRequest,
             contentDescription = "${CamsConfig.camName(snap.cam)} detection at $timeText",
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
@@ -441,6 +471,7 @@ private fun DetectionGridTile(
 private fun DetectionFullScreenViewer(
     snap: DetectionSnap,
     imageUrl: String,
+    imageHeaders: Map<String, String>,
     index: Int,
     total: Int,
     canJumpToReplay: Boolean,
@@ -450,7 +481,22 @@ private fun DetectionFullScreenViewer(
     onJumpToReplay: () -> Unit,
 ) {
     val colors = LocalPcColors.current
+    val context = LocalContext.current
     val confPct = snap.confidence?.let { (it * 100.0).roundToInt().coerceIn(0, 100) }
+    val imageRequest = remember(imageUrl, imageHeaders) {
+        ImageRequest.Builder(context)
+            .data(imageUrl)
+            .apply {
+                if (imageHeaders.isNotEmpty()) {
+                    val h = NetworkHeaders.Builder().apply {
+                        imageHeaders.forEach { (k, v) -> set(k, v) }
+                    }.build()
+                    httpHeaders(h)
+                }
+            }
+            .crossfade(true)
+            .build()
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -528,7 +574,7 @@ private fun DetectionFullScreenViewer(
                     modifier = Modifier.fillMaxSize(),
                 ) {
                     AsyncImage(
-                        model = imageUrl,
+                        model = imageRequest,
                         contentDescription = "${CamsConfig.camName(snap.cam)} detection",
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize(),

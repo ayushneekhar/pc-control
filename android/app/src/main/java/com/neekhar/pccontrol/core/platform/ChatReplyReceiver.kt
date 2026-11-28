@@ -54,8 +54,6 @@ class ChatReplyReceiver : BroadcastReceiver() {
 
     receiverScope.launch {
       try {
-        val baseUrl = PlatformPrefs.chatBaseUrl(appCtx).trimEnd('/')
-        val token = PlatformPrefs.chatToken(appCtx)
         val payload = PlatformHttp.json.encodeToString(
           InlineChatSendBody.serializer(),
           InlineChatSendBody(
@@ -67,13 +65,9 @@ class ChatReplyReceiver : BroadcastReceiver() {
           .connectTimeout(10, TimeUnit.SECONDS)
           .readTimeout(15, TimeUnit.SECONDS)
           .build()
-        val reqBuilder = Request.Builder()
-          .url("$baseUrl/pc/api/chat/send")
+        val reqBuilder = PlatformHttp.apiRequestBuilder(appCtx, "/pc/api/chat/send")
           .post(payload.toRequestBody(JSON_MEDIA))
           .header("Accept", "application/json")
-        if (token.isNotEmpty()) {
-          reqBuilder.header("Authorization", "Bearer $token")
-        }
 
         client.newCall(reqBuilder.build()).execute().use { resp ->
           if (resp.isSuccessful) {

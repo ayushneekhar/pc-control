@@ -251,7 +251,6 @@ object CrashReporter {
           .readTimeout(30, TimeUnit.SECONDS)
           .writeTimeout(30, TimeUnit.SECONDS)
           .build()
-        val url = "${PlatformPrefs.serverUrl(ctx)}/pc/api/crash"
         val appTarget = PlatformPrefs.appBinaryTarget(ctx)
         val device = PlatformPrefs.deviceName()
         val androidSdk = Build.VERSION.SDK_INT.toString()
@@ -274,8 +273,7 @@ object CrashReporter {
                 android = androidSdk,
               ),
             )
-            val req = Request.Builder()
-              .url(url)
+            val req = PlatformHttp.apiRequestBuilder(ctx, "/pc/api/crash")
               .post(payload.toRequestBody(JSON_MEDIA))
               .header("Accept", "application/json")
               .build()

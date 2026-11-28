@@ -136,6 +136,8 @@ class ChatViewModel(
         when (event) {
             is ChatSseEvent.Message,
             is ChatSseEvent.Snapshot,
+            is ChatSseEvent.MessageDeleted,
+            is ChatSseEvent.State,
             -> repository.saveCachedChatState(state.messages, state.engine, state.hasMore)
 
             is ChatSseEvent.Progress -> Unit
@@ -293,6 +295,7 @@ class ChatViewModel(
             clearComposer = true,
             replyTo = state.replyTo,
             restoreEditOnError = state.editingState,
+            replaceQueuedMessageId = state.editingQueuedMessageId,
         )
     }
 
@@ -328,6 +331,7 @@ class ChatViewModel(
         clearComposer: Boolean,
         replyTo: ChatReplyRef?,
         restoreEditOnError: EditingMessageState?,
+        replaceQueuedMessageId: String? = null,
     ) {
         val trimmed = text.trim()
         if ((trimmed.isEmpty() && attachments.isEmpty()) || _uiState.value.sending) return
@@ -356,6 +360,23 @@ class ChatViewModel(
 
         viewModelScope.launch {
             try {
+                if (!replaceQueuedMessageId.isNullOrBlank()) {
+                    try {
+                        val delRes = repository.deleteQueuedMessage(replaceQueuedMessageId)
+                        _uiState.update { cur ->
+                            ChatReducer.onMessageDeleted(
+                                state = cur,
+                                deletedId = replaceQueuedMessageId,
+                                serverQueuedIds = delRes.queuedIds,
+                                serverRunning = delRes.running,
+                            )
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        // Original may have already started running; continue sending the edited text.
+                    }
+                }
                 val res = repository.sendMessage(
                     text = trimmed,
                     clientId = clientId,
@@ -385,8 +406,35 @@ class ChatViewModel(
                         restoreEdit = restoreEditOnError,
                         restoreReply = replyTo,
                         error = e.message ?: "Failed to send message",
+                        restoreEditingQueuedId = replaceQueuedMessageId,
                     )
                 }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- Queued message deletion
+
+    fun deleteQueuedMessage(msg: ChatMessage) {
+        if (msg.id.isBlank() || msg.optimistic) return
+        viewModelScope.launch {
+            try {
+                val res = repository.deleteQueuedMessage(msg.id)
+                val next = ChatReducer.onMessageDeleted(
+                    state = _uiState.value,
+                    deletedId = msg.id,
+                    serverQueuedIds = res.queuedIds,
+                    serverRunning = res.running,
+                )
+                _uiState.value = next
+                repository.saveCachedChatState(next.messages, next.engine, next.hasMore)
+                _events.tryEmit(ChatUiEvent.ShowToast("Deleted queued message"))
+                updatePollingLoop()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update { it.copy(error = e.message ?: "Could not delete queued message") }
+                refreshMessages(silent = true)
             }
         }
     }
@@ -443,6 +491,7 @@ class ChatViewModel(
                 draft = edit?.previousDraft ?: state.draft,
                 pendingAttachments = edit?.previousAttachments ?: state.pendingAttachments,
                 editingState = null,
+                editingQueuedMessageId = null,
                 replyTo = ChatLogic.buildReplyRef(msg),
             )
         }
@@ -456,6 +505,7 @@ class ChatViewModel(
     fun startEditMessage(msg: ChatMessage) {
         _uiState.update { state ->
             val prevEdit = state.editingState
+            val isQueued = msg.isUser && !msg.optimistic && (msg.queued || msg.id in state.queuedIds)
             state.copy(
                 replyTo = null,
                 editingState = EditingMessageState(
@@ -464,6 +514,7 @@ class ChatViewModel(
                     previousDraft = prevEdit?.previousDraft ?: state.draft,
                     previousAttachments = prevEdit?.previousAttachments ?: state.pendingAttachments,
                 ),
+                editingQueuedMessageId = if (isQueued) msg.id else null,
                 draft = msg.text,
                 pendingAttachments = msg.attachments.orEmpty(),
             )
@@ -478,6 +529,7 @@ class ChatViewModel(
                 draft = edit.previousDraft,
                 pendingAttachments = edit.previousAttachments,
                 editingState = null,
+                editingQueuedMessageId = null,
             )
         }
     }

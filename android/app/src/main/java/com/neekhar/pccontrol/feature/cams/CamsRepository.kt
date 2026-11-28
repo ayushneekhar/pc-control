@@ -28,17 +28,22 @@ private data class PtzPresetsEnvelope(val presets: List<PtzPreset> = emptyList()
 /**
  * Network & cache repository for all Cat Cams backend endpoints:
  * - `/pc/api/catcam` (master switch)
- * - `/detect/state`, `/detect/toggle`, `/detect/sightings`, `/pc/api/catdetect/snaps`
- * - `/ptz/move`, `/ptz/stop`, `/ptz/preset`
- * - `/rec/<cam>/index.json`
- * - `/music/api/...`
+ * - `/pc/api/detect/state`, `/pc/api/detect/toggle`, `/pc/api/detect/sightings`, `/pc/api/catdetect/snaps`
+ * - `/pc/api/ptz/move`, `/pc/api/ptz/stop`, `/pc/api/ptz/preset`
+ * - `/rec/<cam>/index.json` (Tailscale-only HLS replay)
+ * - `/pc/api/music/api/...`
  */
 class CamsRepository(
     val apiClient: PcApiClient,
     private val cache: LocalCache,
 ) : ReplayDataSource {
 
-    override fun baseUrl(): String = apiClient.baseUrl
+    /** Tailscale base URL for HLS Replay playlists and recordings (`/rec/...`). */
+    override fun baseUrl(): String = apiClient.tailscaleBaseUrl
+
+    /** Resolves an authenticated detection snapshot URL + scoped headers for Coil. */
+    fun resolveDetectionImage(pathOrUrl: String): Pair<String, Map<String, String>> =
+        apiClient.resolveAuthenticatedImage(pathOrUrl)
 
     // ---------------------------------------------------------------- Cat cam master switch
 
@@ -71,13 +76,13 @@ class CamsRepository(
     // ---------------------------------------------------------------- Detector & alerts
 
     suspend fun getDetectorState(): ApiResult<DetectorState> = apiClient.getJson(
-        pathOrUrl = "/detect/state",
+        pathOrUrl = "/pc/api/detect/state",
         headers = NO_STORE,
         timeoutMs = 6_000L,
     )
 
     suspend fun toggleDetector(on: Boolean): ApiResult<DetectorState> = apiClient.postJson(
-        pathOrUrl = "/detect/toggle?on=${if (on) 1 else 0}",
+        pathOrUrl = "/pc/api/detect/toggle?on=${if (on) 1 else 0}",
         bodyJson = "{}",
         headers = NO_STORE,
         timeoutMs = 6_000L,
@@ -110,13 +115,14 @@ class CamsRepository(
             pathOrUrl = "/rec/${cam.id}/index.json",
             headers = NO_STORE,
             timeoutMs = 10_000L,
+            forceTailscale = true,
         ).getOrThrow()
         return raw.toRecIndex()
     }
 
     override suspend fun fetchSightings(sinceEpochSec: Long): SightingsResponse {
         return apiClient.getJson<SightingsResponse>(
-            pathOrUrl = "/detect/sightings?since=$sinceEpochSec",
+            pathOrUrl = "/pc/api/detect/sightings?since=$sinceEpochSec",
             headers = NO_STORE,
             timeoutMs = 10_000L,
         ).getOrThrow()
@@ -125,14 +131,14 @@ class CamsRepository(
     // ---------------------------------------------------------------- PTZ (cat3 / cam-ptz)
 
     suspend fun ptzMove(direction: String): ApiResult<Unit> = apiClient.postJson(
-        pathOrUrl = "/ptz/move?dir=${URLEncoder.encode(direction, "UTF-8")}",
+        pathOrUrl = "/pc/api/ptz/move?dir=${URLEncoder.encode(direction, "UTF-8")}",
         bodyJson = "{}",
         headers = NO_STORE,
         timeoutMs = 5_000L,
     )
 
     suspend fun ptzStop(): ApiResult<Unit> = apiClient.postJson(
-        pathOrUrl = "/ptz/stop",
+        pathOrUrl = "/pc/api/ptz/stop",
         bodyJson = "{}",
         headers = NO_STORE,
         timeoutMs = 5_000L,
@@ -140,7 +146,7 @@ class CamsRepository(
 
     /** Try invoking a server-side PTZ preset if supported by `cam-ptz`. */
     suspend fun ptzInvokePreset(presetId: String): ApiResult<Unit> = apiClient.postJson(
-        pathOrUrl = "/ptz/preset?name=${URLEncoder.encode(presetId, "UTF-8")}",
+        pathOrUrl = "/pc/api/ptz/preset?name=${URLEncoder.encode(presetId, "UTF-8")}",
         bodyJson = "{}",
         headers = NO_STORE,
         timeoutMs = 6_000L,
@@ -156,58 +162,58 @@ class CamsRepository(
         cache.put(CACHE_PTZ_PRESETS, PtzPresetsEnvelope(presets))
     }
 
-    // ---------------------------------------------------------------- Music (/music/api/*)
+    // ---------------------------------------------------------------- Music (/pc/api/music/api/*)
 
     suspend fun getMusicStatus(): ApiResult<MusicStatus> = apiClient.getJson(
-        pathOrUrl = "/music/api/status",
+        pathOrUrl = "/pc/api/music/api/status",
         headers = NO_STORE,
         timeoutMs = 8_000L,
     )
 
     suspend fun getMusicRecent(): ApiResult<MusicRecentResponse> = apiClient.getJson(
-        pathOrUrl = "/music/api/recent",
+        pathOrUrl = "/pc/api/music/api/recent",
         headers = NO_STORE,
         timeoutMs = 8_000L,
     )
 
     suspend fun playMusic(urlOrQuery: String): ApiResult<MusicStatus> = apiClient.postJson(
-        pathOrUrl = "/music/api/play",
+        pathOrUrl = "/pc/api/music/api/play",
         body = MusicPlayBody(url = urlOrQuery),
         timeoutMs = 70_000L, // yt-dlp resolution can take several seconds
     )
 
     suspend fun pauseMusic(): ApiResult<MusicStatus> = apiClient.postJson(
-        pathOrUrl = "/music/api/pause",
+        pathOrUrl = "/pc/api/music/api/pause",
         bodyJson = "{}",
         timeoutMs = 10_000L,
     )
 
     suspend fun resumeMusic(): ApiResult<MusicStatus> = apiClient.postJson(
-        pathOrUrl = "/music/api/resume",
+        pathOrUrl = "/pc/api/music/api/resume",
         bodyJson = "{}",
         timeoutMs = 10_000L,
     )
 
     suspend fun stopMusic(): ApiResult<MusicStatus> = apiClient.postJson(
-        pathOrUrl = "/music/api/stop",
+        pathOrUrl = "/pc/api/music/api/stop",
         bodyJson = "{}",
         timeoutMs = 10_000L,
     )
 
     suspend fun setMusicLoop(loop: Boolean): ApiResult<MusicStatus> = apiClient.postJson(
-        pathOrUrl = "/music/api/loop",
+        pathOrUrl = "/pc/api/music/api/loop",
         body = MusicLoopBody(loop = loop),
         timeoutMs = 10_000L,
     )
 
     suspend fun setMusicVolume(percent: Int): ApiResult<MusicStatus> = apiClient.postJson(
-        pathOrUrl = "/music/api/volume",
+        pathOrUrl = "/pc/api/music/api/volume",
         body = MusicVolumeBody(percent = percent.coerceIn(0, 100)),
         timeoutMs = 10_000L,
     )
 
     suspend fun setMusicMuted(muted: Boolean): ApiResult<MusicStatus> = apiClient.postJson(
-        pathOrUrl = "/music/api/mute",
+        pathOrUrl = "/pc/api/music/api/mute",
         body = MusicMuteBody(muted = muted),
         timeoutMs = 10_000L,
     )

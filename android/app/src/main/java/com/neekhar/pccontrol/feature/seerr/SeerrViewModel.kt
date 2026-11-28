@@ -140,7 +140,7 @@ class SeerrViewModel(
     }
 
     fun refreshHomeQuietly() {
-        loadWatchHome(forceRefresh = true, showSpinner = false)
+        loadWatchHome(forceRefresh = true)
     }
 
     fun showPlayOnTvError(message: String) {

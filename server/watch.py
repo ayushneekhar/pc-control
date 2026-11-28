@@ -10,8 +10,10 @@ slow or offline upstream never breaks the Watch experience.
 
 import concurrent.futures
 import json
+import mimetypes
 import os
 import re
+import secrets
 import tempfile
 import threading
 import time
@@ -27,8 +29,40 @@ GENRES_CACHE_TTL_SEC = 3600.0
 USER_ID_CACHE_TTL_SEC = 300.0
 
 JELLYFIN_ITEM_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+JELLYFIN_MEDIA_SOURCE_ID_RE = re.compile(r"^[0-9a-zA-Z_-]{1,128}$")
+API_KEY_PARAM_RE = re.compile(r"([?&])ApiKey=[^&\"'\s]+(&?)", re.IGNORECASE)
 TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
 TMDB_ORIG_RE = re.compile(r"^https?://image\.tmdb\.org/t/p/original(/.*)$")
+
+PLAYER_DEVICE_ID = "pccontrol-android-player"
+PLAYER_CLIENT_NAME = "PC Control"
+PLAYER_CLIENT_VERSION = "2.3.0"
+
+TEXT_SUBTITLE_CODECS = frozenset({
+    "subrip", "srt", "vtt", "webvtt", "ass", "ssa",
+    "mov_text", "tx3g", "text", "ttml", "smi", "sami",
+})
+DIRECT_PLAY_CONTAINERS = frozenset({"mp4", "m4v", "mkv", "webm", "mov"})
+DIRECT_PLAY_VIDEO_CODECS = frozenset({"h264", "avc", "hevc", "h265", "vp8", "vp9", "av1"})
+DIRECT_PLAY_AUDIO_CODECS = frozenset({"aac", "mp3", "opus", "flac", "vorbis", "ac3", "eac3", "pcm", "alac"})
+
+QUALITY_PRESETS = (
+    {"id": "original", "label": "Original (Direct)", "maxBitrate": 0, "maxWidth": None, "audioBitrate": 0},
+    {"id": "1080p", "label": "1080p (8 Mbps)", "maxBitrate": 8_000_000, "maxWidth": 1920, "audioBitrate": 256_000},
+    {"id": "720p", "label": "720p (4 Mbps)", "maxBitrate": 4_000_000, "maxWidth": 1280, "audioBitrate": 192_000},
+    {"id": "480p", "label": "480p (1.5 Mbps)", "maxBitrate": 1_500_000, "maxWidth": 854, "audioBitrate": 128_000},
+)
+
+CONTAINER_MIME_TYPES = {
+    "mp4": "video/mp4",
+    "m4v": "video/mp4",
+    "mkv": "video/x-matroska",
+    "webm": "video/webm",
+    "mov": "video/quicktime",
+    "avi": "video/x-msvideo",
+    "ts": "video/mp2t",
+    "m2ts": "video/mp2t",
+}
 
 # Curated Netflix-style discovery rails powered by Seerr's local TMDB proxy
 HOME_RAIL_SPECS = (
@@ -400,16 +434,37 @@ class WatchService:
 
     # ------------------------------------------------------------------ HTTP helpers
 
-    def _jf_get(self, path, timeout=8):
+    def jellyfin_auth_headers(self, include_client_meta=False):
         key = self._jellyfin_key_fn()
+        if include_client_meta:
+            auth = (
+                f'MediaBrowser Token="{key}", '
+                f'Client="{PLAYER_CLIENT_NAME}", '
+                f'Device="Android", '
+                f'DeviceId="{PLAYER_DEVICE_ID}", '
+                f'Version="{PLAYER_CLIENT_VERSION}"'
+            )
+        else:
+            auth = f'MediaBrowser Token="{key}"'
+        return {"Authorization": auth}
+
+    def _jf_request(self, method, path, body=None, timeout=8, include_client_meta=False):
         base = self._jellyfin_url_fn().rstrip("/")
-        req = urllib.request.Request(
-            f"{base}{path}",
-            headers={"Authorization": f'MediaBrowser Token="{key}"', "Accept": "application/json"},
-        )
+        headers = self.jellyfin_auth_headers(include_client_meta=include_client_meta)
+        headers["Accept"] = "application/json"
+        data = None
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        elif method in ("POST", "PUT"):
+            data = b""
+        req = urllib.request.Request(f"{base}{path}", data=data, headers=headers, method=method)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read()
         return json.loads(raw) if raw.strip() else {}
+
+    def _jf_get(self, path, timeout=8):
+        return self._jf_request("GET", path, timeout=timeout)
 
     def _jf_user_id(self, timeout=6):
         now = time.time()
@@ -1450,3 +1505,808 @@ class WatchService:
         mt = mt_raw if mt_raw in ("movie", "tv") else None
         items = self._fetch_active_downloads(filter_tmdb=tid, filter_media_type=mt)
         return 200, {"items": items, "ts": int(time.time())}
+
+    # ------------------------------------------------------------------ Phase 2: Native Playback & Offline Downloads
+
+    def _resolve_playable_item_id(self, uid, jellyfin_item_id=None, tmdb_id=None, media_type=None, season=None, episode=None):
+        """Resolve a playable Jellyfin Movie or Episode item ID."""
+        raw_id = normalize_jf_id(jellyfin_item_id)
+        if raw_id:
+            # Verify whether the provided ID is a Series; if so, pick NextUp or first Episode
+            try:
+                it = self._jf_get(f"/Users/{uid}/Items/{raw_id}", timeout=6)
+                if isinstance(it, dict) and str(it.get("Type") or "") == "Series":
+                    ep_id = self._resolve_series_episode_id(uid, raw_id, season=season, episode=episode)
+                    if ep_id:
+                        return ep_id
+            except Exception:
+                pass
+            return raw_id
+
+        tid = _safe_int(tmdb_id)
+        if not tid or tid <= 0:
+            return None
+
+        mt = "tv" if str(media_type or "").strip().lower() in ("tv", "series", "episode") else "movie"
+        lib_index = {}
+        try:
+            lib_index = self._library_index()
+        except Exception:
+            lib_index = {"by_tmdb": {}, "series_tmdb": {}, "total": 0}
+
+        jf_id = lib_index.get("by_tmdb", {}).get((mt, tid))
+        if not jf_id:
+            include_type = "Series" if mt == "tv" else "Movie"
+            qs = urllib.parse.urlencode({
+                "Recursive": "true",
+                "IncludeItemTypes": include_type,
+                "AnyProviderIdEquals": f"tmdb.{tid}",
+            })
+            data = self._jf_get(f"/Items?{qs}", timeout=6)
+            items = data.get("Items") if isinstance(data, dict) else []
+            if isinstance(items, list) and items and items[0].get("Id"):
+                jf_id = normalize_jf_id(items[0]["Id"])
+
+        if not jf_id:
+            return None
+        if mt == "tv":
+            return self._resolve_series_episode_id(uid, jf_id, season=season, episode=episode)
+        return jf_id
+
+    def _resolve_series_episode_id(self, uid, series_id, season=None, episode=None):
+        sn = _safe_int(season)
+        en = _safe_int(episode)
+        if sn is not None and en is not None:
+            qs = urllib.parse.urlencode({"UserId": uid, "Season": str(sn)})
+            edata = self._jf_get(f"/Shows/{series_id}/Episodes?{qs}", timeout=6)
+            for ep in (edata.get("Items") if isinstance(edata, dict) else []) or []:
+                if isinstance(ep, dict) and _safe_int(ep.get("IndexNumber")) == en:
+                    eid = normalize_jf_id(ep.get("Id"))
+                    if eid:
+                        return eid
+
+        # Try NextUp for this series first
+        try:
+            qs_nu = urllib.parse.urlencode({"UserId": uid, "SeriesId": series_id, "Limit": "1"})
+            nu = self._jf_get(f"/Shows/NextUp?{qs_nu}", timeout=6)
+            nu_items = nu.get("Items") if isinstance(nu, dict) else []
+            if isinstance(nu_items, list) and nu_items:
+                eid = normalize_jf_id(nu_items[0].get("Id"))
+                if eid:
+                    return eid
+        except Exception:
+            pass
+
+        # Fallback: first episode of the series
+        qs_all = urllib.parse.urlencode({"UserId": uid, "Limit": "50"})
+        all_eps = self._jf_get(f"/Shows/{series_id}/Episodes?{qs_all}", timeout=6)
+        ep_items = all_eps.get("Items") if isinstance(all_eps, dict) else []
+        for ep in ep_items if isinstance(ep_items, list) else []:
+            if not isinstance(ep, dict):
+                continue
+            eid = normalize_jf_id(ep.get("Id"))
+            if eid:
+                return eid
+        return None
+
+    def _build_hls_url(self, item_id, media_source_id, play_session_id, max_bitrate, max_width=None, audio_bitrate=192_000, audio_stream_index=None):
+        eff_audio = min(int(audio_bitrate or 192_000), max(64_000, int(max_bitrate) // 4))
+        video_bitrate = max(300_000, int(max_bitrate) - eff_audio)
+        params = {
+            "MediaSourceId": media_source_id,
+            "VideoCodec": "h264",
+            "AudioCodec": "aac",
+            "VideoBitrate": str(video_bitrate),
+            "AudioBitrate": str(eff_audio),
+            "SegmentContainer": "ts",
+            "SegmentLength": "6",
+            "MinSegments": "2",
+            "PlaySessionId": play_session_id,
+            "DeviceId": PLAYER_DEVICE_ID,
+            "TranscodingMaxAudioChannels": "2",
+            "RequireAvc": "false",
+            "EnableAudioVbrEncoding": "true",
+        }
+        if max_width:
+            params["MaxWidth"] = str(int(max_width))
+        if audio_stream_index is not None:
+            params["AudioStreamIndex"] = str(int(audio_stream_index))
+        return f"/pc/api/watch/stream/{item_id}/master.m3u8?{urllib.parse.urlencode(params)}"
+
+    def _find_next_episode(self, uid, series_id, current_item_id, current_season, current_episode):
+        if not series_id:
+            return None
+        try:
+            qs = urllib.parse.urlencode({
+                "UserId": uid,
+                "Fields": "ImageTags,Overview,RunTimeTicks",
+            })
+            data = self._jf_get(f"/Shows/{series_id}/Episodes?{qs}", timeout=6)
+            raw_eps = data.get("Items") if isinstance(data, dict) else []
+            if not isinstance(raw_eps, list) or not raw_eps:
+                return None
+
+            # Sort regular seasons before specials (or keep Jellyfin order)
+            def _sort_key(ep):
+                sn = _safe_int(ep.get("ParentIndexNumber"))
+                en = _safe_int(ep.get("IndexNumber"))
+                return (1 if sn == 0 else 0, sn if sn is not None else 9999, en if en is not None else 9999)
+
+            eps = [ep for ep in raw_eps if isinstance(ep, dict) and normalize_jf_id(ep.get("Id"))]
+            eps.sort(key=_sort_key)
+
+            next_ep = None
+            for idx, ep in enumerate(eps):
+                eid = normalize_jf_id(ep.get("Id"))
+                if eid == current_item_id:
+                    if idx + 1 < len(eps):
+                        next_ep = eps[idx + 1]
+                    break
+            if next_ep is None and current_season is not None and current_episode is not None:
+                for ep in eps:
+                    sn = _safe_int(ep.get("ParentIndexNumber"))
+                    en = _safe_int(ep.get("IndexNumber"))
+                    if sn is None or en is None or sn == 0:
+                        continue
+                    if (sn == current_season and en > current_episode) or sn > current_season:
+                        next_ep = ep
+                        break
+
+            if next_ep is None:
+                return None
+            nid = normalize_jf_id(next_ep.get("Id"))
+            img_tags = next_ep.get("ImageTags") if isinstance(next_ep.get("ImageTags"), dict) else {}
+            still_url = (
+                _jf_img_url(nid, "Primary", series_id=series_id, max_width=720)
+                if img_tags.get("Primary")
+                else _jf_img_url(series_id, "Backdrop", max_width=720)
+            )
+            return {
+                "jellyfinItemId": nid,
+                "title": _clip(next_ep.get("Name") or "Next episode", 160),
+                "seasonNumber": _safe_int(next_ep.get("ParentIndexNumber")),
+                "episodeNumber": _safe_int(next_ep.get("IndexNumber")),
+                "stillUrl": still_url,
+            }
+        except Exception:
+            return None
+
+    def _extract_item_media_context(self, uid, item, media_source):
+        item_id = normalize_jf_id(item.get("Id"))
+        itype = str(item.get("Type") or "")
+        is_episode = itype == "Episode"
+        series_id = normalize_jf_id(item.get("SeriesId")) if is_episode else None
+        sn = _safe_int(item.get("ParentIndexNumber")) if is_episode else None
+        en = _safe_int(item.get("IndexNumber")) if is_episode else None
+
+        if is_episode:
+            title = _clip(item.get("SeriesName") or item.get("Name") or "Untitled", 160)
+            ep_name = _clip(item.get("Name") or "", 140)
+            parts = []
+            if sn is not None and en is not None:
+                parts.append(f"S{sn} · E{en}")
+            elif en is not None:
+                parts.append(f"E{en}")
+            if ep_name:
+                parts.append(ep_name)
+            subtitle = " · ".join(parts) if parts else None
+            media_type = "episode"
+            img_tags = item.get("ImageTags") if isinstance(item.get("ImageTags"), dict) else {}
+            parent_bd = normalize_jf_id(item.get("ParentBackdropItemId"))
+            still_url = (
+                _jf_img_url(item_id, "Primary", series_id=series_id, max_width=720)
+                if img_tags.get("Primary")
+                else _jf_img_url(parent_bd or series_id or item_id, "Backdrop", series_id=series_id, max_width=720)
+            )
+            backdrop_url = _jf_img_url(parent_bd or series_id or item_id, "Backdrop", max_width=1280)
+            poster_url = _jf_img_url(series_id or item_id, "Primary", max_width=400)
+        else:
+            title = _clip(item.get("Name") or "Untitled", 160)
+            yr = _safe_int(item.get("ProductionYear"))
+            subtitle = str(yr) if yr else None
+            media_type = "movie"
+            has_bd = bool(item.get("BackdropImageTags"))
+            backdrop_url = _jf_img_url(item_id, "Backdrop" if has_bd else "Primary", max_width=1280)
+            still_url = _jf_img_url(item_id, "Backdrop" if has_bd else "Primary", max_width=720)
+            poster_url = _jf_img_url(item_id, "Primary", max_width=400)
+
+        tmdb_id = None
+        if is_episode and series_id:
+            try:
+                tmdb_id = self._library_index().get("series_tmdb", {}).get(series_id)
+            except Exception:
+                tmdb_id = None
+        if not tmdb_id:
+            tmdb_id = _parse_provider_tmdb(item.get("ProviderIds"))
+
+        ms_id = str((media_source or {}).get("Id") or item_id).strip()
+        if not JELLYFIN_MEDIA_SOURCE_ID_RE.match(ms_id):
+            ms_id = item_id
+
+        streams = (media_source or {}).get("MediaStreams")
+        if not isinstance(streams, list):
+            streams = item.get("MediaStreams") if isinstance(item.get("MediaStreams"), list) else []
+
+        audio_tracks = []
+        subtitle_tracks = []
+        video_codec = ""
+        default_audio_codec = ""
+        for st in streams:
+            if not isinstance(st, dict):
+                continue
+            stype = str(st.get("Type") or "")
+            idx = _safe_int(st.get("Index"))
+            if idx is None or idx < 0:
+                continue
+            codec = str(st.get("Codec") or "").strip().lower()
+            if stype == "Video" and not video_codec:
+                video_codec = codec
+            elif stype == "Audio":
+                is_def = bool(st.get("IsDefault"))
+                if is_def or not default_audio_codec:
+                    default_audio_codec = codec
+                lang = str(st.get("Language") or "").strip()
+                disp = str(st.get("DisplayTitle") or st.get("Title") or "").strip()
+                if not disp:
+                    disp = " · ".join(p for p in (lang.upper() if lang else "Audio", codec.upper() if codec else "") if p)
+                audio_tracks.append({
+                    "index": idx,
+                    "language": lang,
+                    "displayTitle": _clip(disp, 120),
+                    "codec": codec,
+                    "channels": _safe_int(st.get("Channels")),
+                    "isDefault": is_def,
+                })
+            elif stype == "Subtitle":
+                is_text = bool(st.get("IsTextSubtitleStream")) or codec in TEXT_SUBTITLE_CODECS
+                if not is_text:
+                    continue
+                lang = str(st.get("Language") or "").strip()
+                disp = str(st.get("DisplayTitle") or st.get("Title") or "").strip()
+                if not disp:
+                    disp = lang.upper() if lang else f"Subtitle {idx}"
+                subtitle_tracks.append({
+                    "index": idx,
+                    "language": lang,
+                    "displayTitle": _clip(disp, 120),
+                    "codec": codec,
+                    "isExternal": bool(st.get("IsExternal")),
+                    "isDefault": bool(st.get("IsDefault")),
+                    "isForced": bool(st.get("IsForced")),
+                    "deliveryUrl": f"/pc/api/watch/subtitles/{item_id}/{ms_id}/{idx}.vtt",
+                })
+
+        return {
+            "jellyfinItemId": item_id,
+            "mediaSourceId": ms_id,
+            "title": title,
+            "subtitle": subtitle,
+            "mediaType": media_type,
+            "tmdbId": tmdb_id,
+            "seriesId": series_id,
+            "seasonNumber": sn,
+            "episodeNumber": en,
+            "backdropUrl": backdrop_url,
+            "stillUrl": still_url,
+            "posterUrl": poster_url,
+            "audioTracks": audio_tracks,
+            "subtitleTracks": subtitle_tracks,
+            "videoCodec": video_codec,
+            "defaultAudioCodec": default_audio_codec,
+        }
+
+    def playback_info(self, body):
+        """POST /pc/api/watch/playback-info (Tailscale-only)"""
+        if not isinstance(body, dict):
+            return 400, {"error": "JSON object required"}
+
+        try:
+            uid = self._jf_user_id(timeout=5)
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin user lookup failed: {e}", 240)}
+
+        try:
+            item_id = self._resolve_playable_item_id(
+                uid,
+                jellyfin_item_id=body.get("jellyfinItemId"),
+                tmdb_id=body.get("tmdbId"),
+                media_type=body.get("mediaType"),
+                season=body.get("season") if body.get("season") is not None else body.get("seasonNumber"),
+                episode=body.get("episode") if body.get("episode") is not None else body.get("episodeNumber"),
+            )
+        except urllib.error.HTTPError as e:
+            return 502, {"error": f"Jellyfin lookup failed: HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin lookup failed: {e}", 240)}
+
+        if not item_id:
+            return 404, {"error": "Playable item not found in Jellyfin library"}
+
+        raw_bitrate = _safe_int(body.get("maxBitrate"))
+        requested_bitrate = raw_bitrate if (raw_bitrate is not None and raw_bitrate > 0) else 8_000_000
+        req_audio_idx = _safe_int(body.get("audioStreamIndex"))
+
+        pb_payload = {
+            "UserId": uid,
+            "MaxStreamingBitrate": requested_bitrate,
+            "DeviceProfile": _build_device_profile(requested_bitrate),
+        }
+        if req_audio_idx is not None and req_audio_idx >= 0:
+            pb_payload["AudioStreamIndex"] = req_audio_idx
+
+        fields = "MediaSources,MediaStreams,Chapters,Overview,ProviderIds,ImageTags,ParentBackdropItemId,SeriesId,UserData,RunTimeTicks"
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                f_item = pool.submit(self._jf_get, f"/Users/{uid}/Items/{item_id}?Fields={fields}", 8)
+                f_pb = pool.submit(
+                    self._jf_request,
+                    "POST",
+                    f"/Items/{item_id}/PlaybackInfo?UserId={uid}",
+                    pb_payload,
+                    10,
+                    True,
+                )
+                item = f_item.result()
+                pb = f_pb.result()
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return 404, {"error": "Jellyfin item not found"}
+            return 502, {"error": f"Jellyfin playback info failed: HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin playback info failed: {e}", 240)}
+
+        if not isinstance(item, dict) or not item.get("Id"):
+            return 404, {"error": "Jellyfin item not found"}
+
+        media_sources = pb.get("MediaSources") if isinstance(pb, dict) else None
+        if not isinstance(media_sources, list) or not media_sources:
+            media_sources = item.get("MediaSources") if isinstance(item.get("MediaSources"), list) else []
+        ms = media_sources[0] if media_sources and isinstance(media_sources[0], dict) else {}
+
+        play_session_id = str((pb.get("PlaySessionId") if isinstance(pb, dict) else None) or secrets.token_hex(16))
+        ctx = self._extract_item_media_context(uid, item, ms)
+
+        audio_tracks = ctx["audioTracks"]
+        selected_audio_idx = req_audio_idx
+        if selected_audio_idx is None:
+            default_audio = next((a for a in audio_tracks if a["isDefault"]), audio_tracks[0] if audio_tracks else None)
+            if default_audio is not None:
+                selected_audio_idx = default_audio["index"]
+
+        direct_url = f"/pc/api/watch/stream/{item_id}/direct?{urllib.parse.urlencode({'mediaSourceId': ctx['mediaSourceId']})}"
+        quality_options = []
+        hls_by_bitrate = {}
+        for preset in QUALITY_PRESETS:
+            if preset["id"] == "original":
+                quality_options.append({
+                    "id": "original",
+                    "label": preset["label"],
+                    "maxBitrate": 0,
+                    "maxWidth": None,
+                    "streamUrl": direct_url,
+                    "isHls": False,
+                })
+            else:
+                hls_u = self._build_hls_url(
+                    item_id=item_id,
+                    media_source_id=ctx["mediaSourceId"],
+                    play_session_id=play_session_id,
+                    max_bitrate=preset["maxBitrate"],
+                    max_width=preset["maxWidth"],
+                    audio_bitrate=preset["audioBitrate"],
+                    audio_stream_index=selected_audio_idx,
+                )
+                hls_by_bitrate[preset["maxBitrate"]] = hls_u
+                quality_options.append({
+                    "id": preset["id"],
+                    "label": preset["label"],
+                    "maxBitrate": preset["maxBitrate"],
+                    "maxWidth": preset["maxWidth"],
+                    "streamUrl": hls_u,
+                    "isHls": True,
+                })
+
+        # Primary hlsUrl matches requested_bitrate (or 8 Mbps 1080p default)
+        if requested_bitrate in hls_by_bitrate:
+            hls_url = hls_by_bitrate[requested_bitrate]
+        else:
+            max_w = 1920 if requested_bitrate >= 6_000_000 else (1280 if requested_bitrate >= 2_500_000 else 854)
+            hls_url = self._build_hls_url(
+                item_id=item_id,
+                media_source_id=ctx["mediaSourceId"],
+                play_session_id=play_session_id,
+                max_bitrate=requested_bitrate,
+                max_width=max_w,
+                audio_stream_index=selected_audio_idx,
+            )
+
+        container = str(ms.get("Container") or "").strip().lower().split(",")[0]
+        can_direct_play = (
+            (not container or container in DIRECT_PLAY_CONTAINERS)
+            and (not ctx["videoCodec"] or ctx["videoCodec"] in DIRECT_PLAY_VIDEO_CODECS)
+            and (not ctx["defaultAudioCodec"] or ctx["defaultAudioCodec"] in DIRECT_PLAY_AUDIO_CODECS)
+        )
+        recommended_quality = "original" if (raw_bitrate in (None, 0) and can_direct_play) else (
+            "480p" if requested_bitrate <= 1_500_000
+            else ("720p" if requested_bitrate <= 4_000_000 else ("original" if can_direct_play else "1080p"))
+        )
+
+        ud = item.get("UserData") if isinstance(item.get("UserData"), dict) else {}
+        runtime_ticks = max(0, _safe_int(ms.get("RunTimeTicks")) or _safe_int(item.get("RunTimeTicks")) or 0)
+        resume_ticks = max(0, _safe_int(ud.get("PlaybackPositionTicks")) or 0)
+
+        chapters = []
+        for ch in item.get("Chapters") if isinstance(item.get("Chapters"), list) else []:
+            if not isinstance(ch, dict):
+                continue
+            st_ticks = _safe_int(ch.get("StartPositionTicks"))
+            if st_ticks is None or st_ticks < 0:
+                continue
+            chapters.append({
+                "name": _clip(ch.get("Name") or f"Chapter {len(chapters) + 1}", 120),
+                "startPositionTicks": st_ticks,
+            })
+
+        next_ep = None
+        if ctx["mediaType"] == "episode" and ctx["seriesId"]:
+            next_ep = self._find_next_episode(
+                uid=uid,
+                series_id=ctx["seriesId"],
+                current_item_id=item_id,
+                current_season=ctx["seasonNumber"],
+                current_episode=ctx["episodeNumber"],
+            )
+
+        return 200, {
+            "jellyfinItemId": item_id,
+            "mediaSourceId": ctx["mediaSourceId"],
+            "playSessionId": play_session_id,
+            "title": ctx["title"],
+            "subtitle": ctx["subtitle"],
+            "mediaType": ctx["mediaType"],
+            "tmdbId": ctx["tmdbId"],
+            "seriesId": ctx["seriesId"],
+            "seasonNumber": ctx["seasonNumber"],
+            "episodeNumber": ctx["episodeNumber"],
+            "backdropUrl": ctx["backdropUrl"],
+            "posterUrl": ctx["posterUrl"],
+            "runtimeTicks": runtime_ticks,
+            "resumePositionTicks": resume_ticks,
+            "hlsUrl": hls_url,
+            "directStreamUrl": direct_url,
+            "recommendedQualityId": recommended_quality,
+            "qualityOptions": quality_options,
+            "audioTracks": audio_tracks,
+            "subtitleTracks": ctx["subtitleTracks"],
+            "chapters": chapters,
+            "nextEpisode": next_ep,
+        }
+
+    def report_progress(self, body):
+        """POST /pc/api/watch/progress"""
+        if not isinstance(body, dict):
+            return 400, {"error": "JSON object required"}
+
+        item_id = normalize_jf_id(body.get("jellyfinItemId"))
+        if not item_id:
+            return 400, {"error": "Valid jellyfinItemId is required"}
+
+        event = str(body.get("event") or "progress").strip().lower()
+        if event not in ("start", "progress", "stop"):
+            return 400, {"error": "event must be start, progress, or stop"}
+
+        pos_ticks = max(0, _safe_int(body.get("positionTicks")) or 0)
+        runtime_ticks = max(0, _safe_int(body.get("runtimeTicks")) or 0)
+        is_paused = bool(body.get("isPaused", False))
+        media_source_id = str(body.get("mediaSourceId") or item_id).strip()
+        if not JELLYFIN_MEDIA_SOURCE_ID_RE.match(media_source_id):
+            media_source_id = item_id
+        play_session_id = str(body.get("playSessionId") or "").strip()[:128]
+
+        try:
+            uid = self._jf_user_id(timeout=5)
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin user lookup failed: {e}", 240)}
+
+        jf_payload = {
+            "ItemId": item_id,
+            "MediaSourceId": media_source_id,
+            "PositionTicks": pos_ticks,
+            "IsPaused": is_paused,
+            "CanSeek": True,
+            "PlayMethod": "DirectStream",
+        }
+        if play_session_id:
+            jf_payload["PlaySessionId"] = play_session_id
+
+        endpoint = {
+            "start": "/Sessions/Playing",
+            "progress": "/Sessions/Playing/Progress",
+            "stop": "/Sessions/Playing/Stopped",
+        }[event]
+        if event == "progress":
+            jf_payload["EventName"] = "pause" if is_paused else "timeupdate"
+
+        session_ok = False
+        session_err = None
+        try:
+            self._jf_request("POST", endpoint, body=jf_payload, timeout=6, include_client_meta=True)
+            session_ok = True
+        except Exception as e:
+            session_err = e
+
+        marked_played = False
+        is_complete = runtime_ticks > 0 and (pos_ticks / float(runtime_ticks)) >= 0.90
+
+        # Persist UserData directly for user `ayush` so Continue Watching always updates reliably
+        userdata_ok = False
+        if event in ("progress", "stop"):
+            try:
+                if is_complete:
+                    self._jf_request("POST", f"/Users/{uid}/PlayedItems/{item_id}", body=None, timeout=6)
+                    marked_played = True
+                    userdata_ok = True
+                else:
+                    self._jf_request(
+                        "POST",
+                        f"/Users/{uid}/Items/{item_id}/UserData",
+                        body={"PlaybackPositionTicks": pos_ticks},
+                        timeout=6,
+                    )
+                    userdata_ok = True
+            except Exception:
+                pass
+
+        if event == "stop":
+            if play_session_id:
+                try:
+                    qs = urllib.parse.urlencode({
+                        "DeviceId": PLAYER_DEVICE_ID,
+                        "PlaySessionId": play_session_id,
+                    })
+                    self._jf_request("DELETE", f"/Videos/ActiveEncodings?{qs}", timeout=4, include_client_meta=True)
+                except Exception:
+                    pass
+            self.invalidate_caches()
+
+        if not session_ok and not userdata_ok and session_err is not None:
+            return 502, {"error": _clip(f"Jellyfin progress report failed: {session_err}", 240)}
+
+        return 200, {
+            "ok": True,
+            "event": event,
+            "jellyfinItemId": item_id,
+            "positionTicks": pos_ticks,
+            "markedPlayed": marked_played,
+        }
+
+    def download_info(self, jellyfin_item_id_raw=None, tmdb_id_raw=None, media_type_raw=None, season_raw=None, episode_raw=None):
+        """GET /pc/api/watch/download-info?jellyfinItemId=<id> (Tailscale-only)"""
+        try:
+            uid = self._jf_user_id(timeout=5)
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin user lookup failed: {e}", 240)}
+
+        try:
+            item_id = self._resolve_playable_item_id(
+                uid,
+                jellyfin_item_id=jellyfin_item_id_raw,
+                tmdb_id=tmdb_id_raw,
+                media_type=media_type_raw,
+                season=season_raw,
+                episode=episode_raw,
+            )
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin lookup failed: {e}", 240)}
+
+        if not item_id:
+            return 404, {"error": "Downloadable item not found in Jellyfin library"}
+
+        fields = "MediaSources,MediaStreams,Path,Overview,ProviderIds,ImageTags,ParentBackdropItemId,SeriesId,RunTimeTicks"
+        try:
+            item = self._jf_get(f"/Users/{uid}/Items/{item_id}?Fields={fields}", timeout=8)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return 404, {"error": "Jellyfin item not found"}
+            return 502, {"error": f"Jellyfin download info failed: HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return 502, {"error": _clip(f"Jellyfin download info failed: {e}", 240)}
+
+        if not isinstance(item, dict) or not item.get("Id"):
+            return 404, {"error": "Jellyfin item not found"}
+
+        media_sources = item.get("MediaSources") if isinstance(item.get("MediaSources"), list) else []
+        ms = media_sources[0] if media_sources and isinstance(media_sources[0], dict) else {}
+        ctx = self._extract_item_media_context(uid, item, ms)
+
+        raw_path = str(ms.get("Path") or item.get("Path") or "").strip()
+        container = str(ms.get("Container") or "").strip().lower().split(",")[0]
+        if not container and raw_path:
+            _, ext = os.path.splitext(raw_path)
+            container = ext.lstrip(".").lower()
+        if not container:
+            container = "mp4"
+
+        if raw_path:
+            file_name = _sanitize_filename(os.path.basename(raw_path), default_ext=container)
+        else:
+            base_label = f"{ctx['title']} {ctx['subtitle']}" if ctx["subtitle"] else ctx["title"]
+            file_name = _sanitize_filename(f"{base_label}.{container}", default_ext=container)
+
+        size_bytes = max(0, _safe_int(ms.get("Size")) or 0)
+        if size_bytes == 0 and raw_path and os.path.isfile(raw_path):
+            try:
+                size_bytes = os.path.getsize(raw_path)
+            except OSError:
+                size_bytes = 0
+
+        mime_type = _mime_for_container(container, file_name)
+        download_url = f"/pc/api/watch/download/{item_id}?{urllib.parse.urlencode({'mediaSourceId': ctx['mediaSourceId']})}"
+
+        subtitles = []
+        for sub in ctx["subtitleTracks"]:
+            lang_slug = re.sub(r"[^a-zA-Z0-9_-]+", "", sub.get("language") or "und") or "und"
+            subtitles.append({
+                "index": sub["index"],
+                "language": sub["language"],
+                "displayTitle": sub["displayTitle"],
+                "codec": sub["codec"],
+                "isDefault": sub["isDefault"],
+                "isForced": sub["isForced"],
+                "format": "vtt",
+                "fileName": f"sub_{sub['index']}_{lang_slug}.vtt",
+                "downloadUrl": sub["deliveryUrl"],
+            })
+
+        runtime_ticks = max(0, _safe_int(ms.get("RunTimeTicks")) or _safe_int(item.get("RunTimeTicks")) or 0)
+
+        return 200, {
+            "jellyfinItemId": item_id,
+            "mediaSourceId": ctx["mediaSourceId"],
+            "title": ctx["title"],
+            "subtitle": ctx["subtitle"],
+            "mediaType": ctx["mediaType"],
+            "tmdbId": ctx["tmdbId"],
+            "seriesId": ctx["seriesId"],
+            "seasonNumber": ctx["seasonNumber"],
+            "episodeNumber": ctx["episodeNumber"],
+            "runtimeTicks": runtime_ticks,
+            "fileName": file_name,
+            "sizeBytes": size_bytes,
+            "mimeType": mime_type,
+            "downloadUrl": download_url,
+            "posterUrl": ctx["posterUrl"],
+            "stillUrl": ctx["stillUrl"],
+            "subtitles": subtitles,
+        }
+
+    # ------------------------------------------------------------------ Upstream URL builders for proxy
+
+    def build_stream_upstream_url(self, item_id, subpath, query_str=""):
+        norm_id = normalize_jf_id(item_id)
+        if not norm_id:
+            return None
+        clean_sub = (subpath or "").lstrip("/")
+        if not clean_sub:
+            return None
+        base = self._jellyfin_url_fn().rstrip("/")
+        clean_q = sanitize_upstream_query(query_str)
+        if clean_sub == "direct":
+            params = urllib.parse.parse_qsl(clean_q, keep_blank_values=False)
+            filtered = [(k, v) for k, v in params if k.lower() != "static"]
+            filtered.append(("static", "true"))
+            return f"{base}/Videos/{norm_id}/stream?{urllib.parse.urlencode(filtered)}"
+        url = f"{base}/videos/{norm_id}/{clean_sub}"
+        if clean_q:
+            url = f"{url}?{clean_q}"
+        return url
+
+    def build_download_upstream_url(self, item_id, query_str=""):
+        norm_id = normalize_jf_id(item_id)
+        if not norm_id:
+            return None
+        base = self._jellyfin_url_fn().rstrip("/")
+        clean_q = sanitize_upstream_query(query_str)
+        params = urllib.parse.parse_qsl(clean_q, keep_blank_values=False)
+        filtered = [(k, v) for k, v in params if k.lower() != "static"]
+        filtered.append(("static", "true"))
+        return f"{base}/Videos/{norm_id}/stream?{urllib.parse.urlencode(filtered)}"
+
+    def build_subtitle_upstream_url(self, item_id, media_source_id, index_raw, ext_raw):
+        norm_id = normalize_jf_id(item_id)
+        if not norm_id:
+            return None
+        ms_id = str(media_source_id or "").strip()
+        if not JELLYFIN_MEDIA_SOURCE_ID_RE.match(ms_id):
+            return None
+        idx = _safe_int(index_raw)
+        if idx is None or idx < 0:
+            return None
+        ext = str(ext_raw or "").strip().lower()
+        if ext not in ("vtt", "srt"):
+            return None
+        base = self._jellyfin_url_fn().rstrip("/")
+        return f"{base}/Videos/{norm_id}/{ms_id}/Subtitles/{idx}/0/Stream.{ext}"
+
+
+def normalize_jf_id(raw):
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip().replace("-", "")
+    return s if JELLYFIN_ITEM_ID_RE.match(s) else None
+
+
+def sanitize_upstream_query(query_str):
+    if not query_str:
+        return ""
+    pairs = urllib.parse.parse_qsl(query_str, keep_blank_values=True)
+    filtered = [(k, v) for k, v in pairs if k.lower() not in ("apikey", "api_key")]
+    return urllib.parse.urlencode(filtered)
+
+
+def sanitize_m3u8(text):
+    """Strip any Jellyfin ApiKey query parameters from proxied HLS playlists."""
+    if not text:
+        return text
+
+    def _repl(match):
+        lead, trail = match.group(1), match.group(2)
+        if lead == "?" and trail == "&":
+            return "?"
+        if lead == "&" and trail == "&":
+            return "&"
+        return ""
+
+    return API_KEY_PARAM_RE.sub(_repl, text)
+
+
+def _sanitize_filename(name, default_ext="mp4"):
+    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", str(name or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(". ")
+    if not cleaned:
+        return f"video.{default_ext}"
+    if "." not in cleaned:
+        cleaned = f"{cleaned}.{default_ext}"
+    return cleaned[:180]
+
+
+def _mime_for_container(container, file_name=""):
+    c = str(container or "").strip().lower()
+    if c in CONTAINER_MIME_TYPES:
+        return CONTAINER_MIME_TYPES[c]
+    guessed, _ = mimetypes.guess_type(file_name or f"file.{c}")
+    return guessed or "video/mp4"
+
+
+def _build_device_profile(max_bitrate):
+    return {
+        "MaxStreamingBitrate": int(max_bitrate),
+        "DirectPlayProfiles": [
+            {
+                "Container": "mp4,m4v,mkv,webm,mov",
+                "Type": "Video",
+                "VideoCodec": "h264,hevc,vp8,vp9,av1",
+                "AudioCodec": "aac,mp3,opus,flac,vorbis,ac3,eac3",
+            }
+        ],
+        "TranscodingProfiles": [
+            {
+                "Container": "ts",
+                "Type": "Video",
+                "VideoCodec": "h264",
+                "AudioCodec": "aac",
+                "Protocol": "hls",
+                "Context": "Streaming",
+                "MaxAudioChannels": "2",
+                "SegmentLength": 6,
+                "MinSegments": 2,
+            }
+        ],
+        "SubtitleProfiles": [
+            {"Format": "vtt", "Method": "External"},
+            {"Format": "srt", "Method": "External"},
+            {"Format": "subrip", "Method": "External"},
+            {"Format": "ass", "Method": "External"},
+            {"Format": "ssa", "Method": "External"},
+        ],
+    }

@@ -32,9 +32,12 @@ import androidx.compose.material.icons.rounded.Cancel
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CollectionsBookmark
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.OfflinePin
+import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Tv
@@ -49,6 +52,9 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -73,6 +79,7 @@ import com.neekhar.pccontrol.core.theme.tabular
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
+import com.neekhar.pccontrol.core.ui.PcConfirmDialog
 import com.neekhar.pccontrol.core.ui.PcEmptyState
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcIconButton
@@ -83,6 +90,10 @@ import com.neekhar.pccontrol.core.ui.PcTone
 import com.neekhar.pccontrol.feature.tvremote.TvNowPlayingBar
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteUiState
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
+import com.neekhar.pccontrol.feature.watch.downloads.OfflineDownloadStatus
+import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
+import com.neekhar.pccontrol.feature.watch.downloads.WatchOfflineHelpers
+import java.io.File
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -91,11 +102,13 @@ fun SeerrScreen(
     viewModel: SeerrViewModel,
     onBack: () -> Unit,
     onOpenDetail: (mediaType: String, id: Int, seed: SeerrItem?) -> Unit,
+    onPlayOnPhone: (jellyfinItemId: String?, tmdbId: Int?, mediaType: String?, season: Int?, episode: Int?, preferOffline: Boolean) -> Unit = { _, _, _, _, _, _ -> },
     tvRemoteViewModel: TvRemoteViewModel? = null,
     onOpenTvRemote: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val offlineItems by viewModel.offlineDownloads.collectAsStateWithLifecycle()
     val tvState: TvRemoteUiState? = if (tvRemoteViewModel != null) {
         tvRemoteViewModel.uiState.collectAsStateWithLifecycle().value
     } else {
@@ -106,6 +119,19 @@ fun SeerrScreen(
     val type = LocalPcType.current
     val keyboard = LocalSoftwareKeyboardController.current
     val listState = rememberLazyListState()
+    var pendingDeleteItem by remember { mutableStateOf<OfflineWatchItem?>(null) }
+    var confirmDeleteAll by remember { mutableStateOf(false) }
+
+    val tryPlayOnlineOrOffline: (String?, Int?, String?, Int?, Int?) -> Unit = { jfId, tmdbId, mType, season, episode ->
+        val local = viewModel.findCompletedOffline(jfId, tmdbId ?: 0, mType ?: "movie")
+        if (local != null) {
+            onPlayOnPhone(local.jellyfinItemId, null, local.mediaType, null, null, true)
+        } else if (!viewModel.isTailscaleActive()) {
+            viewModel.showTailscaleRequiredNotice()
+        } else {
+            onPlayOnPhone(jfId, tmdbId, mType, season, episode, false)
+        }
+    }
 
     LifecycleResumeEffect(viewModel) {
         viewModel.onScreenResume()
@@ -202,6 +228,20 @@ fun SeerrScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
+                if (!state.tailscaleNotice.isNullOrBlank()) {
+                    item(key = "tailscale_notice") {
+                        Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                            PcErrorBanner(
+                                title = "Tailscale required",
+                                message = state.tailscaleNotice,
+                                tone = PcTone.Warn,
+                                actionLabel = "Dismiss",
+                                onAction = viewModel::dismissTailscaleNotice,
+                            )
+                        }
+                    }
+                }
+
                 if (!state.error.isNullOrBlank()) {
                     item(key = "error") {
                         Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
@@ -329,7 +369,7 @@ fun SeerrScreen(
                         }
                     }
                 } else {
-                    // Top filter pill strip: All · In Library · Movies · TV · My List · Requests
+                    // Top filter pill strip: All · In Library · Downloads · Movies · TV · My List · Requests
                     item(key = "watch_tabs") {
                         LazyRow(
                             modifier = Modifier.fillMaxWidth(),
@@ -338,6 +378,7 @@ fun SeerrScreen(
                         ) {
                             items(WatchTab.entries, key = { it.id }) { tab ->
                                 val badgeCount = when (tab) {
+                                    WatchTab.DOWNLOADS -> offlineItems.size.takeIf { it > 0 }
                                     WatchTab.REQUESTS -> state.pendingRequestsBadge.takeIf { it > 0 }
                                     WatchTab.MY_LIST -> state.watchlistIds.size.takeIf { it > 0 }
                                     WatchTab.LIBRARY -> state.watchHome?.libraryCount?.takeIf { it > 0 }
@@ -372,15 +413,26 @@ fun SeerrScreen(
                                     item(key = "hero_billboard") {
                                         val heroKey = SeerrHelpers.watchlistKey(hero.mediaType, hero.id)
                                         val inWatchlist = heroKey in state.watchlistIds
+                                        val heroOffline = viewModel.findCompletedOffline(hero.jellyfinItemId, hero.id, hero.mediaType)
                                         Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
                                             WatchHeroBillboard(
                                                 item = hero,
                                                 resolveImageUrl = viewModel::resolveImageUrl,
                                                 tvConnected = tvConnected,
+                                                isDownloadedOffline = heroOffline != null,
                                                 inWatchlist = inWatchlist,
                                                 busyWatchlist = state.busyWatchlistKey == heroKey,
                                                 busyPlayOnTv = state.playingOnTvKey == "hero:${hero.mediaType}:${hero.id}",
                                                 busyRequest = state.busyMovieId == hero.id,
+                                                onPlayOnPhone = {
+                                                    tryPlayOnlineOrOffline(
+                                                        hero.jellyfinItemId,
+                                                        hero.id.takeIf { it > 0 },
+                                                        hero.mediaType,
+                                                        null,
+                                                        null,
+                                                    )
+                                                },
                                                 onPlayOnTv = { viewModel.playHeroOnTv(hero) },
                                                 onRequest = {
                                                     if (hero.isMovie && SeerrHelpers.isRequestableMovie(hero.status)) {
@@ -418,15 +470,30 @@ fun SeerrScreen(
                                                     resolveImageUrl = viewModel::resolveImageUrl,
                                                     tvConnected = tvConnected,
                                                     busyPlayOnTv = state.playingOnTvKey == "cw:${cw.jellyfinItemId}",
-                                                    onClick = {
+                                                    onPlayOnPhone = {
+                                                        tryPlayOnlineOrOffline(
+                                                            cw.jellyfinItemId,
+                                                            cw.id.takeIf { it > 0 },
+                                                            if (cw.isTv) "episode" else "movie",
+                                                            cw.seasonNumber,
+                                                            cw.episodeNumber,
+                                                        )
+                                                    },
+                                                    onOpenDetail = {
                                                         if (cw.id > 0) {
                                                             onOpenDetail(
                                                                 cw.mediaType,
                                                                 cw.id,
                                                                 cw.toSeedItem(viewModel::resolveImageUrl),
                                                             )
-                                                        } else if (tvConnected) {
-                                                            viewModel.playContinueOnTv(cw)
+                                                        } else {
+                                                            tryPlayOnlineOrOffline(
+                                                                cw.jellyfinItemId,
+                                                                null,
+                                                                if (cw.isTv) "episode" else "movie",
+                                                                cw.seasonNumber,
+                                                                cw.episodeNumber,
+                                                            )
                                                         }
                                                     },
                                                     onPlayOnTv = { viewModel.playContinueOnTv(cw) },
@@ -549,6 +616,119 @@ fun SeerrScreen(
                                                 icon = Icons.Rounded.Movie,
                                                 title = "Nothing to show yet",
                                                 body = "Pull to refresh or use Search above to find movies and TV shows",
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        WatchTab.DOWNLOADS -> {
+                            val activeList = offlineItems.filter { it.isInProgressOrPaused }
+                            val completedList = offlineItems.filter { it.isCompleted }
+
+                            if (offlineItems.isNotEmpty()) {
+                                item(key = "offline_storage_header") {
+                                    val totalBytes = viewModel.offlineStorageBytes()
+                                    val summaryText = WatchOfflineHelpers.formatStorageSummary(
+                                        totalBytes = totalBytes,
+                                        completedCount = completedList.size,
+                                    )
+                                    Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                        PcCard(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.OfflinePin,
+                                                    contentDescription = null,
+                                                    tint = colors.accent,
+                                                    modifier = Modifier.size(20.dp),
+                                                )
+                                                Column(
+                                                    modifier = Modifier.weight(1f),
+                                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                                ) {
+                                                    Text(
+                                                        text = "Offline storage",
+                                                        color = colors.text,
+                                                        style = type.cardTitle,
+                                                    )
+                                                    Text(
+                                                        text = summaryText,
+                                                        color = colors.textDim,
+                                                        style = type.caption.tabular(),
+                                                    )
+                                                }
+                                                PcButton(
+                                                    label = "Delete all",
+                                                    onClick = { confirmDeleteAll = true },
+                                                    variant = PcButtonVariant.Danger,
+                                                    compact = true,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (activeList.isNotEmpty()) {
+                                item(key = "offline_active_header") {
+                                    Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                        PcSectionLabel(label = "Downloading")
+                                    }
+                                }
+                                items(activeList, key = { "off_act:${it.jellyfinItemId}" }) { dl ->
+                                    Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                        WatchOfflineActiveCard(
+                                            item = dl,
+                                            onPause = { viewModel.pauseOfflineDownload(dl.jellyfinItemId) },
+                                            onResume = { viewModel.resumeOfflineDownload(dl.jellyfinItemId) },
+                                            onCancel = { viewModel.cancelOfflineDownload(dl.jellyfinItemId) },
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (completedList.isNotEmpty()) {
+                                item(key = "offline_done_header") {
+                                    Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                        PcSectionLabel(label = "Downloaded")
+                                    }
+                                }
+                                items(completedList, key = { "off_done:${it.jellyfinItemId}" }) { dl ->
+                                    Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                        WatchOfflineCompletedCard(
+                                            item = dl,
+                                            onPlay = {
+                                                onPlayOnPhone(
+                                                    dl.jellyfinItemId,
+                                                    dl.tmdbId.takeIf { it > 0 },
+                                                    dl.mediaType,
+                                                    dl.seasonNumber,
+                                                    dl.episodeNumber,
+                                                    true,
+                                                )
+                                            },
+                                            onDelete = { pendingDeleteItem = dl },
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (offlineItems.isEmpty()) {
+                                item(key = "offline_empty") {
+                                    Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
+                                        PcCard(modifier = Modifier.fillMaxWidth()) {
+                                            PcEmptyState(
+                                                icon = Icons.Rounded.Download,
+                                                title = "No offline downloads",
+                                                body = "Download movies or episodes over Tailscale to watch anywhere, even without internet",
                                             )
                                         }
                                     }
@@ -820,6 +1000,36 @@ fun SeerrScreen(
         },
         onDismiss = viewModel::closeCollection,
     )
+
+    pendingDeleteItem?.let { del ->
+        PcConfirmDialog(
+            title = "Delete offline download?",
+            message = "Remove \"${del.title}\" (${WatchOfflineHelpers.formatBytes(del.downloadedBytes)}) from this phone?",
+            confirmLabel = "Delete",
+            dismissLabel = "Cancel",
+            confirmVariant = PcButtonVariant.Danger,
+            onConfirm = {
+                viewModel.deleteOfflineDownload(del.jellyfinItemId)
+                pendingDeleteItem = null
+            },
+            onDismiss = { pendingDeleteItem = null },
+        )
+    }
+
+    if (confirmDeleteAll) {
+        PcConfirmDialog(
+            title = "Delete all offline downloads?",
+            message = "Remove all downloaded movies and episodes from this phone?",
+            confirmLabel = "Delete all",
+            dismissLabel = "Cancel",
+            confirmVariant = PcButtonVariant.Danger,
+            onConfirm = {
+                viewModel.deleteAllOfflineDownloads()
+                confirmDeleteAll = false
+            },
+            onDismiss = { confirmDeleteAll = false },
+        )
+    }
 }
 
 @Composable
@@ -827,10 +1037,12 @@ private fun WatchHeroBillboard(
     item: WatchItem,
     resolveImageUrl: (String?) -> String?,
     tvConnected: Boolean,
+    isDownloadedOffline: Boolean,
     inWatchlist: Boolean,
     busyWatchlist: Boolean,
     busyPlayOnTv: Boolean,
     busyRequest: Boolean,
+    onPlayOnPhone: () -> Unit,
     onPlayOnTv: () -> Unit,
     onRequest: () -> Unit,
     onToggleWatchlist: () -> Unit,
@@ -964,17 +1176,16 @@ private fun WatchHeroBillboard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                val showPlayPrimary = isAvailable && tvConnected
+                val showPlayPrimary = isAvailable || isDownloadedOffline
                 val showRequestPrimary = !showPlayPrimary && canRequest
 
                 when {
                     showPlayPrimary -> {
                         PcButton(
-                            label = "Play on TV",
-                            onClick = onPlayOnTv,
+                            label = if (isDownloadedOffline) "Play offline" else "Play",
+                            onClick = onPlayOnPhone,
                             variant = PcButtonVariant.Primary,
                             icon = Icons.Rounded.PlayArrow,
-                            busy = busyPlayOnTv,
                             compact = true,
                             modifier = Modifier.weight(1f),
                         )
@@ -999,6 +1210,34 @@ private fun WatchHeroBillboard(
                             compact = true,
                             modifier = Modifier.weight(1f),
                         )
+                    }
+                }
+
+                // Secondary Play on TV icon button when available and TV connected
+                if (isAvailable && tvConnected) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(PcDimens.RadiusSm))
+                            .background(colors.mediaChip)
+                            .border(0.5.dp, colors.mediaChipBorder, RoundedCornerShape(PcDimens.RadiusSm))
+                            .clickable(enabled = !busyPlayOnTv, onClick = onPlayOnTv),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (busyPlayOnTv) {
+                            CircularProgressIndicator(
+                                color = colors.accent,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Tv,
+                                contentDescription = "Play on TV",
+                                tint = colors.onMedia,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
                     }
                 }
 
@@ -1071,7 +1310,8 @@ private fun WatchContinueCard(
     resolveImageUrl: (String?) -> String?,
     tvConnected: Boolean,
     busyPlayOnTv: Boolean,
-    onClick: () -> Unit,
+    onPlayOnPhone: () -> Unit,
+    onOpenDetail: () -> Unit,
     onPlayOnTv: () -> Unit,
 ) {
     val colors = LocalPcColors.current
@@ -1093,14 +1333,14 @@ private fun WatchContinueCard(
         modifier = Modifier
             .width(214.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(colors.surface)
-            .clickable(onClick = onClick),
+            .background(colors.surface),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .background(colors.surfaceRaised),
+                .background(colors.surfaceRaised)
+                .clickable(onClick = onPlayOnPhone),
         ) {
             if (!artUrl.isNullOrBlank()) {
                 AsyncImage(
@@ -1125,7 +1365,7 @@ private fun WatchContinueCard(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .height(40.dp)
+                    .height(44.dp)
                     .background(
                         Brush.verticalGradient(
                             0.0f to Color.Transparent,
@@ -1133,6 +1373,24 @@ private fun WatchContinueCard(
                         ),
                     ),
             )
+
+            // Center Play button (plays directly on phone)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.58f))
+                    .border(0.75.dp, Color.White.copy(alpha = 0.28f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.PlayArrow,
+                    contentDescription = "Play on phone",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
 
             // Episode / Next Up pill
             val cornerBadge = when {
@@ -1159,13 +1417,13 @@ private fun WatchContinueCard(
                 }
             }
 
-            // Quick Play on TV button when projector/TV is connected
+            // Secondary Play on TV button when projector/TV is connected
             if (tvConnected) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(7.dp)
-                        .size(30.dp)
+                        .size(28.dp)
                         .clip(CircleShape)
                         .background(colors.mediaChip)
                         .border(0.5.dp, colors.mediaChipBorder, CircleShape)
@@ -1176,14 +1434,14 @@ private fun WatchContinueCard(
                         CircularProgressIndicator(
                             color = colors.accent,
                             strokeWidth = 2.dp,
-                            modifier = Modifier.size(14.dp),
+                            modifier = Modifier.size(13.dp),
                         )
                     } else {
                         Icon(
-                            imageVector = Icons.Rounded.PlayArrow,
+                            imageVector = Icons.Rounded.Tv,
                             contentDescription = "Play on TV",
                             tint = colors.onMedia,
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(15.dp),
                         )
                     }
                 }
@@ -1210,7 +1468,10 @@ private fun WatchContinueCard(
         }
 
         Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpenDetail)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Text(
@@ -1227,6 +1488,234 @@ private fun WatchContinueCard(
                     style = type.micro.tabular(),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WatchOfflineActiveCard(
+    item: OfflineWatchItem,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val isDownloading = item.status == OfflineDownloadStatus.DOWNLOADING
+    val isQueued = item.status == OfflineDownloadStatus.QUEUED
+    val isFailed = item.status == OfflineDownloadStatus.FAILED
+    val barColor = if (isFailed) colors.bad else colors.accent
+    val statusLine = buildList {
+        when (item.status) {
+            OfflineDownloadStatus.DOWNLOADING -> add("Downloading")
+            OfflineDownloadStatus.QUEUED -> add("Queued")
+            OfflineDownloadStatus.PAUSED -> add("Paused")
+            OfflineDownloadStatus.FAILED -> add(item.errorMessage ?: "Failed")
+            OfflineDownloadStatus.COMPLETED -> add("Downloaded")
+        }
+        if (item.totalBytes > 0L) {
+            add("${item.progressPercent}%")
+            add("${WatchOfflineHelpers.formatBytes(item.downloadedBytes)} / ${WatchOfflineHelpers.formatBytes(item.totalBytes)}")
+        } else if (item.downloadedBytes > 0L) {
+            add(WatchOfflineHelpers.formatBytes(item.downloadedBytes))
+        }
+        val spd = WatchOfflineHelpers.formatSpeed(item.speedBytesPerSec)
+        if (isDownloading && spd.isNotEmpty()) add(spd)
+    }.joinToString(" · ")
+
+    PcCard(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(14.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = item.title,
+                        color = colors.text,
+                        style = type.cardTitle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (!item.subtitle.isNullOrBlank()) {
+                        Text(
+                            text = item.subtitle,
+                            color = colors.textDim,
+                            style = type.caption.tabular(),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Text(
+                        text = statusLine,
+                        color = if (isFailed) colors.bad else colors.textFaint,
+                        style = type.micro.tabular(),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            PcProgressBar(
+                progress = item.progressFraction,
+                color = barColor,
+                height = 4.dp,
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (isDownloading || isQueued) {
+                    PcButton(
+                        label = "Pause",
+                        onClick = onPause,
+                        variant = PcButtonVariant.Subtle,
+                        icon = Icons.Rounded.Pause,
+                        compact = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    PcButton(
+                        label = "Resume",
+                        onClick = onResume,
+                        variant = PcButtonVariant.Primary,
+                        icon = Icons.Rounded.PlayArrow,
+                        compact = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                PcButton(
+                    label = "Cancel",
+                    onClick = onCancel,
+                    variant = PcButtonVariant.Danger,
+                    icon = Icons.Rounded.Close,
+                    compact = true,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WatchOfflineCompletedCard(
+    item: OfflineWatchItem,
+    onPlay: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val colors = LocalPcColors.current
+    val type = LocalPcType.current
+    val localArt = item.localStillPath?.takeIf { File(it).isFile }
+        ?: item.localPosterPath?.takeIf { File(it).isFile }
+    val sizeText = WatchOfflineHelpers.formatBytes(item.downloadedBytes.coerceAtLeast(item.totalBytes))
+    val metaLine = buildList {
+        if (!item.subtitle.isNullOrBlank()) add(item.subtitle)
+        add(sizeText)
+        if (item.subtitles.isNotEmpty()) {
+            add("${item.subtitles.size} sub${if (item.subtitles.size == 1) "" else "s"}")
+        }
+    }.joinToString(" · ")
+
+    PcCard(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(12.dp),
+        onClick = onPlay,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(96.dp)
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(colors.surfaceRaised),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (localArt != null) {
+                    AsyncImage(
+                        model = File(localArt),
+                        contentDescription = item.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Icon(
+                        imageVector = if (item.mediaType == "episode") Icons.Rounded.Tv else Icons.Rounded.Movie,
+                        contentDescription = null,
+                        tint = colors.textFaint,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.6f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = "Play offline",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                if (item.resumeProgressFraction > 0.02f) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .background(Color.White.copy(alpha = 0.25f)),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(item.resumeProgressFraction)
+                                .fillMaxHeight()
+                                .background(colors.accent),
+                        )
+                    }
+                }
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(
+                    text = item.title,
+                    color = colors.text,
+                    style = type.cardTitle.copy(fontWeight = FontWeight.SemiBold),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = metaLine,
+                    color = colors.textDim,
+                    style = type.micro.tabular(),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            IconButton(onClick = onDelete) {
+                Icon(
+                    imageVector = Icons.Rounded.DeleteOutline,
+                    contentDescription = "Delete offline download",
+                    tint = colors.textDim,
+                    modifier = Modifier.size(20.dp),
                 )
             }
         }

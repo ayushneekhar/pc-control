@@ -353,6 +353,7 @@ data class PlayOnTvResponse(
 enum class WatchTab(val id: String, val label: String) {
     ALL("all", "All"),
     LIBRARY("library", "In Library"),
+    DOWNLOADS("downloads", "Downloads"),
     MOVIES("movies", "Movies"),
     TV("tv", "TV"),
     MY_LIST("watchlist", "My List"),

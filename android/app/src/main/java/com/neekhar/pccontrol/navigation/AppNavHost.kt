@@ -143,6 +143,8 @@ import com.neekhar.pccontrol.feature.system.SystemScreen
 import com.neekhar.pccontrol.feature.system.VitalsScreen
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteScreen
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
+import com.neekhar.pccontrol.feature.watch.player.WatchPlayerScreen
+import com.neekhar.pccontrol.feature.watch.player.WatchPlayerViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -191,6 +193,7 @@ class PcScreenRegistry(
     val agentRule: @Composable (NavHostController, PcRoute.AgentRule) -> Unit,
     val connectionSettings: @Composable (NavHostController) -> Unit,
     val tvRemote: @Composable (NavHostController) -> Unit,
+    val watchPlayer: @Composable (NavHostController, PcRoute.WatchPlayer) -> Unit,
 )
 
 @Serializable
@@ -284,7 +287,14 @@ fun PcAppShell(
     )
     val seerrViewModel: SeerrViewModel = viewModel(
         key = "pc_seerr_vm",
-        factory = simpleViewModelFactory { SeerrViewModel(container.seerrRepository, autoLoad = false) },
+        factory = simpleViewModelFactory {
+            SeerrViewModel(
+                repository = container.seerrRepository,
+                autoLoad = false,
+                downloadManager = container.watchDownloadManager,
+                transportManager = container.transportManager,
+            )
+        },
     )
     val spaceViewModel: SpaceViewModel = viewModel(
         key = "pc_space_vm",
@@ -409,6 +419,18 @@ fun PcAppShell(
                         if (seed != null) seerrItemSeeds["$mediaType:$id"] = seed
                         nav.navigate(PcRoute.SeerrDetail(mediaType = mediaType, id = id))
                     },
+                    onPlayOnPhone = { jfId, tmdbId, mediaType, season, episode, preferOffline ->
+                        nav.navigate(
+                            PcRoute.WatchPlayer(
+                                jellyfinItemId = jfId,
+                                tmdbId = tmdbId,
+                                mediaType = mediaType,
+                                season = season,
+                                episode = episode,
+                                preferOffline = preferOffline,
+                            ),
+                        )
+                    },
                     tvRemoteViewModel = tvRemoteViewModel,
                     onOpenTvRemote = { nav.navigate(PcRoute.TvRemote) { launchSingleTop = true } },
                 )
@@ -423,6 +445,8 @@ fun PcAppShell(
                             mediaType = route.mediaType,
                             tmdbId = route.id,
                             seed = seed,
+                            downloadManager = container.watchDownloadManager,
+                            transportManager = container.transportManager,
                         )
                     },
                 )
@@ -436,6 +460,18 @@ fun PcAppShell(
                     onOpenPerson = { id, name, profilePath ->
                         seerrPersonSeeds[id] = name to profilePath
                         nav.navigate(PcRoute.SeerrPerson(id = id))
+                    },
+                    onPlayOnPhone = { jfId, tmdbId, mediaType, season, episode, preferOffline ->
+                        nav.navigate(
+                            PcRoute.WatchPlayer(
+                                jellyfinItemId = jfId,
+                                tmdbId = tmdbId,
+                                mediaType = mediaType,
+                                season = season,
+                                episode = episode,
+                                preferOffline = preferOffline,
+                            ),
+                        )
                     },
                     tvRemoteViewModel = tvRemoteViewModel,
                     onOpenTvRemote = { nav.navigate(PcRoute.TvRemote) { launchSingleTop = true } },
@@ -526,6 +562,36 @@ fun PcAppShell(
                     viewModel = tvRemoteViewModel,
                     onBack = { nav.popBackStack() },
                     onOpenSeerr = { nav.navigate(PcRoute.Seerr) { launchSingleTop = true } },
+                )
+            },
+            watchPlayer = { nav, route ->
+                val playerKey = "watch_player_${route.jellyfinItemId.orEmpty()}_${route.tmdbId ?: 0}_${route.season ?: -1}_${route.episode ?: -1}_${route.preferOffline}"
+                val playerVm: WatchPlayerViewModel = viewModel(
+                    key = playerKey,
+                    factory = simpleViewModelFactory {
+                        WatchPlayerViewModel(
+                            playerRepo = container.watchPlayerRepository,
+                            downloadManager = container.watchDownloadManager,
+                            transportManager = container.transportManager,
+                            initialJellyfinItemId = route.jellyfinItemId,
+                            initialTmdbId = route.tmdbId,
+                            initialMediaType = route.mediaType,
+                            initialSeason = route.season,
+                            initialEpisode = route.episode,
+                            preferOffline = route.preferOffline,
+                        )
+                    },
+                )
+                WatchPlayerScreen(
+                    viewModel = playerVm,
+                    activityProvider = activityProvider,
+                    isInPictureInPictureMode = latestInPip.value,
+                    onBack = { nav.popBackStack() },
+                    onHandedOffToTv = {
+                        tvRemoteViewModel.notifyPlaybackStarted()
+                        nav.popBackStack()
+                        nav.navigate(PcRoute.TvRemote) { launchSingleTop = true }
+                    },
                 )
             },
         )
@@ -865,6 +931,7 @@ fun AppNavHost(
         composable<PcRoute.AgentRule> { entry -> screens.agentRule(navController, entry.toRoute()) }
         composable<PcRoute.ConnectionSettings> { screens.connectionSettings(navController) }
         composable<PcRoute.TvRemote> { screens.tvRemote(navController) }
+        composable<PcRoute.WatchPlayer> { entry -> screens.watchPlayer(navController, entry.toRoute()) }
     }
 }
 

@@ -3,6 +3,11 @@ package com.neekhar.pccontrol.feature.seerr
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
+import com.neekhar.pccontrol.core.network.ApiTransport
+import com.neekhar.pccontrol.core.network.ApiTransportManager
+import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
+import com.neekhar.pccontrol.feature.watch.downloads.WatchDownloadEnqueueResult
+import com.neekhar.pccontrol.feature.watch.downloads.WatchDownloadManager
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -43,6 +48,7 @@ data class SeerrUiState(
     val busyWatchlistKey: String? = null,
     val playingOnTvKey: String? = null,
     val playOnTvNotice: String? = null,
+    val tailscaleNotice: String? = null,
     // Browse / Discover (In Library, Movies, TV, My List, Genre/Network see-all)
     val discoverItems: List<WatchItem>? = null,
     val discoverGenres: List<WatchGenre> = emptyList(),
@@ -85,14 +91,74 @@ data class SeerrUiState(
 class SeerrViewModel(
     private val repository: SeerrRepository,
     autoLoad: Boolean = true,
+    private val downloadManager: WatchDownloadManager? = null,
+    private val transportManager: ApiTransportManager? = null,
 ) : ViewModel() {
 
     companion object {
         private const val SEARCH_DEBOUNCE_MS = 300L
         private const val MIN_AUTO_SEARCH_LEN = 3
+        const val TAILSCALE_GUARD_MESSAGE = "Connect to Tailscale to stream or download video"
     }
 
     private val cachedHome = repository.getCachedWatchHome()
+    private val emptyOfflineFlow = MutableStateFlow<List<OfflineWatchItem>>(emptyList())
+    val offlineDownloads: StateFlow<List<OfflineWatchItem>>
+        get() = downloadManager?.items ?: emptyOfflineFlow
+
+    fun isTailscaleActive(): Boolean =
+        transportManager?.resolveTransport()?.let { it == ApiTransport.TAILSCALE } ?: true
+
+    fun offlineStorageBytes(): Long = downloadManager?.totalStorageBytes() ?: 0L
+
+    fun findCompletedOffline(jellyfinItemId: String?, tmdbId: Int = 0, mediaType: String = "movie"): OfflineWatchItem? {
+        val mgr = downloadManager ?: return null
+        val byId = jellyfinItemId?.takeIf { it.isNotBlank() }?.let { mgr.getItem(it) }
+        if (byId != null && byId.isCompleted) return byId
+        if (tmdbId > 0) {
+            val byTmdb = mgr.findByTmdb(tmdbId, mediaType)
+            if (byTmdb != null && byTmdb.isCompleted) return byTmdb
+        }
+        return null
+    }
+
+    fun showTailscaleRequiredNotice() {
+        noticeClearJob?.cancel()
+        _uiState.update { it.copy(tailscaleNotice = TAILSCALE_GUARD_MESSAGE) }
+        noticeClearJob = viewModelScope.launch {
+            delay(4_500L)
+            _uiState.update { it.copy(tailscaleNotice = null) }
+        }
+    }
+
+    fun dismissTailscaleNotice() {
+        _uiState.update { it.copy(tailscaleNotice = null) }
+    }
+
+    fun pauseOfflineDownload(jellyfinItemId: String) {
+        downloadManager?.pauseDownload(jellyfinItemId)
+    }
+
+    fun resumeOfflineDownload(jellyfinItemId: String) {
+        val mgr = downloadManager ?: return
+        when (val res = mgr.resumeDownload(jellyfinItemId)) {
+            is WatchDownloadEnqueueResult.TailscaleRequired -> showTailscaleRequiredNotice()
+            is WatchDownloadEnqueueResult.Error -> _uiState.update { it.copy(error = res.message) }
+            else -> {}
+        }
+    }
+
+    fun cancelOfflineDownload(jellyfinItemId: String) {
+        downloadManager?.cancelDownload(jellyfinItemId)
+    }
+
+    fun deleteOfflineDownload(jellyfinItemId: String) {
+        downloadManager?.deleteDownload(jellyfinItemId)
+    }
+
+    fun deleteAllOfflineDownloads() {
+        downloadManager?.deleteAllDownloads()
+    }
 
     private val _uiState = MutableStateFlow(
         SeerrUiState(
@@ -164,6 +230,11 @@ class SeerrViewModel(
         if (_uiState.value.activeTab == WatchTab.MY_LIST && discoverJob?.isActive != true) {
             loadDiscover(page = 1, append = false)
         }
+        if (downloadManager != null) {
+            viewModelScope.launch {
+                runCatching { downloadManager.syncDirtyResumePositions() }
+            }
+        }
     }
 
     fun selectTab(tab: WatchTab) {
@@ -176,7 +247,7 @@ class SeerrViewModel(
                 selectedGenreId = null,
                 selectedNetworkId = null,
                 selectedNetworkLabel = null,
-                discoverItems = if (tab == WatchTab.ALL || tab == WatchTab.REQUESTS) it.discoverItems else null,
+                discoverItems = if (tab == WatchTab.ALL || tab == WatchTab.REQUESTS || tab == WatchTab.DOWNLOADS) it.discoverItems else null,
                 discoverGenres = emptyList(),
                 discoverPage = 1,
                 discoverTotalPages = 1,
@@ -188,6 +259,9 @@ class SeerrViewModel(
                 if (_uiState.value.watchHome == null) {
                     loadWatchHome(forceRefresh = false)
                 }
+            }
+            WatchTab.DOWNLOADS -> {
+                // Offline downloads are observed reactively via offlineDownloads StateFlow
             }
             WatchTab.REQUESTS -> {
                 loadRequests(_uiState.value.statusFilter, showSpinner = _uiState.value.requests == null)
@@ -353,6 +427,9 @@ class SeerrViewModel(
                         WatchTab.ALL -> {
                             fetchWatchHomeInternal(forceRefresh = true)
                             fetchRequestsInternal(SeerrRequestFilter.ALL)
+                        }
+                        WatchTab.DOWNLOADS -> {
+                            runCatching { downloadManager?.syncDirtyResumePositions() }
                         }
                         WatchTab.REQUESTS -> {
                             fetchRequestsInternal(st.statusFilter)

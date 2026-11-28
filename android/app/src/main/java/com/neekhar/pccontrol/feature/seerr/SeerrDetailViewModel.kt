@@ -3,6 +3,11 @@ package com.neekhar.pccontrol.feature.seerr
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
+import com.neekhar.pccontrol.core.network.ApiTransport
+import com.neekhar.pccontrol.core.network.ApiTransportManager
+import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
+import com.neekhar.pccontrol.feature.watch.downloads.WatchDownloadEnqueueResult
+import com.neekhar.pccontrol.feature.watch.downloads.WatchDownloadManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -41,6 +46,9 @@ data class SeerrDetailUiState(
     val playOnTvStatus: String? = null,
     val playOnTvError: String? = null,
     val playOnTvShowRemoteAction: Boolean = false,
+    // Offline downloads & Tailscale-only notice
+    val enqueuingDownloadKey: String? = null,
+    val tailscaleNotice: String? = null,
     // TV Request season picker
     val selectedSeasons: Set<Int> = emptySet(),
     val showSeasonSheet: Boolean = false,
@@ -74,10 +82,16 @@ class SeerrDetailViewModel(
     mediaType: String,
     tmdbId: Int,
     seed: SeerrItem? = null,
+    private val downloadManager: WatchDownloadManager? = null,
+    private val transportManager: ApiTransportManager? = null,
 ) : ViewModel() {
 
     private val normalizedType: String = if (mediaType == "tv") "tv" else "movie"
     private val watchlistKey: String = SeerrHelpers.watchlistKey(normalizedType, tmdbId)
+
+    private val emptyOfflineFlow = MutableStateFlow<List<OfflineWatchItem>>(emptyList())
+    val offlineDownloads: StateFlow<List<OfflineWatchItem>>
+        get() = downloadManager?.items ?: emptyOfflineFlow
 
     private val _uiState = MutableStateFlow(
         SeerrDetailUiState(
@@ -98,6 +112,92 @@ class SeerrDetailViewModel(
     private var episodesJob: Job? = null
     private var collectionJob: Job? = null
     private var playOnTvClearJob: Job? = null
+    private var tailscaleNoticeJob: Job? = null
+
+    fun isTailscaleActive(): Boolean =
+        transportManager?.resolveTransport()?.let { it == ApiTransport.TAILSCALE } ?: true
+
+    fun showTailscaleRequiredNotice() {
+        tailscaleNoticeJob?.cancel()
+        _uiState.update { it.copy(tailscaleNotice = SeerrViewModel.TAILSCALE_GUARD_MESSAGE) }
+        tailscaleNoticeJob = viewModelScope.launch {
+            delay(4_500L)
+            _uiState.update { it.copy(tailscaleNotice = null) }
+        }
+    }
+
+    fun dismissTailscaleNotice() {
+        _uiState.update { it.copy(tailscaleNotice = null) }
+    }
+
+    fun downloadMovie() {
+        val mgr = downloadManager ?: return
+        val id = _uiState.value.tmdbId
+        if (id <= 0 || _uiState.value.enqueuingDownloadKey != null) return
+        if (!isTailscaleActive()) {
+            showTailscaleRequiredNotice()
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(enqueuingDownloadKey = "movie:$id", error = null) }
+            try {
+                when (val res = mgr.enqueueDownload(tmdbId = id, mediaType = "movie")) {
+                    is WatchDownloadEnqueueResult.TailscaleRequired -> showTailscaleRequiredNotice()
+                    is WatchDownloadEnqueueResult.Error -> _uiState.update { it.copy(error = res.message) }
+                    else -> {}
+                }
+            } finally {
+                _uiState.update { it.copy(enqueuingDownloadKey = null) }
+            }
+        }
+    }
+
+    fun downloadEpisode(episode: WatchEpisode) {
+        val mgr = downloadManager ?: return
+        val jfId = episode.jellyfinItemId?.takeIf { it.isNotBlank() } ?: return
+        if (_uiState.value.enqueuingDownloadKey != null) return
+        if (!isTailscaleActive()) {
+            showTailscaleRequiredNotice()
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(enqueuingDownloadKey = jfId, error = null) }
+            try {
+                when (
+                    val res = mgr.enqueueDownload(
+                        jellyfinItemId = jfId,
+                        tmdbId = _uiState.value.tmdbId,
+                        mediaType = "episode",
+                        season = episode.seasonNumber,
+                        episode = episode.episodeNumber,
+                    )
+                ) {
+                    is WatchDownloadEnqueueResult.TailscaleRequired -> showTailscaleRequiredNotice()
+                    is WatchDownloadEnqueueResult.Error -> _uiState.update { it.copy(error = res.message) }
+                    else -> {}
+                }
+            } finally {
+                _uiState.update { it.copy(enqueuingDownloadKey = null) }
+            }
+        }
+    }
+
+    fun pauseOfflineDownload(jellyfinItemId: String) {
+        downloadManager?.pauseDownload(jellyfinItemId)
+    }
+
+    fun resumeOfflineDownload(jellyfinItemId: String) {
+        val mgr = downloadManager ?: return
+        when (val res = mgr.resumeDownload(jellyfinItemId)) {
+            is WatchDownloadEnqueueResult.TailscaleRequired -> showTailscaleRequiredNotice()
+            is WatchDownloadEnqueueResult.Error -> _uiState.update { it.copy(error = res.message) }
+            else -> {}
+        }
+    }
+
+    fun deleteOfflineDownload(jellyfinItemId: String) {
+        downloadManager?.deleteDownload(jellyfinItemId)
+    }
 
     init {
         if (tmdbId > 0) {

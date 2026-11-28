@@ -5935,6 +5935,14 @@ def route_round4_get(path, qs):
             tmdb_id_raw=(qs.get("tmdbId") or [None])[0],
             media_type_raw=(qs.get("mediaType") or [None])[0],
         )
+    if path == "/api/watch/download-info":
+        return _watch_service().download_info(
+            jellyfin_item_id_raw=(qs.get("jellyfinItemId") or [None])[0],
+            tmdb_id_raw=(qs.get("tmdbId") or [None])[0],
+            media_type_raw=(qs.get("mediaType") or [None])[0],
+            season_raw=(qs.get("season") or [None])[0],
+            episode_raw=(qs.get("episode") or [None])[0],
+        )
     return None
 
 
@@ -5976,7 +5984,50 @@ def route_round4_post(path, b):
         return SEERR.resolve_url(b)
     if path == "/api/watch/watchlist":
         return _watch_service().update_watchlist(b)
+    if path == "/api/watch/playback-info":
+        return _watch_service().playback_info(b)
+    if path == "/api/watch/progress":
+        return _watch_service().report_progress(b)
     return None
+
+
+TAILSCALE_REQUIRED_ERROR = {
+    "error": "Video streaming and offline downloads require Tailscale",
+    "tailscaleRequired": True,
+}
+
+
+def _is_watch_tailscale_only_path(path):
+    return (
+        path == "/pc/api/watch/playback-info"
+        or path == "/pc/api/watch/download-info"
+        or path == "/pc/api/watch/stream"
+        or path.startswith("/pc/api/watch/stream/")
+        or path == "/pc/api/watch/download"
+        or path.startswith("/pc/api/watch/download/")
+        or path == "/pc/api/watch/subtitles"
+        or path.startswith("/pc/api/watch/subtitles/")
+    )
+
+
+def _is_public_api_request(headers):
+    """Detect requests arriving via Cloudflare Tunnel / Public API (never allowed for video bytes)."""
+    if headers is None:
+        return False
+    for hdr in ("CF-Access-Client-Id", "CF-Access-Jwt-Assertion", "CF-Connecting-IP", "CF-Ray"):
+        if headers.get(hdr):
+            return True
+    pub_hosts = {"api.neekhar.dev"}
+    cfg_url = str(os.environ.get("PCAPI_PUBLIC_API_URL") or CONFIG.get("public_api_url") or DEFAULT_PUBLIC_API_URL).strip()
+    parsed_pub = urllib.parse.urlsplit(cfg_url).hostname
+    if parsed_pub:
+        pub_hosts.add(parsed_pub.lower())
+    for hdr in ("X-Forwarded-Host", "Host"):
+        raw = str(headers.get(hdr) or "").strip().lower()
+        host_only = raw.split(",", 1)[0].strip().split(":", 1)[0]
+        if host_only and host_only in pub_hosts:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------- HTTP
@@ -6032,7 +6083,8 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def body(self, limit=64 * 1024):
         n = int(self.headers.get("Content-Length") or 0)
@@ -6115,6 +6167,108 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _proxy_jellyfin_media(
+        self,
+        upstream_url,
+        head_only=False,
+        sanitize_playlist=False,
+        content_type_override=None,
+        cache_control="no-store",
+        timeout=60,
+    ):
+        """Stream Jellyfin video/HLS/subtitle bytes over Tailscale-only pc-api without leaking Jellyfin credentials."""
+        try:
+            fwd_headers = _watch_service().jellyfin_auth_headers(include_client_meta=True)
+        except (OSError, ValueError) as e:
+            return self.send_json(502, {"error": clip(f"Jellyfin auth error: {e}", 240)})
+
+        for hdr in ("Range", "If-Range", "Accept"):
+            val = self.headers.get(hdr)
+            if val:
+                fwd_headers[hdr] = val
+
+        req = urllib.request.Request(
+            upstream_url,
+            headers=fwd_headers,
+            method="HEAD" if (head_only and not sanitize_playlist) else "GET",
+        )
+
+        resp = None
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            status = getattr(resp, "status", 200)
+            resp_headers = resp.headers
+        except urllib.error.HTTPError as e:
+            resp = e
+            status = e.code
+            resp_headers = e.headers or {}
+        except urllib.error.URLError as e:
+            reason = getattr(e, "reason", e)
+            code = 503 if isinstance(reason, ConnectionRefusedError) else 502
+            return self.send_json(code, {"error": clip(f"Jellyfin stream unreachable: {reason}", 240)})
+        except (TimeoutError, socket.timeout):
+            return self.send_json(504, {"error": "Jellyfin stream timed out"})
+        except OSError as e:
+            return self.send_json(502, {"error": clip(f"Jellyfin stream error: {e}", 240)})
+
+        try:
+            if sanitize_playlist and status == 200:
+                raw_bytes = resp.read(2 * 1024 * 1024)
+                cleaned = watch_mod.sanitize_m3u8(raw_bytes.decode("utf-8", "replace")).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
+                self.send_header("Content-Length", str(len(cleaned)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(cleaned)
+                return
+
+            ct = content_type_override or (resp_headers.get("Content-Type") if resp_headers else None) or "application/octet-stream"
+            clen = resp_headers.get("Content-Length") if resp_headers else None
+            crange = resp_headers.get("Content-Range") if resp_headers else None
+            aranges = resp_headers.get("Accept-Ranges") if resp_headers else None
+            etag = resp_headers.get("ETag") if resp_headers else None
+            lastmod = resp_headers.get("Last-Modified") if resp_headers else None
+
+            self.send_response(status)
+            self.send_header("Content-Type", ct)
+            if clen is not None and str(clen).isdigit():
+                self.send_header("Content-Length", str(clen))
+            elif not head_only:
+                # Without Content-Length on HTTP/1.1, close connection on EOF so clients know stream ended
+                self.send_header("Connection", "close")
+                self.close_connection = True
+            if crange:
+                self.send_header("Content-Range", crange)
+            if aranges:
+                self.send_header("Accept-Ranges", aranges)
+            elif status in (200, 206):
+                self.send_header("Accept-Ranges", "bytes")
+            if etag:
+                self.send_header("ETag", etag)
+            if lastmod:
+                self.send_header("Last-Modified", lastmod)
+            self.send_header("Cache-Control", cache_control)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+
+            if head_only:
+                return
+
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
     def route(self, method):
         u = urllib.parse.urlsplit(self.path)
         raw_path = u.path
@@ -6125,6 +6279,7 @@ class H(BaseHTTPRequestHandler):
         is_chat_push = method == "POST" and path == "/pc/api/chat/push"
         is_ota_trigger = method == "POST" and path == "/pc/api/ota/trigger"
         is_public_config = method == "GET" and path == "/pc/api/public-config"
+        is_watch_tailscale_only = _is_watch_tailscale_only_path(path)
 
         auth_mode = None
         if is_chat_push or is_ota_trigger:
@@ -6143,6 +6298,17 @@ class H(BaseHTTPRequestHandler):
                 auth_mode = "local"
             else:
                 return self.send_json(403, {"error": "tailscale or local auth required"})
+        elif is_watch_tailscale_only:
+            # Strict Tailscale-only enforcement: video bytes & streaming metadata never traverse Cloudflare Tunnel.
+            if _is_public_api_request(self.headers):
+                return self.send_json(403, TAILSCALE_REQUIRED_ERROR)
+            login = self.headers.get("Tailscale-User-Login")
+            if login and login in ALLOWED_LOGINS:
+                auth_mode = "tailscale"
+            elif self._is_plain_local() and local_token_authorized(self.headers):
+                auth_mode = "local"
+            else:
+                return self.send_json(403, TAILSCALE_REQUIRED_ERROR)
         else:
             login = self.headers.get("Tailscale-User-Login")
             if login:
@@ -6166,6 +6332,49 @@ class H(BaseHTTPRequestHandler):
             return self.send_json(404, {"error": "not found"})
 
         path = path[3:]
+
+        # Tailscale-only Watch video streaming, offline file downloads, and subtitle delivery (GET & HEAD)
+        if method in ("GET", "HEAD"):
+            head_only = method == "HEAD"
+            if path.startswith("/api/watch/stream/"):
+                if has_traversal:
+                    return self.send_json(400, {"error": "invalid stream path"})
+                rest = raw_path[len("/pc/api/watch/stream/"):]
+                item_id, _, subpath = rest.partition("/")
+                upstream = _watch_service().build_stream_upstream_url(item_id, subpath, u.query)
+                if not upstream:
+                    return self.send_json(400, {"error": "invalid stream target"})
+                is_m3u8 = subpath.lower().endswith(".m3u8")
+                return self._proxy_jellyfin_media(
+                    upstream,
+                    head_only=head_only,
+                    sanitize_playlist=is_m3u8,
+                    cache_control="no-store",
+                )
+            m = re.fullmatch(r"/api/watch/download/([^/]+)", path)
+            if m:
+                upstream = _watch_service().build_download_upstream_url(m.group(1), u.query)
+                if not upstream:
+                    return self.send_json(400, {"error": "invalid download item id"})
+                return self._proxy_jellyfin_media(
+                    upstream,
+                    head_only=head_only,
+                    cache_control="no-store",
+                )
+            m = re.fullmatch(r"/api/watch/subtitles/([^/]+)/([^/]+)/(\d+)\.(vtt|srt)", path, re.IGNORECASE)
+            if m:
+                ext = m.group(4).lower()
+                upstream = _watch_service().build_subtitle_upstream_url(m.group(1), m.group(2), m.group(3), ext)
+                if not upstream:
+                    return self.send_json(400, {"error": "invalid subtitle target"})
+                ctype = "text/vtt; charset=utf-8" if ext == "vtt" else "application/x-subrip; charset=utf-8"
+                return self._proxy_jellyfin_media(
+                    upstream,
+                    head_only=head_only,
+                    content_type_override=ctype,
+                    cache_control="private, max-age=3600",
+                    timeout=30,
+                )
 
         # Proxied local auxiliary services under /pc/api/* (handled before JSON body parsing).
         if method == "GET" and path == "/api/vitals":
@@ -6579,6 +6788,10 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try: self.route("GET")
+        except Exception as e: self.fail(e)
+
+    def do_HEAD(self):
+        try: self.route("HEAD")
         except Exception as e: self.fail(e)
 
     def do_POST(self):

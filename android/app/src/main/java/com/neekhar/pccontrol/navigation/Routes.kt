@@ -82,6 +82,16 @@ sealed interface PcRoute {
 
     @Serializable
     data object TvRemote : PcRoute
+
+    @Serializable
+    data class WatchPlayer(
+        val jellyfinItemId: String? = null,
+        val tmdbId: Int? = null,
+        val mediaType: String? = null,
+        val season: Int? = null,
+        val episode: Int? = null,
+        val preferOffline: Boolean = false,
+    ) : PcRoute
 }
 
 /**

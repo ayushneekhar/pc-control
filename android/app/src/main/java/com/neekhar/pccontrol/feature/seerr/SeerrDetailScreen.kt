@@ -50,7 +50,10 @@ import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.OfflinePin
+import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Tv
@@ -66,7 +69,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -92,6 +97,7 @@ import com.neekhar.pccontrol.core.ui.PcBottomSheet
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import com.neekhar.pccontrol.core.ui.PcCard
+import com.neekhar.pccontrol.core.ui.PcConfirmDialog
 import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
@@ -102,6 +108,9 @@ import com.neekhar.pccontrol.core.ui.PcStatusBarScrim
 import com.neekhar.pccontrol.core.ui.PcTone
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteUiState
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
+import com.neekhar.pccontrol.feature.watch.downloads.OfflineDownloadStatus
+import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
+import com.neekhar.pccontrol.feature.watch.downloads.WatchOfflineHelpers
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -111,11 +120,13 @@ fun SeerrDetailScreen(
     onBack: () -> Unit,
     onOpenDetail: (mediaType: String, id: Int, seed: SeerrItem?) -> Unit,
     onOpenPerson: (id: Int, name: String, profilePath: String?) -> Unit,
+    onPlayOnPhone: (jellyfinItemId: String?, tmdbId: Int?, mediaType: String?, season: Int?, episode: Int?, preferOffline: Boolean) -> Unit = { _, _, _, _, _, _ -> },
     tvRemoteViewModel: TvRemoteViewModel? = null,
     onOpenTvRemote: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val offlineItems by viewModel.offlineDownloads.collectAsStateWithLifecycle()
     val tvState: TvRemoteUiState? = if (tvRemoteViewModel != null) {
         tvRemoteViewModel.uiState.collectAsStateWithLifecycle().value
     } else {
@@ -126,6 +137,34 @@ fun SeerrDetailScreen(
     val context = LocalContext.current
     val item = state.item
     val hasBackdrop = !item?.backdrop.isNullOrBlank()
+    var pendingDeleteOffline by remember { mutableStateOf<OfflineWatchItem?>(null) }
+
+    val offlineById = remember(offlineItems) {
+        offlineItems.associateBy { it.jellyfinItemId }
+    }
+    val movieOfflineItem = remember(offlineItems, state.tmdbId, state.isTv) {
+        if (state.isTv) {
+            offlineItems.firstOrNull { it.tmdbId == state.tmdbId && it.isCompleted }
+        } else {
+            offlineItems.firstOrNull { it.tmdbId == state.tmdbId && it.mediaType == "movie" }
+        }
+    }
+
+    val launchPhonePlayer: (String?, Int?, String?, Int?, Int?) -> Unit = { jfId, tid, mType, season, episode ->
+        val local = jfId?.let { offlineById[it] }?.takeIf { it.isCompleted }
+            ?: if (tid != null && tid > 0) {
+                offlineItems.firstOrNull { it.tmdbId == tid && it.isCompleted }
+            } else {
+                null
+            }
+        if (local != null) {
+            onPlayOnPhone(local.jellyfinItemId, null, local.mediaType, null, null, true)
+        } else if (!viewModel.isTailscaleActive()) {
+            viewModel.showTailscaleRequiredNotice()
+        } else {
+            onPlayOnPhone(jfId, tid, mType, season, episode, false)
+        }
+    }
 
     if (tvRemoteViewModel != null) {
         LifecycleResumeEffect(tvRemoteViewModel) {
@@ -372,7 +411,7 @@ fun SeerrDetailScreen(
                 }
             }
 
-            // Primary Actions (Playback / Request / My List — structured so Phase 2 Play on Phone & Offline Download slot right in)
+            // Primary Actions: Play on Phone (primary), Play on TV, Offline Download, Request, My List
             if (item != null) {
                 item(key = "actions") {
                     Column(
@@ -381,9 +420,40 @@ fun SeerrDetailScreen(
                             .padding(horizontal = 18.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        val isPlayableOnTv = item.status == SeerrStatus.AVAILABLE || item.status == SeerrStatus.PARTIAL
+                        val isAvailable = item.status == SeerrStatus.AVAILABLE || item.status == SeerrStatus.PARTIAL
+                        val hasCompletedOffline = movieOfflineItem?.isCompleted == true
+                        val canPlayOnPhone = isAvailable || hasCompletedOffline
 
-                        if (isPlayableOnTv) {
+                        if (!state.tailscaleNotice.isNullOrBlank()) {
+                            PcErrorBanner(
+                                title = "Tailscale required",
+                                message = state.tailscaleNotice,
+                                tone = PcTone.Warn,
+                                actionLabel = "Dismiss",
+                                onAction = viewModel::dismissTailscaleNotice,
+                            )
+                        }
+
+                        if (canPlayOnPhone) {
+                            PcButton(
+                                label = if (hasCompletedOffline) "Play offline" else "Play",
+                                onClick = {
+                                    launchPhonePlayer(
+                                        movieOfflineItem?.jellyfinItemId?.takeIf { hasCompletedOffline },
+                                        item.id,
+                                        state.mediaType,
+                                        null,
+                                        null,
+                                    )
+                                },
+                                variant = PcButtonVariant.Primary,
+                                icon = Icons.Rounded.PlayArrow,
+                                enabled = !state.loading,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+
+                        if (isAvailable) {
                             val connectedDevice = tvState?.connectedDeviceName
                             val playLabel = state.playOnTvStatus
                                 ?: connectedDevice?.let { "Play on $it" }
@@ -391,7 +461,7 @@ fun SeerrDetailScreen(
                             PcButton(
                                 label = playLabel,
                                 onClick = viewModel::playOnTv,
-                                variant = PcButtonVariant.Primary,
+                                variant = PcButtonVariant.Subtle,
                                 icon = if (state.playOnTvStatus != null) {
                                     Icons.Rounded.Check
                                 } else {
@@ -435,7 +505,7 @@ fun SeerrDetailScreen(
                                     "Choose seasons to request"
                                 },
                                 onClick = viewModel::openSeasonSheet,
-                                variant = if (isPlayableOnTv) PcButtonVariant.Subtle else PcButtonVariant.Primary,
+                                variant = if (canPlayOnPhone) PcButtonVariant.Subtle else PcButtonVariant.Primary,
                                 icon = Icons.Rounded.Add,
                                 busy = state.submitting,
                                 enabled = !state.loading && !state.submitting,
@@ -443,11 +513,47 @@ fun SeerrDetailScreen(
                             )
                         }
 
-                        // Secondary utility row: My List toggle (Phase 2 Play on Phone / Offline Download slot beside this)
+                        // Secondary utility row: Offline Download (for available Movies) + My List toggle
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
+                            if (!state.isTv && (isAvailable || movieOfflineItem != null)) {
+                                val dl = movieOfflineItem
+                                val dlBusy = state.enqueuingDownloadKey == "movie:${state.tmdbId}"
+                                val (dlLabel, dlIcon, dlClick) = when (dl?.status) {
+                                    OfflineDownloadStatus.COMPLETED -> Triple(
+                                        "Downloaded",
+                                        Icons.Rounded.OfflinePin,
+                                        { pendingDeleteOffline = dl },
+                                    )
+                                    OfflineDownloadStatus.DOWNLOADING, OfflineDownloadStatus.QUEUED -> Triple(
+                                        "${dl.progressPercent}% · Pause",
+                                        Icons.Rounded.Pause,
+                                        { viewModel.pauseOfflineDownload(dl.jellyfinItemId) },
+                                    )
+                                    OfflineDownloadStatus.PAUSED, OfflineDownloadStatus.FAILED -> Triple(
+                                        "Resume (${dl.progressPercent}%)",
+                                        Icons.Rounded.Download,
+                                        { viewModel.resumeOfflineDownload(dl.jellyfinItemId) },
+                                    )
+                                    null -> Triple(
+                                        "Download",
+                                        Icons.Rounded.Download,
+                                        { viewModel.downloadMovie() },
+                                    )
+                                }
+                                PcButton(
+                                    label = dlLabel,
+                                    onClick = dlClick,
+                                    variant = PcButtonVariant.Subtle,
+                                    icon = dlIcon,
+                                    busy = dlBusy,
+                                    enabled = !dlBusy,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+
                             PcButton(
                                 label = if (state.inWatchlist) "In My List" else "My List",
                                 onClick = viewModel::toggleWatchlist,
@@ -685,11 +791,33 @@ fun SeerrDetailScreen(
                                     .padding(horizontal = 18.dp, vertical = 8.dp),
                             ) {
                                 epData.episodes.forEachIndexed { idx, ep ->
+                                    val epOffline = ep.jellyfinItemId?.let { offlineById[it] }
                                     WatchEpisodeRow(
                                         episode = ep,
+                                        offlineItem = epOffline,
+                                        enqueuingDownload = ep.jellyfinItemId != null && state.enqueuingDownloadKey == ep.jellyfinItemId,
                                         resolveImageUrl = viewModel::resolveImageUrl,
                                         playingOnTv = state.playingEpisodeId == ep.jellyfinItemId,
                                         playEnabled = state.playingEpisodeId == null && !state.playingOnTv,
+                                        onPlayOnPhone = {
+                                            launchPhonePlayer(
+                                                ep.jellyfinItemId,
+                                                state.tmdbId,
+                                                "episode",
+                                                ep.seasonNumber,
+                                                ep.episodeNumber,
+                                            )
+                                        },
+                                        onDownloadAction = {
+                                            when (epOffline?.status) {
+                                                OfflineDownloadStatus.COMPLETED -> pendingDeleteOffline = epOffline
+                                                OfflineDownloadStatus.DOWNLOADING, OfflineDownloadStatus.QUEUED ->
+                                                    viewModel.pauseOfflineDownload(epOffline.jellyfinItemId)
+                                                OfflineDownloadStatus.PAUSED, OfflineDownloadStatus.FAILED ->
+                                                    viewModel.resumeOfflineDownload(epOffline.jellyfinItemId)
+                                                null -> viewModel.downloadEpisode(ep)
+                                            }
+                                        },
                                         onPlayOnTv = { viewModel.playEpisodeOnTv(ep) },
                                     )
                                     if (idx < epData.episodes.lastIndex) {
@@ -1058,6 +1186,21 @@ fun SeerrDetailScreen(
         },
         onDismiss = viewModel::closeCollection,
     )
+
+    pendingDeleteOffline?.let { del ->
+        PcConfirmDialog(
+            title = "Delete offline download?",
+            message = "Remove \"${del.title}\"${del.subtitle?.let { " ($it)" }.orEmpty()} (${WatchOfflineHelpers.formatBytes(del.downloadedBytes)}) from this phone?",
+            confirmLabel = "Delete",
+            dismissLabel = "Cancel",
+            confirmVariant = PcButtonVariant.Danger,
+            onConfirm = {
+                viewModel.deleteOfflineDownload(del.jellyfinItemId)
+                pendingDeleteOffline = null
+            },
+            onDismiss = { pendingDeleteOffline = null },
+        )
+    }
 }
 
 private data class DetailKvRow(
@@ -1610,17 +1753,24 @@ private fun WatchActiveDownloadCard(
 @Composable
 private fun WatchEpisodeRow(
     episode: WatchEpisode,
+    offlineItem: OfflineWatchItem?,
+    enqueuingDownload: Boolean,
     resolveImageUrl: (String?) -> String?,
     playingOnTv: Boolean,
     playEnabled: Boolean,
+    onPlayOnPhone: () -> Unit,
+    onDownloadAction: () -> Unit,
     onPlayOnTv: () -> Unit,
 ) {
     val colors = LocalPcColors.current
     val stillUrl = resolveImageUrl(episode.still)
     val runtimeStr = SeerrHelpers.formatRuntime(episode.runtimeMinutes)
+    val isOfflineReady = offlineItem?.isCompleted == true
+    val canPlay = (episode.available && !episode.jellyfinItemId.isNullOrBlank()) || isOfflineReady
     val metaLine = buildList {
         runtimeStr?.let { add(it) }
         when {
+            isOfflineReady -> add("Downloaded")
             episode.played -> add("Watched")
             episode.progressPct > 0.0 -> add("${episode.progressPct.roundToInt()}% watched")
             episode.available -> add("Available")
@@ -1632,8 +1782,8 @@ private fun WatchEpisodeRow(
         modifier = Modifier
             .fillMaxWidth()
             .then(
-                if (episode.available && !episode.jellyfinItemId.isNullOrBlank()) {
-                    Modifier.clickable(enabled = playEnabled, onClick = onPlayOnTv)
+                if (canPlay) {
+                    Modifier.clickable(onClick = onPlayOnPhone)
                 } else {
                     Modifier
                 },
@@ -1646,7 +1796,7 @@ private fun WatchEpisodeRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // 16:9 episode still thumbnail with watched checkmark & resume progress bar
+            // 16:9 episode still thumbnail with play badge, watched checkmark & resume progress bar
             Box(
                 modifier = Modifier
                     .width(114.dp)
@@ -1669,6 +1819,24 @@ private fun WatchEpisodeRow(
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
                     )
+                }
+                if (canPlay) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.58f))
+                            .border(0.5.dp, Color.White.copy(alpha = 0.28f), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PlayArrow,
+                            contentDescription = "Play episode",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                 }
                 if (episode.played) {
                     Box(
@@ -1730,7 +1898,7 @@ private fun WatchEpisodeRow(
             ) {
                 Text(
                     text = "E${episode.episodeNumber} · ${episode.name.ifBlank { "Episode ${episode.episodeNumber}" }}",
-                    color = if (episode.available) colors.text else colors.textDim,
+                    color = if (canPlay) colors.text else colors.textDim,
                     style = TabularNumStyle.copy(
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -1742,7 +1910,7 @@ private fun WatchEpisodeRow(
                 if (metaLine.isNotEmpty()) {
                     Text(
                         text = metaLine,
-                        color = if (episode.available && !episode.played) colors.ok else colors.textFaint,
+                        color = if (isOfflineReady || (episode.available && !episode.played)) colors.ok else colors.textFaint,
                         style = TabularNumStyle.copy(fontSize = 12.sp),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1750,29 +1918,106 @@ private fun WatchEpisodeRow(
                 }
             }
 
-            // Per-episode playback actions slot (Phase 2 Play on Phone + Offline Download slot right alongside this)
-            if (episode.available && !episode.jellyfinItemId.isNullOrBlank()) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(colors.accentSoft)
-                        .clickable(enabled = playEnabled, onClick = onPlayOnTv),
-                    contentAlignment = Alignment.Center,
+            // Per-episode actions: Offline Download (with progress ring / downloaded checkmark) + Play on TV
+            if (canPlay) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    if (playingOnTv) {
-                        CircularProgressIndicator(
-                            color = colors.accent,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Rounded.Tv,
-                            contentDescription = "Play episode on TV",
-                            tint = colors.accent,
-                            modifier = Modifier.size(18.dp),
-                        )
+                    // Download / Progress / Downloaded action button
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isOfflineReady) colors.accentSoft else colors.surfaceRaised,
+                            )
+                            .clickable(enabled = !enqueuingDownload, onClick = onDownloadAction),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        when {
+                            enqueuingDownload -> {
+                                CircularProgressIndicator(
+                                    color = colors.accent,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                            offlineItem?.status == OfflineDownloadStatus.DOWNLOADING -> {
+                                CircularProgressIndicator(
+                                    progress = { offlineItem.progressFraction.coerceIn(0.05f, 1f) },
+                                    color = colors.accent,
+                                    trackColor = colors.meterTrack,
+                                    strokeWidth = 2.5.dp,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                                Icon(
+                                    imageVector = Icons.Rounded.Pause,
+                                    contentDescription = "Pause download",
+                                    tint = colors.accent,
+                                    modifier = Modifier.size(12.dp),
+                                )
+                            }
+                            offlineItem?.status == OfflineDownloadStatus.QUEUED -> {
+                                CircularProgressIndicator(
+                                    color = colors.accent,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                            offlineItem?.status == OfflineDownloadStatus.COMPLETED -> {
+                                Icon(
+                                    imageVector = Icons.Rounded.OfflinePin,
+                                    contentDescription = "Downloaded offline",
+                                    tint = colors.accent,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                            offlineItem?.status == OfflineDownloadStatus.PAUSED ||
+                                offlineItem?.status == OfflineDownloadStatus.FAILED -> {
+                                Icon(
+                                    imageVector = Icons.Rounded.Download,
+                                    contentDescription = "Resume download",
+                                    tint = colors.warn,
+                                    modifier = Modifier.size(17.dp),
+                                )
+                            }
+                            else -> {
+                                Icon(
+                                    imageVector = Icons.Rounded.Download,
+                                    contentDescription = "Download episode",
+                                    tint = colors.textDim,
+                                    modifier = Modifier.size(17.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    // Play on TV action button
+                    if (episode.available && !episode.jellyfinItemId.isNullOrBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(colors.surfaceRaised)
+                                .clickable(enabled = playEnabled, onClick = onPlayOnTv),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (playingOnTv) {
+                                CircularProgressIndicator(
+                                    color = colors.accent,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.Tv,
+                                    contentDescription = "Play episode on TV",
+                                    tint = colors.textDim,
+                                    modifier = Modifier.size(17.dp),
+                                )
+                            }
+                        }
                     }
                 }
             }

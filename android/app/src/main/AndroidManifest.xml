@@ -123,6 +123,12 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Offline Watch movie & episode download foreground service -->
+        <service
+            android:name=".feature.watch.downloads.WatchDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- FileProvider for self-updating APK installs -->
         <provider
             android:name="androidx.core.content.FileProvider"

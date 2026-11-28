@@ -48,6 +48,8 @@ import com.neekhar.pccontrol.feature.settings.SettingsPlatformBridge
 import com.neekhar.pccontrol.feature.settings.VaultResult
 import com.neekhar.pccontrol.feature.space.SpaceRepository
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteRepository
+import com.neekhar.pccontrol.feature.watch.downloads.WatchDownloadManager
+import com.neekhar.pccontrol.feature.watch.player.WatchPlayerRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -138,6 +140,12 @@ class AppContainer(
     val seerrRepository: SeerrRepository = SeerrRepository(apiClient, cache)
     val spaceRepository: SpaceRepository = SpaceRepository(apiClient, cache)
     val tvRemoteRepository: TvRemoteRepository = TvRemoteRepository(apiClient)
+    val watchPlayerRepository: WatchPlayerRepository = WatchPlayerRepository(apiClient)
+    val watchDownloadManager: WatchDownloadManager = WatchDownloadManager(
+        context = appContext,
+        api = apiClient,
+        transportManager = transportManager,
+    )
 
     init {
         installPlatformPrefHooks()
@@ -225,6 +233,12 @@ class AppContainer(
             runCatching {
                 prefs.awaitLoaded()
                 LiveDownloadsController.startIfDownloading(appContext, apiClient.okHttpClient)
+            }
+        }
+        appScope.launch(Dispatchers.IO) {
+            runCatching {
+                prefs.awaitLoaded()
+                watchDownloadManager.syncDirtyResumePositions()
             }
         }
         WebRtcRuntime.prewarmAsync(appContext)

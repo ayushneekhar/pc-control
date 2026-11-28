@@ -28,7 +28,9 @@ class FakeUpstreamServer:
     """Multi-purpose local mock HTTP server for Jellyfin, Seerr, Radarr, and Sonarr."""
 
     def __init__(self):
-        self.routes = {}  # (method, path) -> (code, payload) or callable(qs) -> (code, payload)
+        # (method, path) -> (code, payload) OR callable(qs, headers, body) -> (code, payload)
+        # OR raw tuple ("raw", code, bytes, content_type, extra_headers)
+        self.routes = {}
         self.requests = []
         outer = self
 
@@ -39,12 +41,40 @@ class FakeUpstreamServer:
             def _handle(self, method):
                 parsed = urllib.parse.urlsplit(self.path)
                 qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-                outer.requests.append((method, parsed.path, qs))
+                n = int(self.headers.get("Content-Length") or 0)
+                raw_body = self.rfile.read(n) if n > 0 else b""
+                outer.requests.append((method, parsed.path, qs, dict(self.headers), raw_body))
                 entry = outer.routes.get((method, parsed.path))
                 if entry is None:
                     code, payload = 404, {"error": f"not mocked: {method} {parsed.path}"}
                 elif callable(entry):
-                    code, payload = entry(qs)
+                    try:
+                        res = entry(qs, self.headers, raw_body)
+                    except TypeError:
+                        res = entry(qs)
+                    if isinstance(res, tuple) and res and res[0] == "raw":
+                        _, code, data, ctype, extra = res
+                        self.send_response(code)
+                        self.send_header("Content-Type", ctype)
+                        self.send_header("Content-Length", str(len(data)))
+                        for k, v in (extra or {}).items():
+                            self.send_header(k, v)
+                        self.end_headers()
+                        if method != "HEAD":
+                            self.wfile.write(data)
+                        return
+                    code, payload = res
+                elif isinstance(entry, tuple) and entry and entry[0] == "raw":
+                    _, code, data, ctype, extra = entry
+                    self.send_response(code)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(len(data)))
+                    for k, v in (extra or {}).items():
+                        self.send_header(k, v)
+                    self.end_headers()
+                    if method != "HEAD":
+                        self.wfile.write(data)
+                    return
                 else:
                     code, payload = entry
                 body = json.dumps(payload).encode("utf-8")
@@ -52,13 +82,20 @@ class FakeUpstreamServer:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                if method != "HEAD":
+                    self.wfile.write(body)
 
             def do_GET(self):
                 self._handle("GET")
 
+            def do_HEAD(self):
+                self._handle("HEAD")
+
             def do_POST(self):
                 self._handle("POST")
+
+            def do_DELETE(self):
+                self._handle("DELETE")
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.base_url = f"http://127.0.0.1:{self.httpd.server_port}"
@@ -610,6 +647,365 @@ class WatchEndpointsTests(unittest.TestCase):
                 self.assertEqual(r.status, 200)
                 body = json.loads(r.read())
                 self.assertEqual(len(body["items"]), 2)
+
+    def _install_phase2_mocks(self):
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items/{EP1_JF_ID}")] = (200, {
+            "Id": EP1_JF_ID,
+            "Name": "Failure's Contagious",
+            "Type": "Episode",
+            "SeriesName": "Slow Horses",
+            "SeriesId": SERIES_JF_ID,
+            "ParentIndexNumber": 1,
+            "IndexNumber": 1,
+            "RunTimeTicks": 30_000_000_000,
+            "ImageTags": {"Primary": "ep1img"},
+            "UserData": {"PlaybackPositionTicks": 12_000_000_000},
+            "Chapters": [
+                {"Name": "Intro", "StartPositionTicks": 0},
+                {"Name": "Main", "StartPositionTicks": 900_000_000},
+            ],
+            "MediaSources": [
+                {
+                    "Id": EP1_JF_ID,
+                    "Container": "mkv",
+                    "Size": 901_057_713,
+                    "Path": "/media/Shows/Slow Horses/Slow.Horses.S01E01.mkv",
+                    "RunTimeTicks": 30_000_000_000,
+                    "MediaStreams": [
+                        {"Index": 0, "Type": "Video", "Codec": "hevc", "DisplayTitle": "1080p HEVC"},
+                        {"Index": 1, "Type": "Audio", "Codec": "aac", "Language": "eng", "DisplayTitle": "English AAC 5.1", "Channels": 6, "IsDefault": True},
+                        {"Index": 2, "Type": "Audio", "Codec": "opus", "Language": "jpn", "DisplayTitle": "Japanese Opus 2.0", "Channels": 2, "IsDefault": False},
+                        {"Index": 3, "Type": "Subtitle", "Codec": "subrip", "Language": "eng", "DisplayTitle": "English SRT", "IsExternal": True, "IsDefault": True, "IsTextSubtitleStream": True},
+                        {"Index": 4, "Type": "Subtitle", "Codec": "pgssub", "Language": "eng", "DisplayTitle": "PGS Bitmap", "IsExternal": False, "IsTextSubtitleStream": False},
+                    ],
+                },
+            ],
+        })
+        self.jf_srv.routes[("POST", f"/Items/{EP1_JF_ID}/PlaybackInfo")] = (200, {
+            "PlaySessionId": "playsess123",
+            "MediaSources": [
+                {
+                    "Id": EP1_JF_ID,
+                    "Container": "mkv",
+                    "Size": 901_057_713,
+                    "RunTimeTicks": 30_000_000_000,
+                    "MediaStreams": [
+                        {"Index": 0, "Type": "Video", "Codec": "hevc"},
+                        {"Index": 1, "Type": "Audio", "Codec": "aac", "Language": "eng", "DisplayTitle": "English AAC 5.1", "Channels": 6, "IsDefault": True},
+                        {"Index": 2, "Type": "Audio", "Codec": "opus", "Language": "jpn", "DisplayTitle": "Japanese Opus 2.0", "Channels": 2, "IsDefault": False},
+                        {"Index": 3, "Type": "Subtitle", "Codec": "subrip", "Language": "eng", "DisplayTitle": "English SRT", "IsExternal": True, "IsDefault": True, "IsTextSubtitleStream": True},
+                        {"Index": 4, "Type": "Subtitle", "Codec": "pgssub", "Language": "eng", "DisplayTitle": "PGS Bitmap", "IsExternal": False, "IsTextSubtitleStream": False},
+                    ],
+                },
+            ],
+        })
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items/{MOVIE_JF_ID}")] = (200, {
+            "Id": MOVIE_JF_ID,
+            "Name": "Once Upon a Time in... Hollywood",
+            "Type": "Movie",
+            "ProductionYear": 2019,
+            "RunTimeTicks": 96_000_000_000,
+            "BackdropImageTags": ["bd1"],
+            "ProviderIds": {"Tmdb": "466272"},
+            "UserData": {"PlaybackPositionTicks": 36_000_000_000},
+            "MediaSources": [
+                {
+                    "Id": MOVIE_JF_ID,
+                    "Container": "mp4",
+                    "Size": 2_500_000_000,
+                    "Path": "/media/Movies/Once.Upon.a.Time.mp4",
+                    "MediaStreams": [
+                        {"Index": 0, "Type": "Video", "Codec": "h264"},
+                        {"Index": 1, "Type": "Audio", "Codec": "aac", "Language": "eng", "DisplayTitle": "English Stereo", "Channels": 2, "IsDefault": True},
+                    ],
+                },
+            ],
+        })
+        self.jf_srv.routes[("POST", f"/Items/{MOVIE_JF_ID}/PlaybackInfo")] = (200, {
+            "PlaySessionId": "moviesess456",
+            "MediaSources": [
+                {
+                    "Id": MOVIE_JF_ID,
+                    "Container": "mp4",
+                    "Size": 2_500_000_000,
+                    "MediaStreams": [
+                        {"Index": 0, "Type": "Video", "Codec": "h264"},
+                        {"Index": 1, "Type": "Audio", "Codec": "aac", "Language": "eng", "DisplayTitle": "English Stereo", "Channels": 2, "IsDefault": True},
+                    ],
+                },
+            ],
+        })
+        self.jf_srv.routes[("POST", "/Sessions/Playing")] = (200, {})
+        self.jf_srv.routes[("POST", "/Sessions/Playing/Progress")] = (200, {})
+        self.jf_srv.routes[("POST", "/Sessions/Playing/Stopped")] = (200, {})
+        self.jf_srv.routes[("POST", f"/Users/{USER_AYUSH_ID}/Items/{EP1_JF_ID}/UserData")] = (200, {})
+        self.jf_srv.routes[("POST", f"/Users/{USER_AYUSH_ID}/PlayedItems/{EP1_JF_ID}")] = (200, {})
+        self.jf_srv.routes[("DELETE", "/Videos/ActiveEncodings")] = (200, {})
+
+        # HLS master playlist containing an ApiKey param that must be stripped
+        m3u8_body = (
+            "#EXTM3U\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=4000000\n"
+            "main.m3u8?MediaSourceId=abc&ApiKey=SUPERSECRET123&PlaySessionId=playsess123\n"
+            '#EXT-X-IMAGE-STREAM-INF:URI="Trickplay/320/tiles.m3u8?MediaSourceId=abc&ApiKey=SUPERSECRET123"\n'
+        ).encode("utf-8")
+        self.jf_srv.routes[("GET", f"/videos/{EP1_JF_ID}/master.m3u8")] = (
+            "raw", 200, m3u8_body, "application/x-mpegURL", {}
+        )
+
+        # Direct stream & download supporting HTTP Range
+        sample_video = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+        def _range_video(qs, headers, body):
+            rng = headers.get("Range") or ""
+            if rng.startswith("bytes="):
+                spec = rng[6:].split(",")[0]
+                s_str, _, e_str = spec.partition("-")
+                start = int(s_str) if s_str else 0
+                end = int(e_str) if e_str else len(sample_video) - 1
+                chunk = sample_video[start:end + 1]
+                return (
+                    "raw",
+                    206,
+                    chunk,
+                    "video/x-matroska",
+                    {
+                        "Content-Range": f"bytes {start}-{start + len(chunk) - 1}/{len(sample_video)}",
+                        "Accept-Ranges": "bytes",
+                    },
+                )
+            return ("raw", 200, sample_video, "video/x-matroska", {"Accept-Ranges": "bytes"})
+
+        self.jf_srv.routes[("GET", f"/Videos/{EP1_JF_ID}/stream")] = _range_video
+        self.jf_srv.routes[("HEAD", f"/Videos/{EP1_JF_ID}/stream")] = _range_video
+        self.jf_srv.routes[("GET", f"/Videos/{EP1_JF_ID}/{EP1_JF_ID}/Subtitles/3/0/Stream.vtt")] = (
+            "raw",
+            200,
+            b"WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHello world\n",
+            "text/vtt",
+            {},
+        )
+
+    def test_playback_info_episode_returns_tracks_chapters_qualities_and_next_episode(self):
+        self._install_phase2_mocks()
+        code, data = self.service.playback_info({"jellyfinItemId": EP1_JF_ID, "maxBitrate": 8_000_000})
+        self.assertEqual(code, 200)
+        self.assertEqual(data["jellyfinItemId"], EP1_JF_ID)
+        self.assertEqual(data["mediaSourceId"], EP1_JF_ID)
+        self.assertEqual(data["playSessionId"], "playsess123")
+        self.assertEqual(data["title"], "Slow Horses")
+        self.assertEqual(data["subtitle"], "S1 · E1 · Failure's Contagious")
+        self.assertEqual(data["mediaType"], "episode")
+        self.assertEqual(data["tmdbId"], 95480)
+        self.assertEqual(data["seriesId"], SERIES_JF_ID)
+        self.assertEqual(data["resumePositionTicks"], 12_000_000_000)
+        self.assertEqual(data["runtimeTicks"], 30_000_000_000)
+        self.assertIn("/pc/api/watch/stream/", data["hlsUrl"])
+        self.assertIn("/pc/api/watch/stream/", data["directStreamUrl"])
+        self.assertNotIn("jf-test-token", json.dumps(data))
+
+        # Quality options
+        q_ids = [q["id"] for q in data["qualityOptions"]]
+        self.assertEqual(q_ids, ["original", "1080p", "720p", "480p"])
+        self.assertFalse(data["qualityOptions"][0]["isHls"])
+        self.assertTrue(data["qualityOptions"][1]["isHls"])
+
+        # Audio tracks
+        self.assertEqual(len(data["audioTracks"]), 2)
+        self.assertEqual(data["audioTracks"][0]["language"], "eng")
+        self.assertEqual(data["audioTracks"][1]["language"], "jpn")
+
+        # Subtitle tracks (bitmap PGS filtered out; text SRT exposed as WebVTT proxy)
+        self.assertEqual(len(data["subtitleTracks"]), 1)
+        self.assertEqual(
+            data["subtitleTracks"][0]["deliveryUrl"],
+            f"/pc/api/watch/subtitles/{EP1_JF_ID}/{EP1_JF_ID}/3.vtt",
+        )
+
+        # Chapters & Next Episode
+        self.assertEqual(len(data["chapters"]), 2)
+        self.assertIsNotNone(data["nextEpisode"])
+        self.assertEqual(data["nextEpisode"]["jellyfinItemId"], EP2_JF_ID)
+        self.assertEqual(data["nextEpisode"]["seasonNumber"], 1)
+        self.assertEqual(data["nextEpisode"]["episodeNumber"], 2)
+
+    def test_playback_info_resolves_by_tmdb_movie_and_tv(self):
+        self._install_phase2_mocks()
+        code, mv = self.service.playback_info({"tmdbId": 466272, "mediaType": "movie"})
+        self.assertEqual(code, 200)
+        self.assertEqual(mv["jellyfinItemId"], MOVIE_JF_ID)
+        self.assertEqual(mv["mediaType"], "movie")
+        self.assertEqual(mv["recommendedQualityId"], "original")
+
+        code, ep = self.service.playback_info({"tmdbId": 95480, "mediaType": "tv", "season": 1, "episode": 1})
+        self.assertEqual(code, 200)
+        self.assertEqual(ep["jellyfinItemId"], EP1_JF_ID)
+
+    def test_progress_forwards_to_jellyfin_marks_played_and_invalidates_cache(self):
+        self._install_phase2_mocks()
+        # Prime home cache
+        c0, _ = self.service.home(force_refresh=True)
+        self.assertEqual(c0, 200)
+        self.assertIsNotNone(self.service._home_cache[1])
+
+        c1, r1 = self.service.report_progress({
+            "jellyfinItemId": EP1_JF_ID,
+            "mediaSourceId": EP1_JF_ID,
+            "playSessionId": "playsess123",
+            "positionTicks": 5_000_000_000,
+            "runtimeTicks": 30_000_000_000,
+            "event": "start",
+            "isPaused": False,
+        })
+        self.assertEqual(c1, 200)
+        self.assertTrue(r1["ok"])
+        self.assertFalse(r1["markedPlayed"])
+
+        c2, r2 = self.service.report_progress({
+            "jellyfinItemId": EP1_JF_ID,
+            "mediaSourceId": EP1_JF_ID,
+            "playSessionId": "playsess123",
+            "positionTicks": 28_000_000_000,
+            "runtimeTicks": 30_000_000_000,
+            "event": "stop",
+            "isPaused": False,
+        })
+        self.assertEqual(c2, 200)
+        self.assertTrue(r2["markedPlayed"])
+        # Home cache invalidated on stop!
+        self.assertIsNone(self.service._home_cache[1])
+
+        paths = [(m, p) for m, p, *_ in self.jf_srv.requests]
+        self.assertIn(("POST", "/Sessions/Playing"), paths)
+        self.assertIn(("POST", "/Sessions/Playing/Stopped"), paths)
+        self.assertIn(("POST", f"/Users/{USER_AYUSH_ID}/PlayedItems/{EP1_JF_ID}"), paths)
+        self.assertIn(("DELETE", "/Videos/ActiveEncodings"), paths)
+
+    def test_download_info_returns_metadata_url_and_subtitles(self):
+        self._install_phase2_mocks()
+        code, info = self.service.download_info(jellyfin_item_id_raw=EP1_JF_ID)
+        self.assertEqual(code, 200)
+        self.assertEqual(info["jellyfinItemId"], EP1_JF_ID)
+        self.assertEqual(info["fileName"], "Slow.Horses.S01E01.mkv")
+        self.assertEqual(info["sizeBytes"], 901_057_713)
+        self.assertEqual(info["mimeType"], "video/x-matroska")
+        self.assertEqual(info["downloadUrl"], f"/pc/api/watch/download/{EP1_JF_ID}?mediaSourceId={EP1_JF_ID}")
+        self.assertIsNotNone(info["posterUrl"])
+        self.assertIsNotNone(info["stillUrl"])
+        self.assertEqual(len(info["subtitles"]), 1)
+        self.assertEqual(info["subtitles"][0]["format"], "vtt")
+        self.assertEqual(
+            info["subtitles"][0]["downloadUrl"],
+            f"/pc/api/watch/subtitles/{EP1_JF_ID}/{EP1_JF_ID}/3.vtt",
+        )
+
+    def test_tailscale_only_403_and_streaming_subtitle_range_proxies(self):
+        self._install_phase2_mocks()
+        srv = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        port = srv.server_port
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        with mock.patch.object(pcapi, "_watch_service", return_value=self.service), \
+             mock.patch.object(pcapi, "ALLOWED_LOGINS", {"ayush@example.com"}), \
+             mock.patch.object(pcapi, "ALLOW_UNAUTH_LOCAL", False), \
+             mock.patch.object(pcapi, "api_token_authorized", side_effect=lambda h: h.get("Authorization") == "Bearer test-api-tok"):
+
+            # 1. Public API Bearer token MUST get 403 tailscaleRequired on all video/download endpoints
+            public_headers = {
+                "Authorization": "Bearer test-api-tok",
+                "CF-Access-Client-Id": "cf-id-123",
+                "Host": "api.neekhar.dev",
+            }
+            for method, path, body in (
+                ("POST", "/pc/api/watch/playback-info", json.dumps({"jellyfinItemId": EP1_JF_ID}).encode()),
+                ("GET", f"/pc/api/watch/download-info?jellyfinItemId={EP1_JF_ID}", None),
+                ("GET", f"/pc/api/watch/stream/{EP1_JF_ID}/direct", None),
+                ("GET", f"/pc/api/watch/download/{EP1_JF_ID}", None),
+                ("GET", f"/pc/api/watch/subtitles/{EP1_JF_ID}/{EP1_JF_ID}/3.vtt", None),
+            ):
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}{path}",
+                    data=body,
+                    headers={**public_headers, **({"Content-Type": "application/json"} if body else {})},
+                    method=method,
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req, timeout=5)
+                self.assertEqual(ctx.exception.code, 403, f"Expected 403 on {method} {path}")
+                err_body = json.loads(ctx.exception.read())
+                self.assertTrue(err_body.get("tailscaleRequired"))
+                self.assertIn("Tailscale", err_body.get("error", ""))
+
+            # 2. Even if Tailscale-User-Login were spoofed alongside Cloudflare headers -> still 403!
+            spoof_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/pc/api/watch/download-info?jellyfinItemId={EP1_JF_ID}",
+                headers={"Tailscale-User-Login": "ayush@example.com", "CF-Access-Client-Id": "cf-id"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(spoof_req, timeout=5)
+            self.assertEqual(ctx.exception.code, 403)
+            self.assertTrue(json.loads(ctx.exception.read()).get("tailscaleRequired"))
+
+            # 3. Progress sync works over Public API Bearer token (for offline resume sync)
+            prog_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/pc/api/watch/progress",
+                data=json.dumps({"jellyfinItemId": EP1_JF_ID, "positionTicks": 1000, "event": "progress"}).encode(),
+                headers={"Authorization": "Bearer test-api-tok", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(prog_req, timeout=5) as r:
+                self.assertEqual(r.status, 200)
+                self.assertTrue(json.loads(r.read())["ok"])
+
+            # 4. Tailscale request to HLS master.m3u8 succeeds and strips ApiKey
+            ts_hdr = {"Tailscale-User-Login": "ayush@example.com"}
+            hls_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/pc/api/watch/stream/{EP1_JF_ID}/master.m3u8?PlaySessionId=playsess123",
+                headers=ts_hdr,
+            )
+            with urllib.request.urlopen(hls_req, timeout=5) as r:
+                self.assertEqual(r.status, 200)
+                self.assertIn("mpegurl", r.headers.get("Content-Type", "").lower())
+                text = r.read().decode("utf-8")
+                self.assertIn("#EXTM3U", text)
+                self.assertNotIn("SUPERSECRET123", text)
+                self.assertNotIn("ApiKey=", text)
+
+            # 5. Tailscale HTTP Range request to direct stream & download returns 206 + exact bytes
+            for path in (
+                f"/pc/api/watch/stream/{EP1_JF_ID}/direct?mediaSourceId={EP1_JF_ID}",
+                f"/pc/api/watch/download/{EP1_JF_ID}?mediaSourceId={EP1_JF_ID}",
+            ):
+                rng_req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}{path}",
+                    headers={**ts_hdr, "Range": "bytes=10-19"},
+                )
+                with urllib.request.urlopen(rng_req, timeout=5) as r:
+                    self.assertEqual(r.status, 206)
+                    self.assertEqual(r.headers.get("Content-Range"), "bytes 10-19/36")
+                    self.assertEqual(r.read(), b"ABCDEFGHIJ")
+
+            # 6. Tailscale subtitle proxy returns WebVTT
+            sub_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/pc/api/watch/subtitles/{EP1_JF_ID}/{EP1_JF_ID}/3.vtt",
+                headers=ts_hdr,
+            )
+            with urllib.request.urlopen(sub_req, timeout=5) as r:
+                self.assertEqual(r.status, 200)
+                self.assertIn("text/vtt", r.headers.get("Content-Type", ""))
+                self.assertIn("WEBVTT", r.read().decode("utf-8"))
+
+            # 7. Path traversal rejected with 400
+            trav_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/pc/api/watch/stream/{EP1_JF_ID}/..%2f..%2fUsers",
+                headers=ts_hdr,
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(trav_req, timeout=5)
+            self.assertEqual(ctx.exception.code, 400)
 
 
 if __name__ == "__main__":

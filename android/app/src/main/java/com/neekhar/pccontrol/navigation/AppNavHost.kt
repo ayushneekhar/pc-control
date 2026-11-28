@@ -302,7 +302,7 @@ fun PcAppShell(
     )
     val tvRemoteViewModel: TvRemoteViewModel = viewModel(
         key = "pc_tv_remote_vm",
-        factory = simpleViewModelFactory { TvRemoteViewModel(container.tvRemoteRepository) },
+        factory = simpleViewModelFactory { TvRemoteViewModel(container.tvRemoteRepository, container.prefs) },
     )
 
     val rootState by rootViewModel.uiState.collectAsStateWithLifecycle()
@@ -586,6 +586,7 @@ fun PcAppShell(
                     viewModel = playerVm,
                     activityProvider = activityProvider,
                     isInPictureInPictureMode = latestInPip.value,
+                    tvRemoteViewModel = tvRemoteViewModel,
                     onBack = { nav.popBackStack() },
                     onHandedOffToTv = {
                         tvRemoteViewModel.notifyPlaybackStarted()

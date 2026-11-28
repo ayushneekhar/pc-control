@@ -1,8 +1,10 @@
 package com.neekhar.pccontrol.feature.seerr
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +23,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -90,9 +94,11 @@ import com.neekhar.pccontrol.core.ui.PcTone
 import com.neekhar.pccontrol.feature.tvremote.TvNowPlayingBar
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteUiState
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
+import com.neekhar.pccontrol.feature.tvremote.rememberSmartCastController
 import com.neekhar.pccontrol.feature.watch.downloads.OfflineDownloadStatus
 import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
 import com.neekhar.pccontrol.feature.watch.downloads.WatchOfflineHelpers
+import kotlinx.coroutines.delay
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -122,12 +128,15 @@ fun SeerrScreen(
     var pendingDeleteItem by remember { mutableStateOf<OfflineWatchItem?>(null) }
     var confirmDeleteAll by remember { mutableStateOf(false) }
 
+    val smartCast = rememberSmartCastController(
+        tvRemoteViewModel = tvRemoteViewModel,
+        onNoDevices = { msg -> viewModel.showPlayOnTvError(msg) },
+    )
+
     val tryPlayOnlineOrOffline: (String?, Int?, String?, Int?, Int?) -> Unit = { jfId, tmdbId, mType, season, episode ->
         val local = viewModel.findCompletedOffline(jfId, tmdbId ?: 0, mType ?: "movie")
         if (local != null) {
             onPlayOnPhone(local.jellyfinItemId, null, local.mediaType, null, null, true)
-        } else if (!viewModel.isTailscaleActive()) {
-            viewModel.showTailscaleRequiredNotice()
         } else {
             onPlayOnPhone(jfId, tmdbId, mType, season, episode, false)
         }
@@ -135,6 +144,8 @@ fun SeerrScreen(
 
     LifecycleResumeEffect(viewModel) {
         viewModel.onScreenResume()
+        viewModel.reprobeTailscaleIfVpnActive()
+        viewModel.refreshHomeQuietly()
         onPauseOrDispose {}
     }
 
@@ -399,52 +410,60 @@ fun SeerrScreen(
                             val home = state.watchHome
                             if (home == null && state.loadingHome) {
                                 item(key = "home_hero_skeleton") {
-                                    Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
-                                        WatchHeroSkeleton()
-                                    }
+                                    WatchHeroSkeleton()
                                 }
                                 items(2, key = { "home_rail_skel_$it" }) {
                                     WatchRailSkeleton()
                                 }
                             } else if (home != null) {
-                                // 1. Hero Billboard Card
-                                val hero = home.hero
-                                if (hero != null) {
-                                    item(key = "hero_billboard") {
-                                        val heroKey = SeerrHelpers.watchlistKey(hero.mediaType, hero.id)
-                                        val inWatchlist = heroKey in state.watchlistIds
-                                        val heroOffline = viewModel.findCompletedOffline(hero.jellyfinItemId, hero.id, hero.mediaType)
-                                        Box(modifier = Modifier.padding(horizontal = PcDimens.ScreenPad)) {
-                                            WatchHeroBillboard(
-                                                item = hero,
-                                                resolveImageUrl = viewModel::resolveImageUrl,
-                                                tvConnected = tvConnected,
-                                                isDownloadedOffline = heroOffline != null,
-                                                inWatchlist = inWatchlist,
-                                                busyWatchlist = state.busyWatchlistKey == heroKey,
-                                                busyPlayOnTv = state.playingOnTvKey == "hero:${hero.mediaType}:${hero.id}",
-                                                busyRequest = state.busyMovieId == hero.id,
-                                                onPlayOnPhone = {
-                                                    tryPlayOnlineOrOffline(
-                                                        hero.jellyfinItemId,
-                                                        hero.id.takeIf { it > 0 },
-                                                        hero.mediaType,
-                                                        null,
-                                                        null,
+                                // 1. Full-Width Edge-to-Edge Hero Carousel
+                                val heroItems = home.effectiveHeroItems
+                                if (heroItems.isNotEmpty()) {
+                                    item(key = "hero_carousel") {
+                                        WatchHeroCarousel(
+                                            items = heroItems,
+                                            watchlistIds = state.watchlistIds,
+                                            busyWatchlistKey = state.busyWatchlistKey,
+                                            playingOnTvKey = state.playingOnTvKey,
+                                            busyMovieId = state.busyMovieId,
+                                            resolveImageUrl = viewModel::resolveImageUrl,
+                                            findCompletedOffline = viewModel::findCompletedOffline,
+                                            onPlayOnPhone = { hero, heroOffline ->
+                                                val targetJfId = hero.resumeJellyfinItemId?.takeIf { it.isNotBlank() }
+                                                    ?: heroOffline?.jellyfinItemId
+                                                    ?: hero.jellyfinItemId
+                                                val targetType = if (hero.isTv && !hero.resumeJellyfinItemId.isNullOrBlank()) {
+                                                    "episode"
+                                                } else {
+                                                    hero.mediaType
+                                                }
+                                                tryPlayOnlineOrOffline(
+                                                    targetJfId,
+                                                    hero.id.takeIf { it > 0 },
+                                                    targetType,
+                                                    null,
+                                                    null,
+                                                )
+                                            },
+                                            onPlayOnTv = { hero, forcePicker ->
+                                                smartCast.cast(forcePicker = forcePicker) { picked ->
+                                                    viewModel.playHeroOnTv(
+                                                        item = hero,
+                                                        sessionId = picked?.sessionId,
+                                                        deviceName = picked?.deviceName,
                                                     )
-                                                },
-                                                onPlayOnTv = { viewModel.playHeroOnTv(hero) },
-                                                onRequest = {
-                                                    if (hero.isMovie && SeerrHelpers.isRequestableMovie(hero.status)) {
-                                                        viewModel.requestMovie(hero.id)
-                                                    } else {
-                                                        openWatchItem(hero)
-                                                    }
-                                                },
-                                                onToggleWatchlist = { viewModel.toggleWatchlist(hero) },
-                                                onOpenDetail = { openWatchItem(hero) },
-                                            )
-                                        }
+                                                }
+                                            },
+                                            onRequest = { hero ->
+                                                if (hero.isMovie && SeerrHelpers.isRequestableMovie(hero.status)) {
+                                                    viewModel.requestMovie(hero.id)
+                                                } else {
+                                                    openWatchItem(hero)
+                                                }
+                                            },
+                                            onToggleWatchlist = { hero -> viewModel.toggleWatchlist(hero) },
+                                            onOpenDetail = { hero -> openWatchItem(hero) },
+                                        )
                                     }
                                 }
 
@@ -496,7 +515,15 @@ fun SeerrScreen(
                                                             )
                                                         }
                                                     },
-                                                    onPlayOnTv = { viewModel.playContinueOnTv(cw) },
+                                                    onPlayOnTv = { forcePicker ->
+                                                        smartCast.cast(forcePicker = forcePicker) { picked ->
+                                                            viewModel.playContinueOnTv(
+                                                                item = cw,
+                                                                sessionId = picked?.sessionId,
+                                                                deviceName = picked?.deviceName,
+                                                            )
+                                                        }
+                                                    },
                                                 )
                                             }
                                         }
@@ -1032,18 +1059,100 @@ fun SeerrScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun WatchHeroBillboard(
+private fun WatchHeroCarousel(
+    items: List<WatchItem>,
+    watchlistIds: Set<String>,
+    busyWatchlistKey: String?,
+    playingOnTvKey: String?,
+    busyMovieId: Int?,
+    resolveImageUrl: (String?) -> String?,
+    findCompletedOffline: (jellyfinItemId: String?, tmdbId: Int, mediaType: String) -> OfflineWatchItem?,
+    onPlayOnPhone: (WatchItem, OfflineWatchItem?) -> Unit,
+    onPlayOnTv: (WatchItem, forcePicker: Boolean) -> Unit,
+    onRequest: (WatchItem) -> Unit,
+    onToggleWatchlist: (WatchItem) -> Unit,
+    onOpenDetail: (WatchItem) -> Unit,
+) {
+    val colors = LocalPcColors.current
+    val pagerState = rememberPagerState(pageCount = { items.size })
+
+    // Smooth auto-advance every 7 seconds when multiple hero items exist; pauses while user drags
+    LaunchedEffect(items.size, pagerState.isScrollInProgress) {
+        if (items.size <= 1 || pagerState.isScrollInProgress) return@LaunchedEffect
+        delay(7_000L)
+        if (!pagerState.isScrollInProgress && items.size > 1) {
+            val nextPage = (pagerState.currentPage + 1) % items.size
+            pagerState.animateScrollToPage(nextPage)
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxWidth(),
+        ) { page ->
+            val item = items[page]
+            val heroKey = SeerrHelpers.watchlistKey(item.mediaType, item.id)
+            val inWatchlist = heroKey in watchlistIds
+            val heroOffline = findCompletedOffline(item.jellyfinItemId, item.id, item.mediaType)
+            WatchHeroSlide(
+                item = item,
+                resolveImageUrl = resolveImageUrl,
+                offlineItem = heroOffline,
+                inWatchlist = inWatchlist,
+                busyWatchlist = busyWatchlistKey == heroKey,
+                busyPlayOnTv = playingOnTvKey == "hero:${item.mediaType}:${item.id}",
+                busyRequest = busyMovieId == item.id,
+                hasMultipleSlides = items.size > 1,
+                onPlayOnPhone = { onPlayOnPhone(item, heroOffline) },
+                onPlayOnTv = { forcePicker -> onPlayOnTv(item, forcePicker) },
+                onRequest = { onRequest(item) },
+                onToggleWatchlist = { onToggleWatchlist(item) },
+                onOpenDetail = { onOpenDetail(item) },
+            )
+        }
+
+        // Clean minimal dot indicators at the bottom of the hero
+        if (items.size > 1) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                items.indices.forEach { idx ->
+                    val active = pagerState.currentPage == idx
+                    Box(
+                        modifier = Modifier
+                            .height(5.dp)
+                            .width(if (active) 18.dp else 5.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (active) colors.accent else Color.White.copy(alpha = 0.30f),
+                            ),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun WatchHeroSlide(
     item: WatchItem,
     resolveImageUrl: (String?) -> String?,
-    tvConnected: Boolean,
-    isDownloadedOffline: Boolean,
+    offlineItem: OfflineWatchItem?,
     inWatchlist: Boolean,
     busyWatchlist: Boolean,
     busyPlayOnTv: Boolean,
     busyRequest: Boolean,
+    hasMultipleSlides: Boolean,
     onPlayOnPhone: () -> Unit,
-    onPlayOnTv: () -> Unit,
+    onPlayOnTv: (forcePicker: Boolean) -> Unit,
     onRequest: () -> Unit,
     onToggleWatchlist: () -> Unit,
     onOpenDetail: () -> Unit,
@@ -1054,9 +1163,20 @@ private fun WatchHeroBillboard(
     val badge = SeerrHelpers.statusBadge(item.status)
     val ratingStr = SeerrHelpers.formatVoteAverage(item.voteAverage)
     val isAvailable = item.status == SeerrStatus.AVAILABLE
+    val isDownloadedOffline = offlineItem != null
     val canRequest = !isAvailable && (
         (item.isMovie && SeerrHelpers.isRequestableMovie(item.status)) || item.isTv
         )
+
+    val effectiveResumeTicks = maxOf(
+        item.positionTicks,
+        offlineItem?.resumePositionTicks ?: 0L,
+    )
+    val playLabel = SeerrHelpers.formatPlayButtonLabel(
+        resumePositionTicks = effectiveResumeTicks,
+        isOffline = isDownloadedOffline,
+        episodeLabel = item.resumeEpisodeLabel,
+    )
 
     val metaLine = buildList {
         item.year?.let { add(it.toString()) }
@@ -1067,9 +1187,8 @@ private fun WatchHeroBillboard(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(310.dp)
-            .clip(RoundedCornerShape(PcDimens.RadiusLg))
-            .background(colors.surface)
+            .height(430.dp)
+            .background(colors.bg)
             .clickable(onClick = onOpenDetail),
     ) {
         if (!artUrl.isNullOrBlank()) {
@@ -1085,32 +1204,33 @@ private fun WatchHeroBillboard(
                 contentDescription = null,
                 tint = colors.textFaint,
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(48.dp)
                     .align(Alignment.Center),
             )
         }
 
-        // Subtle dark scrim over photography for crisp text legibility (no decorative glow)
+        // Crisp top & bottom dark scrims merging seamlessly into true black (#000000)
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
-                        0.0f to Color.Black.copy(alpha = 0.10f),
-                        0.38f to Color.Black.copy(alpha = 0.25f),
-                        0.70f to Color.Black.copy(alpha = 0.78f),
-                        1.0f to Color.Black.copy(alpha = 0.95f),
+                        0.0f to colors.bg.copy(alpha = 0.55f),
+                        0.18f to Color.Transparent,
+                        0.45f to colors.bg.copy(alpha = 0.22f),
+                        0.74f to colors.bg.copy(alpha = 0.84f),
+                        1.0f to colors.bg,
                     ),
                 ),
         )
 
-        // Top-left availability pill
+        // Top-left availability/media badge
         if (badge != null) {
             val (dotColor, _) = seerrToneColors(badge.tone)
             Row(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(12.dp)
+                    .padding(horizontal = PcDimens.ScreenPad, vertical = 14.dp)
                     .clip(RoundedCornerShape(999.dp))
                     .background(colors.mediaChip)
                     .border(0.5.dp, colors.mediaChipBorder, RoundedCornerShape(999.dp))
@@ -1137,17 +1257,21 @@ private fun WatchHeroBillboard(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(
+                    start = PcDimens.ScreenPad,
+                    end = PcDimens.ScreenPad,
+                    bottom = if (hasMultipleSlides) 28.dp else 18.dp,
+                ),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
                     text = item.title,
                     color = colors.onMedia,
-                    fontSize = 22.sp,
+                    fontSize = 26.sp,
                     fontWeight = FontWeight.SemiBold,
-                    lineHeight = 26.sp,
-                    letterSpacing = (-0.3).sp,
+                    lineHeight = 30.sp,
+                    letterSpacing = (-0.4).sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -1163,8 +1287,8 @@ private fun WatchHeroBillboard(
                     Text(
                         text = item.overview,
                         color = colors.onMediaDim,
-                        fontSize = 12.5.sp,
-                        lineHeight = 17.sp,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -1182,7 +1306,7 @@ private fun WatchHeroBillboard(
                 when {
                     showPlayPrimary -> {
                         PcButton(
-                            label = if (isDownloadedOffline) "Play offline" else "Play",
+                            label = playLabel,
                             onClick = onPlayOnPhone,
                             variant = PcButtonVariant.Primary,
                             icon = Icons.Rounded.PlayArrow,
@@ -1213,15 +1337,19 @@ private fun WatchHeroBillboard(
                     }
                 }
 
-                // Secondary Play on TV icon button when available and TV connected
-                if (isAvailable && tvConnected) {
+                // Play on TV / Cast button (always shown when available; long-press opens device picker)
+                if (isAvailable) {
                     Box(
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(38.dp)
                             .clip(RoundedCornerShape(PcDimens.RadiusSm))
                             .background(colors.mediaChip)
                             .border(0.5.dp, colors.mediaChipBorder, RoundedCornerShape(PcDimens.RadiusSm))
-                            .clickable(enabled = !busyPlayOnTv, onClick = onPlayOnTv),
+                            .combinedClickable(
+                                enabled = !busyPlayOnTv,
+                                onClick = { onPlayOnTv(false) },
+                                onLongClick = { onPlayOnTv(true) },
+                            ),
                         contentAlignment = Alignment.Center,
                     ) {
                         if (busyPlayOnTv) {
@@ -1244,7 +1372,7 @@ private fun WatchHeroBillboard(
                 // My List toggle
                 Row(
                     modifier = Modifier
-                        .height(36.dp)
+                        .height(38.dp)
                         .clip(RoundedCornerShape(PcDimens.RadiusSm))
                         .background(if (inWatchlist) colors.accentSoft else colors.mediaChip)
                         .border(
@@ -1272,7 +1400,7 @@ private fun WatchHeroBillboard(
                         )
                     }
                     Text(
-                        text = if (inWatchlist) "My List" else "My List",
+                        text = "My List",
                         color = if (inWatchlist) colors.accent else colors.onMedia,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,
@@ -1284,7 +1412,7 @@ private fun WatchHeroBillboard(
                 if (showPlayPrimary || showRequestPrimary) {
                     Box(
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(38.dp)
                             .clip(RoundedCornerShape(PcDimens.RadiusSm))
                             .background(colors.mediaChip)
                             .border(0.5.dp, colors.mediaChipBorder, RoundedCornerShape(PcDimens.RadiusSm))
@@ -1304,6 +1432,7 @@ private fun WatchHeroBillboard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WatchContinueCard(
     item: WatchContinueItem,
@@ -1312,7 +1441,7 @@ private fun WatchContinueCard(
     busyPlayOnTv: Boolean,
     onPlayOnPhone: () -> Unit,
     onOpenDetail: () -> Unit,
-    onPlayOnTv: () -> Unit,
+    onPlayOnTv: (forcePicker: Boolean) -> Unit,
 ) {
     val colors = LocalPcColors.current
     val type = LocalPcType.current
@@ -1417,33 +1546,35 @@ private fun WatchContinueCard(
                 }
             }
 
-            // Secondary Play on TV button when projector/TV is connected
-            if (tvConnected) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(7.dp)
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(colors.mediaChip)
-                        .border(0.5.dp, colors.mediaChipBorder, CircleShape)
-                        .clickable(enabled = !busyPlayOnTv, onClick = onPlayOnTv),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (busyPlayOnTv) {
-                        CircularProgressIndicator(
-                            color = colors.accent,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(13.dp),
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Rounded.Tv,
-                            contentDescription = "Play on TV",
-                            tint = colors.onMedia,
-                            modifier = Modifier.size(15.dp),
-                        )
-                    }
+            // Secondary Play on TV / Cast button (tap = smart cast, long-press = pick TV)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(7.dp)
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(colors.mediaChip)
+                    .border(0.5.dp, colors.mediaChipBorder, CircleShape)
+                    .combinedClickable(
+                        enabled = !busyPlayOnTv,
+                        onClick = { onPlayOnTv(false) },
+                        onLongClick = { onPlayOnTv(true) },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (busyPlayOnTv) {
+                    CircularProgressIndicator(
+                        color = colors.accent,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(13.dp),
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Rounded.Tv,
+                        contentDescription = "Play on TV",
+                        tint = if (tvConnected) colors.accent else colors.onMedia,
+                        modifier = Modifier.size(15.dp),
+                    )
                 }
             }
 

@@ -213,4 +213,27 @@ class SeerrHelpersTest {
         )
         assertNull(SeerrHelpers.defaultEpisodeSeason(emptyList()))
     }
+
+    @Test
+    fun formatResumeTimestampAndPlayButtonLabel_handlesThresholdAndHours() {
+        assertNull(SeerrHelpers.formatResumeTimestamp(0L))
+        assertNull(SeerrHelpers.formatResumeTimestamp(10L * 10_000_000L))
+        assertEquals("0:11", SeerrHelpers.formatResumeTimestamp(11L * 10_000_000L))
+        assertEquals("14:22", SeerrHelpers.formatResumeTimestamp((14L * 60L + 22L) * 10_000_000L))
+        assertEquals("1:14:22", SeerrHelpers.formatResumeTimestamp((3600L + 14L * 60L + 22L) * 10_000_000L))
+
+        assertEquals("Play", SeerrHelpers.formatPlayButtonLabel(0L, isOffline = false))
+        assertEquals("Play offline", SeerrHelpers.formatPlayButtonLabel(0L, isOffline = true))
+        assertEquals(
+            "Resume from 14:22",
+            SeerrHelpers.formatPlayButtonLabel((14L * 60L + 22L) * 10_000_000L),
+        )
+        assertEquals(
+            "Resume S1 · E3 from 1:14:22",
+            SeerrHelpers.formatPlayButtonLabel(
+                (3600L + 14L * 60L + 22L) * 10_000_000L,
+                episodeLabel = "S1 · E3",
+            ),
+        )
+    }
 }

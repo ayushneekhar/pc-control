@@ -348,7 +348,8 @@ class PcApiClient(
         val snap = prefs.awaitLoaded()
         val trimmed = pathOrUrl.trim()
         val isAbsolute = HTTP_PREFIX.containsMatchIn(trimmed)
-        val useUnifiedTransport = !isAbsolute && !forceTailscale && (useChatTarget || isPcApiPath(trimmed))
+        val effectiveForceTailscale = forceTailscale || (!isAbsolute && isWatchTailscaleOnlyPath(trimmed))
+        val useUnifiedTransport = !isAbsolute && !effectiveForceTailscale && (useChatTarget || isPcApiPath(trimmed))
 
         if (!useUnifiedTransport) {
             val url = if (isAbsolute) trimmed else buildTargetUrl(trimmed, snap.serverUrl)
@@ -464,7 +465,8 @@ class PcApiClient(
         val snap = prefs.awaitLoaded()
         val trimmed = pathOrUrl.trim()
         val isAbsolute = HTTP_PREFIX.containsMatchIn(trimmed)
-        val useUnifiedTransport = !isAbsolute && !forceTailscale && (useChatTarget || isPcApiPath(trimmed))
+        val effectiveForceTailscale = forceTailscale || (!isAbsolute && isWatchTailscaleOnlyPath(trimmed))
+        val useUnifiedTransport = !isAbsolute && !effectiveForceTailscale && (useChatTarget || isPcApiPath(trimmed))
 
         if (!useUnifiedTransport) {
             val url = if (isAbsolute) trimmed else buildTargetUrl(trimmed, snap.serverUrl)
@@ -486,9 +488,9 @@ class PcApiClient(
                 timeoutMs = timeoutMs,
                 isCloudflare = scopedHeaders.isNotEmpty(),
             )
-            if (isRetryableGetError(method, first)) {
+            val result = if (isRetryableGetError(method, first)) {
                 delay(getRetryBackoffMs)
-                return executeStringOnce(
+                executeStringOnce(
                     method = method,
                     url = url,
                     requestBody = requestBody,
@@ -496,8 +498,13 @@ class PcApiClient(
                     timeoutMs = timeoutMs,
                     isCloudflare = scopedHeaders.isNotEmpty(),
                 )
+            } else {
+                first
             }
-            return first
+            if (effectiveForceTailscale && result is ApiResult.Success) {
+                transportManager.markTailscaleReachable()
+            }
+            return result
         }
 
         val target = resolveApiTarget(snap)
@@ -945,6 +952,19 @@ class PcApiClient(
         internal fun isPcApiPath(path: String): Boolean {
             val normalized = if (path.startsWith("/")) path else "/$path"
             return normalized == "/pc/api" || normalized.startsWith("/pc/api/")
+        }
+
+        internal fun isWatchTailscaleOnlyPath(path: String): Boolean {
+            val withoutQuery = path.substringBefore('?')
+            val normalized = if (withoutQuery.startsWith("/")) withoutQuery else "/$withoutQuery"
+            return normalized == "/pc/api/watch/playback-info" ||
+                normalized == "/pc/api/watch/download-info" ||
+                normalized == "/pc/api/watch/stream" ||
+                normalized.startsWith("/pc/api/watch/stream/") ||
+                normalized == "/pc/api/watch/download" ||
+                normalized.startsWith("/pc/api/watch/download/") ||
+                normalized == "/pc/api/watch/subtitles" ||
+                normalized.startsWith("/pc/api/watch/subtitles/")
         }
 
         internal fun buildTargetUrl(pathOrUrl: String, origin: String): String {

@@ -3,9 +3,12 @@ package com.neekhar.pccontrol.feature.seerr
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -75,8 +78,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -108,6 +118,7 @@ import com.neekhar.pccontrol.core.ui.PcStatusBarScrim
 import com.neekhar.pccontrol.core.ui.PcTone
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteUiState
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
+import com.neekhar.pccontrol.feature.tvremote.rememberSmartCastController
 import com.neekhar.pccontrol.feature.watch.downloads.OfflineDownloadStatus
 import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
 import com.neekhar.pccontrol.feature.watch.downloads.WatchOfflineHelpers
@@ -150,6 +161,11 @@ fun SeerrDetailScreen(
         }
     }
 
+    val smartCast = rememberSmartCastController(
+        tvRemoteViewModel = tvRemoteViewModel,
+        onNoDevices = { msg -> viewModel.showPlayOnTvError(msg) },
+    )
+
     val launchPhonePlayer: (String?, Int?, String?, Int?, Int?) -> Unit = { jfId, tid, mType, season, episode ->
         val local = jfId?.let { offlineById[it] }?.takeIf { it.isCompleted }
             ?: if (tid != null && tid > 0) {
@@ -159,11 +175,16 @@ fun SeerrDetailScreen(
             }
         if (local != null) {
             onPlayOnPhone(local.jellyfinItemId, null, local.mediaType, null, null, true)
-        } else if (!viewModel.isTailscaleActive()) {
-            viewModel.showTailscaleRequiredNotice()
         } else {
             onPlayOnPhone(jfId, tid, mType, season, episode, false)
         }
+    }
+
+    LifecycleResumeEffect(viewModel) {
+        if (!state.loading && state.item != null) {
+            viewModel.refreshQuietly()
+        }
+        onPauseOrDispose {}
     }
 
     if (tvRemoteViewModel != null) {
@@ -435,15 +456,35 @@ fun SeerrDetailScreen(
                         }
 
                         if (canPlayOnPhone) {
+                            val effectiveResumeTicks = maxOf(
+                                item.resumePositionTicks,
+                                movieOfflineItem?.resumePositionTicks ?: 0L,
+                            )
+                            val primaryPlayLabel = SeerrHelpers.formatPlayButtonLabel(
+                                resumePositionTicks = effectiveResumeTicks,
+                                isOffline = hasCompletedOffline,
+                                episodeLabel = if (state.isTv) item.resumeEpisodeLabel else null,
+                            )
                             PcButton(
-                                label = if (hasCompletedOffline) "Play offline" else "Play",
+                                label = primaryPlayLabel,
                                 onClick = {
+                                    val targetJfId = when {
+                                        hasCompletedOffline && !state.isTv -> movieOfflineItem?.jellyfinItemId
+                                        !item.resumeJellyfinItemId.isNullOrBlank() -> item.resumeJellyfinItemId
+                                        hasCompletedOffline -> movieOfflineItem?.jellyfinItemId
+                                        else -> null
+                                    }
+                                    val targetMediaType = if (state.isTv && !item.resumeJellyfinItemId.isNullOrBlank()) {
+                                        "episode"
+                                    } else {
+                                        state.mediaType
+                                    }
                                     launchPhonePlayer(
-                                        movieOfflineItem?.jellyfinItemId?.takeIf { hasCompletedOffline },
+                                        targetJfId,
                                         item.id,
-                                        state.mediaType,
-                                        null,
-                                        null,
+                                        targetMediaType,
+                                        if (state.isTv) item.resumeSeasonNumber else null,
+                                        if (state.isTv) item.resumeEpisodeNumber else null,
                                     )
                                 },
                                 variant = PcButtonVariant.Primary,
@@ -458,19 +499,54 @@ fun SeerrDetailScreen(
                             val playLabel = state.playOnTvStatus
                                 ?: connectedDevice?.let { "Play on $it" }
                                 ?: "Play on TV"
-                            PcButton(
-                                label = playLabel,
-                                onClick = viewModel::playOnTv,
-                                variant = PcButtonVariant.Subtle,
-                                icon = if (state.playOnTvStatus != null) {
-                                    Icons.Rounded.Check
-                                } else {
-                                    Icons.Rounded.Tv
-                                },
-                                busy = state.playingOnTv,
-                                enabled = !state.loading && !state.playingOnTv,
+                            Row(
                                 modifier = Modifier.fillMaxWidth(),
-                            )
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                PcButton(
+                                    label = playLabel,
+                                    onClick = {
+                                        smartCast.cast(forcePicker = false) { picked ->
+                                            viewModel.playOnTv(
+                                                sessionId = picked?.sessionId,
+                                                deviceName = picked?.deviceName,
+                                            )
+                                        }
+                                    },
+                                    variant = PcButtonVariant.Subtle,
+                                    icon = if (state.playOnTvStatus != null) {
+                                        Icons.Rounded.Check
+                                    } else {
+                                        Icons.Rounded.Tv
+                                    },
+                                    busy = state.playingOnTv,
+                                    enabled = !state.loading && !state.playingOnTv,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(colors.surfaceRaised)
+                                        .clickable(enabled = !state.loading && !state.playingOnTv) {
+                                            smartCast.cast(forcePicker = true) { picked ->
+                                                viewModel.playOnTv(
+                                                    sessionId = picked?.sessionId,
+                                                    deviceName = picked?.deviceName,
+                                                )
+                                            }
+                                        },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Tv,
+                                        contentDescription = "Choose TV",
+                                        tint = colors.textDim,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                            }
                             if (state.playOnTvShowRemoteAction) {
                                 PcButton(
                                     label = "Open TV Remote",
@@ -818,7 +894,15 @@ fun SeerrDetailScreen(
                                                 null -> viewModel.downloadEpisode(ep)
                                             }
                                         },
-                                        onPlayOnTv = { viewModel.playEpisodeOnTv(ep) },
+                                        onPlayOnTv = { forcePicker ->
+                                            smartCast.cast(forcePicker = forcePicker) { picked ->
+                                                viewModel.playEpisodeOnTv(
+                                                    episode = ep,
+                                                    sessionId = picked?.sessionId,
+                                                    deviceName = picked?.deviceName,
+                                                )
+                                            }
+                                        },
                                     )
                                     if (idx < epData.episodes.lastIndex) {
                                         HorizontalDivider(
@@ -1262,14 +1346,20 @@ private fun buildDetailKvRows(
     return rows
 }
 
+private enum class RatingSourceKind {
+    IMDB,
+    RT_CRITICS_FRESH,
+    RT_CRITICS_ROTTEN,
+    RT_AUDIENCE_UPRIGHT,
+    RT_AUDIENCE_SPILLED,
+    TMDB,
+}
+
 private data class RatingCellData(
     val key: String,
-    val label: String,
+    val kind: RatingSourceKind,
     val value: String,
     val sub: String?,
-    val fg: Color,
-    val bg: Color,
-    val icon: ImageVector,
 )
 
 @Composable
@@ -1279,57 +1369,55 @@ private fun SeerrRatingsStrip(
 ) {
     val colors = LocalPcColors.current
     val cells = buildList {
-        ratings.tmdb?.takeIf { it.score > 0.0 }?.let { tmdb ->
-            add(
-                RatingCellData(
-                    key = "tmdb",
-                    label = "TMDB",
-                    value = SeerrHelpers.formatVoteAverage(tmdb.score) ?: return@let,
-                    sub = SeerrHelpers.formatCompactCount(tmdb.count) ?: "/ 10",
-                    fg = colors.text,
-                    bg = colors.surfaceRaised,
-                    icon = Icons.Rounded.Star,
-                ),
-            )
-        }
         ratings.imdb?.takeIf { it.score > 0.0 }?.let { imdb ->
             add(
                 RatingCellData(
                     key = "imdb",
-                    label = "IMDb",
+                    kind = RatingSourceKind.IMDB,
                     value = SeerrHelpers.formatVoteAverage(imdb.score) ?: return@let,
-                    sub = SeerrHelpers.formatCompactCount(imdb.count) ?: "/ 10",
-                    fg = colors.warn,
-                    bg = colors.warnSoft,
-                    icon = Icons.Rounded.Star,
+                    sub = SeerrHelpers.formatCompactCount(imdb.count),
                 ),
             )
         }
         ratings.rt?.criticsScore?.let { score ->
-            val fresh = score >= 60
+            val ratingText = ratings.rt.criticsRating.orEmpty()
+            val fresh = when {
+                ratingText.contains("rotten", ignoreCase = true) -> false
+                ratingText.contains("fresh", ignoreCase = true) -> true
+                else -> score >= 60
+            }
             add(
                 RatingCellData(
                     key = "rt-critics",
-                    label = "RT Critics",
+                    kind = if (fresh) RatingSourceKind.RT_CRITICS_FRESH else RatingSourceKind.RT_CRITICS_ROTTEN,
                     value = "$score%",
-                    sub = ratings.rt.criticsRating ?: if (fresh) "Fresh" else "Rotten",
-                    fg = if (fresh) colors.ok else colors.bad,
-                    bg = if (fresh) colors.okSoft else colors.badSoft,
-                    icon = if (fresh) Icons.Rounded.Verified else Icons.Rounded.Warning,
+                    sub = null,
                 ),
             )
         }
         ratings.rt?.audienceScore?.let { score ->
-            val good = score >= 60
+            val ratingText = ratings.rt.audienceRating.orEmpty()
+            val upright = when {
+                ratingText.contains("spilled", ignoreCase = true) -> false
+                ratingText.contains("upright", ignoreCase = true) -> true
+                else -> score >= 60
+            }
             add(
                 RatingCellData(
                     key = "rt-audience",
-                    label = "RT Audience",
+                    kind = if (upright) RatingSourceKind.RT_AUDIENCE_UPRIGHT else RatingSourceKind.RT_AUDIENCE_SPILLED,
                     value = "$score%",
-                    sub = ratings.rt.audienceRating,
-                    fg = if (good) colors.ok else colors.bad,
-                    bg = if (good) colors.okSoft else colors.badSoft,
-                    icon = Icons.Rounded.Group,
+                    sub = null,
+                ),
+            )
+        }
+        ratings.tmdb?.takeIf { it.score > 0.0 }?.let { tmdb ->
+            add(
+                RatingCellData(
+                    key = "tmdb",
+                    kind = RatingSourceKind.TMDB,
+                    value = SeerrHelpers.formatVoteAverage(tmdb.score) ?: return@let,
+                    sub = SeerrHelpers.formatCompactCount(tmdb.count),
                 ),
             )
         }
@@ -1343,53 +1431,177 @@ private fun SeerrRatingsStrip(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(cells, key = { it.key }) { cell ->
-            Column(
+            Row(
                 modifier = Modifier
-                    .widthIn(min = 96.dp)
-                    .clip(RoundedCornerShape(14.dp))
+                    .clip(RoundedCornerShape(12.dp))
                     .background(colors.surface)
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
+                    .border(0.5.dp, colors.hairline, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
             ) {
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(cell.bg)
-                        .padding(horizontal = 8.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Icon(
-                        imageVector = cell.icon,
-                        contentDescription = null,
-                        tint = cell.fg,
-                        modifier = Modifier.size(13.dp),
-                    )
-                    Text(
-                        text = cell.value,
-                        color = cell.fg,
-                        style = TabularNumStyle.copy(
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        ),
-                    )
-                }
-                Spacer(modifier = Modifier.height(1.dp))
+                RatingSourceLogo(kind = cell.kind)
                 Text(
-                    text = cell.label,
-                    color = colors.textDim,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Medium,
+                    text = cell.value,
+                    color = colors.text,
+                    style = TabularNumStyle.copy(
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    ),
                     maxLines = 1,
                 )
                 if (!cell.sub.isNullOrBlank()) {
                     Text(
                         text = cell.sub,
                         color = colors.textFaint,
-                        style = TabularNumStyle.copy(fontSize = 11.sp),
+                        style = TabularNumStyle.copy(fontSize = 11.5.sp),
                         maxLines = 1,
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RatingSourceLogo(kind: RatingSourceKind) {
+    when (kind) {
+        RatingSourceKind.IMDB -> {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xFFF5C518))
+                    .padding(horizontal = 5.dp, vertical = 1.5.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "IMDb",
+                    color = Color(0xFF0A0A0A),
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = (-0.4).sp,
+                    lineHeight = 12.sp,
+                    maxLines = 1,
+                )
+            }
+        }
+        RatingSourceKind.TMDB -> {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xFF3DDC97))
+                    .padding(horizontal = 5.dp, vertical = 1.5.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "TMDB",
+                    color = Color(0xFF0A0A0A),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = (-0.2).sp,
+                    lineHeight = 12.sp,
+                    maxLines = 1,
+                )
+            }
+        }
+        RatingSourceKind.RT_CRITICS_FRESH -> {
+            Canvas(modifier = Modifier.size(16.dp)) {
+                val w = size.width
+                val h = size.height
+                // Fresh red tomato body
+                drawOval(
+                    color = Color(0xFFFA320A),
+                    topLeft = Offset(w * 0.10f, h * 0.22f),
+                    size = Size(w * 0.80f, h * 0.72f),
+                )
+                // Crisp subtle highlight
+                drawOval(
+                    color = Color.White.copy(alpha = 0.25f),
+                    topLeft = Offset(w * 0.24f, h * 0.34f),
+                    size = Size(w * 0.20f, h * 0.14f),
+                )
+                // Green calyx / stem
+                val stem = Path().apply {
+                    moveTo(w * 0.50f, h * 0.26f)
+                    lineTo(w * 0.34f, h * 0.14f)
+                    moveTo(w * 0.50f, h * 0.26f)
+                    lineTo(w * 0.66f, h * 0.14f)
+                    moveTo(w * 0.50f, h * 0.26f)
+                    lineTo(w * 0.50f, h * 0.08f)
+                }
+                drawPath(
+                    path = stem,
+                    color = Color(0xFF4CAF50),
+                    style = Stroke(width = w * 0.11f, cap = StrokeCap.Round),
+                )
+            }
+        }
+        RatingSourceKind.RT_CRITICS_ROTTEN -> {
+            Canvas(modifier = Modifier.size(16.dp)) {
+                val w = size.width
+                val h = size.height
+                val splatColor = Color(0xFF66BB6A)
+                // Green splat core + 5 irregular droplets
+                drawCircle(color = splatColor, radius = w * 0.30f, center = Offset(w * 0.50f, h * 0.52f))
+                drawCircle(color = splatColor, radius = w * 0.14f, center = Offset(w * 0.22f, h * 0.30f))
+                drawCircle(color = splatColor, radius = w * 0.13f, center = Offset(w * 0.78f, h * 0.28f))
+                drawCircle(color = splatColor, radius = w * 0.14f, center = Offset(w * 0.80f, h * 0.72f))
+                drawCircle(color = splatColor, radius = w * 0.12f, center = Offset(w * 0.22f, h * 0.74f))
+                drawCircle(color = splatColor, radius = w * 0.11f, center = Offset(w * 0.50f, h * 0.16f))
+            }
+        }
+        RatingSourceKind.RT_AUDIENCE_UPRIGHT -> {
+            Canvas(modifier = Modifier.size(16.dp)) {
+                val w = size.width
+                val h = size.height
+                // Fluffy cream/gold popcorn puffs on top
+                val puffColor = Color(0xFFF6E3A1)
+                drawCircle(color = puffColor, radius = w * 0.17f, center = Offset(w * 0.34f, h * 0.28f))
+                drawCircle(color = puffColor, radius = w * 0.19f, center = Offset(w * 0.52f, h * 0.22f))
+                drawCircle(color = puffColor, radius = w * 0.16f, center = Offset(w * 0.68f, h * 0.30f))
+                // Striped popcorn bucket
+                val bucket = Path().apply {
+                    moveTo(w * 0.20f, h * 0.38f)
+                    lineTo(w * 0.80f, h * 0.38f)
+                    lineTo(w * 0.70f, h * 0.94f)
+                    lineTo(w * 0.30f, h * 0.94f)
+                    close()
+                }
+                drawPath(path = bucket, color = Color(0xFFFA320A))
+                // Center white vertical stripe
+                drawRoundRect(
+                    color = Color(0xFFF5F5F5),
+                    topLeft = Offset(w * 0.43f, h * 0.40f),
+                    size = Size(w * 0.14f, h * 0.52f),
+                    cornerRadius = CornerRadius(1f, 1f),
+                )
+            }
+        }
+        RatingSourceKind.RT_AUDIENCE_SPILLED -> {
+            Canvas(modifier = Modifier.size(16.dp)) {
+                val w = size.width
+                val h = size.height
+                // Tipped muted bucket
+                rotate(degrees = 28f, pivot = Offset(w * 0.46f, h * 0.56f)) {
+                    val bucket = Path().apply {
+                        moveTo(w * 0.18f, h * 0.34f)
+                        lineTo(w * 0.70f, h * 0.34f)
+                        lineTo(w * 0.62f, h * 0.86f)
+                        lineTo(w * 0.26f, h * 0.86f)
+                        close()
+                    }
+                    drawPath(path = bucket, color = Color(0xFF8C8C8C))
+                    drawRoundRect(
+                        color = Color(0xFF525252),
+                        topLeft = Offset(w * 0.38f, h * 0.36f),
+                        size = Size(w * 0.12f, h * 0.48f),
+                        cornerRadius = CornerRadius(1f, 1f),
+                    )
+                }
+                // Spilled kernels
+                val kernelColor = Color(0xFFC4B68A)
+                drawCircle(color = kernelColor, radius = w * 0.10f, center = Offset(w * 0.76f, h * 0.78f))
+                drawCircle(color = kernelColor, radius = w * 0.08f, center = Offset(w * 0.88f, h * 0.66f))
             }
         }
     }
@@ -1750,6 +1962,7 @@ private fun WatchActiveDownloadCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WatchEpisodeRow(
     episode: WatchEpisode,
@@ -1760,16 +1973,23 @@ private fun WatchEpisodeRow(
     playEnabled: Boolean,
     onPlayOnPhone: () -> Unit,
     onDownloadAction: () -> Unit,
-    onPlayOnTv: () -> Unit,
+    onPlayOnTv: (forcePicker: Boolean) -> Unit,
 ) {
     val colors = LocalPcColors.current
     val stillUrl = resolveImageUrl(episode.still)
     val runtimeStr = SeerrHelpers.formatRuntime(episode.runtimeMinutes)
     val isOfflineReady = offlineItem?.isCompleted == true
     val canPlay = (episode.available && !episode.jellyfinItemId.isNullOrBlank()) || isOfflineReady
+    val epResumeTicks = if (episode.played) {
+        0L
+    } else {
+        maxOf(episode.positionTicks, offlineItem?.resumePositionTicks ?: 0L)
+    }
+    val epResumeLabel = SeerrHelpers.formatResumeTimestamp(epResumeTicks)
     val metaLine = buildList {
         runtimeStr?.let { add(it) }
         when {
+            epResumeLabel != null -> add("Resume $epResumeLabel")
             isOfflineReady -> add("Downloaded")
             episode.played -> add("Watched")
             episode.progressPct > 0.0 -> add("${episode.progressPct.roundToInt()}% watched")
@@ -1993,14 +2213,18 @@ private fun WatchEpisodeRow(
                         }
                     }
 
-                    // Play on TV action button
+                    // Play on TV action button (tap = smart cast, long-press = pick TV)
                     if (episode.available && !episode.jellyfinItemId.isNullOrBlank()) {
                         Box(
                             modifier = Modifier
                                 .size(34.dp)
                                 .clip(CircleShape)
                                 .background(colors.surfaceRaised)
-                                .clickable(enabled = playEnabled, onClick = onPlayOnTv),
+                                .combinedClickable(
+                                    enabled = playEnabled,
+                                    onClick = { onPlayOnTv(false) },
+                                    onLongClick = { onPlayOnTv(true) },
+                                ),
                             contentAlignment = Alignment.Center,
                         ) {
                             if (playingOnTv) {

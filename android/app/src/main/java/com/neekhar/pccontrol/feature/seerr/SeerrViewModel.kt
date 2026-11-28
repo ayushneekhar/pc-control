@@ -135,6 +135,19 @@ class SeerrViewModel(
         _uiState.update { it.copy(tailscaleNotice = null) }
     }
 
+    fun reprobeTailscaleIfVpnActive() {
+        transportManager?.reprobeIfVpnActive()
+    }
+
+    fun refreshHomeQuietly() {
+        loadWatchHome(forceRefresh = true, showSpinner = false)
+    }
+
+    fun showPlayOnTvError(message: String) {
+        noticeClearJob?.cancel()
+        _uiState.update { it.copy(playingOnTvKey = null, playOnTvNotice = null, error = message) }
+    }
+
     fun pauseOfflineDownload(jellyfinItemId: String) {
         downloadManager?.pauseDownload(jellyfinItemId)
     }
@@ -512,6 +525,11 @@ class SeerrViewModel(
                                             inWatchlist = SeerrHelpers.watchlistKey(hero.mediaType, hero.id) in serverIds,
                                         )
                                     },
+                                    heroItems = h.heroItems.map { hero ->
+                                        hero.copy(
+                                            inWatchlist = SeerrHelpers.watchlistKey(hero.mediaType, hero.id) in serverIds,
+                                        )
+                                    },
                                 )
                             },
                         )
@@ -532,22 +550,35 @@ class SeerrViewModel(
         }
     }
 
-    fun playHeroOnTv(item: WatchItem) {
+    fun playHeroOnTv(
+        item: WatchItem,
+        sessionId: String? = null,
+        deviceName: String? = null,
+    ) {
         val key = "hero:${item.mediaType}:${item.id}"
         if (_uiState.value.playingOnTvKey != null) return
         viewModelScope.launch {
             _uiState.update { it.copy(playingOnTvKey = key, error = null) }
+            val targetJfId = item.resumeJellyfinItemId?.takeIf { it.isNotBlank() } ?: item.jellyfinItemId
+            val targetMediaType = if (item.isTv && !item.resumeJellyfinItemId.isNullOrBlank()) "episode" else item.mediaType
             val res = repository.playOnTv(
                 tmdbId = item.id.takeIf { it > 0 },
-                mediaType = item.mediaType,
+                mediaType = targetMediaType,
                 title = item.title,
-                jellyfinItemId = item.jellyfinItemId,
+                jellyfinItemId = targetJfId,
+                startPositionTicks = item.positionTicks.takeIf { it > 0L },
+                sessionId = sessionId,
+                deviceName = deviceName,
             )
             handlePlayOnTvResult(res)
         }
     }
 
-    fun playContinueOnTv(item: WatchContinueItem) {
+    fun playContinueOnTv(
+        item: WatchContinueItem,
+        sessionId: String? = null,
+        deviceName: String? = null,
+    ) {
         val key = "cw:${item.jellyfinItemId}"
         if (_uiState.value.playingOnTvKey != null) return
         viewModelScope.launch {
@@ -558,6 +589,8 @@ class SeerrViewModel(
                 title = item.episodeTitle ?: item.title,
                 jellyfinItemId = item.jellyfinItemId,
                 startPositionTicks = item.positionTicks.takeIf { it > 0L && !item.isNextUp },
+                sessionId = sessionId,
+                deviceName = deviceName,
             )
             handlePlayOnTvResult(res)
         }

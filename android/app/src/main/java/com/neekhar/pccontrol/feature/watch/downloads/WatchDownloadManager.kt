@@ -93,10 +93,6 @@ class WatchDownloadManager(
         season: Int? = null,
         episode: Int? = null,
     ): WatchDownloadEnqueueResult {
-        if (!isTailscaleActive()) {
-            return WatchDownloadEnqueueResult.TailscaleRequired
-        }
-
         val existing = jellyfinItemId?.let { store.get(it) }
             ?: if (tmdbId != null && tmdbId > 0 && !mediaType.isNullOrBlank()) {
                 store.findByTmdb(tmdbId, mediaType)
@@ -124,7 +120,7 @@ class WatchDownloadManager(
         )
         return when (res) {
             is ApiResult.Error -> {
-                if (res.statusCode == 403 && res.rawBody?.contains("tailscaleRequired") == true) {
+                if (res.statusCode == 0 || (res.statusCode == 403 && res.rawBody?.contains("tailscaleRequired") == true)) {
                     WatchDownloadEnqueueResult.TailscaleRequired
                 } else {
                     WatchDownloadEnqueueResult.Error(res.message)
@@ -200,9 +196,6 @@ class WatchDownloadManager(
     }
 
     fun resumeDownload(jellyfinItemId: String): WatchDownloadEnqueueResult {
-        if (!isTailscaleActive()) {
-            return WatchDownloadEnqueueResult.TailscaleRequired
-        }
         val cur = store.get(jellyfinItemId)
             ?: return WatchDownloadEnqueueResult.Error("Download not found")
         if (cur.isCompleted && File(cur.localVideoPath).isFile) {

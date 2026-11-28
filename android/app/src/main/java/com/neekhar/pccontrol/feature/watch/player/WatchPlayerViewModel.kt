@@ -7,7 +7,11 @@ import com.neekhar.pccontrol.core.network.ApiTransport
 import com.neekhar.pccontrol.core.network.ApiTransportManager
 import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
 import com.neekhar.pccontrol.feature.watch.downloads.WatchDownloadManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,6 +21,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 data class PlayerSubtitleEntry(
@@ -114,11 +119,23 @@ class WatchPlayerViewModel(
 
     private var loadJob: Job? = null
     private var progressSyncJob: Job? = null
+    private var seekDebounceJob: Job? = null
     private var nextEpCountdownJob: Job? = null
     private var toastClearJob: Job? = null
     private var startedReported = false
     private var fallbackAttempted = false
     private var lastLocalSaveMs = 0L
+    private var pendingInitialSeekMs = 0L
+    private var hasPlaybackStartedOrSeeked = false
+    private var lastStopReportedPosMs: Long = -1L
+    private var lastStopReportedItemId: String = ""
+
+    companion object {
+        // Application-lifetime scope so Back/onCleared NEVER cancels final progress/stop POSTs
+        private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private const val PERIODIC_SYNC_MS = 10_000L
+        private const val SEEK_SYNC_DEBOUNCE_MS = 2_000L
+    }
 
     init {
         loadItem(
@@ -154,9 +171,14 @@ class WatchPlayerViewModel(
     ) {
         loadJob?.cancel()
         progressSyncJob?.cancel()
+        seekDebounceJob?.cancel()
         nextEpCountdownJob?.cancel()
         startedReported = false
         fallbackAttempted = false
+        pendingInitialSeekMs = 0L
+        hasPlaybackStartedOrSeeked = false
+        lastStopReportedPosMs = -1L
+        lastStopReportedItemId = ""
 
         loadJob = viewModelScope.launch {
             _uiState.update {
@@ -173,29 +195,13 @@ class WatchPlayerViewModel(
 
             // 1. Check for a completed local offline file first
             val offlineCandidate = findOfflineMatch(jellyfinItemId, tmdbId, mediaType)
-            if (offlineCandidate != null && (preferOffline || !isTailscaleActive())) {
-                activateOfflineItem(offlineCandidate)
-                return@launch
-            }
             if (offlineCandidate != null && offlineCandidate.isCompleted) {
-                // Even when on Tailscale, playing an already-downloaded file locally is instant & zero-bandwidth
+                // Playing an already-downloaded file locally is instant & zero-bandwidth
                 activateOfflineItem(offlineCandidate)
                 return@launch
             }
 
-            // 2. Enforce Tailscale-only guard before streaming
-            if (!isTailscaleActive()) {
-                _uiState.update {
-                    it.copy(
-                        loading = false,
-                        tailscaleRequired = true,
-                        error = "Connect to Tailscale to stream video.",
-                    )
-                }
-                return@launch
-            }
-
-            // 3. Fetch playback info from backend over Tailscale
+            // 2. Directly fetch playback info over Tailscale serverUrl (never gate on cached transport state)
             val res = playerRepo.getPlaybackInfo(
                 jellyfinItemId = jellyfinItemId,
                 tmdbId = tmdbId,
@@ -205,7 +211,8 @@ class WatchPlayerViewModel(
             )
             when (res) {
                 is ApiResult.Error -> {
-                    val isTs = res.statusCode == 403 && res.rawBody?.contains("tailscaleRequired") == true
+                    val isTs = res.statusCode == 0 ||
+                        (res.statusCode == 403 && res.rawBody?.contains("tailscaleRequired") == true)
                     _uiState.update {
                         it.copy(
                             loading = false,
@@ -219,6 +226,7 @@ class WatchPlayerViewModel(
                     }
                 }
                 is ApiResult.Success -> {
+                    transportManager.markTailscaleReachable()
                     activateOnlinePlayback(res.data)
                 }
             }
@@ -264,6 +272,8 @@ class WatchPlayerViewModel(
         val defaultSub = subs.firstOrNull { it.isDefault }?.id
         val startMs = WatchPlayerHelpers.ticksToMs(item.resumePositionTicks)
         val runtimeMs = WatchPlayerHelpers.ticksToMs(item.runtimeTicks)
+        pendingInitialSeekMs = startMs
+        hasPlaybackStartedOrSeeked = false
 
         _uiState.update { cur ->
             cur.copy(
@@ -333,6 +343,8 @@ class WatchPlayerViewModel(
 
         val startMs = WatchPlayerHelpers.ticksToMs(info.resumePositionTicks)
         val runtimeMs = WatchPlayerHelpers.ticksToMs(info.runtimeTicks)
+        pendingInitialSeekMs = startMs
+        hasPlaybackStartedOrSeeked = false
 
         _uiState.update { cur ->
             cur.copy(
@@ -371,11 +383,40 @@ class WatchPlayerViewModel(
         progressSyncJob?.cancel()
         progressSyncJob = viewModelScope.launch {
             while (true) {
-                delay(15_000L)
+                delay(PERIODIC_SYNC_MS)
                 val st = _uiState.value
-                if (st.isPlaying && st.jellyfinItemId.isNotBlank()) {
-                    sendOnlineProgress(event = "progress", isPaused = false)
+                if (st.isPlaying && st.jellyfinItemId.isNotBlank() && canPersistPosition(st)) {
+                    sendOnlineProgressSnapshot(st, event = "progress", isPaused = false)
                 }
+            }
+        }
+    }
+
+    /**
+     * Guard against the classic `0:00` overwrite bug: do not report `position == 0`
+     * before an initial resume seek (`pendingInitialSeekMs > 0`) has settled and playback started.
+     */
+    private fun canPersistPosition(st: WatchPlayerUiState): Boolean {
+        if (st.jellyfinItemId.isBlank()) return false
+        if (pendingInitialSeekMs > 0L && !hasPlaybackStartedOrSeeked) return false
+        if (st.currentPositionMs <= 0L && !hasPlaybackStartedOrSeeked && !st.isEnded) return false
+        return true
+    }
+
+    fun onUserSeek(targetPositionMs: Long) {
+        val safePos = targetPositionMs.coerceAtLeast(0L)
+        hasPlaybackStartedOrSeeked = true
+        pendingInitialSeekMs = 0L
+        lastStopReportedPosMs = -1L
+        _uiState.update { cur ->
+            cur.copy(currentPositionMs = safePos)
+        }
+        seekDebounceJob?.cancel()
+        seekDebounceJob = viewModelScope.launch {
+            delay(SEEK_SYNC_DEBOUNCE_MS)
+            val st = _uiState.value
+            if (st.jellyfinItemId.isNotBlank() && canPersistPosition(st)) {
+                persistCurrentPosition(event = "progress", isPaused = !st.isPlaying)
             }
         }
     }
@@ -390,12 +431,28 @@ class WatchPlayerViewModel(
     ) {
         val prev = _uiState.value
         val safeDur = if (durationMs > 0L) durationMs else prev.durationMs
-        val safePos = positionMs.coerceAtLeast(0L)
+        val rawPos = positionMs.coerceAtLeast(0L)
+
+        // Guard against ExoPlayer reporting 0ms while preparing an initial resume seek
+        val waitingForInitialSeek = pendingInitialSeekMs > 0L && !hasPlaybackStartedOrSeeked
+        val effectivePos = if (waitingForInitialSeek && rawPos < 1_000L && !isEnded) {
+            prev.currentPositionMs.coerceAtLeast(pendingInitialSeekMs)
+        } else {
+            if (isPlaying && (pendingInitialSeekMs <= 0L || rawPos >= 1_000L)) {
+                hasPlaybackStartedOrSeeked = true
+                pendingInitialSeekMs = 0L
+            }
+            rawPos
+        }
+
+        if (isPlaying) {
+            lastStopReportedPosMs = -1L
+        }
 
         _uiState.update { cur ->
             cur.copy(
-                currentPositionMs = safePos,
-                bufferedPositionMs = bufferedMs.coerceAtLeast(safePos),
+                currentPositionMs = effectivePos,
+                bufferedPositionMs = bufferedMs.coerceAtLeast(effectivePos),
                 durationMs = safeDur,
                 isPlaying = isPlaying,
                 isBuffering = isBuffering,
@@ -403,23 +460,28 @@ class WatchPlayerViewModel(
             )
         }
 
-        if (!startedReported && isPlaying && prev.jellyfinItemId.isNotBlank() && !prev.isOffline) {
+        val updated = _uiState.value
+        if (!startedReported && isPlaying && updated.jellyfinItemId.isNotBlank() && !updated.isOffline && canPersistPosition(updated)) {
             startedReported = true
-            viewModelScope.launch { sendOnlineProgress(event = "start", isPaused = false) }
+            progressScope.launch {
+                withContext(NonCancellable) {
+                    sendOnlineProgressSnapshot(updated, event = "start", isPaused = false)
+                }
+            }
         }
 
-        if (prev.isPlaying && !isPlaying && !isEnded && prev.jellyfinItemId.isNotBlank()) {
+        if (prev.isPlaying && !isPlaying && !isEnded && canPersistPosition(updated)) {
             persistCurrentPosition(event = "progress", isPaused = true)
         }
 
         // Periodically save offline resume ticks locally
-        if (prev.isOffline && prev.jellyfinItemId.isNotBlank()) {
+        if (updated.isOffline && canPersistPosition(updated)) {
             val now = System.currentTimeMillis()
             if (now - lastLocalSaveMs >= 5_000L) {
                 lastLocalSaveMs = now
                 downloadManager.updateOfflineResume(
-                    jellyfinItemId = prev.jellyfinItemId,
-                    positionTicks = WatchPlayerHelpers.msToTicks(safePos),
+                    jellyfinItemId = updated.jellyfinItemId,
+                    positionTicks = WatchPlayerHelpers.msToTicks(effectivePos),
                     runtimeTicks = WatchPlayerHelpers.msToTicks(safeDur),
                 )
             }
@@ -427,6 +489,7 @@ class WatchPlayerViewModel(
 
         // Trigger Next Episode countdown when ended
         if (isEnded && !prev.isEnded) {
+            hasPlaybackStartedOrSeeked = true
             persistCurrentPosition(event = "stop", isPaused = false)
             if (prev.nextEpisode != null && !prev.nextEpisodeDismissed) {
                 startNextEpisodeCountdown()
@@ -572,7 +635,7 @@ class WatchPlayerViewModel(
         )
     }
 
-    fun castToTv() {
+    fun castToTv(sessionId: String? = null, deviceName: String? = null) {
         val st = _uiState.value
         if (st.castingToTv || st.jellyfinItemId.isBlank()) return
         viewModelScope.launch {
@@ -583,10 +646,12 @@ class WatchPlayerViewModel(
                 mediaType = st.mediaType,
                 title = st.title,
                 positionTicks = posTicks,
+                sessionId = sessionId,
+                deviceName = deviceName,
             )
             when (res) {
                 is ApiResult.Success -> {
-                    val dev = res.data.device?.takeIf { it.isNotBlank() } ?: "TV"
+                    val dev = res.data.device?.takeIf { it.isNotBlank() } ?: deviceName ?: "TV"
                     showToast("Handed off to $dev")
                     _uiState.update { it.copy(castingToTv = false) }
                     reportStopSync()
@@ -600,13 +665,38 @@ class WatchPlayerViewModel(
         }
     }
 
-    fun reportStopSync() {
-        persistCurrentPosition(event = "stop", isPaused = false)
+    fun showCastMessage(message: String) {
+        showToast(message)
+    }
+
+    fun reportStopSync(explicitPositionMs: Long? = null) {
+        val st = _uiState.value
+        val effectiveSt = if (explicitPositionMs != null && explicitPositionMs > 0L) {
+            hasPlaybackStartedOrSeeked = true
+            st.copy(currentPositionMs = explicitPositionMs)
+        } else {
+            st
+        }
+        if (!canPersistPosition(effectiveSt)) return
+        // Dedupe back-to-back stop reports for the same item & position (e.g. ON_STOP -> onDispose -> onCleared)
+        if (lastStopReportedItemId == effectiveSt.jellyfinItemId &&
+            lastStopReportedPosMs >= 0L &&
+            kotlin.math.abs(effectiveSt.currentPositionMs - lastStopReportedPosMs) < 1_000L
+        ) {
+            return
+        }
+        lastStopReportedItemId = effectiveSt.jellyfinItemId
+        lastStopReportedPosMs = effectiveSt.currentPositionMs
+        persistSnapshot(effectiveSt, event = "stop", isPaused = false)
     }
 
     private fun persistCurrentPosition(event: String, isPaused: Boolean) {
         val st = _uiState.value
-        if (st.jellyfinItemId.isBlank()) return
+        if (!canPersistPosition(st)) return
+        persistSnapshot(st, event = event, isPaused = isPaused)
+    }
+
+    private fun persistSnapshot(st: WatchPlayerUiState, event: String, isPaused: Boolean) {
         val posTicks = WatchPlayerHelpers.msToTicks(st.currentPositionMs)
         val runTicks = WatchPlayerHelpers.msToTicks(st.durationMs.takeIf { it > 0L } ?: st.runtimeMs)
 
@@ -616,19 +706,22 @@ class WatchPlayerViewModel(
                 positionTicks = posTicks,
                 runtimeTicks = runTicks,
             )
-            // Best-effort sync to Jellyfin if online
-            viewModelScope.launch {
-                downloadManager.syncDirtyResumePositions()
+            // Best-effort sync to Jellyfin in NonCancellable application scope
+            progressScope.launch {
+                withContext(NonCancellable) {
+                    downloadManager.syncDirtyResumePositions()
+                }
             }
         } else {
-            viewModelScope.launch {
-                sendOnlineProgress(event = event, isPaused = isPaused)
+            progressScope.launch {
+                withContext(NonCancellable) {
+                    sendOnlineProgressSnapshot(st, event = event, isPaused = isPaused)
+                }
             }
         }
     }
 
-    private suspend fun sendOnlineProgress(event: String, isPaused: Boolean) {
-        val st = _uiState.value
+    private suspend fun sendOnlineProgressSnapshot(st: WatchPlayerUiState, event: String, isPaused: Boolean) {
         if (st.jellyfinItemId.isBlank() || st.isOffline) return
         playerRepo.reportProgress(
             WatchProgressRequest(
@@ -667,7 +760,9 @@ class WatchPlayerViewModel(
     }
 
     override fun onCleared() {
+        reportStopSync()
         progressSyncJob?.cancel()
+        seekDebounceJob?.cancel()
         nextEpCountdownJob?.cancel()
         super.onCleared()
     }

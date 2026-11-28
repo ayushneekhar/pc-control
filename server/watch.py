@@ -34,9 +34,11 @@ API_KEY_PARAM_RE = re.compile(r"([?&])ApiKey=[^&\"'\s]+(&?)", re.IGNORECASE)
 TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
 TMDB_ORIG_RE = re.compile(r"^https?://image\.tmdb\.org/t/p/original(/.*)$")
 
-PLAYER_DEVICE_ID = "pccontrol-android-player"
+PLAYER_DEVICE_ID = "pc-control-watch"
 PLAYER_CLIENT_NAME = "PC Control"
-PLAYER_CLIENT_VERSION = "2.3.0"
+PLAYER_CLIENT_VERSION = "2.3.1"
+MAX_HERO_ITEMS = 6
+USERDATA_PROGRESS_THROTTLE_SEC = 2.0
 
 TEXT_SUBTITLE_CODECS = frozenset({
     "subrip", "srt", "vtt", "webvtt", "ass", "ssa",
@@ -426,6 +428,7 @@ class WatchService:
         self._home_cache = (0.0, None)
         self._library_index_cache = (0.0, None)
         self._genres_cache = {}  # "movie"|"tv" -> (ts, list)
+        self._userdata_last_write = {}  # item_id -> (ts, pos_ticks)
 
     def invalidate_caches(self):
         with self._lock:
@@ -438,11 +441,11 @@ class WatchService:
         key = self._jellyfin_key_fn()
         if include_client_meta:
             auth = (
-                f'MediaBrowser Token="{key}", '
-                f'Client="{PLAYER_CLIENT_NAME}", '
+                f'MediaBrowser Client="{PLAYER_CLIENT_NAME}", '
                 f'Device="Android", '
                 f'DeviceId="{PLAYER_DEVICE_ID}", '
-                f'Version="{PLAYER_CLIENT_VERSION}"'
+                f'Version="{PLAYER_CLIENT_VERSION}", '
+                f'Token="{key}"'
             )
         else:
             auth = f'MediaBrowser Token="{key}"'
@@ -618,6 +621,10 @@ class WatchService:
         genres = [str(g) for g in (it.get("Genres") or []) if isinstance(g, str) and g.strip()][:5]
 
         key = _watchlist_key(mtype, tid) if tid > 0 else ""
+        ud = it.get("UserData") if isinstance(it.get("UserData"), dict) else {}
+        played = bool(ud.get("Played"))
+        pos_ticks = 0 if played else max(0, _safe_int(ud.get("PlaybackPositionTicks")) or 0)
+        run_ticks = max(0, _safe_int(it.get("RunTimeTicks")) or 0)
         return {
             "id": tid,
             "mediaType": mtype,
@@ -631,6 +638,8 @@ class WatchService:
             "jellyfinItemId": jf_id,
             "inWatchlist": bool(key and watchlist_ids is not None and key in watchlist_ids),
             "genres": genres,
+            "positionTicks": pos_ticks,
+            "runtimeTicks": run_ticks,
         }
 
     def _normalize_continue_item(self, it, series_tmdb, is_next_up=False):
@@ -973,53 +982,247 @@ class WatchService:
             rail["networkId"] = spec["networkId"]
         return rail
 
-    def _pick_hero(self, recently_added, rails, continue_watching, watchlist_ids):
-        # 1. Prefer an available Jellyfin item with a crisp backdrop & overview
+    def _upgrade_hero_item(self, item, cw_by_tmdb, cw_by_jf):
+        hero = dict(item)
+        bd = hero.get("backdrop")
+        if hero.get("jellyfinItemId") and isinstance(bd, str) and bd.startswith("/pc/api/jellyfin/image/"):
+            hero["backdrop"] = _jf_img_url(hero["jellyfinItemId"], "Backdrop", max_width=1280)
+        elif isinstance(bd, str) and "/w780/" in bd:
+            hero["backdrop"] = _tmdb_img(bd.replace("/w780/", "/original/"), size="w1280")
+
+        # Enrich with live Continue Watching resume ticks if available
+        mtype = hero.get("mediaType")
+        tid = _safe_int(hero.get("id")) or 0
+        jf_id = hero.get("jellyfinItemId")
+        cw = None
+        if tid > 0 and (mtype, tid) in cw_by_tmdb:
+            cw = cw_by_tmdb[(mtype, tid)]
+        elif jf_id and jf_id in cw_by_jf:
+            cw = cw_by_jf[jf_id]
+
+        if cw is not None:
+            cw_pos = max(0, _safe_int(cw.get("positionTicks")) or 0)
+            cw_run = max(0, _safe_int(cw.get("runtimeTicks")) or 0)
+            if cw_pos > 0:
+                hero["positionTicks"] = cw_pos
+                if cw_run > 0:
+                    hero["runtimeTicks"] = cw_run
+                if cw.get("episodeLabel"):
+                    hero["resumeEpisodeLabel"] = cw["episodeLabel"]
+                if cw.get("jellyfinItemId"):
+                    hero["resumeJellyfinItemId"] = cw["jellyfinItemId"]
+        return hero
+
+    def _pick_hero_items(self, recently_added, rails, continue_watching, watchlist_ids, limit=MAX_HERO_ITEMS):
+        cw_by_tmdb = {}
+        cw_by_jf = {}
+        for cw in continue_watching or []:
+            if not isinstance(cw, dict):
+                continue
+            pos = max(0, _safe_int(cw.get("positionTicks")) or 0)
+            if pos <= 0:
+                continue
+            tid = _safe_int(cw.get("id")) or 0
+            mt = cw.get("mediaType")
+            if tid > 0 and mt in ("movie", "tv") and (mt, tid) not in cw_by_tmdb:
+                cw_by_tmdb[(mt, tid)] = cw
+            for key_id in (cw.get("seriesId"), cw.get("jellyfinItemId")):
+                if key_id and key_id not in cw_by_jf:
+                    cw_by_jf[key_id] = cw
+
+        picked = []
+        seen = set()
+
+        def _dedupe_key(it):
+            mt = it.get("mediaType") or "movie"
+            tid = _safe_int(it.get("id")) or 0
+            if tid > 0:
+                return (mt, tid)
+            jf_id = it.get("jellyfinItemId")
+            if jf_id:
+                return ("jf", jf_id)
+            return ("title", mt, str(it.get("title") or "").strip().lower())
+
+        def _try_add(it):
+            if len(picked) >= limit or not isinstance(it, dict):
+                return False
+            k = _dedupe_key(it)
+            if k in seen:
+                return False
+            seen.add(k)
+            picked.append(self._upgrade_hero_item(it, cw_by_tmdb, cw_by_jf))
+            return True
+
+        trending = next((r["items"] for r in rails if r.get("id") == "trending"), [])
+
+        # 1. Up to 3 best available Jellyfin library highlights with crisp backdrops & overview
+        lib_added = 0
         for item in recently_added:
+            if lib_added >= 3 or len(picked) >= limit:
+                break
             if item.get("id", 0) > 0 and item.get("backdrop") and item.get("overview"):
-                hero = dict(item)
-                if hero.get("jellyfinItemId"):
-                    hero["backdrop"] = _jf_img_url(hero["jellyfinItemId"], "Backdrop", max_width=1280)
-                return hero
-        # 2. Check trending items that are already available in Jellyfin
-        trending = next((r["items"] for r in rails if r["id"] == "trending"), [])
+                if _try_add(item):
+                    lib_added += 1
+
+        # 2. Trending items that are already available in Jellyfin with a backdrop
         for item in trending:
+            if len(picked) >= limit:
+                break
             if item.get("status") == "available" and item.get("backdrop"):
-                hero = dict(item)
-                hero["backdrop"] = _tmdb_img(hero["backdrop"].replace("/w780/", "/original/"), size="w1280")
-                return hero
-        # 3. Top trending item with a backdrop
+                _try_add(item)
+
+        # 3. Top trending items with a backdrop & overview
         for item in trending:
+            if len(picked) >= limit:
+                break
+            if item.get("backdrop") and item.get("overview"):
+                _try_add(item)
+
+        # 4. Any trending item with a backdrop
+        for item in trending:
+            if len(picked) >= limit:
+                break
             if item.get("backdrop"):
-                hero = dict(item)
-                hero["backdrop"] = _tmdb_img(hero["backdrop"].replace("/w780/", "/original/"), size="w1280")
-                return hero
-        # 4. Any recently added item
-        if recently_added:
-            return dict(recently_added[0])
-        # 5. Any rail item
+                _try_add(item)
+
+        # 5. Remaining recently added items with a backdrop
+        for item in recently_added:
+            if len(picked) >= limit:
+                break
+            if item.get("backdrop"):
+                _try_add(item)
+
+        # 6. Other rail items with a backdrop
         for r in rails:
-            if r.get("items"):
-                return dict(r["items"][0])
-        # 6. Continue watching fallback
-        if continue_watching:
-            cw = continue_watching[0]
-            key = _watchlist_key(cw["mediaType"], cw["id"]) if cw.get("id", 0) > 0 else ""
+            if len(picked) >= limit:
+                break
+            if r.get("id") == "trending":
+                continue
+            for item in r.get("items") or []:
+                if len(picked) >= limit:
+                    break
+                if item.get("backdrop"):
+                    _try_add(item)
+
+        # 7. Fallbacks without strict backdrop requirement
+        if not picked:
+            for item in recently_added:
+                if _try_add(item) and len(picked) >= limit:
+                    break
+        if not picked:
+            for r in rails:
+                for item in r.get("items") or []:
+                    if _try_add(item) and len(picked) >= limit:
+                        break
+                if len(picked) >= limit:
+                    break
+        if not picked and continue_watching:
+            for cw in continue_watching:
+                if len(picked) >= limit:
+                    break
+                key = _watchlist_key(cw["mediaType"], cw["id"]) if cw.get("id", 0) > 0 else ""
+                _try_add({
+                    "id": cw["id"],
+                    "mediaType": cw["mediaType"],
+                    "title": cw["title"],
+                    "year": cw.get("year"),
+                    "overview": cw.get("episodeTitle") or "",
+                    "poster": cw.get("poster"),
+                    "backdrop": cw.get("backdrop"),
+                    "voteAverage": None,
+                    "status": "available",
+                    "jellyfinItemId": cw.get("jellyfinItemId"),
+                    "inWatchlist": key in watchlist_ids,
+                    "genres": [],
+                    "positionTicks": max(0, _safe_int(cw.get("positionTicks")) or 0),
+                    "runtimeTicks": max(0, _safe_int(cw.get("runtimeTicks")) or 0),
+                    "resumeEpisodeLabel": cw.get("episodeLabel"),
+                    "resumeJellyfinItemId": cw.get("jellyfinItemId"),
+                })
+
+        return picked[:limit]
+
+    def _pick_hero(self, recently_added, rails, continue_watching, watchlist_ids):
+        items = self._pick_hero_items(recently_added, rails, continue_watching, watchlist_ids, limit=1)
+        return items[0] if items else None
+
+    def get_resume_state(self, media_type, tmdb_id):
+        """Best-effort live Jellyfin resume position lookup for detail screens."""
+        mt = "tv" if str(media_type or "").strip().lower() == "tv" else "movie"
+        tid = _safe_int(tmdb_id)
+        if not tid or tid <= 0:
+            return None
+        try:
+            uid = self._jf_user_id(timeout=3)
+            lib_index = self._library_index()
+            jf_id = lib_index.get("by_tmdb", {}).get((mt, tid))
+            if not jf_id:
+                return None
+
+            if mt == "movie":
+                it = self._jf_get(f"/Users/{uid}/Items/{jf_id}?Fields=UserData,RunTimeTicks", timeout=4)
+                if not isinstance(it, dict):
+                    return None
+                ud = it.get("UserData") if isinstance(it.get("UserData"), dict) else {}
+                played = bool(ud.get("Played"))
+                pos_ticks = 0 if played else max(0, _safe_int(ud.get("PlaybackPositionTicks")) or 0)
+                run_ticks = max(0, _safe_int(it.get("RunTimeTicks")) or 0)
+                return {
+                    "resumePositionTicks": pos_ticks,
+                    "resumeRuntimeTicks": run_ticks,
+                    "resumeJellyfinItemId": jf_id,
+                    "resumeEpisodeLabel": None,
+                    "resumeSeasonNumber": None,
+                    "resumeEpisodeNumber": None,
+                }
+
+            # TV show: check in-progress Resume episode for this series first
+            qs_res = urllib.parse.urlencode({
+                "ParentId": jf_id,
+                "IncludeItemTypes": "Episode",
+                "Recursive": "true",
+                "Limit": "1",
+                "Fields": "UserData,RunTimeTicks",
+            })
+            rdata = self._jf_get(f"/Users/{uid}/Items/Resume?{qs_res}", timeout=4)
+            ritems = rdata.get("Items") if isinstance(rdata, dict) else []
+            ep = ritems[0] if isinstance(ritems, list) and ritems and isinstance(ritems[0], dict) else None
+            if ep is None:
+                # Fall back to NextUp (may also carry partial progress or next episode info)
+                qs_nu = urllib.parse.urlencode({
+                    "UserId": uid,
+                    "SeriesId": jf_id,
+                    "Limit": "1",
+                    "Fields": "UserData,RunTimeTicks",
+                })
+                ndata = self._jf_get(f"/Shows/NextUp?{qs_nu}", timeout=4)
+                nitems = ndata.get("Items") if isinstance(ndata, dict) else []
+                ep = nitems[0] if isinstance(nitems, list) and nitems and isinstance(nitems[0], dict) else None
+            if ep is None:
+                return None
+            ep_id = normalize_jf_id(ep.get("Id"))
+            ud = ep.get("UserData") if isinstance(ep.get("UserData"), dict) else {}
+            played = bool(ud.get("Played"))
+            pos_ticks = 0 if played else max(0, _safe_int(ud.get("PlaybackPositionTicks")) or 0)
+            run_ticks = max(0, _safe_int(ep.get("RunTimeTicks")) or 0)
+            sn = _safe_int(ep.get("ParentIndexNumber"))
+            en = _safe_int(ep.get("IndexNumber"))
+            if sn is not None and en is not None:
+                ep_label = f"S{sn} · E{en}"
+            elif en is not None:
+                ep_label = f"E{en}"
+            else:
+                ep_label = None
             return {
-                "id": cw["id"],
-                "mediaType": cw["mediaType"],
-                "title": cw["title"],
-                "year": cw.get("year"),
-                "overview": cw.get("episodeTitle") or "",
-                "poster": cw.get("poster"),
-                "backdrop": cw.get("backdrop"),
-                "voteAverage": None,
-                "status": "available",
-                "jellyfinItemId": cw.get("jellyfinItemId"),
-                "inWatchlist": key in watchlist_ids,
-                "genres": [],
+                "resumePositionTicks": pos_ticks,
+                "resumeRuntimeTicks": run_ticks,
+                "resumeJellyfinItemId": ep_id,
+                "resumeEpisodeLabel": ep_label,
+                "resumeSeasonNumber": sn,
+                "resumeEpisodeNumber": en,
             }
-        return None
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------ Public API handlers
 
@@ -1085,10 +1288,12 @@ class WatchService:
                     degraded.append(HOME_RAIL_SPECS[idx]["id"])
 
         rails = [rails_by_idx[i] for i in sorted(rails_by_idx.keys())]
-        hero = self._pick_hero(recently_added, rails, continue_watching, watchlist_ids)
+        hero_items = self._pick_hero_items(recently_added, rails, continue_watching, watchlist_ids)
+        hero = hero_items[0] if hero_items else None
 
         payload = {
             "hero": hero,
+            "heroItems": hero_items,
             "continueWatching": continue_watching,
             "recentlyAdded": recently_added,
             "downloads": downloads,
@@ -2038,22 +2243,51 @@ class WatchService:
         marked_played = False
         is_complete = runtime_ticks > 0 and (pos_ticks / float(runtime_ticks)) >= 0.90
 
-        # Persist UserData directly for user `ayush` so Continue Watching always updates reliably
+        # Persist UserData directly for user `ayush` so Continue Watching & Resume timestamps
+        # always stick even if Jellyfin ignores /Sessions/Playing/* updates.
         userdata_ok = False
-        if event in ("progress", "stop"):
+        should_write_userdata = event == "stop" or (event == "progress" and is_paused)
+        if event == "progress" and not should_write_userdata:
+            now_ts = time.time()
+            with self._lock:
+                prev_ts, prev_pos = self._userdata_last_write.get(item_id, (0.0, -1))
+                if (now_ts - prev_ts) >= USERDATA_PROGRESS_THROTTLE_SEC or abs(pos_ticks - prev_pos) >= (5 * TICKS_PER_SEC):
+                    should_write_userdata = True
+
+        if should_write_userdata:
             try:
                 if is_complete:
-                    self._jf_request("POST", f"/Users/{uid}/PlayedItems/{item_id}", body=None, timeout=6)
+                    self._jf_request(
+                        "POST",
+                        f"/Users/{uid}/Items/{item_id}/UserData",
+                        body={"Played": True, "PlaybackPositionTicks": 0},
+                        timeout=6,
+                        include_client_meta=True,
+                    )
+                    try:
+                        self._jf_request(
+                            "POST",
+                            f"/Users/{uid}/PlayedItems/{item_id}",
+                            body=None,
+                            timeout=6,
+                            include_client_meta=True,
+                        )
+                    except Exception:
+                        pass
                     marked_played = True
                     userdata_ok = True
                 else:
                     self._jf_request(
                         "POST",
                         f"/Users/{uid}/Items/{item_id}/UserData",
-                        body={"PlaybackPositionTicks": pos_ticks},
+                        body={"Played": False, "PlaybackPositionTicks": pos_ticks},
                         timeout=6,
+                        include_client_meta=True,
                     )
                     userdata_ok = True
+                if userdata_ok:
+                    with self._lock:
+                        self._userdata_last_write[item_id] = (time.time(), 0 if is_complete else pos_ticks)
             except Exception:
                 pass
 
@@ -2068,6 +2302,10 @@ class WatchService:
                 except Exception:
                     pass
             self.invalidate_caches()
+        elif userdata_ok:
+            # Ensure Watch home reflects fresh resume timestamps on return
+            with self._lock:
+                self._home_cache = (0.0, None)
 
         if not session_ok and not userdata_ok and session_err is not None:
             return 502, {"error": _clip(f"Jellyfin progress report failed: {session_err}", 240)}
@@ -2076,8 +2314,9 @@ class WatchService:
             "ok": True,
             "event": event,
             "jellyfinItemId": item_id,
-            "positionTicks": pos_ticks,
+            "positionTicks": 0 if marked_played else pos_ticks,
             "markedPlayed": marked_played,
+            "userdataPersisted": userdata_ok,
         }
 
     def download_info(self, jellyfin_item_id_raw=None, tmdb_id_raw=None, media_type_raw=None, season_raw=None, episode_raw=None):

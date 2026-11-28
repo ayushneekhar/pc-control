@@ -44,6 +44,7 @@ data class AppPrefsSnapshot(
     val downloadNotificationsEnabled: Boolean = true,
     val usageAlertsNotificationsEnabled: Boolean = true,
     val lastSelectedCam: String = AppPrefs.DEFAULT_CAM,
+    val lastTvDeviceName: String? = null,
     val deviceFingerprint: String? = null,
     val pushToken: String? = null,
     val pushError: String? = null,
@@ -81,6 +82,7 @@ class AppPrefs internal constructor(
         val DOWNLOAD_NOTIFICATIONS = booleanPreferencesKey("download_notifications_enabled")
         val USAGE_ALERTS_NOTIFICATIONS = booleanPreferencesKey("usage_alerts_notifications_enabled")
         val LAST_SELECTED_CAM = stringPreferencesKey("last_selected_cam")
+        val LAST_TV_DEVICE_NAME = stringPreferencesKey("last_tv_device_name")
         val DEVICE_FINGERPRINT = stringPreferencesKey("device_fingerprint")
         val PUSH_TOKEN = stringPreferencesKey("push_token")
         val PUSH_ERROR = stringPreferencesKey("push_error")
@@ -236,6 +238,14 @@ class AppPrefs internal constructor(
         }
     }
 
+    suspend fun setLastTvDeviceName(deviceName: String?) {
+        val clean = deviceName?.trim()?.takeIf { it.isNotEmpty() }
+        _current.value = _current.value.copy(lastTvDeviceName = clean)
+        dataStore.edit { prefs ->
+            if (clean == null) prefs.remove(Keys.LAST_TV_DEVICE_NAME) else prefs[Keys.LAST_TV_DEVICE_NAME] = clean
+        }
+    }
+
     suspend fun setDeviceFingerprint(fingerprint: String?) {
         val clean = fingerprint?.trim()?.takeIf { it.isNotEmpty() }
         _current.value = _current.value.copy(deviceFingerprint = clean)
@@ -290,6 +300,7 @@ class AppPrefs internal constructor(
         downloadNotificationsEnabled = this[Keys.DOWNLOAD_NOTIFICATIONS] ?: true,
         usageAlertsNotificationsEnabled = this[Keys.USAGE_ALERTS_NOTIFICATIONS] ?: true,
         lastSelectedCam = this[Keys.LAST_SELECTED_CAM]?.takeIf { it.isNotBlank() } ?: DEFAULT_CAM,
+        lastTvDeviceName = this[Keys.LAST_TV_DEVICE_NAME]?.takeIf { it.isNotBlank() },
         deviceFingerprint = this[Keys.DEVICE_FINGERPRINT],
         pushToken = this[Keys.PUSH_TOKEN],
         pushError = this[Keys.PUSH_ERROR],

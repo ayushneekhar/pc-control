@@ -1007,6 +1007,75 @@ class WatchEndpointsTests(unittest.TestCase):
                 urllib.request.urlopen(trav_req, timeout=5)
             self.assertEqual(ctx.exception.code, 400)
 
+    def test_home_returns_deduped_hero_items_with_resume_enrichment(self):
+        code, payload = self.service.home(force_refresh=True)
+        self.assertEqual(code, 200)
+        hero_items = payload.get("heroItems")
+        self.assertIsInstance(hero_items, list)
+        self.assertGreaterEqual(len(hero_items), 2)
+        self.assertLessEqual(len(hero_items), 6)
+        self.assertEqual(payload["hero"], hero_items[0])
+        # Verify deduplication by (mediaType, id)
+        keys = [(h["mediaType"], h["id"]) for h in hero_items if h.get("id", 0) > 0]
+        self.assertEqual(len(keys), len(set(keys)))
+        # Verify resume ticks enrichment from Continue Watching on matching hero item
+        dune_hero = next((h for h in hero_items if h.get("id") == 438631), None)
+        if dune_hero is not None:
+            self.assertEqual(dune_hero.get("positionTicks"), 36_000_000_000)
+
+    def test_report_progress_hardens_userdata_and_client_auth_header(self):
+        self._install_phase2_mocks()
+        self.jf_srv.requests.clear()
+
+        # Partial progress (< 90%) must send Played=False and PlaybackPositionTicks to UserData
+        c1, r1 = self.service.report_progress({
+            "jellyfinItemId": EP1_JF_ID,
+            "mediaSourceId": EP1_JF_ID,
+            "playSessionId": "playsess-harden",
+            "positionTicks": 6_000_000_000,
+            "runtimeTicks": 30_000_000_000,
+            "event": "progress",
+            "isPaused": True,
+        })
+        self.assertEqual(c1, 200)
+        self.assertTrue(r1["userdataPersisted"])
+        self.assertFalse(r1["markedPlayed"])
+
+        # Verify UserData POST body had Played=False and exact PlaybackPositionTicks
+        ud_reqs = [
+            (hdrs, json.loads(body.decode("utf-8")) if isinstance(body, (bytes, bytearray)) else body)
+            for m, p, _q, hdrs, body in self.jf_srv.requests
+            if m == "POST" and p == f"/Users/{USER_AYUSH_ID}/Items/{EP1_JF_ID}/UserData"
+        ]
+        self.assertTrue(ud_reqs)
+        last_hdrs, last_body = ud_reqs[-1]
+        self.assertEqual(last_body.get("Played"), False)
+        self.assertEqual(last_body.get("PlaybackPositionTicks"), 6_000_000_000)
+        auth_val = last_hdrs.get("Authorization", "")
+        self.assertIn('Client="PC Control"', auth_val)
+        self.assertIn('DeviceId="pc-control-watch"', auth_val)
+
+        # >= 90% completion must send Played=True and PlaybackPositionTicks=0
+        c2, r2 = self.service.report_progress({
+            "jellyfinItemId": EP1_JF_ID,
+            "mediaSourceId": EP1_JF_ID,
+            "playSessionId": "playsess-harden",
+            "positionTicks": 28_500_000_000,
+            "runtimeTicks": 30_000_000_000,
+            "event": "stop",
+            "isPaused": False,
+        })
+        self.assertEqual(c2, 200)
+        self.assertTrue(r2["markedPlayed"])
+        self.assertEqual(r2["positionTicks"], 0)
+        ud_reqs_after = [
+            json.loads(body.decode("utf-8")) if isinstance(body, (bytes, bytearray)) else body
+            for m, p, _q, _hdrs, body in self.jf_srv.requests
+            if m == "POST" and p == f"/Users/{USER_AYUSH_ID}/Items/{EP1_JF_ID}/UserData"
+        ]
+        self.assertEqual(ud_reqs_after[-1].get("Played"), True)
+        self.assertEqual(ud_reqs_after[-1].get("PlaybackPositionTicks"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

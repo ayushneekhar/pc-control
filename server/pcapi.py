@@ -4303,6 +4303,29 @@ def _jellyfin_get_sessions(key, timeout=10):
     return data if isinstance(data, list) else []
 
 
+JELLYFIN_TV_SUBSTRINGS = (
+    "android tv", "androidtv", "fire tv", "firetv", "apple tv", "appletv",
+    "webos", "tizen", "roku", "shield", "projector", "chromecast",
+    "google tv", "googletv", "bravia", "lumio", "kodi", "xbox", "playstation",
+)
+JELLYFIN_TV_WORD_RE = re.compile(r"\btv\b", re.IGNORECASE)
+
+
+def _jellyfin_is_tv_session(session):
+    if not isinstance(session, dict):
+        return False
+    fields = " ".join(
+        str(session.get(k) or "")
+        for k in ("Client", "DeviceName", "DeviceType")
+    ).strip()
+    if not fields:
+        return False
+    low = fields.lower()
+    if any(kw in low for kw in JELLYFIN_TV_SUBSTRINGS):
+        return True
+    return bool(JELLYFIN_TV_WORD_RE.search(fields))
+
+
 def _jellyfin_pick_best_session(matches):
     if not matches:
         return None
@@ -4312,34 +4335,103 @@ def _jellyfin_pick_best_session(matches):
     return matches[0]
 
 
-def _jellyfin_find_tv_session(sessions, device_name, explicit_device=False):
+def _jellyfin_find_tv_session(sessions, device_name=None, explicit_device=False, session_id=None):
     controllable = [
         s for s in (sessions if isinstance(sessions, list) else [])
         if isinstance(s, dict) and s.get("SupportsRemoteControl") is True and s.get("Id")
     ]
-    needle = device_name.lower()
-    # 1. Exact DeviceName match (case-insensitive)
-    exact = [s for s in controllable if str(s.get("DeviceName") or "").strip().lower() == needle]
-    if exact:
-        return _jellyfin_pick_best_session(exact)
-    # 2. Substring DeviceName match (case-insensitive)
-    substr = [s for s in controllable if needle in str(s.get("DeviceName") or "").lower()]
-    if substr:
-        return _jellyfin_pick_best_session(substr)
-    # 3. Fallback to Android TV / TV client when deviceName was not explicitly overridden
+    # 1. Exact sessionId match (if provided and still online)
+    sid = str(session_id or "").strip()
+    if sid:
+        for s in controllable:
+            if str(s.get("Id") or "") == sid:
+                return s
+        # If sessionId was explicitly requested without a fallback deviceName, still allow
+        # explicit deviceName if provided; otherwise if neither matches, fall through below.
+
+    needle = str(device_name or "").strip().lower()
+    if needle:
+        # 2. Exact DeviceName match (case-insensitive)
+        exact = [s for s in controllable if str(s.get("DeviceName") or "").strip().lower() == needle]
+        if exact:
+            return _jellyfin_pick_best_session(exact)
+        # 3. Substring DeviceName match (case-insensitive)
+        substr = [s for s in controllable if needle in str(s.get("DeviceName") or "").lower()]
+        if substr:
+            return _jellyfin_pick_best_session(substr)
+
+    # 4. Dynamic multi-TV fallback when deviceName was not explicitly overridden
     if not explicit_device:
-        for kw in ("android tv", "tv"):
-            client_matches = [s for s in controllable if kw in str(s.get("Client") or "").lower()]
-            if client_matches:
-                return _jellyfin_pick_best_session(client_matches)
+        tv_matches = [s for s in controllable if _jellyfin_is_tv_session(s)]
+        if tv_matches:
+            return _jellyfin_pick_best_session(tv_matches)
     return None
 
 
-def _jellyfin_tv_offline_response(target_device):
+def _jellyfin_tv_offline_response(target_device=None, explicit_device=False):
+    if explicit_device and target_device:
+        msg = f"{target_device} isn't open in Jellyfin right now. Open Jellyfin on {target_device} and try again."
+    else:
+        msg = "No TVs are open in Jellyfin right now. Open Jellyfin on any TV and try again."
     return 409, {
         "ok": False,
         "code": "tv_offline",
-        "error": f"{target_device} isn't open in Jellyfin right now. Open Jellyfin on the projector and try again.",
+        "error": msg,
+    }
+
+
+def jellyfin_tv_devices():
+    """Return all active remote-controllable Jellyfin sessions, sorted TVs first."""
+    default_device, _ = _jellyfin_resolve_target_device(None)
+    default_low = default_device.lower()
+    try:
+        key = _jellyfin_api_key()
+        sessions = _jellyfin_get_sessions(key, timeout=10)
+    except (OSError, ValueError) as e:
+        return 502, {"ok": False, "error": clip(f"Jellyfin TV devices lookup failed: {e}", 240)}
+
+    devices = []
+    for s in sessions if isinstance(sessions, list) else []:
+        if not isinstance(s, dict):
+            continue
+        sid = str(s.get("Id") or "").strip()
+        if not sid or s.get("SupportsRemoteControl") is not True:
+            continue
+        dev_name = str(s.get("DeviceName") or s.get("Client") or "Jellyfin Device").strip()
+        client = str(s.get("Client") or "").strip() or None
+        user_name = str(s.get("UserName") or "").strip() or None
+        now_item = s.get("NowPlayingItem") if isinstance(s.get("NowPlayingItem"), dict) else None
+        is_playing = now_item is not None
+        now_title = None
+        if is_playing:
+            series_name = str(now_item.get("SeriesName") or "").strip()
+            item_name = str(now_item.get("Name") or "").strip()
+            now_title = f"{series_name} · {item_name}" if (series_name and item_name) else (series_name or item_name or None)
+        devices.append({
+            "sessionId": sid,
+            "deviceName": dev_name,
+            "client": client,
+            "userName": user_name,
+            "isTv": _jellyfin_is_tv_session(s),
+            "isPlaying": is_playing,
+            "nowPlayingTitle": clip(now_title, 120) if now_title else None,
+        })
+
+    def _sort_key(d):
+        dname = d["deviceName"].lower()
+        is_default = (dname == default_low) or (bool(default_low) and default_low in dname)
+        return (
+            0 if d["isTv"] else 1,
+            0 if d["isPlaying"] else 1,
+            0 if is_default else 1,
+            dname,
+        )
+
+    devices.sort(key=_sort_key)
+    return 200, {
+        "ok": True,
+        "devices": devices,
+        "defaultDevice": default_device,
     }
 
 
@@ -4371,8 +4463,9 @@ def _jellyfin_image_proxy_url(item_id, image_type="Primary", series_id=None):
     return f"/pc/api/jellyfin/image/{item_id}?{urllib.parse.urlencode(params)}"
 
 
-def jellyfin_tv_session(device_name=None):
+def jellyfin_tv_session(device_name=None, session_id=None):
     """Return structured playback state for the active controllable Jellyfin TV session."""
+    explicit_sid = str(session_id or "").strip() or None
     target_device, explicit_device = _jellyfin_resolve_target_device(device_name)
     try:
         key = _jellyfin_api_key()
@@ -4380,7 +4473,12 @@ def jellyfin_tv_session(device_name=None):
     except (OSError, ValueError) as e:
         return 502, {"ok": False, "error": clip(f"Jellyfin TV session lookup failed: {e}", 240)}
 
-    session = _jellyfin_find_tv_session(sessions, target_device, explicit_device=explicit_device)
+    session = _jellyfin_find_tv_session(
+        sessions,
+        target_device,
+        explicit_device=explicit_device,
+        session_id=explicit_sid,
+    )
     if not session:
         return 200, {
             "connected": False,
@@ -4568,15 +4666,14 @@ def jellyfin_tv_command(body):
             session_id = explicit_sid
         else:
             sessions = _jellyfin_get_sessions(key, timeout=10)
-            if explicit_sid:
-                session = next(
-                    (s for s in sessions if isinstance(s, dict) and str(s.get("Id") or "") == explicit_sid),
-                    None,
-                )
-            else:
-                session = _jellyfin_find_tv_session(sessions, target_device, explicit_device=explicit_device)
+            session = _jellyfin_find_tv_session(
+                sessions,
+                target_device,
+                explicit_device=explicit_device,
+                session_id=explicit_sid,
+            )
             if not session:
-                return _jellyfin_tv_offline_response(target_device)
+                return _jellyfin_tv_offline_response(target_device, explicit_device=explicit_device)
             session_id = str(session["Id"])
 
         sid_quoted = urllib.parse.quote(session_id, safe="")
@@ -4635,7 +4732,7 @@ def jellyfin_tv_command(body):
         return 200, {"ok": True, "command": general_cmd, "sessionId": session_id}
     except urllib.error.HTTPError as e:
         if e.code == 404 and explicit_sid:
-            return _jellyfin_tv_offline_response(target_device)
+            return _jellyfin_tv_offline_response(target_device, explicit_device=explicit_device)
         return 502, {"ok": False, "error": clip(f"Jellyfin TV command failed: HTTP {e.code}", 240)}
     except (OSError, ValueError) as e:
         return 502, {"ok": False, "error": clip(f"Jellyfin TV command failed: {e}", 240)}
@@ -4752,6 +4849,7 @@ def jellyfin_play_on_tv(body):
     if start_pos_ticks is not None and start_pos_ticks <= 0:
         start_pos_ticks = None
     title = str(body.get("title") or "").strip()
+    explicit_sid = str(body.get("sessionId") or "").strip() or None
     target_device, explicit_device = _jellyfin_resolve_target_device(body.get("deviceName"))
 
     try:
@@ -4764,15 +4862,21 @@ def jellyfin_play_on_tv(body):
             return 404, {"ok": False, "error": "Item not found in Jellyfin library."}
 
         sessions = _jellyfin_get_sessions(key, timeout=10)
-        session = _jellyfin_find_tv_session(sessions, target_device, explicit_device=explicit_device)
+        session = _jellyfin_find_tv_session(
+            sessions,
+            target_device,
+            explicit_device=explicit_device,
+            session_id=explicit_sid,
+        )
         if not session:
-            return _jellyfin_tv_offline_response(target_device)
+            return _jellyfin_tv_offline_response(target_device, explicit_device=explicit_device)
 
+        sid = str(session["Id"])
         action = _jellyfin_send_remote_command(
-            key, str(session["Id"]), item_id, media_type, title=title, start_position_ticks=start_pos_ticks
+            key, sid, item_id, media_type, title=title, start_position_ticks=start_pos_ticks
         )
         device_label = str(session.get("DeviceName") or session.get("Client") or target_device)
-        return 200, {"ok": True, "device": device_label, "action": action, "itemId": item_id}
+        return 200, {"ok": True, "device": device_label, "sessionId": sid, "action": action, "itemId": item_id}
     except (OSError, ValueError) as e:
         return 502, {"ok": False, "error": clip(f"Jellyfin play on TV failed: {e}", 240)}
 
@@ -5396,6 +5500,13 @@ class SeerrClient:
                     season_obj["overview"] = clip(s.get("overview"), 400)
                 seasons.append(season_obj)
             item["seasons"] = seasons
+        if item.get("status") in ("available", "partial"):
+            try:
+                resume_info = _watch_service().get_resume_state(media_type, tid)
+                if isinstance(resume_info, dict):
+                    item.update(resume_info)
+            except Exception:
+                pass
         return 200, item
 
     def person(self, person_id):
@@ -5909,8 +6020,13 @@ def route_round4_get(path, qs):
         except ValueError:
             return 400, {"error": "invalid take"}
         return SEERR.requests(take=take, status_filter=flt)
+    if path == "/api/jellyfin/tv/devices":
+        return jellyfin_tv_devices()
     if path == "/api/jellyfin/tv/session":
-        return jellyfin_tv_session(device_name=(qs.get("deviceName") or [None])[0])
+        return jellyfin_tv_session(
+            device_name=(qs.get("deviceName") or [None])[0],
+            session_id=(qs.get("sessionId") or [None])[0],
+        )
     if path == "/api/watch/home":
         refresh = (qs.get("refresh") or [""])[0] in ("1", "true", "yes")
         return _watch_service().home(force_refresh=refresh)

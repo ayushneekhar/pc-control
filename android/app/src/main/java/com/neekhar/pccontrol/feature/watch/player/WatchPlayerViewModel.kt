@@ -68,6 +68,9 @@ data class WatchPlayerUiState(
     val selectedSubtitleId: String? = null,
     val hlsAttachedSubtitleId: String? = null,
     val chapters: List<WatchChapter> = emptyList(),
+    val segments: List<WatchMediaSegment> = emptyList(),
+    val dismissedSegmentKeys: Set<String> = emptySet(),
+    val trickplay: WatchTrickplayInfo? = null,
     val nextEpisode: WatchNextEpisode? = null,
     val nextEpisodeDismissed: Boolean = false,
     val nextEpisodeCountdownSec: Int? = null,
@@ -84,6 +87,12 @@ data class WatchPlayerUiState(
     val castingToTv: Boolean = false,
     val toastMessage: String? = null,
 ) {
+    val activeSegment: WatchMediaSegment?
+        get() = WatchPlayerHelpers.activeSegment(segments, currentPositionMs)
+
+    val isInOutroSegment: Boolean
+        get() = activeSegment?.type?.equals("Outro", ignoreCase = true) == true
+
     val showNextEpisodeCard: Boolean
         get() = WatchPlayerHelpers.shouldShowNextEpisodeOverlay(
             positionMs = currentPositionMs,
@@ -91,6 +100,7 @@ data class WatchPlayerUiState(
             isEnded = isEnded,
             hasNextEpisode = nextEpisode != null,
             dismissed = nextEpisodeDismissed,
+            inOutroSegment = isInOutroSegment,
         )
 
     val selectedQualityLabel: String
@@ -192,6 +202,9 @@ class WatchPlayerViewModel(
                     error = null,
                     tailscaleRequired = false,
                     isEnded = false,
+                    segments = emptyList(),
+                    dismissedSegmentKeys = emptySet(),
+                    trickplay = null,
                     nextEpisodeDismissed = false,
                     nextEpisodeCountdownSec = null,
                     activeSheet = WatchPlayerSheet.NONE,
@@ -309,6 +322,9 @@ class WatchPlayerViewModel(
                 selectedSubtitleId = defaultSub,
                 hlsAttachedSubtitleId = null,
                 chapters = emptyList(),
+                segments = emptyList(),
+                dismissedSegmentKeys = emptySet(),
+                trickplay = null,
                 nextEpisode = null,
                 isBuffering = true,
             )
@@ -363,6 +379,12 @@ class WatchPlayerViewModel(
             subEntries.firstOrNull { it.isDefault }?.id
         }
 
+        val resolvedTrickplay = info.trickplay?.takeIf {
+            it.thumbnailCount > 0 && it.tileUrlTemplate.isNotBlank()
+        }?.let { tp ->
+            tp.copy(tileUrlTemplate = playerRepo.resolveTailscaleUrl(tp.tileUrlTemplate))
+        }
+
         val startMs = WatchPlayerHelpers.ticksToMs(info.resumePositionTicks)
         val runtimeMs = WatchPlayerHelpers.ticksToMs(info.runtimeTicks)
         pendingInitialSeekMs = startMs
@@ -395,6 +417,9 @@ class WatchPlayerViewModel(
                 selectedSubtitleId = defaultSubId,
                 hlsAttachedSubtitleId = null,
                 chapters = info.chapters,
+                segments = info.segments,
+                dismissedSegmentKeys = emptySet(),
+                trickplay = resolvedTrickplay,
                 nextEpisode = info.nextEpisode,
                 isBuffering = true,
             )
@@ -682,6 +707,13 @@ class WatchPlayerViewModel(
     fun dismissNextEpisode() {
         nextEpCountdownJob?.cancel()
         _uiState.update { it.copy(nextEpisodeDismissed = true, nextEpisodeCountdownSec = null) }
+    }
+
+    fun dismissSegment(segmentKey: String) {
+        if (segmentKey.isBlank()) return
+        _uiState.update { cur ->
+            cur.copy(dismissedSegmentKeys = cur.dismissedSegmentKeys + segmentKey)
+        }
     }
 
     fun playNextEpisodeNow() {

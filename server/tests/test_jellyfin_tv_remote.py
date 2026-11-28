@@ -25,6 +25,7 @@ class FakeJellyfinTvServer:
     def __init__(self):
         self.sessions = []
         self.images = {}  # (item_id, image_type) -> (bytes, content_type)
+        self.segments = {}  # item_id -> list of segment dicts
         self.requests = []
         self.missing_sessions = set()
         outer = self
@@ -65,6 +66,11 @@ class FakeJellyfinTvServer:
                 if parsed.path == "/Sessions":
                     return self._send_json(200, outer.sessions)
                 parts = parsed.path.strip("/").split("/")
+                if len(parts) == 2 and parts[0] == "MediaSegments":
+                    segs = outer.segments.get(parts[1])
+                    if segs is None:
+                        return self._send_json(404, {"error": "not found"})
+                    return self._send_json(200, {"Items": segs})
                 if len(parts) == 4 and parts[0] == "Items" and parts[2] == "Images":
                     item_id, img_type = parts[1], parts[3]
                     img = outer.images.get((item_id, img_type))
@@ -629,6 +635,43 @@ class JellyfinTvRemoteTests(unittest.TestCase):
         self.assertEqual(body["deviceName"], "Bedroom Fire TV")
         self.assertTrue(body["isPlaying"])
         self.assertEqual(body["nowPlaying"]["name"], "Arrival")
+
+    def test_tv_session_includes_cached_media_segments(self):
+        self.jf.segments[EPISODE_ID] = [
+            {"Type": "Intro", "StartTicks": 5_000_000_000, "EndTicks": 5_600_000_000},
+            {"Type": "Outro", "StartTicks": 30_000_000_000, "EndTicks": 31_000_000_000},
+        ]
+        self.jf.sessions = [
+            {
+                "Id": "sess-tv-segs",
+                "DeviceName": "Lumio Arc 7",
+                "Client": "Android TV",
+                "UserId": "9ea4a2cdbf034020a25e837e94e5cfd9",
+                "SupportsRemoteControl": True,
+                "PlayState": {"IsPaused": False, "CanSeek": True, "PositionTicks": 5_200_000_000},
+                "NowPlayingItem": {
+                    "Id": EPISODE_ID,
+                    "Name": "Failure's Contagious",
+                    "Type": "Episode",
+                    "SeriesName": "Slow Horses",
+                    "RunTimeTicks": 32_000_000_000,
+                },
+            }
+        ]
+
+        code, body = pcapi.jellyfin_tv_session()
+        self.assertEqual(code, 200)
+        self.assertEqual(body["segments"], [
+            {"type": "Intro", "startTicks": 5_000_000_000, "endTicks": 5_600_000_000},
+            {"type": "Outro", "startTicks": 30_000_000_000, "endTicks": 31_000_000_000},
+        ])
+
+        # Second poll must hit the in-memory segments cache and NOT call /MediaSegments again
+        code2, body2 = pcapi.jellyfin_tv_session()
+        self.assertEqual(code2, 200)
+        self.assertEqual(len(body2["segments"]), 2)
+        seg_reqs = [r for r in self.jf.requests if r["path"] == f"/MediaSegments/{EPISODE_ID}"]
+        self.assertEqual(len(seg_reqs), 1)
 
 
 if __name__ == "__main__":

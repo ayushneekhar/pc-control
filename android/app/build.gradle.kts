@@ -60,8 +60,8 @@ android {
         applicationId = "com.neekhar.pccontrol"
         minSdk = 30
         targetSdk = 35
-        versionCode = (findProperty("pcc.versionCode") as? String)?.toIntOrNull() ?: 36
-        versionName = (findProperty("pcc.versionName") as? String)?.takeIf { it.isNotBlank() } ?: "2.3.5"
+        versionCode = (findProperty("pcc.versionCode") as? String)?.toIntOrNull() ?: 37
+        versionName = (findProperty("pcc.versionName") as? String)?.takeIf { it.isNotBlank() } ?: "2.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

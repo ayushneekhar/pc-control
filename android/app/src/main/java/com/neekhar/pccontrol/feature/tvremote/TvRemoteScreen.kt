@@ -1,5 +1,10 @@
 package com.neekhar.pccontrol.feature.tvremote
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,6 +33,7 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeDown
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Audiotrack
+import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.Forward30
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.Pause
@@ -89,6 +95,8 @@ import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcIconButton
 import com.neekhar.pccontrol.core.ui.PcScaffold
 import com.neekhar.pccontrol.core.ui.PcTone
+import com.neekhar.pccontrol.feature.watch.player.WatchMediaSegment
+import com.neekhar.pccontrol.feature.watch.player.WatchPlayerHelpers
 import kotlin.math.roundToLong
 
 private enum class ActiveTrackPicker {
@@ -445,6 +453,54 @@ fun TvRemoteScreen(
                                         .clickable(onClick = viewModel::toggleTimeDisplayMode)
                                         .padding(horizontal = 4.dp, vertical = 2.dp),
                                 )
+                            }
+                        }
+
+                        // 2b. Skip Intro / Skip Recap / Skip Credits pill when TV is inside a segment
+                        val activeSeg = state.activeSegment
+                        var lastActiveSeg by remember(nowPlaying.itemId) { mutableStateOf<WatchMediaSegment?>(null) }
+                        if (activeSeg != null) {
+                            lastActiveSeg = activeSeg
+                        }
+                        AnimatedVisibility(
+                            visible = activeSeg != null,
+                            enter = fadeIn() + expandVertically(),
+                            exit = fadeOut() + shrinkVertically(),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            val seg = activeSeg ?: lastActiveSeg
+                            if (seg != null) {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(999.dp))
+                                            .background(colors.surface)
+                                            .border(1.dp, colors.accent, RoundedCornerShape(999.dp))
+                                            .clickable(role = Role.Button) {
+                                                viewModel.seekToPositionMs(seg.endMs)
+                                            }
+                                            .padding(horizontal = 20.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.FastForward,
+                                            contentDescription = null,
+                                            tint = colors.accent,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        Text(
+                                            text = WatchPlayerHelpers.segmentButtonLabel(seg.type),
+                                            color = colors.text,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                        )
+                                    }
+                                }
                             }
                         }
 

@@ -79,6 +79,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -87,7 +88,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.SingletonImageLoader
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.PcDimens
@@ -281,6 +284,7 @@ fun SeerrScreen(
                                 resolveImageUrl = tvRemoteViewModel::resolveImageUrl,
                                 onTogglePlayPause = tvRemoteViewModel::togglePlayPause,
                                 onOpenRemote = onOpenTvRemote,
+                                onSkipSegment = { seg -> tvRemoteViewModel.seekToPositionMs(seg.endMs) },
                             )
                         }
                     }
@@ -1089,6 +1093,7 @@ private fun WatchHeroCarousel(
     if (items.isEmpty()) return
 
     val colors = LocalPcColors.current
+    val context = LocalContext.current
     var currentIndex by rememberSaveable { mutableIntStateOf(0) }
     LaunchedEffect(items.size) {
         if (currentIndex !in items.indices) {
@@ -1097,6 +1102,20 @@ private fun WatchHeroCarousel(
     }
     val safeIndex = currentIndex.coerceIn(0, items.lastIndex)
     val currentItem = items[safeIndex]
+
+    // Preload the next slide's backdrop into Coil so the crossfade dissolve has zero pop-in
+    LaunchedEffect(items, safeIndex) {
+        if (items.size <= 1) return@LaunchedEffect
+        val nextItem = items[(safeIndex + 1) % items.size]
+        val nextArtUrl = resolveImageUrl(nextItem.backdrop ?: nextItem.poster)
+        if (!nextArtUrl.isNullOrBlank()) {
+            SingletonImageLoader.get(context).enqueue(
+                ImageRequest.Builder(context)
+                    .data(nextArtUrl)
+                    .build(),
+            )
+        }
+    }
 
     var isUserInteracting by remember { mutableStateOf(false) }
     val progress = remember { Animatable(0f) }

@@ -4500,6 +4500,7 @@ def jellyfin_tv_session(device_name=None, session_id=None):
             "nowPlaying": None,
             "audioTracks": [],
             "subtitleTracks": [],
+            "segments": [],
             "supportedCommands": [],
         }
 
@@ -4520,8 +4521,15 @@ def jellyfin_tv_session(device_name=None, session_id=None):
     now_playing = None
     audio_tracks = []
     subtitle_tracks = []
+    segments = []
     if is_playing:
         item_id = str(now_item.get("Id") or "").strip()
+        if item_id and JELLYFIN_ITEM_ID_RE.match(item_id):
+            try:
+                sess_uid = str(session.get("UserId") or "").strip() or None
+                segments = _watch_service().get_media_segments(item_id, uid=sess_uid, use_cache=True)
+            except Exception:
+                segments = []
         item_type = str(now_item.get("Type") or "").strip()
         series_id_raw = str(now_item.get("SeriesId") or "").strip()
         series_id = series_id_raw if JELLYFIN_ITEM_ID_RE.match(series_id_raw) else None
@@ -4606,6 +4614,7 @@ def jellyfin_tv_session(device_name=None, session_id=None):
         "nowPlaying": now_playing,
         "audioTracks": audio_tracks,
         "subtitleTracks": subtitle_tracks,
+        "segments": segments,
         "supportedCommands": supported,
     }
 
@@ -4738,13 +4747,16 @@ def jellyfin_tv_command(body):
         return 502, {"ok": False, "error": clip(f"Jellyfin TV command failed: {e}", 240)}
 
 
-def jellyfin_proxy_image(item_id, image_type_name="Primary", series_id=None, max_width=None, quality=None):
+def jellyfin_proxy_image(item_id, image_type_name="Primary", series_id=None, max_width=None, quality=None, include_etag=False):
     """Fetch a Jellyfin item image (Primary/Backdrop/Thumb/Logo) server-side without exposing API credentials."""
+    def _ret(code, payload, ctype, etag=None):
+        return (code, payload, ctype, etag) if include_etag else (code, payload, ctype)
+
     if not isinstance(item_id, str) or not JELLYFIN_ITEM_ID_RE.match(item_id):
-        return 400, {"error": "invalid Jellyfin item id"}, None
+        return _ret(400, {"error": "invalid Jellyfin item id"}, None)
     img_type = JELLYFIN_IMAGE_TYPES.get(str(image_type_name or "Primary").strip().lower())
     if not img_type:
-        return 400, {"error": "unsupported image type"}, None
+        return _ret(400, {"error": "unsupported image type"}, None)
 
     mw = _jellyfin_safe_int(max_width)
     mw = max(64, min(1920, mw)) if mw is not None else 600
@@ -4760,7 +4772,7 @@ def jellyfin_proxy_image(item_id, image_type_name="Primary", series_id=None, max
     try:
         key = _jellyfin_api_key()
     except (OSError, ValueError) as e:
-        return 502, {"error": clip(f"Jellyfin key error: {e}", 240)}, None
+        return _ret(502, {"error": clip(f"Jellyfin key error: {e}", 240)}, None)
 
     qs = urllib.parse.urlencode({"maxWidth": str(mw), "quality": str(qual)})
     headers = {"Authorization": f'MediaBrowser Token="{key}"'}
@@ -4774,16 +4786,17 @@ def jellyfin_proxy_image(item_id, image_type_name="Primary", series_id=None, max
                 data = r.read(8 * 1024 * 1024)
                 raw_ct = (r.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
                 ctype = raw_ct if raw_ct.startswith("image/") else (image_type(data) or "image/jpeg")
-                return 200, data, ctype
+                etag = (r.headers.get("ETag") or "").strip() or None
+                return _ret(200, data, ctype, etag)
         except urllib.error.HTTPError as e:
             if e.code == 404 and idx + 1 < len(candidates):
                 continue
             if e.code == 404:
-                return 404, {"error": "image not found"}, None
-            return 502, {"error": clip(f"Jellyfin image fetch failed: HTTP {e.code}", 240)}, None
+                return _ret(404, {"error": "image not found"}, None)
+            return _ret(502, {"error": clip(f"Jellyfin image fetch failed: HTTP {e.code}", 240)}, None)
         except (OSError, ValueError) as e:
-            return 502, {"error": clip(f"Jellyfin image fetch failed: {e}", 240)}, None
-    return 404, {"error": "image not found"}, None
+            return _ret(502, {"error": clip(f"Jellyfin image fetch failed: {e}", 240)}, None)
+    return _ret(404, {"error": "image not found"}, None)
 
 
 def _jellyfin_send_remote_command(key, session_id, item_id, media_type, title="", start_position_ticks=None):
@@ -6123,6 +6136,8 @@ def _is_watch_tailscale_only_path(path):
         or path.startswith("/pc/api/watch/download/")
         or path == "/pc/api/watch/subtitles"
         or path.startswith("/pc/api/watch/subtitles/")
+        or path == "/pc/api/watch/trickplay"
+        or path.startswith("/pc/api/watch/trickplay/")
     )
 
 
@@ -6340,12 +6355,15 @@ class H(BaseHTTPRequestHandler):
                     self.wfile.write(cleaned)
                 return
 
-            ct = content_type_override or (resp_headers.get("Content-Type") if resp_headers else None) or "application/octet-stream"
+            ct = (
+                content_type_override if (content_type_override and status in (200, 206)) else None
+            ) or (resp_headers.get("Content-Type") if resp_headers else None) or "application/octet-stream"
             clen = resp_headers.get("Content-Length") if resp_headers else None
             crange = resp_headers.get("Content-Range") if resp_headers else None
             aranges = resp_headers.get("Accept-Ranges") if resp_headers else None
             etag = resp_headers.get("ETag") if resp_headers else None
             lastmod = resp_headers.get("Last-Modified") if resp_headers else None
+            eff_cc = cache_control if status in (200, 206) else "no-store"
 
             self.send_response(status)
             self.send_header("Content-Type", ct)
@@ -6365,7 +6383,7 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("ETag", etag)
             if lastmod:
                 self.send_header("Last-Modified", lastmod)
-            self.send_header("Cache-Control", cache_control)
+            self.send_header("Cache-Control", eff_cc)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
 
@@ -6492,6 +6510,23 @@ class H(BaseHTTPRequestHandler):
                     content_type_override=ctype,
                     cache_control="private, max-age=3600",
                     timeout=30,
+                )
+            m = re.fullmatch(r"/api/watch/trickplay/([^/]+)/(\d+)/(\d+)\.jpg", path, re.IGNORECASE)
+            if m:
+                if has_traversal:
+                    return self.send_json(400, {"error": "invalid trickplay path"})
+                ms_id = (qs.get("mediaSourceId") or [None])[0]
+                upstream = _watch_service().build_trickplay_upstream_url(
+                    m.group(1), m.group(2), m.group(3), media_source_id=ms_id
+                )
+                if not upstream:
+                    return self.send_json(400, {"error": "invalid trickplay target"})
+                return self._proxy_jellyfin_media(
+                    upstream,
+                    head_only=head_only,
+                    content_type_override="image/jpeg",
+                    cache_control="public, max-age=86400",
+                    timeout=20,
                 )
 
         # Proxied local auxiliary services under /pc/api/* (handled before JSON body parsing).
@@ -6620,20 +6655,24 @@ class H(BaseHTTPRequestHandler):
                 )
             m = re.fullmatch(r"/api/jellyfin/image/([^/]+)", path)
             if m:
-                code, data_or_err, ctype = jellyfin_proxy_image(
+                code, data_or_err, ctype, etag = jellyfin_proxy_image(
                     m.group(1),
                     image_type_name=(qs.get("type") or ["Primary"])[0],
                     series_id=(qs.get("seriesId") or [None])[0],
                     max_width=(qs.get("maxWidth") or [None])[0],
                     quality=(qs.get("quality") or [None])[0],
+                    include_etag=True,
                 )
                 if code != 200:
                     return self.send_json(code, data_or_err)
+                extra_hdrs = [("X-Content-Type-Options", "nosniff")]
+                if etag:
+                    extra_hdrs.append(("ETag", etag))
                 return self.send_bytes(
                     data_or_err,
                     ctype,
-                    extra=[("X-Content-Type-Options", "nosniff")],
-                    cache_control="private, max-age=3600",
+                    extra=extra_hdrs,
+                    cache_control="public, max-age=86400",
                 )
             r4 = route_round4_get(path, qs)
             if r4 is not None:

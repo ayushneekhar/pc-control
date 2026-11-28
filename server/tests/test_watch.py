@@ -1138,6 +1138,143 @@ class WatchEndpointsTests(unittest.TestCase):
             MOVIE2_JF_ID,
         )
 
+    def test_playback_info_returns_segments_and_trickplay_with_filtering_and_width_selection(self):
+        self._install_phase2_mocks()
+        # Add Trickplay with multiple resolutions (should prefer 320) to EP1
+        ep_item = dict(self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items/{EP1_JF_ID}")][1])
+        ep_item["Trickplay"] = {
+            EP1_JF_ID: {
+                "160": {"Width": 160, "Height": 80, "TileWidth": 10, "TileHeight": 10, "ThumbnailCount": 323, "Interval": 10000},
+                "320": {"Width": 320, "Height": 160, "TileWidth": 10, "TileHeight": 10, "ThumbnailCount": 323, "Interval": 10000},
+                "640": {"Width": 640, "Height": 320, "TileWidth": 5, "TileHeight": 5, "ThumbnailCount": 323, "Interval": 10000},
+            }
+        }
+        self.jf_srv.routes[("GET", f"/Users/{USER_AYUSH_ID}/Items/{EP1_JF_ID}")] = (200, ep_item)
+        self.jf_srv.routes[("GET", f"/MediaSegments/{EP1_JF_ID}")] = (200, {
+            "Items": [
+                {"Type": "Outro", "StartTicks": 31_700_000_000, "EndTicks": 32_300_000_000},
+                {"Type": "Intro", "StartTicks": 5_160_000_000, "EndTicks": 5_610_000_000},
+                {"Type": "Recap", "StartTicks": 100_000_000, "EndTicks": 100_000_000},  # invalid: end == start
+                {"Type": "Preview", "StartTicks": 500_000_000, "EndTicks": 200_000_000},  # invalid: end < start
+                {"Type": "UnknownKind", "StartTicks": 1_000_000, "EndTicks": 2_000_000},  # unsupported type
+            ]
+        })
+
+        code, data = self.service.playback_info({"jellyfinItemId": EP1_JF_ID, "maxBitrate": 8_000_000})
+        self.assertEqual(code, 200)
+
+        # Segments sorted, invalid filtered out
+        self.assertEqual(data["segments"], [
+            {"type": "Intro", "startTicks": 5_160_000_000, "endTicks": 5_610_000_000},
+            {"type": "Outro", "startTicks": 31_700_000_000, "endTicks": 32_300_000_000},
+        ])
+
+        # Trickplay picked 320 width
+        tp = data["trickplay"]
+        self.assertIsNotNone(tp)
+        self.assertEqual(tp["width"], 320)
+        self.assertEqual(tp["height"], 160)
+        self.assertEqual(tp["tileWidth"], 10)
+        self.assertEqual(tp["tileHeight"], 10)
+        self.assertEqual(tp["thumbnailCount"], 323)
+        self.assertEqual(tp["intervalMs"], 10000)
+        self.assertEqual(
+            tp["tileUrlTemplate"],
+            f"/pc/api/watch/trickplay/{EP1_JF_ID}/320/{{tileIndex}}.jpg?mediaSourceId={EP1_JF_ID}",
+        )
+
+        # Movie with no trickplay and 404 MediaSegments degrades gracefully
+        code2, mv = self.service.playback_info({"jellyfinItemId": MOVIE_JF_ID})
+        self.assertEqual(code2, 200)
+        self.assertEqual(mv["segments"], [])
+        self.assertIsNone(mv["trickplay"])
+
+        # Closest width fallback when 320 is unavailable
+        closest = watch_mod.parse_trickplay_info(
+            {
+                "Trickplay": {
+                    MOVIE_JF_ID: {
+                        "240": {"Width": 240, "Height": 135, "TileWidth": 8, "TileHeight": 8, "ThumbnailCount": 50, "Interval": 5000},
+                        "480": {"Width": 480, "Height": 270, "TileWidth": 5, "TileHeight": 5, "ThumbnailCount": 50, "Interval": 5000},
+                    }
+                }
+            },
+            MOVIE_JF_ID,
+        )
+        self.assertEqual(closest["width"], 240)
+
+    def test_trickplay_tailscale_only_proxy_and_jellyfin_image_cache_control_etag(self):
+        self._install_phase2_mocks()
+        fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+        self.jf_srv.routes[("GET", f"/Videos/{EP1_JF_ID}/Trickplay/320/0.jpg")] = (
+            "raw", 200, fake_jpeg, "image/jpeg", {}
+        )
+        self.jf_srv.routes[("GET", f"/Items/{EP1_JF_ID}/Images/Primary")] = (
+            "raw", 200, fake_jpeg, "image/jpeg", {"ETag": '"etag-poster-123"'}
+        )
+
+        srv = pcapi.Server(("127.0.0.1", 0), pcapi.H)
+        port = srv.server_port
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        with mock.patch.object(pcapi, "_watch_service", return_value=self.service), \
+             mock.patch.object(pcapi, "JELLYFIN_URL", self.jf_srv.base_url), \
+             mock.patch.object(pcapi, "JELLYFIN_KEY_FILE", self.jf_key_file), \
+             mock.patch.object(pcapi, "ALLOWED_LOGINS", {"ayush@example.com"}), \
+             mock.patch.object(pcapi, "ALLOW_UNAUTH_LOCAL", False), \
+             mock.patch.object(pcapi, "api_token_authorized", side_effect=lambda h: h.get("Authorization") == "Bearer test-api-tok"):
+
+            # 1. Public API Bearer token MUST get 403 tailscaleRequired on trickplay tiles
+            pub_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/pc/api/watch/trickplay/{EP1_JF_ID}/320/0.jpg?mediaSourceId={EP1_JF_ID}",
+                headers={
+                    "Authorization": "Bearer test-api-tok",
+                    "CF-Access-Client-Id": "cf-id-123",
+                    "Host": "api.neekhar.dev",
+                },
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(pub_req, timeout=5)
+            self.assertEqual(ctx.exception.code, 403)
+            self.assertTrue(json.loads(ctx.exception.read()).get("tailscaleRequired"))
+
+            # 2. Tailscale request to trickplay tile returns 200 image/jpeg + Cache-Control: public, max-age=86400
+            ts_hdr = {"Tailscale-User-Login": "ayush@example.com"}
+            tp_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/pc/api/watch/trickplay/{EP1_JF_ID}/320/0.jpg?mediaSourceId={EP1_JF_ID}",
+                headers=ts_hdr,
+            )
+            with urllib.request.urlopen(tp_req, timeout=5) as r:
+                self.assertEqual(r.status, 200)
+                self.assertEqual(r.headers.get("Content-Type"), "image/jpeg")
+                self.assertEqual(r.headers.get("Cache-Control"), "public, max-age=86400")
+                self.assertEqual(r.read(), fake_jpeg)
+
+            # 3. Invalid item id or width rejected with 400
+            for bad_path in (
+                "/pc/api/watch/trickplay/not-hex-id/320/0.jpg",
+                f"/pc/api/watch/trickplay/{EP1_JF_ID}/0/0.jpg",
+            ):
+                bad_req = urllib.request.Request(f"http://127.0.0.1:{port}{bad_path}", headers=ts_hdr)
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(bad_req, timeout=5)
+                self.assertEqual(ctx.exception.code, 400)
+
+            # 4. /pc/api/jellyfin/image/{itemId} returns Cache-Control: public, max-age=86400 and forwards ETag
+            img_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/pc/api/jellyfin/image/{EP1_JF_ID}?type=Primary&maxWidth=600",
+                headers=ts_hdr,
+            )
+            with urllib.request.urlopen(img_req, timeout=5) as r:
+                self.assertEqual(r.status, 200)
+                self.assertEqual(r.headers.get("Content-Type"), "image/jpeg")
+                self.assertEqual(r.headers.get("Cache-Control"), "public, max-age=86400")
+                self.assertEqual(r.headers.get("ETag"), '"etag-poster-123"')
+                self.assertEqual(r.read(), fake_jpeg)
+
 
 if __name__ == "__main__":
     unittest.main()

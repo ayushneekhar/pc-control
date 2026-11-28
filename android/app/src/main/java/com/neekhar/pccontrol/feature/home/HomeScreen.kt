@@ -113,6 +113,7 @@ import com.neekhar.pccontrol.feature.tvremote.TvNowPlayingBar
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteFormatters
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteUiState
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
+import com.neekhar.pccontrol.feature.watch.player.WatchMediaSegment
 import kotlinx.coroutines.flow.MutableStateFlow
 import okhttp3.OkHttpClient
 import org.webrtc.VideoTrack
@@ -167,6 +168,7 @@ fun HomeScreen(
         tvState = tvState,
         resolveTvImageUrl = { path -> tvRemoteViewModel?.resolveImageUrl(path) },
         onToggleTvPlayPause = { tvRemoteViewModel?.togglePlayPause() },
+        onSkipTvSegment = { seg -> tvRemoteViewModel?.seekToPositionMs(seg.endMs) },
         onOpenTvRemote = onOpenTvRemote,
         onRefresh = {
             viewModel.refresh(isPullToRefresh = true)
@@ -207,6 +209,7 @@ fun HomeScreenContent(
     tvState: TvRemoteUiState? = null,
     resolveTvImageUrl: (String?) -> String? = { null },
     onToggleTvPlayPause: () -> Unit = {},
+    onSkipTvSegment: ((WatchMediaSegment) -> Unit)? = null,
     onOpenTvRemote: () -> Unit = {},
 ) {
     val colors = LocalPcColors.current
@@ -372,6 +375,7 @@ fun HomeScreenContent(
                             resolveImageUrl = resolveTvImageUrl,
                             onTogglePlayPause = onToggleTvPlayPause,
                             onOpenRemote = onOpenTvRemote,
+                            onSkipSegment = onSkipTvSegment,
                             modifier = Modifier.padding(
                                 start = PcDimens.ScreenPad,
                                 end = PcDimens.ScreenPad,

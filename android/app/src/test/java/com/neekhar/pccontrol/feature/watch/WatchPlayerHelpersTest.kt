@@ -1,10 +1,15 @@
 package com.neekhar.pccontrol.feature.watch
 
 import com.neekhar.pccontrol.feature.watch.player.PlayerSubtitleEntry
+import com.neekhar.pccontrol.feature.watch.player.WatchChapter
+import com.neekhar.pccontrol.feature.watch.player.WatchMediaSegment
 import com.neekhar.pccontrol.feature.watch.player.WatchPlayerHelpers
 import com.neekhar.pccontrol.feature.watch.player.WatchQualityOption
+import com.neekhar.pccontrol.feature.watch.player.WatchTrickplayInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -198,5 +203,148 @@ class WatchPlayerHelpersTest {
         assertFalse(WatchPlayerHelpers.languagesMatch("en", "es"))
         assertFalse(WatchPlayerHelpers.languagesMatch("", "eng"))
         assertFalse(WatchPlayerHelpers.languagesMatch(null, "eng"))
+    }
+
+    @Test
+    fun `activeSegment matches half-open interval and ignores invalid or unknown segments`() {
+        val intro = WatchMediaSegment(
+            type = "Intro",
+            startTicks = 5_000_000_000L, // 500_000 ms
+            endTicks = 5_600_000_000L,   // 560_000 ms
+        )
+        val outro = WatchMediaSegment(
+            type = "Outro",
+            startTicks = 31_700_000_000L, // 3_170_000 ms
+            endTicks = 32_300_000_000L,   // 3_230_000 ms
+        )
+        val invalidZeroLen = WatchMediaSegment(type = "Recap", startTicks = 100_000L, endTicks = 100_000L)
+        val unknownType = WatchMediaSegment(type = "Chapter", startTicks = 0L, endTicks = 1_000_000_000L)
+        val segments = listOf(invalidZeroLen, unknownType, intro, outro)
+
+        assertNull(WatchPlayerHelpers.activeSegment(segments, -1L))
+        assertNull(WatchPlayerHelpers.activeSegment(segments, 499_999L))
+        assertEquals(intro, WatchPlayerHelpers.activeSegment(segments, 500_000L))
+        assertEquals(intro, WatchPlayerHelpers.activeSegment(segments, 530_000L))
+        // Exactly at endMs must NOT match so skipping to endMs dismisses the button immediately
+        assertNull(WatchPlayerHelpers.activeSegment(segments, 560_000L))
+        assertEquals(outro, WatchPlayerHelpers.activeSegment(segments, 3_170_000L))
+        assertNull(WatchPlayerHelpers.activeSegment(segments, 3_230_000L))
+    }
+
+    @Test
+    fun `segmentButtonLabel maps every Jellyfin segment type cleanly`() {
+        assertEquals("Skip Intro", WatchPlayerHelpers.segmentButtonLabel("Intro"))
+        assertEquals("Skip Intro", WatchPlayerHelpers.segmentButtonLabel("intro"))
+        assertEquals("Skip Recap", WatchPlayerHelpers.segmentButtonLabel("Recap"))
+        assertEquals("Skip Credits", WatchPlayerHelpers.segmentButtonLabel("Outro"))
+        assertEquals("Next Episode", WatchPlayerHelpers.segmentButtonLabel("Outro", hasNextEpisode = true))
+        assertEquals("Skip Preview", WatchPlayerHelpers.segmentButtonLabel("Preview"))
+        assertEquals("Skip Ad", WatchPlayerHelpers.segmentButtonLabel("Commercial"))
+        assertEquals("Skip", WatchPlayerHelpers.segmentButtonLabel("Other"))
+    }
+
+    @Test
+    fun `shouldShowNextEpisodeOverlay triggers during Outro segment unless dismissed`() {
+        assertTrue(
+            WatchPlayerHelpers.shouldShowNextEpisodeOverlay(
+                positionMs = 1_000_000L,
+                durationMs = 3_000_000L,
+                isEnded = false,
+                hasNextEpisode = true,
+                dismissed = false,
+                inOutroSegment = true,
+            ),
+        )
+        assertFalse(
+            WatchPlayerHelpers.shouldShowNextEpisodeOverlay(
+                positionMs = 1_000_000L,
+                durationMs = 3_000_000L,
+                isEnded = false,
+                hasNextEpisode = true,
+                dismissed = true,
+                inOutroSegment = true,
+            ),
+        )
+        assertFalse(
+            WatchPlayerHelpers.shouldShowNextEpisodeOverlay(
+                positionMs = 1_000_000L,
+                durationMs = 3_000_000L,
+                isEnded = false,
+                hasNextEpisode = false,
+                dismissed = false,
+                inOutroSegment = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `trickplayFrameForPosition computes tile index row col and edge cases accurately`() {
+        val tp = WatchTrickplayInfo(
+            width = 320,
+            height = 160,
+            tileWidth = 10,
+            tileHeight = 10,
+            thumbnailCount = 323,
+            intervalMs = 10_000L,
+            tileUrlTemplate = "https://host.ts.net/pc/api/watch/trickplay/abc/320/{tileIndex}.jpg?mediaSourceId=abc",
+        )
+
+        // 0ms -> frame 0, tile 0, row 0, col 0
+        val f0 = WatchPlayerHelpers.trickplayFrameForPosition(tp, 0L)
+        assertNotNull(f0)
+        assertEquals(0, f0!!.frameIndex)
+        assertEquals(0, f0.tileIndex)
+        assertEquals(0, f0.row)
+        assertEquals(0, f0.col)
+        assertEquals("https://host.ts.net/pc/api/watch/trickplay/abc/320/0.jpg?mediaSourceId=abc", f0.tileUrl)
+
+        // Multi-tile boundary: frame 99 (990_000 ms) -> tile 0, row 9, col 9
+        val f99 = WatchPlayerHelpers.trickplayFrameForPosition(tp, 990_000L)
+        assertNotNull(f99)
+        assertEquals(99, f99!!.frameIndex)
+        assertEquals(0, f99.tileIndex)
+        assertEquals(9, f99.row)
+        assertEquals(9, f99.col)
+        assertEquals("https://host.ts.net/pc/api/watch/trickplay/abc/320/0.jpg?mediaSourceId=abc", f99.tileUrl)
+
+        // Multi-tile boundary: frame 100 (1_000_000 ms) -> tile 1, row 0, col 0
+        val f100 = WatchPlayerHelpers.trickplayFrameForPosition(tp, 1_000_000L)
+        assertNotNull(f100)
+        assertEquals(100, f100!!.frameIndex)
+        assertEquals(1, f100.tileIndex)
+        assertEquals(0, f100.row)
+        assertEquals(0, f100.col)
+        assertEquals("https://host.ts.net/pc/api/watch/trickplay/abc/320/1.jpg?mediaSourceId=abc", f100.tileUrl)
+
+        // Beyond duration clamps cleanly to last frame (322 -> tile 3, row 2, col 2)
+        val fLast = WatchPlayerHelpers.trickplayFrameForPosition(tp, 99_999_000L)
+        assertNotNull(fLast)
+        assertEquals(322, fLast!!.frameIndex)
+        assertEquals(3, fLast.tileIndex)
+        assertEquals(2, fLast.row)
+        assertEquals(2, fLast.col)
+        assertEquals("https://host.ts.net/pc/api/watch/trickplay/abc/320/3.jpg?mediaSourceId=abc", fLast.tileUrl)
+
+        // Negative position clamps to frame 0
+        val fNeg = WatchPlayerHelpers.trickplayFrameForPosition(tp, -5_000L)
+        assertEquals(0, fNeg!!.frameIndex)
+
+        // Invalid trickplay metadata returns null
+        assertNull(WatchPlayerHelpers.trickplayFrameForPosition(tp.copy(thumbnailCount = 0), 10_000L))
+        assertNull(WatchPlayerHelpers.trickplayFrameForPosition(tp.copy(intervalMs = 0L), 10_000L))
+        assertNull(WatchPlayerHelpers.trickplayFrameForPosition(tp.copy(tileUrlTemplate = ""), 10_000L))
+    }
+
+    @Test
+    fun `activeChapterTitle selects latest chapter at or before position`() {
+        val chapters = listOf(
+            WatchChapter(name = "Cold Open", startPositionTicks = 0L),
+            WatchChapter(name = "Title Sequence", startPositionTicks = 3_000_000_000L), // 300s
+            WatchChapter(name = "Act I", startPositionTicks = 4_000_000_000L),          // 400s
+        )
+        assertEquals("Cold Open", WatchPlayerHelpers.activeChapterTitle(chapters, 120_000L))
+        assertEquals("Title Sequence", WatchPlayerHelpers.activeChapterTitle(chapters, 300_000L))
+        assertEquals("Act I", WatchPlayerHelpers.activeChapterTitle(chapters, 550_000L))
+        assertNull(WatchPlayerHelpers.activeChapterTitle(emptyList(), 100_000L))
     }
 }

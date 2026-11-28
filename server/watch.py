@@ -27,6 +27,16 @@ HOME_CACHE_TTL_SEC = 45.0
 LIBRARY_INDEX_TTL_SEC = 45.0
 GENRES_CACHE_TTL_SEC = 3600.0
 USER_ID_CACHE_TTL_SEC = 300.0
+SEGMENTS_CACHE_TTL_SEC = 300.0
+SEGMENTS_CACHE_MAX_ITEMS = 256
+
+MEDIA_SEGMENT_TYPES_BY_LOWER = {
+    "intro": "Intro",
+    "outro": "Outro",
+    "recap": "Recap",
+    "preview": "Preview",
+    "commercial": "Commercial",
+}
 
 JELLYFIN_ITEM_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 JELLYFIN_MEDIA_SOURCE_ID_RE = re.compile(r"^[0-9a-zA-Z_-]{1,128}$")
@@ -36,7 +46,7 @@ TMDB_ORIG_RE = re.compile(r"^https?://image\.tmdb\.org/t/p/original(/.*)$")
 
 PLAYER_DEVICE_ID = "pc-control-watch"
 PLAYER_CLIENT_NAME = "PC Control"
-PLAYER_CLIENT_VERSION = "2.3.2"
+PLAYER_CLIENT_VERSION = "2.4.0"
 MAX_HERO_ITEMS = 6
 USERDATA_PROGRESS_THROTTLE_SEC = 2.0
 
@@ -456,12 +466,61 @@ class WatchService:
         self._home_cache = (0.0, None)
         self._library_index_cache = (0.0, None)
         self._genres_cache = {}  # "movie"|"tv" -> (ts, list)
+        self._segments_cache = {}  # (jf_base_url, item_id) -> (ts, list)
         self._userdata_last_write = {}  # item_id -> (ts, pos_ticks)
 
     def invalidate_caches(self):
         with self._lock:
             self._home_cache = (0.0, None)
             self._library_index_cache = (0.0, None)
+
+    def get_media_segments(self, item_id, uid=None, use_cache=True):
+        """Fetch Jellyfin /MediaSegments/{itemId} with 5-minute in-memory TTL caching and graceful fallback."""
+        norm_id = normalize_jf_id(item_id)
+        if not norm_id:
+            return []
+        base_key = self._jellyfin_url_fn().rstrip("/")
+        cache_key = (base_key, norm_id)
+        now = time.time()
+        if use_cache:
+            with self._lock:
+                cached = self._segments_cache.get(cache_key)
+                if cached is not None and (now - cached[0]) < SEGMENTS_CACHE_TTL_SEC:
+                    return list(cached[1])
+
+        eff_uid = str(uid or "").strip() or None
+        if not eff_uid:
+            try:
+                eff_uid = self._jf_user_id(timeout=4)
+            except Exception:
+                eff_uid = None
+
+        path = f"/MediaSegments/{norm_id}"
+        if eff_uid:
+            path = f"{path}?{urllib.parse.urlencode({'userId': eff_uid})}"
+
+        try:
+            raw = self._jf_get(path, timeout=5)
+            segments = parse_media_segments(raw)
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 404):
+                segments = []
+            else:
+                return []
+        except Exception:
+            return []
+
+        with self._lock:
+            if len(self._segments_cache) >= SEGMENTS_CACHE_MAX_ITEMS:
+                cutoff = time.time() - SEGMENTS_CACHE_TTL_SEC
+                expired = [k for k, (ts, _) in self._segments_cache.items() if ts < cutoff]
+                for k in expired:
+                    self._segments_cache.pop(k, None)
+                if len(self._segments_cache) >= SEGMENTS_CACHE_MAX_ITEMS:
+                    oldest = min(self._segments_cache.items(), key=lambda kv: kv[1][0])[0]
+                    self._segments_cache.pop(oldest, None)
+            self._segments_cache[cache_key] = (time.time(), segments)
+        return list(segments)
 
     # ------------------------------------------------------------------ HTTP helpers
 
@@ -2074,9 +2133,10 @@ class WatchService:
         if req_audio_idx is not None and req_audio_idx >= 0:
             pb_payload["AudioStreamIndex"] = req_audio_idx
 
-        fields = "MediaSources,MediaStreams,Chapters,Overview,ProviderIds,ImageTags,ParentBackdropItemId,SeriesId,UserData,RunTimeTicks"
+        fields = "MediaSources,MediaStreams,Chapters,Overview,ProviderIds,ImageTags,ParentBackdropItemId,SeriesId,UserData,RunTimeTicks,Trickplay"
+        segments = []
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
                 f_item = pool.submit(self._jf_get, f"/Users/{uid}/Items/{item_id}?Fields={fields}", 8)
                 f_pb = pool.submit(
                     self._jf_request,
@@ -2086,8 +2146,13 @@ class WatchService:
                     10,
                     True,
                 )
+                f_segs = pool.submit(self.get_media_segments, item_id, uid, True)
                 item = f_item.result()
                 pb = f_pb.result()
+                try:
+                    segments = f_segs.result() or []
+                except Exception:
+                    segments = []
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return 404, {"error": "Jellyfin item not found"}
@@ -2197,6 +2262,8 @@ class WatchService:
                 current_episode=ctx["episodeNumber"],
             )
 
+        trickplay = parse_trickplay_info(item, item_id, media_source_id=ctx["mediaSourceId"])
+
         return 200, {
             "jellyfinItemId": item_id,
             "mediaSourceId": ctx["mediaSourceId"],
@@ -2220,6 +2287,8 @@ class WatchService:
             "subtitleTracks": ctx["subtitleTracks"],
             "chapters": chapters,
             "nextEpisode": next_ep,
+            "segments": segments,
+            "trickplay": trickplay,
         }
 
     def report_progress(self, body):
@@ -2501,6 +2570,114 @@ class WatchService:
             return None
         base = self._jellyfin_url_fn().rstrip("/")
         return f"{base}/Videos/{norm_id}/{ms_id}/Subtitles/{idx}/0/Stream.{ext}"
+
+    def build_trickplay_upstream_url(self, item_id, width_raw, tile_index_raw, media_source_id=None):
+        norm_id = normalize_jf_id(item_id)
+        if not norm_id:
+            return None
+        width = _safe_int(width_raw)
+        if width is None or width <= 0 or width > 4096:
+            return None
+        tile_idx = _safe_int(tile_index_raw)
+        if tile_idx is None or tile_idx < 0 or tile_idx > 100_000:
+            return None
+        base = self._jellyfin_url_fn().rstrip("/")
+        url = f"{base}/Videos/{norm_id}/Trickplay/{width}/{tile_idx}.jpg"
+        if media_source_id is not None:
+            ms_id = str(media_source_id).strip()
+            if ms_id:
+                if not JELLYFIN_MEDIA_SOURCE_ID_RE.match(ms_id):
+                    return None
+                url = f"{url}?{urllib.parse.urlencode({'mediaSourceId': ms_id})}"
+        return url
+
+
+def parse_media_segments(raw):
+    """Normalize Jellyfin /MediaSegments/{itemId} response into valid sorted segment dicts."""
+    if isinstance(raw, dict):
+        items = raw.get("Items")
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        items = []
+    if not isinstance(items, list):
+        return []
+    out = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        raw_type = str(entry.get("Type") or entry.get("type") or "").strip().lower()
+        seg_type = MEDIA_SEGMENT_TYPES_BY_LOWER.get(raw_type)
+        if not seg_type:
+            continue
+        start_ticks = _safe_int(entry.get("StartTicks") if "StartTicks" in entry else entry.get("startTicks"))
+        end_ticks = _safe_int(entry.get("EndTicks") if "EndTicks" in entry else entry.get("endTicks"))
+        if start_ticks is None or end_ticks is None or start_ticks < 0 or end_ticks <= start_ticks:
+            continue
+        out.append({
+            "type": seg_type,
+            "startTicks": start_ticks,
+            "endTicks": end_ticks,
+        })
+    out.sort(key=lambda s: (s["startTicks"], s["endTicks"]))
+    return out
+
+
+def parse_trickplay_info(item, item_id, media_source_id=None, preferred_width=320):
+    """Parse Jellyfin item Trickplay metadata, choosing the width closest to preferred_width (default 320)."""
+    norm_id = normalize_jf_id(item_id)
+    if not norm_id or not isinstance(item, dict):
+        return None
+    tp_root = item.get("Trickplay")
+    if not isinstance(tp_root, dict) or not tp_root:
+        return None
+
+    chosen_ms = None
+    widths_map = None
+    for candidate_key in (media_source_id, norm_id):
+        if candidate_key and isinstance(tp_root.get(candidate_key), dict) and tp_root[candidate_key]:
+            chosen_ms = str(candidate_key).strip()
+            widths_map = tp_root[candidate_key]
+            break
+    if widths_map is None:
+        for k, v in tp_root.items():
+            if isinstance(k, str) and k.strip() and isinstance(v, dict) and v:
+                chosen_ms = k.strip()
+                widths_map = v
+                break
+    if not isinstance(widths_map, dict) or not widths_map:
+        return None
+
+    candidates = []
+    for k, meta in widths_map.items():
+        if not isinstance(meta, dict):
+            continue
+        w = _safe_int(meta.get("Width")) or _safe_int(k)
+        h = _safe_int(meta.get("Height"))
+        tw = _safe_int(meta.get("TileWidth"))
+        th = _safe_int(meta.get("TileHeight"))
+        cnt = _safe_int(meta.get("ThumbnailCount"))
+        interval = _safe_int(meta.get("Interval"))
+        if not (w and w > 0 and h and h > 0 and tw and tw > 0 and th and th > 0 and cnt and cnt > 0 and interval and interval > 0):
+            continue
+        candidates.append({
+            "width": w,
+            "height": h,
+            "tileWidth": tw,
+            "tileHeight": th,
+            "thumbnailCount": cnt,
+            "intervalMs": interval,
+        })
+    if not candidates:
+        return None
+
+    best = min(candidates, key=lambda c: (abs(c["width"] - preferred_width), -c["width"]))
+    norm_ms = chosen_ms if (chosen_ms and JELLYFIN_MEDIA_SOURCE_ID_RE.match(chosen_ms)) else norm_id
+    best["tileUrlTemplate"] = (
+        f"/pc/api/watch/trickplay/{norm_id}/{best['width']}/{{tileIndex}}.jpg"
+        f"?mediaSourceId={urllib.parse.quote(norm_ms, safe='')}"
+    )
+    return best
 
 
 def normalize_jf_id(raw):

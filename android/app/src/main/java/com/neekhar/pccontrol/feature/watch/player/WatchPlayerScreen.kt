@@ -4,6 +4,7 @@ import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Color as AndroidColor
 import android.media.AudioManager
 import android.net.Uri
@@ -12,8 +13,12 @@ import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,6 +35,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -46,6 +52,7 @@ import androidx.compose.material.icons.rounded.Audiotrack
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.HighQuality
 import androidx.compose.material.icons.rounded.Lock
@@ -83,12 +90,18 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -183,6 +196,14 @@ fun WatchPlayerScreen(
 
     val audioManager = remember(context) {
         context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    }
+
+    // Memory-safe LRU cache for Trickplay sprite sheets (evicted on item change or player exit)
+    val trickplayCache = remember(state.jellyfinItemId, state.trickplay?.tileUrlTemplate, mediaStreamingClient) {
+        TrickplayTileCache(httpClient = mediaStreamingClient)
+    }
+    DisposableEffect(trickplayCache) {
+        onDispose { trickplayCache.clear() }
     }
 
     // Build ExoPlayer once for this player route
@@ -890,105 +911,141 @@ fun WatchPlayerScreen(
                         )
                     }
 
-                    // Bottom bar: scrubber + timestamps + utility actions
-                    Column(
+                    // Bottom bar: floating scrub preview + scrubber + timestamps + utility actions
+                    val effectiveDuration = state.durationMs.takeIf { it > 0L } ?: state.runtimeMs
+                    val displayPosition = if (isScrubbing) scrubPositionMs else state.currentPositionMs
+                    val remainingMs = (effectiveDuration - displayPosition).coerceAtLeast(0L)
+                    var safeBottomOriginX by remember { mutableFloatStateOf(0f) }
+                    var safeBottomWidthPx by remember { mutableFloatStateOf(0f) }
+                    var scrubberLeftInSafePx by remember { mutableFloatStateOf(0f) }
+                    var scrubberWidthPx by remember { mutableFloatStateOf(1f) }
+                    var bottomBarHeightPx by remember { mutableIntStateOf(0) }
+
+                    Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
                             .safeDrawingPadding()
-                            .padding(horizontal = 20.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                            .onGloballyPositioned { coords ->
+                                safeBottomOriginX = coords.positionInRoot().x
+                                safeBottomWidthPx = coords.size.width.toFloat()
+                            },
                     ) {
-                        val effectiveDuration = state.durationMs.takeIf { it > 0L } ?: state.runtimeMs
-                        val displayPosition = if (isScrubbing) scrubPositionMs else state.currentPositionMs
-                        val remainingMs = (effectiveDuration - displayPosition).coerceAtLeast(0L)
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .onSizeChanged { bottomBarHeightPx = it.height }
+                                .padding(horizontal = 20.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            Text(
-                                text = WatchPlayerHelpers.formatTimeMs(displayPosition),
-                                color = Color.White,
-                                style = TabularNumStyle.copy(
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                ),
-                            )
-                            WatchScrubberBar(
-                                positionMs = displayPosition,
-                                bufferedMs = state.bufferedPositionMs,
-                                durationMs = effectiveDuration,
-                                chapters = state.chapters,
-                                onScrubStart = { posMs ->
-                                    isScrubbing = true
-                                    scrubPositionMs = posMs
-                                    bumpHud()
-                                },
-                                onScrubMove = { posMs ->
-                                    scrubPositionMs = posMs
-                                },
-                                onScrubEnd = { posMs ->
-                                    isScrubbing = false
-                                    val safe = posMs.coerceAtLeast(0L)
-                                    exoPlayer.seekTo(safe)
-                                    viewModel.onUserSeek(safe)
-                                    bumpHud()
-                                },
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text(
-                                text = "-${WatchPlayerHelpers.formatTimeMs(remainingMs)}",
-                                color = DarkPcColors.onMediaDim,
-                                style = TabularNumStyle.copy(
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                ),
-                            )
-                        }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                Text(
+                                    text = WatchPlayerHelpers.formatTimeMs(displayPosition),
+                                    color = Color.White,
+                                    style = TabularNumStyle.copy(
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                    ),
+                                )
+                                WatchScrubberBar(
+                                    positionMs = displayPosition,
+                                    bufferedMs = state.bufferedPositionMs,
+                                    durationMs = effectiveDuration,
+                                    chapters = state.chapters,
+                                    onScrubStart = { posMs ->
+                                        isScrubbing = true
+                                        scrubPositionMs = posMs
+                                        bumpHud()
+                                    },
+                                    onScrubMove = { posMs ->
+                                        scrubPositionMs = posMs
+                                    },
+                                    onScrubEnd = { posMs ->
+                                        isScrubbing = false
+                                        val safe = posMs.coerceAtLeast(0L)
+                                        exoPlayer.seekTo(safe)
+                                        viewModel.onUserSeek(safe)
+                                        bumpHud()
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .onGloballyPositioned { coords ->
+                                            scrubberLeftInSafePx = coords.positionInRoot().x - safeBottomOriginX
+                                            scrubberWidthPx = coords.size.width.toFloat().coerceAtLeast(1f)
+                                        },
+                                )
+                                Text(
+                                    text = "-${WatchPlayerHelpers.formatTimeMs(remainingMs)}",
+                                    color = DarkPcColors.onMediaDim,
+                                    style = TabularNumStyle.copy(
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                    ),
+                                )
+                            }
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                        ) {
-                            PlayerBottomAction(
-                                icon = Icons.Rounded.Subtitles,
-                                label = "Audio & Subtitles",
-                                highlighted = state.selectedSubtitleId != null,
-                                onClick = {
-                                    viewModel.openSheet(WatchPlayerSheet.TRACKS)
-                                    bumpHud()
-                                },
-                            )
-                            PlayerBottomAction(
-                                icon = Icons.Rounded.Speed,
-                                label = "Speed (${WatchPlayerHelpers.formatSpeed(state.playbackSpeed)})",
-                                highlighted = state.playbackSpeed != 1.0f,
-                                onClick = {
-                                    viewModel.openSheet(WatchPlayerSheet.SPEED)
-                                    bumpHud()
-                                },
-                            )
-                            PlayerBottomAction(
-                                icon = Icons.Rounded.Lock,
-                                label = "Lock",
-                                onClick = {
-                                    viewModel.toggleLock()
-                                    bumpHud()
-                                },
-                            )
-                            if (state.nextEpisode != null) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceEvenly,
+                            ) {
                                 PlayerBottomAction(
-                                    icon = Icons.Rounded.SkipNext,
-                                    label = "Next Episode",
+                                    icon = Icons.Rounded.Subtitles,
+                                    label = "Audio & Subtitles",
+                                    highlighted = state.selectedSubtitleId != null,
                                     onClick = {
-                                        viewModel.playNextEpisodeNow()
+                                        viewModel.openSheet(WatchPlayerSheet.TRACKS)
                                         bumpHud()
                                     },
                                 )
+                                PlayerBottomAction(
+                                    icon = Icons.Rounded.Speed,
+                                    label = "Speed (${WatchPlayerHelpers.formatSpeed(state.playbackSpeed)})",
+                                    highlighted = state.playbackSpeed != 1.0f,
+                                    onClick = {
+                                        viewModel.openSheet(WatchPlayerSheet.SPEED)
+                                        bumpHud()
+                                    },
+                                )
+                                PlayerBottomAction(
+                                    icon = Icons.Rounded.Lock,
+                                    label = "Lock",
+                                    onClick = {
+                                        viewModel.toggleLock()
+                                        bumpHud()
+                                    },
+                                )
+                                if (state.nextEpisode != null) {
+                                    PlayerBottomAction(
+                                        icon = Icons.Rounded.SkipNext,
+                                        label = "Next Episode",
+                                        onClick = {
+                                            viewModel.playNextEpisodeNow()
+                                            bumpHud()
+                                        },
+                                    )
+                                }
                             }
+                        }
+
+                        if (isScrubbing && effectiveDuration > 0L) {
+                            WatchScrubPreviewPopup(
+                                positionMs = scrubPositionMs,
+                                durationMs = effectiveDuration,
+                                trickplay = state.trickplay,
+                                chapters = state.chapters,
+                                tileCache = trickplayCache,
+                                scrubberLeftPx = scrubberLeftInSafePx,
+                                scrubberWidthPx = scrubberWidthPx,
+                                containerWidthPx = safeBottomWidthPx,
+                                bottomClearancePx = bottomBarHeightPx,
+                                modifier = Modifier.align(Alignment.BottomStart),
+                            )
                         }
                     }
                 }
@@ -1006,7 +1063,53 @@ fun WatchPlayerScreen(
             )
         }
 
-        // 8. Next Episode auto-play overlay (final 15s or ended)
+        // 7b. Netflix-style Skip Intro / Skip Credits / Skip Recap floating pill (visible even when HUD is hidden)
+        val activeSeg = state.activeSegment
+        var lastRenderedSegment by remember(state.jellyfinItemId) { mutableStateOf<WatchMediaSegment?>(null) }
+        if (activeSeg != null) {
+            lastRenderedSegment = activeSeg
+        }
+        val showSkipPill = !isInPictureInPictureMode &&
+            !state.isLocked &&
+            !state.loading &&
+            state.error == null &&
+            state.activeSheet == WatchPlayerSheet.NONE &&
+            !state.showNextEpisodeCard &&
+            !isScrubbing &&
+            activeSeg != null &&
+            activeSeg.key !in state.dismissedSegmentKeys
+        val skipBottomPad by animateDpAsState(
+            targetValue = if (state.controlsVisible) 104.dp else 28.dp,
+            animationSpec = tween(durationMillis = 220),
+            label = "skip_pill_bottom_pad",
+        )
+        AnimatedVisibility(
+            visible = showSkipPill,
+            enter = fadeIn(tween(220)) + slideInHorizontally(tween(240)) { it / 2 },
+            exit = fadeOut(tween(180)) + slideOutHorizontally(tween(200)) { it / 2 },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .safeDrawingPadding()
+                .padding(end = 20.dp, bottom = skipBottomPad),
+        ) {
+            val seg = activeSeg ?: lastRenderedSegment
+            if (seg != null) {
+                SkipSegmentPill(
+                    label = WatchPlayerHelpers.segmentButtonLabel(seg.type),
+                    onSkip = {
+                        val dur = state.durationMs.takeIf { it > 0L } ?: state.runtimeMs
+                        val target = if (dur > 0L) seg.endMs.coerceIn(0L, dur) else seg.endMs.coerceAtLeast(0L)
+                        exoPlayer.seekTo(target)
+                        viewModel.onUserSeek(target)
+                    },
+                    onDismiss = {
+                        viewModel.dismissSegment(seg.key)
+                    },
+                )
+            }
+        }
+
+        // 8. Next Episode auto-play overlay (final 15s, Outro segment, or ended)
         if (!isInPictureInPictureMode && state.showNextEpisodeCard && state.activeSheet == WatchPlayerSheet.NONE) {
             state.nextEpisode?.let { nextEp ->
                 NextEpisodeOverlayCard(
@@ -1325,6 +1428,201 @@ private fun WatchScrubberBar(
                 color = DarkPcColors.accent,
                 radius = thumbRadius,
                 center = Offset(size.width * playedFrac, cy),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SkipSegmentPill(
+    label: String,
+    onSkip: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(DarkPcColors.surface.copy(alpha = 0.92f))
+            .border(1.dp, DarkPcColors.accent, RoundedCornerShape(999.dp)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            modifier = Modifier
+                .clickable(onClick = onSkip)
+                .padding(start = 16.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.FastForward,
+                contentDescription = null,
+                tint = DarkPcColors.accent,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = label,
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .height(18.dp)
+                .background(DarkPcColors.hairline),
+        )
+        Box(
+            modifier = Modifier
+                .clickable(onClick = onDismiss)
+                .padding(start = 9.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Close,
+                contentDescription = "Dismiss",
+                tint = DarkPcColors.textDim,
+                modifier = Modifier.size(15.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun WatchScrubPreviewPopup(
+    positionMs: Long,
+    durationMs: Long,
+    trickplay: WatchTrickplayInfo?,
+    chapters: List<WatchChapter>,
+    tileCache: TrickplayTileCache,
+    scrubberLeftPx: Float,
+    scrubberWidthPx: Float,
+    containerWidthPx: Float,
+    bottomClearancePx: Int,
+    modifier: Modifier = Modifier,
+) {
+    val density = LocalDensity.current
+    val frame = remember(trickplay, positionMs) {
+        trickplay?.let { WatchPlayerHelpers.trickplayFrameForPosition(it, positionMs) }
+    }
+    val chapterTitle = remember(chapters, positionMs) {
+        WatchPlayerHelpers.activeChapterTitle(chapters, positionMs)
+    }
+
+    var tileBitmap by remember(tileCache, frame?.tileIndex) {
+        mutableStateOf<Bitmap?>(frame?.let { tileCache.getCached(it.tileIndex) })
+    }
+    LaunchedEffect(tileCache, frame?.tileIndex, frame?.tileUrl) {
+        val f = frame ?: run {
+            tileBitmap = null
+            return@LaunchedEffect
+        }
+        val cached = tileCache.getCached(f.tileIndex)
+        if (cached != null) {
+            tileBitmap = cached
+        } else {
+            tileBitmap = tileCache.loadTile(f.tileIndex, f.tileUrl)
+        }
+    }
+
+    val hasThumb = trickplay != null && frame != null
+    val thumbWidthDp = 160.dp
+    val thumbHeightDp = if (trickplay != null && trickplay.width > 0 && trickplay.height > 0) {
+        (160f * (trickplay.height.toFloat() / trickplay.width.toFloat())).coerceIn(72f, 112f).dp
+    } else {
+        90.dp
+    }
+
+    var popupWidthPx by remember { mutableIntStateOf(0) }
+    val fallbackCardWidthPx = with(density) { (if (hasThumb) 168.dp else 88.dp).toPx() }
+    val cardWidthPx = if (popupWidthPx > 0) popupWidthPx.toFloat() else fallbackCardWidthPx
+    val scrubFrac = if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+    val thumbCenterX = if (scrubberWidthPx > 1f) {
+        scrubberLeftPx + scrubberWidthPx * scrubFrac
+    } else {
+        containerWidthPx * scrubFrac
+    }
+    val edgeMarginPx = with(density) { 16.dp.toPx() }
+    val maxLeftPx = (containerWidthPx - cardWidthPx - edgeMarginPx).coerceAtLeast(edgeMarginPx)
+    val clampedLeftPx = (thumbCenterX - cardWidthPx / 2f).coerceIn(edgeMarginPx, maxLeftPx)
+    val bottomPaddingDp = with(density) {
+        (bottomClearancePx.takeIf { it > 0 } ?: 92.dp.roundToPx()).toDp() + 6.dp
+    }
+
+    Column(
+        modifier = modifier
+            .padding(bottom = bottomPaddingDp)
+            .offset { IntOffset(clampedLeftPx.roundToInt(), 0) }
+            .onSizeChanged { popupWidthPx = it.width }
+            .widthIn(max = if (hasThumb) 172.dp else 180.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(DarkPcColors.surface.copy(alpha = 0.95f))
+            .border(1.dp, DarkPcColors.hairline, RoundedCornerShape(10.dp))
+            .padding(if (hasThumb) 4.dp else 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (hasThumb && trickplay != null && frame != null) {
+            Box(
+                modifier = Modifier
+                    .width(thumbWidthDp)
+                    .height(thumbHeightDp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(Color.Black),
+                contentAlignment = Alignment.Center,
+            ) {
+                val bmp = tileBitmap
+                if (bmp != null && !bmp.isRecycled) {
+                    val imgBitmap = remember(bmp) { bmp.asImageBitmap() }
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val srcX = (frame.col * trickplay.width).coerceIn(0, (imgBitmap.width - 1).coerceAtLeast(0))
+                        val srcY = (frame.row * trickplay.height).coerceIn(0, (imgBitmap.height - 1).coerceAtLeast(0))
+                        val srcW = trickplay.width.coerceAtMost((imgBitmap.width - srcX).coerceAtLeast(1))
+                        val srcH = trickplay.height.coerceAtMost((imgBitmap.height - srcY).coerceAtLeast(1))
+                        drawImage(
+                            image = imgBitmap,
+                            srcOffset = IntOffset(srcX, srcY),
+                            srcSize = IntSize(srcW, srcH),
+                            dstOffset = IntOffset.Zero,
+                            dstSize = IntSize(size.width.roundToInt().coerceAtLeast(1), size.height.roundToInt().coerceAtLeast(1)),
+                        )
+                    }
+                } else {
+                    CircularProgressIndicator(
+                        color = DarkPcColors.accent,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
+
+        Text(
+            text = WatchPlayerHelpers.formatTimeMs(positionMs),
+            color = Color.White,
+            style = TabularNumStyle.copy(
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.SemiBold,
+            ),
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            modifier = Modifier.padding(horizontal = 4.dp),
+        )
+
+        if (!chapterTitle.isNullOrBlank()) {
+            Text(
+                text = chapterTitle,
+                color = DarkPcColors.textDim,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Normal,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .widthIn(max = thumbWidthDp)
+                    .padding(horizontal = 4.dp, vertical = 1.dp),
             )
         }
     }

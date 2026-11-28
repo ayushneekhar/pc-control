@@ -6,6 +6,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
 import com.neekhar.pccontrol.core.storage.AppPrefs
+import com.neekhar.pccontrol.feature.watch.player.WatchMediaSegment
+import com.neekhar.pccontrol.feature.watch.player.WatchPlayerHelpers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,6 +60,19 @@ data class TvRemoteUiState(
 
     val displayedPositionSeconds: Double
         get() = if (isScrubbing) scrubPositionSeconds.toDouble() else interpolatedPositionSeconds
+
+    val segments: List<WatchMediaSegment>
+        get() = session?.segments.orEmpty()
+
+    val displayedPositionMs: Long
+        get() = (displayedPositionSeconds * 1_000.0).toLong().coerceAtLeast(0L)
+
+    val activeSegment: WatchMediaSegment?
+        get() = if (isPlaying && session?.canSeek == true) {
+            WatchPlayerHelpers.activeSegment(segments, displayedPositionMs)
+        } else {
+            null
+        }
 }
 
 class TvRemoteViewModel(
@@ -239,6 +254,28 @@ class TvRemoteViewModel(
         )
     }
 
+    fun seekToPositionMs(positionMs: Long) {
+        val state = _uiState.value
+        val dur = state.durationSeconds
+        val rawSec = positionMs.coerceAtLeast(0L) / 1_000.0
+        val targetSec = if (dur > 0.0) rawSec.coerceIn(0.0, dur) else rawSec
+        seekPositionLockUntilMs = SystemClock.elapsedRealtime() + SEEK_LOCK_MS
+        _uiState.update {
+            it.copy(
+                isScrubbing = false,
+                interpolatedPositionSeconds = targetSec,
+            )
+        }
+        sendCommand(
+            request = TvCommandRequest(
+                sessionId = state.session?.sessionId,
+                command = "Seek",
+                positionSeconds = targetSec,
+            ),
+            resyncDelayMs = 600L,
+        )
+    }
+
     fun seekRelative(deltaSeconds: Double) {
         val state = _uiState.value
         val dur = state.durationSeconds
@@ -391,7 +428,8 @@ class TvRemoteViewModel(
             viewModelScope.launch { fetchSessionInternal() }
         }
 
-        if (fullScreenActive) {
+        val shouldTick = fullScreenActive || miniBarOwners.isNotEmpty()
+        if (shouldTick) {
             if (tickJob?.isActive != true) {
                 tickJob = viewModelScope.launch {
                     while (isActive) {

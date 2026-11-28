@@ -53,6 +53,36 @@ data class WatchChapter(
 )
 
 @Serializable
+data class WatchMediaSegment(
+    val type: String = "",
+    val startTicks: Long = 0L,
+    val endTicks: Long = 0L,
+) {
+    val startMs: Long get() = WatchPlayerHelpers.ticksToMs(startTicks)
+    val endMs: Long get() = WatchPlayerHelpers.ticksToMs(endTicks)
+    val key: String get() = "$type:$startTicks:$endTicks"
+}
+
+@Serializable
+data class WatchTrickplayInfo(
+    val width: Int = 320,
+    val height: Int = 180,
+    val tileWidth: Int = 10,
+    val tileHeight: Int = 10,
+    val thumbnailCount: Int = 0,
+    val intervalMs: Long = 10_000L,
+    val tileUrlTemplate: String = "",
+)
+
+data class TrickplayFrame(
+    val frameIndex: Int,
+    val tileIndex: Int,
+    val row: Int,
+    val col: Int,
+    val tileUrl: String,
+)
+
+@Serializable
 data class WatchNextEpisode(
     val jellyfinItemId: String = "",
     val title: String = "",
@@ -95,6 +125,8 @@ data class WatchPlaybackInfoResponse(
     val subtitleTracks: List<WatchSubtitleTrack> = emptyList(),
     val chapters: List<WatchChapter> = emptyList(),
     val nextEpisode: WatchNextEpisode? = null,
+    val segments: List<WatchMediaSegment> = emptyList(),
+    val trickplay: WatchTrickplayInfo? = null,
 )
 
 @Serializable
@@ -217,12 +249,99 @@ object WatchPlayerHelpers {
         isEnded: Boolean,
         hasNextEpisode: Boolean,
         dismissed: Boolean,
+        inOutroSegment: Boolean = false,
     ): Boolean {
         if (!hasNextEpisode || dismissed) return false
-        if (isEnded) return true
+        if (isEnded || inOutroSegment) return true
         if (durationMs <= 0L) return false
         val remaining = durationMs - positionMs
         return remaining in 0L..NEXT_EPISODE_THRESHOLD_MS
+    }
+
+    private val SKIPPABLE_SEGMENT_TYPES: Set<String> = setOf(
+        "intro",
+        "outro",
+        "recap",
+        "preview",
+        "commercial",
+    )
+
+    fun activeSegment(
+        segments: List<WatchMediaSegment>,
+        positionMs: Long,
+    ): WatchMediaSegment? {
+        if (segments.isEmpty() || positionMs < 0L) return null
+        return segments.firstOrNull { seg ->
+            val normType = seg.type.trim().lowercase(Locale.US)
+            if (normType !in SKIPPABLE_SEGMENT_TYPES) return@firstOrNull false
+            if (seg.endTicks <= seg.startTicks) return@firstOrNull false
+            val startMs = seg.startMs
+            val endMs = seg.endMs
+            endMs > startMs && positionMs >= startMs && positionMs < endMs
+        }
+    }
+
+    fun segmentButtonLabel(
+        type: String,
+        hasNextEpisode: Boolean = false,
+    ): String = when (type.trim().lowercase(Locale.US)) {
+        "intro" -> "Skip Intro"
+        "recap" -> "Skip Recap"
+        "outro" -> if (hasNextEpisode) "Next Episode" else "Skip Credits"
+        "preview" -> "Skip Preview"
+        "commercial" -> "Skip Ad"
+        else -> "Skip"
+    }
+
+    fun trickplayFrameForPosition(
+        trickplay: WatchTrickplayInfo,
+        positionMs: Long,
+    ): TrickplayFrame? {
+        if (
+            trickplay.width <= 0 ||
+            trickplay.height <= 0 ||
+            trickplay.tileWidth <= 0 ||
+            trickplay.tileHeight <= 0 ||
+            trickplay.thumbnailCount <= 0 ||
+            trickplay.intervalMs <= 0L ||
+            trickplay.tileUrlTemplate.isBlank()
+        ) {
+            return null
+        }
+        val safePosMs = positionMs.coerceAtLeast(0L)
+        val frameIdx = (safePosMs / trickplay.intervalMs)
+            .coerceIn(0L, (trickplay.thumbnailCount - 1).toLong())
+            .toInt()
+        val tilesPerSheet = trickplay.tileWidth * trickplay.tileHeight
+        val tileIndex = frameIdx / tilesPerSheet
+        val inTile = frameIdx % tilesPerSheet
+        val row = inTile / trickplay.tileWidth
+        val col = inTile % trickplay.tileWidth
+        val tileUrl = trickplay.tileUrlTemplate.replace("{tileIndex}", tileIndex.toString())
+        return TrickplayFrame(
+            frameIndex = frameIdx,
+            tileIndex = tileIndex,
+            row = row,
+            col = col,
+            tileUrl = tileUrl,
+        )
+    }
+
+    fun activeChapterTitle(
+        chapters: List<WatchChapter>,
+        positionMs: Long,
+    ): String? {
+        if (chapters.isEmpty() || positionMs < 0L) return null
+        var matched: WatchChapter? = null
+        var bestStart = Long.MIN_VALUE
+        for (ch in chapters) {
+            val startMs = ticksToMs(ch.startPositionTicks)
+            if (startMs <= positionMs && startMs >= bestStart && ch.name.isNotBlank()) {
+                bestStart = startMs
+                matched = ch
+            }
+        }
+        return matched?.name?.trim()?.takeIf { it.isNotEmpty() }
     }
 
     fun selectInitialQuality(

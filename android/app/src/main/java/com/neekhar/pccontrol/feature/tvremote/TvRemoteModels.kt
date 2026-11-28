@@ -1,5 +1,6 @@
 package com.neekhar.pccontrol.feature.tvremote
 
+import com.neekhar.pccontrol.feature.watch.player.WatchMediaSegment
 import kotlinx.serialization.Serializable
 import java.util.Locale
 
@@ -78,6 +79,7 @@ data class TvSessionResponse(
     val nowPlaying: TvNowPlaying? = null,
     val audioTracks: List<TvAudioTrack> = emptyList(),
     val subtitleTracks: List<TvSubtitleTrack> = emptyList(),
+    val segments: List<WatchMediaSegment> = emptyList(),
     val supportedCommands: List<String> = emptyList(),
 )
 

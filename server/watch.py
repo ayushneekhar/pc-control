@@ -46,7 +46,10 @@ TEXT_SUBTITLE_CODECS = frozenset({
 })
 DIRECT_PLAY_CONTAINERS = frozenset({"mp4", "m4v", "mkv", "webm", "mov"})
 DIRECT_PLAY_VIDEO_CODECS = frozenset({"h264", "avc", "hevc", "h265", "vp8", "vp9", "av1"})
-DIRECT_PLAY_AUDIO_CODECS = frozenset({"aac", "mp3", "opus", "flac", "vorbis", "ac3", "eac3", "pcm", "alac"})
+DIRECT_PLAY_AUDIO_CODECS = frozenset({
+    "aac", "mp3", "opus", "flac", "vorbis", "ac3", "eac3", "pcm", "alac",
+    "truehd", "dts", "dca", "dtshd", "mlp",
+})
 
 QUALITY_PRESETS = (
     {"id": "original", "label": "Original (Direct)", "maxBitrate": 0, "maxWidth": None, "audioBitrate": 0},
@@ -2528,7 +2531,7 @@ def _build_device_profile(max_bitrate):
                 "Container": "mp4,m4v,mkv,webm,mov",
                 "Type": "Video",
                 "VideoCodec": "h264,hevc,vp8,vp9,av1",
-                "AudioCodec": "aac,mp3,opus,flac,vorbis,ac3,eac3",
+                "AudioCodec": "aac,mp3,opus,flac,vorbis,ac3,eac3,truehd,dts,dca",
             }
         ],
         "TranscodingProfiles": [

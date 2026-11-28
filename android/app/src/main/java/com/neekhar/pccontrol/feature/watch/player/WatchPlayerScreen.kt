@@ -194,7 +194,9 @@ fun WatchPlayerScreen(
             .build()
         ExoPlayer.Builder(
             context,
-            DefaultRenderersFactory(context).setEnableDecoderFallback(true),
+            DefaultRenderersFactory(context)
+                .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+                .setEnableDecoderFallback(true),
         )
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .setAudioAttributes(audioAttrs, true)

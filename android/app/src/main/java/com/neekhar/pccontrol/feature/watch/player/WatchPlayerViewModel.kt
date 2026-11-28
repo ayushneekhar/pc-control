@@ -328,14 +328,11 @@ class WatchPlayerViewModel(
         }
         val defaultAudio = audioEntries.firstOrNull { it.isDefault } ?: audioEntries.firstOrNull()
         val defaultAudioIdx = defaultAudio?.index
-        val defaultAudioUnsupported = WatchPlayerHelpers.isUnsupportedDirectAudioCodec(defaultAudio?.codec)
 
-        var chosen = WatchPlayerHelpers.selectInitialQuality(options, info.recommendedQualityId)
-        if (chosen != null && !chosen.isHls && defaultAudioUnsupported) {
-            // Android MediaCodec cannot natively decode TrueHD / DTS / DTS-HD / MLP:
-            // proactively start on HLS with AAC transcode for instant, error-free playback.
-            chosen = WatchPlayerHelpers.selectHlsFallbackQuality(options) ?: chosen
-        }
+        // With Jellyfin's Media3 FFmpeg audio decoder enabled (EXTENSION_RENDERER_MODE_ON),
+        // TrueHD / DTS / DTS-HD / EAC3 / FLAC / ALAC / Opus / Vorbis decode natively on-device
+        // during Direct Play with zero server transcoding; reactive HLS fallback stays as a safety net.
+        val chosen = WatchPlayerHelpers.selectInitialQuality(options, info.recommendedQualityId)
         var chosenUrl = chosen?.streamUrl?.takeIf { it.isNotBlank() }
             ?: playerRepo.resolveTailscaleUrl(info.directStreamUrl.ifBlank { info.hlsUrl })
         val chosenIsHls = chosen?.isHls ?: chosenUrl.contains(".m3u8", ignoreCase = true)
@@ -603,33 +600,7 @@ class WatchPlayerViewModel(
                 )
             }
         } else {
-            val targetAudio = st.audioTracks.firstOrNull { it.index == audioIndex }
-            if (!st.isOffline && WatchPlayerHelpers.isUnsupportedDirectAudioCodec(targetAudio?.codec)) {
-                val hlsFallback = WatchPlayerHelpers.selectHlsFallbackQuality(st.qualityOptions)
-                if (hlsFallback != null) {
-                    val updatedUrl = WatchPlayerHelpers.withAudioStreamIndex(hlsFallback.streamUrl, audioIndex)
-                    val currentSub = st.subtitleTracks.firstOrNull { it.id == st.selectedSubtitleId }
-                    val nextSelectedSub = if (currentSub != null && currentSub.isExternal) currentSub.id else null
-                    showToast("Switching to transcoded audio…")
-                    _uiState.update { cur ->
-                        cur.copy(
-                            selectedAudioIndex = audioIndex,
-                            selectedQualityId = hlsFallback.id,
-                            streamUri = updatedUrl,
-                            isHls = true,
-                            startPositionMs = cur.currentPositionMs.coerceAtLeast(0L),
-                            streamVersion = cur.streamVersion + 1,
-                            selectedSubtitleId = nextSelectedSub,
-                            hlsAttachedSubtitleId = null,
-                            activeSheet = WatchPlayerSheet.NONE,
-                            isBuffering = true,
-                            error = null,
-                        )
-                    }
-                    return
-                }
-            }
-            // Direct / local file: ExoPlayer switches track in-place without reloading
+            // Direct / local file: ExoPlayer (with FFmpeg audio extension) switches track in-place without reloading
             _uiState.update {
                 it.copy(
                     selectedAudioIndex = audioIndex,

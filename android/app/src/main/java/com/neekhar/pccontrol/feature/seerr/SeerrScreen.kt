@@ -1,13 +1,21 @@
 package com.neekhar.pccontrol.feature.seerr
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,8 +34,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -59,9 +65,10 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -70,6 +77,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -102,9 +110,8 @@ import com.neekhar.pccontrol.feature.tvremote.rememberSmartCastController
 import com.neekhar.pccontrol.feature.watch.downloads.OfflineDownloadStatus
 import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
 import com.neekhar.pccontrol.feature.watch.downloads.WatchOfflineHelpers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.io.File
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1064,7 +1071,6 @@ fun SeerrScreen(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WatchHeroCarousel(
     items: List<WatchItem>,
@@ -1080,15 +1086,24 @@ private fun WatchHeroCarousel(
     onToggleWatchlist: (WatchItem) -> Unit,
     onOpenDetail: (WatchItem) -> Unit,
 ) {
+    if (items.isEmpty()) return
+
     val colors = LocalPcColors.current
-    val pagerState = rememberPagerState(pageCount = { items.size })
-    val coroutineScope = rememberCoroutineScope()
+    var currentIndex by rememberSaveable { mutableIntStateOf(0) }
+    LaunchedEffect(items.size) {
+        if (currentIndex !in items.indices) {
+            currentIndex = 0
+        }
+    }
+    val safeIndex = currentIndex.coerceIn(0, items.lastIndex)
+    val currentItem = items[safeIndex]
+
+    var isUserInteracting by remember { mutableStateOf(false) }
     val progress = remember { Animatable(0f) }
 
-    // Reliable 6s auto-advance with linear progress animation; pauses & resets cleanly while dragging
-    LaunchedEffect(items.size, pagerState.currentPage, pagerState.isScrollInProgress) {
-        if (items.size <= 1 || pagerState.isScrollInProgress) {
-            progress.snapTo(0f)
+    // State-driven 6s auto-advance with linear progress fill; pauses smoothly in place while dragging
+    LaunchedEffect(items.size, safeIndex, isUserInteracting) {
+        if (items.size <= 1 || isUserInteracting) {
             return@LaunchedEffect
         }
         progress.snapTo(0f)
@@ -1096,39 +1111,127 @@ private fun WatchHeroCarousel(
             targetValue = 1f,
             animationSpec = tween(durationMillis = 6_000, easing = LinearEasing),
         )
-        if (!pagerState.isScrollInProgress && items.size > 1) {
-            val nextPage = (pagerState.currentPage + 1) % items.size
-            pagerState.animateScrollToPage(nextPage)
-        }
+        currentIndex = (safeIndex + 1) % items.size
     }
 
-    Box(modifier = Modifier.fillMaxWidth()) {
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier.fillMaxWidth(),
-        ) { page ->
-            val item = items[page]
-            val heroKey = SeerrHelpers.watchlistKey(item.mediaType, item.id)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(430.dp)
+            .background(colors.bg)
+            .pointerInput(items.size) {
+                if (items.size <= 1) return@pointerInput
+                val swipeThresholdPx = 48.dp.toPx()
+                var totalDragX = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = {
+                        totalDragX = 0f
+                        isUserInteracting = true
+                    },
+                    onDragCancel = {
+                        totalDragX = 0f
+                        isUserInteracting = false
+                    },
+                    onDragEnd = {
+                        if (abs(totalDragX) > swipeThresholdPx) {
+                            val base = currentIndex.coerceIn(0, items.lastIndex)
+                            currentIndex = if (totalDragX < 0f) {
+                                (base + 1) % items.size
+                            } else {
+                                (base - 1 + items.size) % items.size
+                            }
+                        }
+                        totalDragX = 0f
+                        isUserInteracting = false
+                    },
+                    onHorizontalDrag = { change, dragAmount ->
+                        change.consume()
+                        totalDragX += dragAmount
+                    },
+                )
+            }
+            .clickable { onOpenDetail(currentItem) },
+    ) {
+        // 1. Full-bleed Backdrop Artwork crossfade
+        AnimatedContent(
+            targetState = currentItem,
+            contentKey = { "${it.mediaType}:${it.id}" },
+            transitionSpec = {
+                fadeIn(tween(550, easing = FastOutSlowInEasing)) togetherWith
+                    fadeOut(tween(450, easing = FastOutSlowInEasing))
+            },
+            label = "hero_backdrop",
+            modifier = Modifier.fillMaxSize(),
+        ) { slideItem ->
+            val artUrl = resolveImageUrl(slideItem.backdrop ?: slideItem.poster)
+            Box(modifier = Modifier.fillMaxSize()) {
+                if (!artUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = artUrl,
+                        contentDescription = slideItem.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Icon(
+                        imageVector = if (slideItem.isTv) Icons.Rounded.Tv else Icons.Rounded.Movie,
+                        contentDescription = null,
+                        tint = colors.textFaint,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .align(Alignment.Center),
+                    )
+                }
+            }
+        }
+
+        // 2. Fixed top & bottom dark scrims merging seamlessly into true black (zero flicker)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0.0f to colors.bg.copy(alpha = 0.55f),
+                        0.18f to Color.Transparent,
+                        0.45f to colors.bg.copy(alpha = 0.22f),
+                        0.74f to colors.bg.copy(alpha = 0.84f),
+                        1.0f to colors.bg,
+                    ),
+                ),
+        )
+
+        // 3. Synchronized Foreground Text & Actions crossfade + subtle rise
+        AnimatedContent(
+            targetState = currentItem,
+            contentKey = { "${it.mediaType}:${it.id}" },
+            transitionSpec = {
+                (fadeIn(tween(420, delayMillis = 90, easing = FastOutSlowInEasing)) +
+                    slideInVertically(tween(420, delayMillis = 90, easing = FastOutSlowInEasing)) { 18 }) togetherWith
+                    fadeOut(tween(200, easing = FastOutSlowInEasing))
+            },
+            label = "hero_foreground",
+            modifier = Modifier.fillMaxSize(),
+        ) { slideItem ->
+            val heroKey = SeerrHelpers.watchlistKey(slideItem.mediaType, slideItem.id)
             val inWatchlist = heroKey in watchlistIds
-            val heroOffline = findCompletedOffline(item.jellyfinItemId, item.id, item.mediaType)
-            WatchHeroSlide(
-                item = item,
-                resolveImageUrl = resolveImageUrl,
+            val heroOffline = findCompletedOffline(slideItem.jellyfinItemId, slideItem.id, slideItem.mediaType)
+            WatchHeroSlideForeground(
+                item = slideItem,
                 offlineItem = heroOffline,
                 inWatchlist = inWatchlist,
                 busyWatchlist = busyWatchlistKey == heroKey,
-                busyPlayOnTv = playingOnTvKey == "hero:${item.mediaType}:${item.id}",
-                busyRequest = busyMovieId == item.id,
+                busyPlayOnTv = playingOnTvKey == "hero:${slideItem.mediaType}:${slideItem.id}",
+                busyRequest = busyMovieId == slideItem.id,
                 hasMultipleSlides = items.size > 1,
-                onPlayOnPhone = { onPlayOnPhone(item, heroOffline) },
-                onPlayOnTv = { forcePicker -> onPlayOnTv(item, forcePicker) },
-                onRequest = { onRequest(item) },
-                onToggleWatchlist = { onToggleWatchlist(item) },
-                onOpenDetail = { onOpenDetail(item) },
+                onPlayOnPhone = { onPlayOnPhone(slideItem, heroOffline) },
+                onPlayOnTv = { forcePicker -> onPlayOnTv(slideItem, forcePicker) },
+                onRequest = { onRequest(slideItem) },
+                onToggleWatchlist = { onToggleWatchlist(slideItem) },
+                onOpenDetail = { onOpenDetail(slideItem) },
             )
         }
 
-        // Animated progress pill (active) + crisp tappable dots (inactive)
+        // 4. Smoothly animated pagination progress pills
         if (items.size > 1) {
             Row(
                 modifier = Modifier
@@ -1138,18 +1241,23 @@ private fun WatchHeroCarousel(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 items.indices.forEach { idx ->
-                    val active = pagerState.currentPage == idx
-                    if (active) {
-                        Box(
-                            modifier = Modifier
-                                .height(5.dp)
-                                .width(28.dp)
-                                .clip(RoundedCornerShape(999.dp))
-                                .background(Color.White.copy(alpha = 0.28f))
-                                .clickable {
-                                    coroutineScope.launch { pagerState.animateScrollToPage(idx) }
-                                },
-                        ) {
+                    val active = safeIndex == idx
+                    val pillWidth by animateDpAsState(
+                        targetValue = if (active) 28.dp else 5.dp,
+                        animationSpec = tween(durationMillis = 260),
+                        label = "hero_pill_width_$idx",
+                    )
+                    Box(
+                        modifier = Modifier
+                            .height(5.dp)
+                            .width(pillWidth)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(Color.White.copy(alpha = if (active) 0.28f else 0.30f))
+                            .clickable {
+                                currentIndex = idx
+                            },
+                    ) {
+                        if (active) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxHeight()
@@ -1158,16 +1266,6 @@ private fun WatchHeroCarousel(
                                     .background(Color(0xFF3DDC97)),
                             )
                         }
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .size(5.dp)
-                                .clip(CircleShape)
-                                .background(Color.White.copy(alpha = 0.30f))
-                                .clickable {
-                                    coroutineScope.launch { pagerState.animateScrollToPage(idx) }
-                                },
-                        )
                     }
                 }
             }
@@ -1177,9 +1275,8 @@ private fun WatchHeroCarousel(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun WatchHeroSlide(
+private fun WatchHeroSlideForeground(
     item: WatchItem,
-    resolveImageUrl: (String?) -> String?,
     offlineItem: OfflineWatchItem?,
     inWatchlist: Boolean,
     busyWatchlist: Boolean,
@@ -1194,7 +1291,6 @@ private fun WatchHeroSlide(
 ) {
     val colors = LocalPcColors.current
     val type = LocalPcType.current
-    val artUrl = resolveImageUrl(item.backdrop ?: item.poster)
     val badge = SeerrHelpers.statusBadge(item.status)
     val ratingStr = SeerrHelpers.formatVoteAverage(item.voteAverage)
     val isAvailable = item.status == SeerrStatus.AVAILABLE
@@ -1219,46 +1315,7 @@ private fun WatchHeroSlide(
         add(if (item.isTv) "TV Show" else "Movie")
     }.joinToString(" · ")
 
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(430.dp)
-            .background(colors.bg)
-            .clickable(onClick = onOpenDetail),
-    ) {
-        if (!artUrl.isNullOrBlank()) {
-            AsyncImage(
-                model = artUrl,
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            Icon(
-                imageVector = if (item.isTv) Icons.Rounded.Tv else Icons.Rounded.Movie,
-                contentDescription = null,
-                tint = colors.textFaint,
-                modifier = Modifier
-                    .size(48.dp)
-                    .align(Alignment.Center),
-            )
-        }
-
-        // Crisp top & bottom dark scrims merging seamlessly into true black (#000000)
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0.0f to colors.bg.copy(alpha = 0.55f),
-                        0.18f to Color.Transparent,
-                        0.45f to colors.bg.copy(alpha = 0.22f),
-                        0.74f to colors.bg.copy(alpha = 0.84f),
-                        1.0f to colors.bg,
-                    ),
-                ),
-        )
-
+    Box(modifier = Modifier.fillMaxSize()) {
         // Top-left availability/media badge
         if (badge != null) {
             val (dotColor, _) = seerrToneColors(badge.tone)

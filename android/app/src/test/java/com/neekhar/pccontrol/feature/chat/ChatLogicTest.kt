@@ -605,6 +605,7 @@ class ChatLogicTest {
                 InlineToken.Link(
                     url = "/home/ayushlive/code/pc-control/server/pcapi.py#L5879-L5881",
                     children = listOf(InlineToken.Text("pcapi.py:5879-5881")),
+                    external = false,
                 ),
                 InlineToken.Text("."),
             ),
@@ -645,7 +646,7 @@ class ChatLogicTest {
             engine = ChatEngines.CLAUDE,
             queuedIds = setOf("u2"),
         )
-        assertEquals(listOf("u1", ChatLogic.THINKING_INDICATOR_ID, "u2"), items.map { it.id })
+        assertEquals(listOf("u1", THINKING_INDICATOR_ID, "u2"), items.map { it.id })
     }
 
     @Test

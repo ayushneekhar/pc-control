@@ -60,8 +60,8 @@ android {
         applicationId = "com.neekhar.pccontrol"
         minSdk = 30
         targetSdk = 35
-        versionCode = (findProperty("pcc.versionCode") as? String)?.toIntOrNull() ?: 34
-        versionName = (findProperty("pcc.versionName") as? String)?.takeIf { it.isNotBlank() } ?: "2.3.3"
+        versionCode = (findProperty("pcc.versionCode") as? String)?.toIntOrNull() ?: 35
+        versionName = (findProperty("pcc.versionName") as? String)?.takeIf { it.isNotBlank() } ?: "2.3.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -162,6 +162,7 @@ dependencies {
 
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.exoplayer.hls)
+    implementation(libs.media3.datasource.okhttp)
     implementation(libs.media3.ui)
     implementation(libs.jellyfin.media3.ffmpeg.decoder)
 

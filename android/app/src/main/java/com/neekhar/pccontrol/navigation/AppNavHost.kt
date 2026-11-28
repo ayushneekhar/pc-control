@@ -447,6 +447,7 @@ fun PcAppShell(
                             seed = seed,
                             downloadManager = container.watchDownloadManager,
                             transportManager = container.transportManager,
+                            watchPlayerRepository = container.watchPlayerRepository,
                         )
                     },
                 )
@@ -586,6 +587,7 @@ fun PcAppShell(
                     viewModel = playerVm,
                     activityProvider = activityProvider,
                     isInPictureInPictureMode = latestInPip.value,
+                    mediaStreamingClient = container.apiClient.mediaStreamingClient(),
                     tvRemoteViewModel = tvRemoteViewModel,
                     onBack = { nav.popBackStack() },
                     onHandedOffToTv = {

@@ -161,6 +161,7 @@ class WatchPlayerViewModel(
             season = initialSeason,
             episode = initialEpisode,
             preferOffline = preferOffline,
+            forceRefresh = true,
         )
     }
 
@@ -171,6 +172,7 @@ class WatchPlayerViewModel(
         season: Int?,
         episode: Int?,
         preferOffline: Boolean,
+        forceRefresh: Boolean = false,
     ) {
         loadJob?.cancel()
         progressSyncJob?.cancel()
@@ -211,6 +213,7 @@ class WatchPlayerViewModel(
                 mediaType = mediaType,
                 season = season,
                 episode = episode,
+                useCache = !forceRefresh,
             )
             when (res) {
                 is ApiResult.Error -> {

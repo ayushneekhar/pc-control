@@ -8,6 +8,7 @@ import com.neekhar.pccontrol.core.network.ApiTransportManager
 import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
 import com.neekhar.pccontrol.feature.watch.downloads.WatchDownloadEnqueueResult
 import com.neekhar.pccontrol.feature.watch.downloads.WatchDownloadManager
+import com.neekhar.pccontrol.feature.watch.player.WatchPlayerRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -84,6 +85,7 @@ class SeerrDetailViewModel(
     seed: SeerrItem? = null,
     private val downloadManager: WatchDownloadManager? = null,
     private val transportManager: ApiTransportManager? = null,
+    private val watchPlayerRepository: WatchPlayerRepository? = null,
 ) : ViewModel() {
 
     private val normalizedType: String = if (mediaType == "tv") "tv" else "movie"
@@ -113,6 +115,7 @@ class SeerrDetailViewModel(
     private var collectionJob: Job? = null
     private var playOnTvClearJob: Job? = null
     private var tailscaleNoticeJob: Job? = null
+    private var prefetchJob: Job? = null
 
     fun isTailscaleActive(): Boolean =
         transportManager?.resolveTransport()?.let { it == ApiTransport.TAILSCALE } ?: true
@@ -726,10 +729,41 @@ class SeerrDetailViewModel(
                         selectedSeasons = defaultSelected,
                     )
                 }
+                maybePrefetchPlaybackInfo(detail)
             }
             is ApiResult.Error -> {
                 _uiState.update { it.copy(error = res.message) }
             }
+        }
+    }
+
+    private fun maybePrefetchPlaybackInfo(detail: SeerrItem) {
+        val repo = watchPlayerRepository ?: return
+        val targetJfId = detail.resumeJellyfinItemId?.takeIf { it.isNotBlank() }
+        val isAvailable = detail.status == SeerrStatus.AVAILABLE ||
+            detail.status == SeerrStatus.PARTIAL ||
+            targetJfId != null
+        if (!isAvailable) return
+
+        // Skip prefetch when an offline completed file will be played locally
+        val hasCompletedOffline = when {
+            targetJfId != null && downloadManager?.getItem(targetJfId)?.isCompleted == true -> true
+            !detail.isTv && downloadManager?.findByTmdb(detail.id, "movie")?.isCompleted == true -> true
+            detail.isTv && targetJfId == null && offlineDownloads.value.any { it.tmdbId == detail.id && it.isCompleted } -> true
+            else -> false
+        }
+        if (hasCompletedOffline) return
+
+        val targetMediaType = if (detail.isTv && targetJfId != null) "episode" else normalizedType
+        prefetchJob?.cancel()
+        prefetchJob = viewModelScope.launch {
+            repo.prefetchPlaybackInfo(
+                jellyfinItemId = targetJfId,
+                tmdbId = detail.id,
+                mediaType = targetMediaType,
+                season = if (detail.isTv) detail.resumeSeasonNumber else null,
+                episode = if (detail.isTv) detail.resumeEpisodeNumber else null,
+            )
         }
     }
 }

@@ -112,8 +112,11 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -129,6 +132,7 @@ import com.neekhar.pccontrol.feature.tvremote.rememberSmartCastController
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import kotlinx.coroutines.delay
+import okhttp3.OkHttpClient
 import kotlin.math.roundToInt
 
 private enum class GestureOverlayKind {
@@ -152,6 +156,7 @@ fun WatchPlayerScreen(
     isInPictureInPictureMode: Boolean,
     onBack: () -> Unit,
     onHandedOffToTv: () -> Unit,
+    mediaStreamingClient: OkHttpClient? = null,
     tvRemoteViewModel: TvRemoteViewModel? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -181,13 +186,27 @@ fun WatchPlayerScreen(
     }
 
     // Build ExoPlayer once for this player route
-    val exoPlayer = remember(context) {
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(PcApiClient.USER_AGENT)
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(30_000)
+    val exoPlayer = remember(context, mediaStreamingClient) {
+        val httpFactory: DataSource.Factory = if (mediaStreamingClient != null) {
+            OkHttpDataSource.Factory(mediaStreamingClient)
+                .setUserAgent(PcApiClient.USER_AGENT)
+        } else {
+            DefaultHttpDataSource.Factory()
+                .setUserAgent(PcApiClient.USER_AGENT)
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(15_000)
+                .setReadTimeoutMs(30_000)
+        }
         val dataSourceFactory = DefaultDataSource.Factory(context, httpFactory)
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 15_000,
+                /* maxBufferMs = */ 50_000,
+                /* bufferForPlaybackMs = */ 750,
+                /* bufferForPlaybackAfterRebufferMs = */ 1_500,
+            )
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
         val audioAttrs = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
@@ -198,6 +217,7 @@ fun WatchPlayerScreen(
                 .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
                 .setEnableDecoderFallback(true),
         )
+            .setLoadControl(loadControl)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .setAudioAttributes(audioAttrs, true)
             .setHandleAudioBecomingNoisy(true)

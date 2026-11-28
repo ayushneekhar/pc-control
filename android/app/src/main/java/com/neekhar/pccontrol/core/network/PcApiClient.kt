@@ -106,6 +106,22 @@ class PcApiClient(
         .retryOnConnectionFailure(true)
         .build()
 
+    private val mediaStreamingOkHttpClient: OkHttpClient by lazy {
+        this.okHttpClient.newBuilder()
+            .callTimeout(0, TimeUnit.MILLISECONDS)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+    }
+
+    /**
+     * OkHttpClient derived from [okHttpClient] so ExoPlayer media streams share the warm
+     * HTTP/2 connection pool and dispatcher without an overall call timeout.
+     */
+    fun mediaStreamingClient(): OkHttpClient = mediaStreamingOkHttpClient
+
     private val transportManager: ApiTransportManager = transportManager ?: ApiTransportManager(
         prefs = prefs,
         probeClient = this.okHttpClient,

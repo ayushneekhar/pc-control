@@ -167,7 +167,9 @@ class JellyfinPlayOnTvTests(unittest.TestCase):
         self.assertEqual(play_req["auth"], 'MediaBrowser Token="test-jf-secret-key"')
 
     def test_tv_tmdb_fallback_sends_viewing(self):
-        self.jf.items_by_query[("Series", "tmdb.1396")] = [{"Id": SERIES_ID, "Name": "Breaking Bad"}]
+        self.jf.items_by_query[("Series", "tmdb.1396")] = [
+            {"Id": SERIES_ID, "Name": "Breaking Bad", "ProviderIds": {"Tmdb": "1396"}},
+        ]
         self.jf.sessions = [
             {
                 "Id": "sess-tv-2",
@@ -196,6 +198,7 @@ class JellyfinPlayOnTvTests(unittest.TestCase):
         self.assertEqual(items_req["query"]["Recursive"], ["true"])
         self.assertEqual(items_req["query"]["IncludeItemTypes"], ["Series"])
         self.assertEqual(items_req["query"]["AnyProviderIdEquals"], ["tmdb.1396"])
+        self.assertEqual(items_req["query"]["Fields"], ["ProviderIds"])
         self.assertEqual(items_req["auth"], 'MediaBrowser Token="test-jf-secret-key"')
 
         view_req = self.jf.requests[-1]
@@ -206,7 +209,9 @@ class JellyfinPlayOnTvTests(unittest.TestCase):
         self.assertEqual(view_req["query"]["itemName"], ["Breaking Bad & Co"])
 
     def test_movie_tmdb_fallback_when_media_url_has_no_id(self):
-        self.jf.items_by_query[("Movie", "tmdb.693134")] = [{"Id": MOVIE_ID}]
+        self.jf.items_by_query[("Movie", "tmdb.693134")] = [
+            {"Id": MOVIE_ID, "ProviderIds": {"Tmdb": "693134"}},
+        ]
         self.jf.sessions = [
             {
                 "Id": "sess-tv-3",
@@ -380,6 +385,24 @@ class JellyfinPlayOnTvTests(unittest.TestCase):
         })
         self.assertEqual(code, 400)
         self.assertEqual(body["ok"], False)
+
+    def test_tmdb_lookup_ignores_unrelated_items_when_jellyfin_ignores_filter(self):
+        # Simulate Jellyfin ignoring AnyProviderIdEquals and returning unrelated shows
+        self.jf.items_by_query[("Series", "tmdb.60573")] = [
+            {"Id": SERIES_ID, "Name": "Insomniacs After School", "ProviderIds": {"Tmdb": "155440"}},
+            {"Id": MOVIE_ID, "Name": "No ProviderIds Show"},
+        ]
+        self.assertIsNone(pcapi._jellyfin_lookup_item_by_tmdb("test-jf-secret-key", 60573, "tv"))
+
+        # When the requested item appears later in the unfiltered list, return only the matching item
+        self.jf.items_by_query[("Movie", "tmdb.693134")] = [
+            {"Id": SERIES_ID, "Name": "Wrong Movie", "ProviderIds": {"Tmdb": "999999"}},
+            {"Id": MOVIE_ID, "Name": "Dune: Part Two", "ProviderIds": {"tmdb": "693134"}},
+        ]
+        self.assertEqual(
+            pcapi._jellyfin_lookup_item_by_tmdb("test-jf-secret-key", 693134, "movie"),
+            MOVIE_ID,
+        )
 
 
 if __name__ == "__main__":

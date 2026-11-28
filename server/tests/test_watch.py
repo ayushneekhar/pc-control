@@ -1076,6 +1076,68 @@ class WatchEndpointsTests(unittest.TestCase):
         self.assertEqual(ud_reqs_after[-1].get("Played"), True)
         self.assertEqual(ud_reqs_after[-1].get("PlaybackPositionTicks"), 0)
 
+    def test_episodes_ignores_unmatched_jellyfin_items_when_filter_ignored(self):
+        # Silicon Valley (tmdbId=60573) is NOT in the Jellyfin library.
+        # Simulate Jellyfin ignoring AnyProviderIdEquals on /Items and returning all series.
+        self.seerr_srv.routes[("GET", "/api/v1/tv/60573/season/1")] = (200, {
+            "name": "Season 1",
+            "episodes": [
+                {"episodeNumber": 1, "name": "Minimum Viable Product", "overview": "Pilot", "airDate": "2014-04-06"},
+                {"episodeNumber": 2, "name": "The Cap Table", "overview": "Ep 2", "airDate": "2014-04-13"},
+            ],
+        })
+        self.jf_srv.routes[("GET", "/Items")] = (200, {
+            "Items": [
+                {"Id": SERIES_JF_ID, "Name": "Insomniacs After School", "ProviderIds": {"Tmdb": "155440"}},
+                {"Id": SERIES2_JF_ID, "Name": "Slow Horses", "ProviderIds": {"Tmdb": "95480"}},
+            ],
+        })
+
+        code, res = self.service.episodes(60573, 1)
+        self.assertEqual(code, 200)
+        self.assertIsNone(res["seriesJellyfinId"])
+        self.assertEqual(res["availableCount"], 0)
+        self.assertEqual(res["totalCount"], 2)
+        for ep in res["episodes"]:
+            self.assertFalse(ep["available"])
+            self.assertFalse(ep["played"])
+            self.assertIsNone(ep["jellyfinItemId"])
+
+        items_reqs = [
+            qs for m, p, qs, _h, _b in self.jf_srv.requests
+            if m == "GET" and p == "/Items"
+        ]
+        self.assertTrue(items_reqs)
+        self.assertEqual(items_reqs[-1].get("Fields"), ["ProviderIds"])
+
+    def test_resolve_playable_item_id_ignores_unmatched_jellyfin_items(self):
+        # Unrequested TV show and movie are not in the library; Jellyfin returns unrelated items.
+        self.jf_srv.routes[("GET", "/Items")] = (200, {
+            "Items": [
+                {"Id": SERIES_JF_ID, "Name": "Insomniacs After School", "ProviderIds": {"Tmdb": "155440"}},
+                {"Id": MOVIE_JF_ID, "Name": "Once Upon a Time", "ProviderIds": {"Tmdb": "466272"}},
+            ],
+        })
+
+        self.assertIsNone(
+            self.service._resolve_playable_item_id(USER_AYUSH_ID, tmdb_id=60573, media_type="tv", season=1, episode=1)
+        )
+        self.assertIsNone(
+            self.service._resolve_playable_item_id(USER_AYUSH_ID, tmdb_id=999999, media_type="movie")
+        )
+
+        # When the matching movie appears after an unrelated item (with lowercase tmdb key), it resolves cleanly.
+        self.jf_srv.routes[("GET", "/Items")] = (200, {
+            "Items": [
+                {"Id": MOVIE_JF_ID, "Name": "Wrong Movie", "ProviderIds": {"Tmdb": "466272"}},
+                {"Id": MOVIE2_JF_ID, "Name": "Target Movie", "ProviderIds": {"tmdb": "888888"}},
+            ],
+        })
+        self.assertEqual(
+            self.service._resolve_playable_item_id(USER_AYUSH_ID, tmdb_id=888888, media_type="movie"),
+            MOVIE2_JF_ID,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

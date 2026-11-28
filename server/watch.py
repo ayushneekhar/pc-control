@@ -230,6 +230,31 @@ def _parse_provider_tmdb(provider_ids):
     return None
 
 
+def _match_item_by_tmdb(items, tmdb_id):
+    """Return the first Jellyfin item whose ProviderIds TMDB entry matches tmdb_id.
+
+    Jellyfin can ignore ``AnyProviderIdEquals`` on ``/Items`` and return every item
+    in the library, so callers must request ``Fields=ProviderIds`` and verify the
+    returned item's ``ProviderIds`` matches ``str(tmdb_id)``.
+    """
+    if not isinstance(items, list):
+        return None
+    target = str(tmdb_id).strip()
+    if not target:
+        return None
+    for item in items:
+        if not isinstance(item, dict) or not item.get("Id"):
+            continue
+        provider_ids = item.get("ProviderIds")
+        if not isinstance(provider_ids, dict):
+            continue
+        for k, v in provider_ids.items():
+            if isinstance(k, str) and k.lower() == "tmdb" and v is not None:
+                if str(v).strip() == target:
+                    return item
+    return None
+
+
 def _parse_timeleft_seconds(raw):
     """Parse Radarr/Sonarr timeleft like '00:48:20' or '1.02:15:00' into integer seconds."""
     if not raw or not isinstance(raw, str):
@@ -1571,11 +1596,13 @@ class WatchService:
                     "Recursive": "true",
                     "IncludeItemTypes": "Series",
                     "AnyProviderIdEquals": f"tmdb.{tmdb_id}",
+                    "Fields": "ProviderIds",
                 })
                 sdata = self._jf_get(f"/Items?{qs_s}", timeout=6)
                 sitems = sdata.get("Items") if isinstance(sdata, dict) else []
-                if isinstance(sitems, list) and sitems and sitems[0].get("Id"):
-                    series_id = str(sitems[0]["Id"])
+                matched = _match_item_by_tmdb(sitems, tmdb_id)
+                if matched:
+                    series_id = str(matched["Id"])
             if not series_id:
                 return None, []
             qs_e = urllib.parse.urlencode({
@@ -1749,11 +1776,13 @@ class WatchService:
                 "Recursive": "true",
                 "IncludeItemTypes": include_type,
                 "AnyProviderIdEquals": f"tmdb.{tid}",
+                "Fields": "ProviderIds",
             })
             data = self._jf_get(f"/Items?{qs}", timeout=6)
             items = data.get("Items") if isinstance(data, dict) else []
-            if isinstance(items, list) and items and items[0].get("Id"):
-                jf_id = normalize_jf_id(items[0]["Id"])
+            matched = _match_item_by_tmdb(items, tid)
+            if matched:
+                jf_id = normalize_jf_id(matched["Id"])
 
         if not jf_id:
             return None

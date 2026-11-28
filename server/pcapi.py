@@ -4248,6 +4248,7 @@ def _jellyfin_lookup_item_by_tmdb(key, tmdb_id, media_type):
         "Recursive": "true",
         "IncludeItemTypes": include_type,
         "AnyProviderIdEquals": f"tmdb.{tmdb_id}",
+        "Fields": "ProviderIds",
     })
     req = urllib.request.Request(
         f"{JELLYFIN_URL}/Items?{qs}",
@@ -4256,10 +4257,9 @@ def _jellyfin_lookup_item_by_tmdb(key, tmdb_id, media_type):
     with urllib.request.urlopen(req, timeout=10) as r:
         data = json.loads(r.read() or b"{}")
     items = data.get("Items") if isinstance(data, dict) else None
-    if isinstance(items, list):
-        for item in items:
-            if isinstance(item, dict) and item.get("Id"):
-                return str(item["Id"])
+    matched = watch_mod._match_item_by_tmdb(items, tmdb_id)
+    if matched:
+        return str(matched["Id"])
     return None
 
 

@@ -70,7 +70,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 _SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
-import bazarr_trigger as bazarr_mod  # noqa: E402
 import chat as chat_mod  # noqa: E402
 import link_preview as link_preview_mod  # noqa: E402
 import watch as watch_mod  # noqa: E402
@@ -927,7 +926,6 @@ def map_hook(source, p):
 
 NOTIFY = None
 WATCHER = None
-BAZARR = None
 
 LOWSPACE = os.environ.get("PCAPI_LOWSPACE", os.path.join(HOME, "tools", "localagent", "lowspace.py"))
 
@@ -6825,9 +6823,7 @@ class H(BaseHTTPRequestHandler):
             NOTIFY.live_kick(source)
             space_check(source, p)
         if source in ("radarr", "sonarr") and p.get("eventType") == "Download":
-            if BAZARR is not None:
-                BAZARR.trigger(source)
-            return self.send_json(200, {"ok": True, "bazarr": BAZARR is not None})
+            return self.send_json(200, {"ok": True, "ignored": True})
         if not n: return self.send_json(200, {"ok": True, "ignored": True})
         img = NOTIFY.fetch_poster(n["image_url"]) if n.get("image_url") else None
         return self.send_json(*NOTIFY.send(n["category"], n["title"], n["body"], None, img, n.get("link")))
@@ -6999,12 +6995,11 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER, VPN, USAGE_ALERTS, KEYRING, CHAT, BAZARR
+    global HUB, PUSH, NOTIFY, DOWNLOADS, WATCHER, VPN, USAGE_ALERTS, KEYRING, CHAT
     PUSH = Push()
     NOTIFY = Notify(PUSH)
     CHAT = chat_mod.ChatManager(notify=NOTIFY)
     DOWNLOADS = Downloads()
-    BAZARR = bazarr_mod.BazarrTrigger()
     VPN = VpnManager(NOTIFY, qbt=DOWNLOADS).start()
     USAGE_ALERTS = UsageAlertWatcher(NOTIFY, AGENT_USAGE, AGENT_SETTINGS)
     AGENT_USAGE.on_update = USAGE_ALERTS.evaluate

@@ -41,6 +41,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Audiotrack
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Check
@@ -58,7 +59,6 @@ import androidx.compose.material.icons.rounded.Replay10
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Subtitles
-import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.CircularProgressIndicator
@@ -1294,7 +1294,7 @@ private fun PlayerGesturePill(
 ) {
     val icon = when (overlay.kind) {
         GestureOverlayKind.BRIGHTNESS -> Icons.Rounded.WbSunny
-        GestureOverlayKind.VOLUME -> Icons.Rounded.VolumeUp
+        GestureOverlayKind.VOLUME -> Icons.AutoMirrored.Rounded.VolumeUp
         GestureOverlayKind.SEEK_BACK -> Icons.Rounded.Replay10
         GestureOverlayKind.SEEK_FORWARD -> Icons.Rounded.Forward10
     }

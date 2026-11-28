@@ -159,6 +159,7 @@ object WatchOfflineHelpers {
         val cleaned = raw
             .replace(Regex("""[\\/:*?"<>|\u0000-\u001F]+"""), " ")
             .replace(Regex("""\s+"""), " ")
+            .replace(Regex("""\s+\."""), ".")
             .trim()
             .trim('.')
         return cleaned.ifEmpty { fallback }.take(160)

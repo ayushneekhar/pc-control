@@ -165,6 +165,36 @@ class ApiTransportManager(
         }
     }
 
+    /**
+     * Re-probes Tailscale when VPN is active and transport is still on [ApiTransport.CLOUDFLARE],
+     * without resetting an already-promoted [ApiTransport.TAILSCALE] session.
+     */
+    fun reprobeIfVpnActive() {
+        val snap = prefs.current.value
+        if (!snap.isPublicApiConfigured) {
+            _activeTransport.value = ApiTransport.TAILSCALE
+            return
+        }
+        if (_activeTransport.value == ApiTransport.TAILSCALE) return
+        val vpn = isVpnActive()
+        lastVpnActive = vpn
+        if (vpn) {
+            launchTailscaleProbe(snap.serverUrl)
+        }
+    }
+
+    /**
+     * Opportunistically promotes transport to [ApiTransport.TAILSCALE] after a direct
+     * Tailscale-only request succeeds (e.g., `/pc/api/watch/playback-info`).
+     */
+    fun markTailscaleReachable() {
+        val snap = prefs.current.value
+        if (!snap.isPublicApiConfigured) return
+        if (_activeTransport.value != ApiTransport.TAILSCALE) {
+            _activeTransport.value = ApiTransport.TAILSCALE
+        }
+    }
+
     fun close() {
         cancelProbe()
         val cm = connectivityManager
@@ -274,7 +304,7 @@ class ApiTransportManager(
     )
 
     companion object {
-        const val TAILSCALE_PROBE_TIMEOUT_MS = 500L
+        const val TAILSCALE_PROBE_TIMEOUT_MS = 2_000L
         const val TAILSCALE_MAGIC_DNS = "100.100.100.100"
 
         internal fun initialTransport(snapshot: AppPrefsSnapshot): ApiTransport =

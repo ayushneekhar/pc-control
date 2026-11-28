@@ -57,6 +57,8 @@ class WatchPlayerRepository(
         mediaType: String,
         title: String,
         positionTicks: Long,
+        sessionId: String? = null,
+        deviceName: String? = null,
     ): ApiResult<PlayOnTvResponse> {
         val normType = if (mediaType.equals("episode", ignoreCase = true)) "episode" else "movie"
         return api.postJson<PlayOnTvRequestBody, PlayOnTvResponse>(
@@ -66,6 +68,8 @@ class WatchPlayerRepository(
                 mediaType = normType,
                 title = title,
                 startPositionTicks = positionTicks.takeIf { it > 0L },
+                sessionId = sessionId?.takeIf { it.isNotBlank() },
+                deviceName = deviceName?.takeIf { it.isNotBlank() },
             ),
             timeoutMs = 12_000L,
         )

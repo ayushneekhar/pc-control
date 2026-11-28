@@ -40,10 +40,28 @@ data class TvSubtitleTrack(
 )
 
 @Serializable
+data class TvDeviceInfo(
+    val sessionId: String = "",
+    val deviceName: String = "",
+    val client: String? = null,
+    val userName: String? = null,
+    val isTv: Boolean = false,
+    val isPlaying: Boolean = false,
+    val nowPlayingTitle: String? = null,
+)
+
+@Serializable
+data class TvDevicesResponse(
+    val ok: Boolean = false,
+    val devices: List<TvDeviceInfo> = emptyList(),
+    val defaultDevice: String? = null,
+)
+
+@Serializable
 data class TvSessionResponse(
     val connected: Boolean = false,
     val sessionId: String? = null,
-    val deviceName: String = "Lumio Arc 7",
+    val deviceName: String = "TV",
     val client: String? = null,
     val appVersion: String? = null,
     val isPlaying: Boolean = false,
@@ -66,6 +84,7 @@ data class TvSessionResponse(
 @Serializable
 data class TvCommandRequest(
     val sessionId: String? = null,
+    val deviceName: String? = null,
     val command: String,
     val seekPositionTicks: Long? = null,
     val positionSeconds: Double? = null,

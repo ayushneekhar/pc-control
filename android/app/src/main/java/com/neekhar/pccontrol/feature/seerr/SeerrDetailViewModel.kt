@@ -134,10 +134,6 @@ class SeerrDetailViewModel(
         val mgr = downloadManager ?: return
         val id = _uiState.value.tmdbId
         if (id <= 0 || _uiState.value.enqueuingDownloadKey != null) return
-        if (!isTailscaleActive()) {
-            showTailscaleRequiredNotice()
-            return
-        }
         viewModelScope.launch {
             _uiState.update { it.copy(enqueuingDownloadKey = "movie:$id", error = null) }
             try {
@@ -156,10 +152,6 @@ class SeerrDetailViewModel(
         val mgr = downloadManager ?: return
         val jfId = episode.jellyfinItemId?.takeIf { it.isNotBlank() } ?: return
         if (_uiState.value.enqueuingDownloadKey != null) return
-        if (!isTailscaleActive()) {
-            showTailscaleRequiredNotice()
-            return
-        }
         viewModelScope.launch {
             _uiState.update { it.copy(enqueuingDownloadKey = jfId, error = null) }
             try {
@@ -358,7 +350,28 @@ class SeerrDetailViewModel(
         }
     }
 
-    fun playOnTv() {
+    fun refreshQuietly() {
+        val id = _uiState.value.tmdbId
+        if (id <= 0) return
+        viewModelScope.launch {
+            fetchAllInternal(id, forceEpisodes = true)
+        }
+    }
+
+    fun showPlayOnTvError(message: String) {
+        playOnTvClearJob?.cancel()
+        _uiState.update {
+            it.copy(
+                playingOnTv = false,
+                playingEpisodeId = null,
+                playOnTvStatus = null,
+                playOnTvError = message,
+                playOnTvShowRemoteAction = false,
+            )
+        }
+    }
+
+    fun playOnTv(sessionId: String? = null, deviceName: String? = null) {
         val current = _uiState.value.item ?: return
         if (_uiState.value.playingOnTv) return
         playOnTvClearJob?.cancel()
@@ -375,12 +388,23 @@ class SeerrDetailViewModel(
                 tmdbId = current.id,
                 mediaType = normalizedType,
                 title = current.title,
+                startPositionTicks = if (!current.isTv && current.resumePositionTicks > 0L) {
+                    current.resumePositionTicks
+                } else {
+                    null
+                },
+                sessionId = sessionId,
+                deviceName = deviceName,
             )
             handlePlayOnTvResponse(res)
         }
     }
 
-    fun playEpisodeOnTv(episode: WatchEpisode) {
+    fun playEpisodeOnTv(
+        episode: WatchEpisode,
+        sessionId: String? = null,
+        deviceName: String? = null,
+    ) {
         val jfId = episode.jellyfinItemId?.takeIf { it.isNotBlank() } ?: return
         if (_uiState.value.playingEpisodeId != null || _uiState.value.playingOnTv) return
         playOnTvClearJob?.cancel()
@@ -398,6 +422,8 @@ class SeerrDetailViewModel(
                 title = episode.name,
                 jellyfinItemId = jfId,
                 startPositionTicks = episode.positionTicks.takeIf { it > 0L && !episode.played },
+                sessionId = sessionId,
+                deviceName = deviceName,
             )
             _uiState.update { it.copy(playingEpisodeId = null) }
             handlePlayOnTvResponse(res)

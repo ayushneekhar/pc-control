@@ -131,6 +131,9 @@ class SeerrRepository(
             hero = prev.hero?.let { h ->
                 h.copy(inWatchlist = SeerrHelpers.watchlistKey(h.mediaType, h.id) in idSet)
             },
+            heroItems = prev.heroItems.map { h ->
+                h.copy(inWatchlist = SeerrHelpers.watchlistKey(h.mediaType, h.id) in idSet)
+            },
         )
         saveCachedWatchHome(updated)
     }
@@ -219,6 +222,8 @@ class SeerrRepository(
         title: String? = null,
         jellyfinItemId: String? = null,
         startPositionTicks: Long? = null,
+        sessionId: String? = null,
+        deviceName: String? = null,
     ): ApiResult<PlayOnTvResponse> {
         val type = when (mediaType.trim().lowercase()) {
             "episode" -> "episode"
@@ -234,6 +239,8 @@ class SeerrRepository(
                 title = title?.takeIf { it.isNotBlank() },
                 jellyfinItemId = jellyfinItemId?.takeIf { it.isNotBlank() },
                 startPositionTicks = startPositionTicks?.takeIf { it > 0L },
+                sessionId = sessionId?.takeIf { it.isNotBlank() },
+                deviceName = deviceName?.takeIf { it.isNotBlank() },
             ),
         )
     }

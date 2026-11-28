@@ -410,4 +410,16 @@ class PcApiClientTest {
             scope.cancel()
         }
     }
+
+    @Test
+    fun watchTailscaleOnlyPaths_detectedAccurately() {
+        assertTrue(PcApiClient.isWatchTailscaleOnlyPath("/pc/api/watch/playback-info"))
+        assertTrue(PcApiClient.isWatchTailscaleOnlyPath("/pc/api/watch/download-info?tmdbId=42"))
+        assertTrue(PcApiClient.isWatchTailscaleOnlyPath("/pc/api/watch/stream/abc/master.m3u8"))
+        assertTrue(PcApiClient.isWatchTailscaleOnlyPath("/pc/api/watch/download/abc"))
+        assertTrue(PcApiClient.isWatchTailscaleOnlyPath("/pc/api/watch/subtitles/abc/ms/1.vtt"))
+        assertFalse(PcApiClient.isWatchTailscaleOnlyPath("/pc/api/watch/home"))
+        assertFalse(PcApiClient.isWatchTailscaleOnlyPath("/pc/api/watch/progress"))
+        assertFalse(PcApiClient.isWatchTailscaleOnlyPath("/pc/api/jellyfin/tv/devices"))
+    }
 }

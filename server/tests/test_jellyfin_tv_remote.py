@@ -548,6 +548,88 @@ class JellyfinTvRemoteTests(unittest.TestCase):
                 self.assertIn("max-age=", r.headers.get("Cache-Control") or "")
                 self.assertEqual(r.read(), FAKE_JPEG)
 
+    def test_tv_devices_lists_filters_and_sorts_sessions(self):
+        self.jf.sessions = [
+            {
+                "Id": "sess-uncontrollable",
+                "DeviceName": "Ghost TV",
+                "Client": "Android TV",
+                "SupportsRemoteControl": False,
+            },
+            {
+                "Id": "sess-web",
+                "DeviceName": "Chrome Desktop",
+                "Client": "Jellyfin Web",
+                "UserName": "ayush",
+                "SupportsRemoteControl": True,
+            },
+            {
+                "Id": "sess-appletv",
+                "DeviceName": "Living Room Apple TV",
+                "Client": "Infuse Apple TV",
+                "UserName": "ayush",
+                "SupportsRemoteControl": True,
+                "NowPlayingItem": {"Name": "The Matrix", "Type": "Movie"},
+            },
+            {
+                "Id": "sess-lumio",
+                "DeviceName": "Lumio Arc 7",
+                "Client": "Android TV",
+                "UserName": "ayush",
+                "SupportsRemoteControl": True,
+            },
+            {
+                "Id": "sess-alpha-tv",
+                "DeviceName": "Alpha Shield",
+                "Client": "Android TV",
+                "UserName": "ayush",
+                "SupportsRemoteControl": True,
+            },
+        ]
+
+        code, body = pcapi.route_round4_get("/api/jellyfin/tv/devices", {})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["defaultDevice"], "Lumio Arc 7")
+        devices = body["devices"]
+        # Uncontrollable session must be excluded
+        self.assertEqual([d["sessionId"] for d in devices], [
+            "sess-appletv",   # TV + playing
+            "sess-lumio",     # TV + default device
+            "sess-alpha-tv",  # TV + alphabetical
+            "sess-web",       # non-TV last
+        ])
+        self.assertTrue(devices[0]["isTv"])
+        self.assertTrue(devices[0]["isPlaying"])
+        self.assertEqual(devices[0]["nowPlayingTitle"], "The Matrix")
+        self.assertFalse(devices[3]["isTv"])
+
+    def test_tv_session_targets_explicit_session_id(self):
+        self.jf.sessions = [
+            {
+                "Id": "sess-lumio",
+                "DeviceName": "Lumio Arc 7",
+                "Client": "Android TV",
+                "SupportsRemoteControl": True,
+            },
+            {
+                "Id": "sess-bedroom",
+                "DeviceName": "Bedroom Fire TV",
+                "Client": "Jellyfin Fire TV",
+                "SupportsRemoteControl": True,
+                "NowPlayingItem": {"Id": MOVIE_ID, "Name": "Arrival", "Type": "Movie"},
+                "PlayState": {"IsPaused": False, "PositionTicks": 100_000_000},
+            },
+        ]
+
+        code, body = pcapi.route_round4_get("/api/jellyfin/tv/session", {"sessionId": ["sess-bedroom"]})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["connected"])
+        self.assertEqual(body["sessionId"], "sess-bedroom")
+        self.assertEqual(body["deviceName"], "Bedroom Fire TV")
+        self.assertTrue(body["isPlaying"])
+        self.assertEqual(body["nowPlaying"]["name"], "Arrival")
+
 
 if __name__ == "__main__":
     unittest.main()

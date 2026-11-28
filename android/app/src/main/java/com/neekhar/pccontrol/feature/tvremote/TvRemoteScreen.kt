@@ -115,12 +115,30 @@ fun TvRemoteScreen(
     val type = LocalPcType.current
     val pullState = rememberPullToRefreshState()
     var activePicker by remember { mutableStateOf<ActiveTrackPicker?>(null) }
+    var showDevicePicker by remember { mutableStateOf(false) }
 
     LifecycleResumeEffect(viewModel) {
         viewModel.setFullScreenActive(true)
+        viewModel.refreshDevices()
         onPauseOrDispose {
             viewModel.setFullScreenActive(false)
         }
+    }
+
+    if (showDevicePicker) {
+        TvDevicePickerSheet(
+            devices = state.availableDevices,
+            loading = state.loadingDevices,
+            selectedSessionId = state.selectedSessionId,
+            selectedDeviceName = state.selectedDeviceName,
+            onSelect = { device ->
+                showDevicePicker = false
+                viewModel.selectDevice(device)
+            },
+            onRefresh = { viewModel.refreshDevices() },
+            onDismiss = { showDevicePicker = false },
+            title = "Switch TV",
+        )
     }
 
     val (statusText, statusTone) = when {
@@ -140,12 +158,47 @@ fun TvRemoteScreen(
         onBack = onBack,
         collapsing = false,
         actions = {
-            PcIconButton(
-                icon = Icons.Rounded.Refresh,
-                contentDescription = "Refresh TV session",
-                onClick = { viewModel.refreshNow(userInitiated = true) },
-                tint = colors.textDim,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(colors.surfaceRaised)
+                        .border(0.5.dp, colors.hairline, RoundedCornerShape(999.dp))
+                        .clickable {
+                            viewModel.refreshDevices()
+                            showDevicePicker = true
+                        }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Tv,
+                        contentDescription = "Switch TV",
+                        tint = if (state.connected) colors.accent else colors.textDim,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(
+                        text = if (state.availableDevices.size > 1) {
+                            "${state.availableDevices.size} TVs"
+                        } else {
+                            "Devices"
+                        },
+                        color = colors.text,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+                PcIconButton(
+                    icon = Icons.Rounded.Refresh,
+                    contentDescription = "Refresh TV session",
+                    onClick = { viewModel.refreshNow(userInitiated = true) },
+                    tint = colors.textDim,
+                )
+            }
         },
     ) { innerPadding ->
         val topPad = innerPadding.calculateTopPadding()
@@ -218,14 +271,25 @@ fun TvRemoteScreen(
                                 PcEmptyState(
                                     icon = Icons.Rounded.Tv,
                                     title = "${state.deviceName} isn't connected",
-                                    body = "Open Jellyfin on the projector to control playback from here.",
+                                    body = "Open Jellyfin on any TV to control playback from here.",
                                     action = {
-                                        PcButton(
-                                            label = "Retry",
-                                            onClick = { viewModel.refreshNow(userInitiated = true) },
-                                            variant = PcButtonVariant.Subtle,
-                                            icon = Icons.Rounded.Refresh,
-                                        )
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            PcButton(
+                                                label = "Switch TV",
+                                                onClick = {
+                                                    viewModel.refreshDevices()
+                                                    showDevicePicker = true
+                                                },
+                                                variant = PcButtonVariant.Subtle,
+                                                icon = Icons.Rounded.Tv,
+                                            )
+                                            PcButton(
+                                                label = "Retry",
+                                                onClick = { viewModel.refreshNow(userInitiated = true) },
+                                                variant = PcButtonVariant.Subtle,
+                                                icon = Icons.Rounded.Refresh,
+                                            )
+                                        }
                                     },
                                 )
                             }
@@ -237,10 +301,10 @@ fun TvRemoteScreen(
                             PcEmptyState(
                                 icon = Icons.Rounded.Tv,
                                 title = "Nothing playing on ${state.deviceName}",
-                                body = "Pick something from Seerr to start watching on the projector.",
+                                body = "Pick something from Watch to start playing on your TV.",
                                 action = {
                                     PcButton(
-                                        label = "Browse Seerr",
+                                        label = "Browse Watch",
                                         onClick = onOpenSeerr,
                                         variant = PcButtonVariant.Primary,
                                         icon = Icons.Rounded.Movie,

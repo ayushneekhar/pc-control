@@ -5,6 +5,7 @@ import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
+import com.neekhar.pccontrol.core.storage.AppPrefs
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,6 +18,10 @@ import kotlinx.coroutines.launch
 @Immutable
 data class TvRemoteUiState(
     val session: TvSessionResponse? = null,
+    val availableDevices: List<TvDeviceInfo> = emptyList(),
+    val loadingDevices: Boolean = false,
+    val selectedSessionId: String? = null,
+    val selectedDeviceName: String? = null,
     val loaded: Boolean = false,
     val refreshing: Boolean = false,
     val error: String? = null,
@@ -37,7 +42,9 @@ data class TvRemoteUiState(
         get() = session?.isPaused == true
 
     val deviceName: String
-        get() = session?.deviceName?.takeIf { it.isNotBlank() } ?: "Lumio Arc 7"
+        get() = session?.deviceName?.takeIf { it.isNotBlank() }
+            ?: selectedDeviceName?.takeIf { it.isNotBlank() }
+            ?: "TV"
 
     val connectedDeviceName: String?
         get() = if (session?.connected == true) {
@@ -55,9 +62,14 @@ data class TvRemoteUiState(
 
 class TvRemoteViewModel(
     private val repository: TvRemoteRepository,
+    private val prefs: AppPrefs? = null,
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(TvRemoteUiState())
+    private val _uiState = MutableStateFlow(
+        TvRemoteUiState(
+            selectedDeviceName = prefs?.current?.value?.lastTvDeviceName,
+        ),
+    )
     val uiState: StateFlow<TvRemoteUiState> = _uiState.asStateFlow()
 
     private var fullScreenActive: Boolean = false
@@ -89,11 +101,63 @@ class TvRemoteViewModel(
             if (userInitiated) {
                 _uiState.update { it.copy(refreshing = true, commandError = null) }
             }
+            fetchDevicesInternal()
             fetchSessionInternal()
             if (userInitiated) {
                 _uiState.update { it.copy(refreshing = false) }
             }
         }
+    }
+
+    fun refreshDevices() {
+        viewModelScope.launch {
+            fetchDevicesInternal()
+        }
+    }
+
+    suspend fun fetchActiveDevices(): ApiResult<List<TvDeviceInfo>> {
+        _uiState.update { it.copy(loadingDevices = true) }
+        return when (val res = repository.getDevices()) {
+            is ApiResult.Success -> {
+                val devices = res.data.devices
+                _uiState.update { cur ->
+                    val currentSid = cur.selectedSessionId
+                    val stillOnline = currentSid != null && devices.any { it.sessionId == currentSid }
+                    cur.copy(
+                        availableDevices = devices,
+                        loadingDevices = false,
+                        selectedSessionId = if (stillOnline) currentSid else cur.selectedSessionId,
+                    )
+                }
+                ApiResult.Success(devices, res.statusCode)
+            }
+            is ApiResult.Error -> {
+                _uiState.update { it.copy(loadingDevices = false) }
+                res
+            }
+        }
+    }
+
+    fun selectDevice(device: TvDeviceInfo) {
+        val cleanName = device.deviceName.trim().takeIf { it.isNotEmpty() }
+        val cleanSid = device.sessionId.trim().takeIf { it.isNotEmpty() }
+        _uiState.update {
+            it.copy(
+                selectedSessionId = cleanSid,
+                selectedDeviceName = cleanName ?: it.selectedDeviceName,
+                commandError = null,
+            )
+        }
+        viewModelScope.launch {
+            if (cleanName != null) {
+                prefs?.setLastTvDeviceName(cleanName)
+            }
+            fetchSessionInternal()
+        }
+    }
+
+    private suspend fun fetchDevicesInternal() {
+        fetchActiveDevices()
     }
 
     fun notifyPlaybackStarted() {
@@ -259,9 +323,17 @@ class TvRemoteViewModel(
         onSuccess: ((TvCommandResponse) -> Unit)? = null,
     ) {
         clearCommandErrorJob?.cancel()
+        val effectiveReq = if (request.deviceName.isNullOrBlank() && !_uiState.value.selectedDeviceName.isNullOrBlank()) {
+            request.copy(
+                sessionId = request.sessionId ?: _uiState.value.selectedSessionId,
+                deviceName = _uiState.value.selectedDeviceName,
+            )
+        } else {
+            request.copy(sessionId = request.sessionId ?: _uiState.value.selectedSessionId)
+        }
         viewModelScope.launch {
             _uiState.update { it.copy(commandBusy = true, commandError = null) }
-            when (val res = repository.sendCommand(request)) {
+            when (val res = repository.sendCommand(effectiveReq)) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(commandBusy = false, commandError = null) }
                     onSuccess?.invoke(res.data)
@@ -345,7 +417,10 @@ class TvRemoteViewModel(
     }
 
     private suspend fun fetchSessionInternal() {
-        when (val res = repository.getSession()) {
+        val targetState = _uiState.value
+        val reqSid = targetState.selectedSessionId?.takeIf { it.isNotBlank() }
+        val reqName = targetState.selectedDeviceName?.takeIf { it.isNotBlank() }
+        when (val res = repository.getSession(sessionId = reqSid, deviceName = reqName)) {
             is ApiResult.Success -> {
                 val data = res.data
                 val nowMs = SystemClock.elapsedRealtime()
@@ -358,6 +433,11 @@ class TvRemoteViewModel(
                     }
                     cur.copy(
                         session = data,
+                        selectedSessionId = if (data.connected && !data.sessionId.isNullOrBlank()) {
+                            data.sessionId
+                        } else {
+                            cur.selectedSessionId
+                        },
                         loaded = true,
                         error = null,
                         interpolatedPositionSeconds = nextPos,

@@ -124,6 +124,8 @@ import com.neekhar.pccontrol.MainActivity
 import com.neekhar.pccontrol.core.network.PcApiClient
 import com.neekhar.pccontrol.core.theme.DarkPcColors
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
+import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
+import com.neekhar.pccontrol.feature.tvremote.rememberSmartCastController
 import com.neekhar.pccontrol.core.ui.PcButton
 import com.neekhar.pccontrol.core.ui.PcButtonVariant
 import kotlinx.coroutines.delay
@@ -150,6 +152,7 @@ fun WatchPlayerScreen(
     isInPictureInPictureMode: Boolean,
     onBack: () -> Unit,
     onHandedOffToTv: () -> Unit,
+    tvRemoteViewModel: TvRemoteViewModel? = null,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -158,6 +161,10 @@ fun WatchPlayerScreen(
     val latestOnBack by rememberUpdatedState(onBack)
     val latestOnHandedOff by rememberUpdatedState(onHandedOffToTv)
     val latestInPip by rememberUpdatedState(isInPictureInPictureMode)
+    val smartCast = rememberSmartCastController(
+        tvRemoteViewModel = tvRemoteViewModel,
+        onNoDevices = { msg -> viewModel.showCastMessage(msg) },
+    )
 
     var interactionTick by remember { mutableIntStateOf(0) }
     var isScrubbing by remember { mutableStateOf(false) }
@@ -235,7 +242,8 @@ fun WatchPlayerScreen(
         }
         exoPlayer.addListener(listener)
         onDispose {
-            viewModel.reportStopSync()
+            val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
+            viewModel.reportStopSync(explicitPositionMs = pos.takeIf { it > 0L })
             exoPlayer.removeListener(listener)
             exoPlayer.release()
         }
@@ -245,8 +253,9 @@ fun WatchPlayerScreen(
     DisposableEffect(lifecycleOwner, exoPlayer) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP && !latestInPip) {
+                val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
                 exoPlayer.pause()
-                viewModel.reportStopSync()
+                viewModel.reportStopSync(explicitPositionMs = pos.takeIf { it > 0L })
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -408,6 +417,7 @@ fun WatchPlayerScreen(
             if (dur > 0L) dur else Long.MAX_VALUE,
         )
         exoPlayer.seekTo(target)
+        viewModel.onUserSeek(target)
         gestureOverlay = GestureOverlayState(
             kind = if (deltaMs < 0) GestureOverlayKind.SEEK_BACK else GestureOverlayKind.SEEK_FORWARD,
             label = if (deltaMs < 0) "-10s" else "+10s",
@@ -766,7 +776,12 @@ fun WatchPlayerScreen(
                                 contentDescription = "Cast to TV",
                                 busy = state.castingToTv,
                                 onClick = {
-                                    viewModel.castToTv()
+                                    smartCast.cast(forcePicker = false) { picked ->
+                                        viewModel.castToTv(
+                                            sessionId = picked?.sessionId,
+                                            deviceName = picked?.deviceName,
+                                        )
+                                    }
                                     bumpHud()
                                 },
                             )
@@ -876,7 +891,9 @@ fun WatchPlayerScreen(
                                 },
                                 onScrubEnd = { posMs ->
                                     isScrubbing = false
-                                    exoPlayer.seekTo(posMs.coerceAtLeast(0L))
+                                    val safe = posMs.coerceAtLeast(0L)
+                                    exoPlayer.seekTo(safe)
+                                    viewModel.onUserSeek(safe)
                                     bumpHud()
                                 },
                                 modifier = Modifier.weight(1f),

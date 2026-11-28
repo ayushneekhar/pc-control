@@ -222,6 +222,12 @@ data class SeerrItem(
     val requests: List<SeerrMediaRequestRef> = emptyList(),
     val seasons: List<SeerrSeason> = emptyList(),
     val collection: SeerrCollectionRef? = null,
+    val resumePositionTicks: Long = 0L,
+    val resumeRuntimeTicks: Long = 0L,
+    val resumeJellyfinItemId: String? = null,
+    val resumeEpisodeLabel: String? = null,
+    val resumeSeasonNumber: Int? = null,
+    val resumeEpisodeNumber: Int? = null,
 ) {
     val isMovie: Boolean get() = mediaType == "movie"
     val isTv: Boolean get() = mediaType == "tv"
@@ -336,12 +342,15 @@ data class PlayOnTvRequestBody(
     val title: String? = null,
     val jellyfinItemId: String? = null,
     val startPositionTicks: Long? = null,
+    val sessionId: String? = null,
+    val deviceName: String? = null,
 )
 
 @Serializable
 data class PlayOnTvResponse(
     val ok: Boolean = false,
     val device: String? = null,
+    val sessionId: String? = null,
     val action: String? = null,
     val itemId: String? = null,
     val code: String? = null,
@@ -386,6 +395,10 @@ data class WatchItem(
     val jellyfinItemId: String? = null,
     val inWatchlist: Boolean = false,
     val genres: List<String> = emptyList(),
+    val positionTicks: Long = 0L,
+    val runtimeTicks: Long = 0L,
+    val resumeEpisodeLabel: String? = null,
+    val resumeJellyfinItemId: String? = null,
 ) {
     val isMovie: Boolean get() = mediaType == "movie"
     val isTv: Boolean get() = mediaType == "tv"
@@ -480,6 +493,7 @@ data class WatchRail(
 @Serializable
 data class WatchHomeResponse(
     val hero: WatchItem? = null,
+    val heroItems: List<WatchItem> = emptyList(),
     val continueWatching: List<WatchContinueItem> = emptyList(),
     val recentlyAdded: List<WatchItem> = emptyList(),
     val downloads: List<WatchDownloadItem> = emptyList(),
@@ -488,7 +502,10 @@ data class WatchHomeResponse(
     val libraryCount: Int = 0,
     val ts: Long = 0L,
     val degraded: List<String> = emptyList(),
-)
+) {
+    val effectiveHeroItems: List<WatchItem>
+        get() = heroItems.ifEmpty { listOfNotNull(hero) }
+}
 
 @Serializable
 data class WatchGenre(

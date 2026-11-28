@@ -152,6 +152,7 @@ class JellyfinPlayOnTvTests(unittest.TestCase):
         self.assertEqual(body, {
             "ok": True,
             "device": "Lumio Arc 7",
+            "sessionId": "sess-tv-1",
             "action": "play",
             "itemId": MOVIE_ID,
         })
@@ -187,6 +188,7 @@ class JellyfinPlayOnTvTests(unittest.TestCase):
         self.assertEqual(body, {
             "ok": True,
             "device": "Lumio Arc 7 Projector",
+            "sessionId": "sess-tv-2",
             "action": "view",
             "itemId": SERIES_ID,
         })
@@ -251,7 +253,7 @@ class JellyfinPlayOnTvTests(unittest.TestCase):
         self.assertEqual(code, 409)
         self.assertEqual(body["ok"], False)
         self.assertEqual(body["code"], "tv_offline")
-        self.assertIn("Lumio Arc 7", body["error"])
+        self.assertIn("No TVs are open in Jellyfin", body["error"])
 
     def test_explicit_device_name_does_not_fallback_to_other_tv(self):
         self.jf.sessions = [
@@ -316,6 +318,7 @@ class JellyfinPlayOnTvTests(unittest.TestCase):
         self.assertEqual(body, {
             "ok": True,
             "device": "Lumio Arc 7",
+            "sessionId": "sess-tv-ep",
             "action": "play",
             "itemId": ep_id,
         })
@@ -326,6 +329,49 @@ class JellyfinPlayOnTvTests(unittest.TestCase):
         self.assertEqual(play_req["query"]["itemIds"], [ep_id])
         self.assertEqual(play_req["query"]["playCommand"], ["PlayNow"])
         self.assertEqual(play_req["query"]["startPositionTicks"], ["1234567890"])
+
+    def test_session_id_targets_exact_device(self):
+        self.jf.sessions = [
+            {
+                "Id": "sess-lumio",
+                "DeviceName": "Lumio Arc 7",
+                "Client": "Android TV",
+                "SupportsRemoteControl": True,
+            },
+            {
+                "Id": "sess-lg-oled",
+                "DeviceName": "LG OLED C3",
+                "Client": "Jellyfin for WebOS",
+                "SupportsRemoteControl": True,
+            },
+        ]
+        code, body = pcapi.jellyfin_play_on_tv({
+            "mediaUrl": f"https://jf.example/web/#/details?id={MOVIE_ID}",
+            "mediaType": "movie",
+            "sessionId": "sess-lg-oled",
+        })
+        self.assertEqual(code, 200)
+        self.assertEqual(body["ok"], True)
+        self.assertEqual(body["device"], "LG OLED C3")
+        self.assertEqual(body["sessionId"], "sess-lg-oled")
+        self.assertEqual(self.jf.requests[-1]["path"], "/Sessions/sess-lg-oled/Playing")
+
+    def test_multi_tv_fallback_picks_non_android_tv_when_default_offline(self):
+        self.jf.sessions = [
+            {
+                "Id": "sess-roku",
+                "DeviceName": "Bedroom Roku",
+                "Client": "Jellyfin Roku",
+                "SupportsRemoteControl": True,
+            },
+        ]
+        code, body = pcapi.jellyfin_play_on_tv({
+            "mediaUrl": f"https://jf.example/web/#/details?id={MOVIE_ID}",
+            "mediaType": "movie",
+        })
+        self.assertEqual(code, 200)
+        self.assertEqual(body["device"], "Bedroom Roku")
+        self.assertEqual(body["sessionId"], "sess-roku")
 
     def test_invalid_jellyfin_item_id_returns_400(self):
         code, body = pcapi.jellyfin_play_on_tv({

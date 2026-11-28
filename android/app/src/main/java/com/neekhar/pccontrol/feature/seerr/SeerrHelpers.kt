@@ -301,6 +301,44 @@ object SeerrHelpers {
         return (pending + processing).coerceAtLeast(pending + grabbing)
     }
 
+    const val RESUME_THRESHOLD_TICKS: Long = 10L * 10_000_000L
+
+    /**
+     * Formats a Jellyfin playback position in ticks (`10_000_000` ticks = 1 sec) as
+     * `M:SS` or `H:MM:SS` when `positionTicks > 10s`, otherwise returns `null`.
+     */
+    fun formatResumeTimestamp(positionTicks: Long): String? {
+        if (positionTicks <= RESUME_THRESHOLD_TICKS) return null
+        val totalSeconds = positionTicks / 10_000_000L
+        val hours = totalSeconds / 3600L
+        val minutes = (totalSeconds % 3600L) / 60L
+        val seconds = totalSeconds % 60L
+        return if (hours > 0L) {
+            String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            String.format(Locale.US, "%d:%02d", minutes, seconds)
+        }
+    }
+
+    /**
+     * Builds the primary Play/Resume button label:
+     * - `Resume from 14:22` (or `Resume S1 · E3 from 14:22` when [episodeLabel] is provided)
+     * - `Play offline` when downloaded and not resuming
+     * - `Play` otherwise
+     */
+    fun formatPlayButtonLabel(
+        resumePositionTicks: Long,
+        isOffline: Boolean = false,
+        episodeLabel: String? = null,
+    ): String {
+        val ts = formatResumeTimestamp(resumePositionTicks)
+        if (ts != null) {
+            val ep = episodeLabel?.trim()?.takeIf { it.isNotEmpty() }
+            return if (ep != null) "Resume $ep from $ts" else "Resume from $ts"
+        }
+        return if (isOffline) "Play offline" else "Play"
+    }
+
     fun defaultEpisodeSeason(seasons: List<SeerrSeason>): Int? {
         if (seasons.isEmpty()) return null
         val regular = seasons.filter { it.seasonNumber > 0 }.sortedBy { it.seasonNumber }

@@ -50,7 +50,7 @@ import kotlin.coroutines.resumeWithException
  * Shared HTTP & SSE client for PC Control.
  *
  * Transport rules:
- * - All `/pc/api/*` requests route through the unified dynamic transport ([ApiTransport.CLOUDFLARE]
+ * - All `/pc/api/...` requests route through the unified dynamic transport ([ApiTransport.CLOUDFLARE]
  *   at `apiUrl` with dual Cloudflare Access + API Bearer auth, or [ApiTransport.TAILSCALE] at
  *   `serverUrl` when promoted via a one-shot 500 ms probe while Tailscale VPN is active).
  * - If a request over [ApiTransport.TAILSCALE] fails with a network/connection error
@@ -134,7 +134,7 @@ class PcApiClient(
     val baseUrl: String
         get() = tailscaleBaseUrl
 
-    /** Active API origin for `/pc/api/*` calls (Cloudflare `apiUrl` or Tailscale `serverUrl`). */
+    /** Active API origin for `/pc/api/...` calls (Cloudflare `apiUrl` or Tailscale `serverUrl`). */
     val apiBaseUrl: String
         get() = resolveApiTarget(prefs.current.value).baseUrl
 

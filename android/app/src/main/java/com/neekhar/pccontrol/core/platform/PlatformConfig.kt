@@ -183,7 +183,7 @@ object PlatformPrefs {
   }
 
   /**
-   * Resolves the active `(baseUrl, scopedAuthHeaders)` for a `/pc/api/*` background call.
+   * Resolves the active `(baseUrl, scopedAuthHeaders)` for a `/pc/api/...` background call.
    * Uses the live `PcApiClient` transport when the app container is active, or falls back to
    * Cloudflare-first persisted credentials on cold wakeups (or Tailscale `serverUrl` if unconfigured).
    */

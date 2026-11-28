@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Active API transport used for `/pc/api/*` requests.
+ * Active API transport used for `/pc/api/...` requests.
  *
  * - [CLOUDFLARE]: Public API via `apiUrl` (`https://api.neekhar.dev`) with Cloudflare Access +
  *   API Bearer dual authentication. Always the immediate initial transport when configured.

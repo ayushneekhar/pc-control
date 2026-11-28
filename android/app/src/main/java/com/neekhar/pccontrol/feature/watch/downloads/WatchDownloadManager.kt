@@ -14,10 +14,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.Serializable
 import okhttp3.Call
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
-import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -61,9 +61,11 @@ class WatchDownloadManager(
         get() = store.items
 
     private val downloadClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -342,151 +344,70 @@ class WatchDownloadManager(
             return
         }
 
-        val reqBuilder = Request.Builder()
-            .url(fullUrl)
-            .get()
-            .header("User-Agent", PcApiClient.USER_AGENT)
-        if (startOffset > 0L) {
-            reqBuilder.header("Range", "bytes=$startOffset-")
-        }
-
-        val call = downloadClient.newCall(reqBuilder.build())
-        activeCalls[id] = call
-
-        try {
-            call.execute().use { resp ->
-                val code = resp.code
-                if (code == 416 && initial.totalBytes > 0L && startOffset >= initial.totalBytes) {
-                    // Already completely downloaded!
-                    finalizeCompletedItem(id, itemDir, videoFile, startOffset, onItemCompleted)
-                    return
+        val result = WatchDownloadTransfer.downloadWithResume(
+            client = downloadClient,
+            url = fullUrl,
+            userAgent = PcApiClient.USER_AGENT,
+            videoFile = videoFile,
+            initialTotalBytes = initial.totalBytes,
+            isCancelled = { cancelledFlags[id]?.get() == true },
+            isPaused = { pausedFlags[id]?.get() == true },
+            onCallCreated = { call -> activeCalls[id] = call },
+            onCallFinished = { activeCalls.remove(id) },
+            onProgress = { downloadedBytes, totalBytes, speedBps, persist ->
+                val snap = store.update(id, persist = persist) {
+                    it.copy(
+                        status = OfflineDownloadStatus.DOWNLOADING,
+                        downloadedBytes = downloadedBytes,
+                        totalBytes = maxOf(it.totalBytes, totalBytes),
+                        speedBytesPerSec = speedBps,
+                        errorMessage = null,
+                    )
                 }
-                if (code == 403) {
-                    store.update(id) {
-                        it.copy(
-                            status = OfflineDownloadStatus.PAUSED,
-                            speedBytesPerSec = 0L,
-                            errorMessage = "Connect to Tailscale to download video",
-                        )
-                    }
-                    return
-                }
-                if (code != 200 && code != 206) {
-                    store.update(id) {
-                        it.copy(
-                            status = OfflineDownloadStatus.FAILED,
-                            speedBytesPerSec = 0L,
-                            errorMessage = "Download failed (HTTP $code)",
-                        )
-                    }
-                    return
-                }
+                if (snap != null) onProgress(snap)
+            },
+            clockMs = { SystemClock.elapsedRealtime() },
+        )
 
-                val isResume = (code == 206 && startOffset > 0L)
-                val contentLen = resp.body?.contentLength() ?: -1L
-                val totalBytes = when {
-                    isResume -> parseTotalFromContentRange(resp.header("Content-Range"))
-                        ?: if (contentLen > 0L) startOffset + contentLen else initial.totalBytes
-                    contentLen > 0L -> contentLen
-                    else -> initial.totalBytes
-                }
-
-                var writtenBytes = if (isResume) startOffset else 0L
-                val body = resp.body ?: throw IOException("Empty download response body")
-
-                FileOutputStream(videoFile, isResume).use { out ->
-                    val buf = ByteArray(64 * 1024)
-                    val input = body.byteStream()
-                    var lastTickMs = SystemClock.elapsedRealtime()
-                    var bytesSinceTick = 0L
-                    var smoothedBps = 0L
-
-                    while (true) {
-                        if (cancelledFlags[id]?.get() == true) {
-                            return
-                        }
-                        if (pausedFlags[id]?.get() == true) {
-                            store.update(id) {
-                                it.copy(
-                                    status = OfflineDownloadStatus.PAUSED,
-                                    downloadedBytes = writtenBytes,
-                                    totalBytes = maxOf(totalBytes, writtenBytes),
-                                    speedBytesPerSec = 0L,
-                                )
-                            }
-                            return
-                        }
-                        val read = input.read(buf)
-                        if (read == -1) break
-                        out.write(buf, 0, read)
-                        writtenBytes += read
-                        bytesSinceTick += read
-
-                        val nowMs = SystemClock.elapsedRealtime()
-                        val elapsedMs = nowMs - lastTickMs
-                        if (elapsedMs >= 500L) {
-                            val instantBps = (bytesSinceTick * 1000L) / elapsedMs.coerceAtLeast(1L)
-                            smoothedBps = if (smoothedBps == 0L) {
-                                instantBps
-                            } else {
-                                ((smoothedBps * 7L) + (instantBps * 3L)) / 10L
-                            }
-                            lastTickMs = nowMs
-                            bytesSinceTick = 0L
-                            val snap = store.update(id, persist = false) {
-                                it.copy(
-                                    status = OfflineDownloadStatus.DOWNLOADING,
-                                    downloadedBytes = writtenBytes,
-                                    totalBytes = maxOf(totalBytes, writtenBytes),
-                                    speedBytesPerSec = smoothedBps,
-                                )
-                            }
-                            if (snap != null) onProgress(snap)
-                        }
-                    }
-                    out.flush()
-                }
-
-                if (cancelledFlags[id]?.get() == true) return
-                if (pausedFlags[id]?.get() == true) {
-                    store.update(id) {
-                        it.copy(
-                            status = OfflineDownloadStatus.PAUSED,
-                            downloadedBytes = writtenBytes,
-                            totalBytes = maxOf(totalBytes, writtenBytes),
-                            speedBytesPerSec = 0L,
-                        )
-                    }
-                    return
-                }
-
-                finalizeCompletedItem(id, itemDir, videoFile, writtenBytes, onItemCompleted)
+        when (result) {
+            is WatchDownloadTransferResult.Completed -> {
+                finalizeCompletedItem(id, itemDir, videoFile, result.totalBytes, onItemCompleted)
             }
-        } catch (e: IOException) {
-            if (cancelledFlags[id]?.get() == true) {
+            is WatchDownloadTransferResult.Cancelled -> {
                 store.remove(id)
-            } else if (pausedFlags[id]?.get() == true) {
-                val diskBytes = if (videoFile.isFile) videoFile.length() else startOffset
+            }
+            is WatchDownloadTransferResult.Paused -> {
                 store.update(id) {
                     it.copy(
                         status = OfflineDownloadStatus.PAUSED,
-                        downloadedBytes = diskBytes,
+                        downloadedBytes = result.downloadedBytes,
+                        totalBytes = maxOf(it.totalBytes, result.totalBytes),
                         speedBytesPerSec = 0L,
-                    )
-                }
-            } else {
-                val diskBytes = if (videoFile.isFile) videoFile.length() else startOffset
-                store.update(id) {
-                    it.copy(
-                        status = OfflineDownloadStatus.FAILED,
-                        downloadedBytes = diskBytes,
-                        speedBytesPerSec = 0L,
-                        errorMessage = e.message ?: "Network interrupted. Tap Resume when on Tailscale.",
                     )
                 }
             }
-        } finally {
-            activeCalls.remove(id)
+            is WatchDownloadTransferResult.TailscaleRequired -> {
+                store.update(id) {
+                    it.copy(
+                        status = OfflineDownloadStatus.PAUSED,
+                        downloadedBytes = result.downloadedBytes,
+                        totalBytes = maxOf(it.totalBytes, result.totalBytes),
+                        speedBytesPerSec = 0L,
+                        errorMessage = "Connect to Tailscale to download video",
+                    )
+                }
+            }
+            is WatchDownloadTransferResult.Failed -> {
+                store.update(id) {
+                    it.copy(
+                        status = OfflineDownloadStatus.FAILED,
+                        downloadedBytes = result.downloadedBytes,
+                        totalBytes = maxOf(it.totalBytes, result.totalBytes),
+                        speedBytesPerSec = 0L,
+                        errorMessage = result.errorMessage,
+                    )
+                }
+            }
         }
     }
 
@@ -582,13 +503,6 @@ class WatchDownloadManager(
         }
         val norm = if (raw.startsWith("/")) raw else "/$raw"
         return "$base$norm"
-    }
-
-    private fun parseTotalFromContentRange(header: String?): Long? {
-        if (header.isNullOrBlank()) return null
-        val slash = header.lastIndexOf('/')
-        if (slash < 0) return null
-        return header.substring(slash + 1).trim().toLongOrNull()
     }
 
     companion object {

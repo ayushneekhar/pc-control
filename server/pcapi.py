@@ -6377,6 +6377,7 @@ class H(BaseHTTPRequestHandler):
                 if not chunk:
                     break
                 self.wfile.write(chunk)
+                self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
@@ -6476,6 +6477,7 @@ class H(BaseHTTPRequestHandler):
                     upstream,
                     head_only=head_only,
                     cache_control="no-store",
+                    timeout=120,
                 )
             m = re.fullmatch(r"/api/watch/subtitles/([^/]+)/([^/]+)/(\d+)\.(vtt|srt)", path, re.IGNORECASE)
             if m:

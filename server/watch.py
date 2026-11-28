@@ -650,10 +650,13 @@ class WatchService:
         self._segments_cache = {}  # (jf_base_url, item_id) -> (ts, list)
         self._userdata_last_write = {}  # item_id -> (ts, pos_ticks)
 
-    def invalidate_caches(self):
+    def invalidate_caches(self, clear_library=False, clear_segments=False):
         with self._lock:
             self._home_cache = (0.0, None)
-            self._library_index_cache = (0.0, None)
+            if clear_library:
+                self._library_index_cache = (0.0, None)
+            if clear_segments:
+                self._segments_cache.clear()
 
     def get_media_segments(self, item_id, uid=None, use_cache=True):
         """Fetch Jellyfin /MediaSegments/{itemId} with 5-minute in-memory TTL caching and graceful fallback."""

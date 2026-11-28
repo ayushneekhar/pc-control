@@ -45,8 +45,8 @@ GET  /pc/api/keyring                  {locked: bool, rdp: <gnome-remote-desktop 
 POST /pc/api/keyring/unlock           {password}: unlock GNOME login keyring via --stdin and restart RDP
 POST /pc/api/downloads/started        {hash?, title?}: "a download just started" (the Qwen bot calls it): wakes the
                                       phone's live progress (FCM "downloads") if that category is on
-POST /pc/api/hook/radarr|sonarr|seerr webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
-                                      (Authorization: Bearer/Basic password, or X-PC-Hook-Secret); maps events to categories.
+POST /pc/api/hook/radarr|sonarr|seerr|jellyfin webhook ingest, needs the shared secret in ~/.config/pc-control/hook-secret
+                                      (Authorization: Bearer/Basic password, X-PC-Hook-Secret, or X-Hook-Secret); maps events to categories.
                                       A Grab also starts the Qwen bot's low-space check (~/tools/localagent/lowspace.py)
 POST /pc/api/crash                   {kind, ts, reason, where, text, trace_b64?, app, device, android}: a crash report
                                       the app uploads on its next start (stored in DATA_DIR/crashes, newest 30)
@@ -838,8 +838,9 @@ def hook_secret():
 
 def hook_authorized(headers, secret):
     """Accepts `Authorization: Bearer <s>`, a bare `Authorization: <s>` (Seerr's auth header field), Basic auth
-    with the secret as password (Radarr/Sonarr username/password fields) or `X-PC-Hook-Secret: <s>`."""
-    cands = [headers.get("X-PC-Hook-Secret") or ""]
+    with the secret as password (Radarr/Sonarr username/password fields), `X-PC-Hook-Secret: <s>`, or
+    `X-Hook-Secret: <s>`."""
+    cands = [headers.get("X-PC-Hook-Secret") or "", headers.get("X-Hook-Secret") or ""]
     a = (headers.get("Authorization") or "").strip()
     if a.lower().startswith("bearer "): cands.append(a[7:].strip())
     elif a.lower().startswith("basic "):
@@ -922,6 +923,109 @@ def map_hook(source, p):
         if p.get("image"): out["image_url"] = p["image"]
         return out
     return None
+
+
+JELLYFIN_ADDED_DEDUP_SEC = 15.0
+_JELLYFIN_ADDED_LOCK = threading.Lock()
+_JELLYFIN_ADDED_SEEN = {}
+
+
+def _jellyfin_extract_tmdb_id(p):
+    for key in ("Provider_tmdb", "Provider_Tmdb", "provider_tmdb", "TmdbId", "tmdbId"):
+        raw = p.get(key)
+        if raw is not None:
+            s = str(raw).strip()
+            if s.isdigit() and int(s) > 0:
+                return s
+    return None
+
+
+def _jellyfin_num(val):
+    if val is None or isinstance(val, bool):
+        return None
+    s = str(val).strip()
+    if s.isdigit():
+        return int(s)
+    return None
+
+
+def _jellyfin_dedup_check(key, now=None):
+    """Return True if key was seen within JELLYFIN_ADDED_DEDUP_SEC; otherwise record it and return False."""
+    ts = time.monotonic() if now is None else float(now)
+    with _JELLYFIN_ADDED_LOCK:
+        cutoff = ts - JELLYFIN_ADDED_DEDUP_SEC
+        if len(_JELLYFIN_ADDED_SEEN) > 256:
+            stale = [k for k, v in _JELLYFIN_ADDED_SEEN.items() if v < cutoff]
+            for k in stale:
+                _JELLYFIN_ADDED_SEEN.pop(k, None)
+        prev = _JELLYFIN_ADDED_SEEN.get(key)
+        if prev is not None and (ts - prev) < JELLYFIN_ADDED_DEDUP_SEC:
+            return True
+        _JELLYFIN_ADDED_SEEN[key] = ts
+        return False
+
+
+def _handle_jellyfin_hook(p):
+    """Process a Jellyfin Webhook payload -> (http_code, response_dict)."""
+    nt = str(p.get("NotificationType") or "").strip().lower()
+    if nt in ("playbackstart", "playbackstop", "userdatasaved"):
+        _watch_service().invalidate_caches(clear_library=False)
+        return 200, {"ok": True, "action": "cache_invalidated"}
+    if nt == "itemdeleted":
+        _watch_service().invalidate_caches(clear_library=True, clear_segments=True)
+        return 200, {"ok": True, "action": "cache_invalidated"}
+    if nt == "itemadded":
+        _watch_service().invalidate_caches(clear_library=True)
+        item_type = str(p.get("ItemType") or "").strip().lower()
+        if item_type not in ("movie", "episode"):
+            return 200, {"ok": True, "action": "cache_invalidated"}
+
+        tmdb_id = _jellyfin_extract_tmdb_id(p)
+        item_id = str(p.get("ItemId") or "").strip()
+        name = clip(p.get("Name") or "", 160)
+        year = _jellyfin_num(p.get("Year"))
+
+        if item_type == "movie":
+            if not name:
+                return 200, {"ok": True, "action": "cache_invalidated"}
+            dedup_key = f"movie:{tmdb_id or item_id or name.lower()}"
+            if _jellyfin_dedup_check(dedup_key):
+                return 200, {"ok": True, "action": "cache_invalidated", "deduped": True}
+            body = f"{name} ({year})" if year else name
+            link = f"pccontrol://watch/movie/{tmdb_id}" if tmdb_id else None
+        else:
+            series_name = clip(p.get("SeriesName") or "", 160)
+            series_id = str(p.get("SeriesId") or "").strip()
+            s_num = _jellyfin_num(p.get("SeasonNumber00"))
+            if s_num is None:
+                s_num = _jellyfin_num(p.get("SeasonNumber"))
+            e_num = _jellyfin_num(p.get("EpisodeNumber00"))
+            if e_num is None:
+                e_num = _jellyfin_num(p.get("EpisodeNumber"))
+
+            if not series_name and not name:
+                return 200, {"ok": True, "action": "cache_invalidated"}
+            dedup_key = f"series:{series_id or series_name.lower() or item_id or name.lower()}"
+            if _jellyfin_dedup_check(dedup_key):
+                return 200, {"ok": True, "action": "cache_invalidated", "deduped": True}
+
+            ep_code = f"S{s_num:02d}E{e_num:02d}" if (s_num is not None and e_num is not None) else ""
+            if series_name and ep_code:
+                body = f"{series_name} · {ep_code}"
+                if name and name.lower() != series_name.lower():
+                    body = f"{body}\n{name}"
+            elif series_name and name and name.lower() != series_name.lower():
+                body = f"{series_name} · {name}"
+            else:
+                body = series_name or name
+            link = f"pccontrol://watch/tv/{tmdb_id}" if tmdb_id else None
+
+        code, res = NOTIFY.send("available", "🍿 Ready to watch", body, link=link)
+        if isinstance(res, dict):
+            res = {**res, "action": "cache_invalidated"}
+        return code, res
+
+    return 200, {"ok": True, "ignored": True}
 
 
 NOTIFY = None
@@ -6436,7 +6540,7 @@ class H(BaseHTTPRequestHandler):
         path, qs = raw_path.rstrip("/"), urllib.parse.parse_qs(u.query)
         has_traversal = _has_path_traversal(raw_path)
 
-        is_hook = method == "POST" and bool(re.fullmatch(r"/pc/api/hook/(radarr|sonarr|seerr)", path))
+        is_hook = method == "POST" and bool(re.fullmatch(r"/pc/api/hook/(radarr|sonarr|seerr|jellyfin)", path))
         is_chat_push = method == "POST" and path == "/pc/api/chat/push"
         is_ota_trigger = method == "POST" and path == "/pc/api/ota/trigger"
         is_public_config = method == "GET" and path == "/pc/api/public-config"
@@ -6705,7 +6809,7 @@ class H(BaseHTTPRequestHandler):
             if r4 is not None:
                 return self.send_json(*r4)
         elif method == "POST":
-            m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr)", path)
+            m = re.fullmatch(r"/api/hook/(radarr|sonarr|seerr|jellyfin)", path)
             if m: return self.hook(m.group(1))
             limit = {
                 "/api/notify": 16 * 1024 * 1024,
@@ -6809,13 +6913,15 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def hook(self, source):
-        """Webhook ingest for Radarr/Sonarr/Seerr. Needs the shared secret on top of the usual local/tailnet check."""
+        """Webhook ingest for Radarr/Sonarr/Seerr/Jellyfin. Needs the shared secret on top of the usual local check."""
         if not hook_authorized(self.headers, hook_secret()):
             n = int(self.headers.get("Content-Length") or 0)
             if 0 < n <= 1024 * 1024: self.rfile.read(n)
             return self.send_json(401, {"error": "bad or missing webhook secret"})
         try: p = self.body(1024 * 1024)
         except ValueError as e: return self.send_json(400, {"error": str(e)})
+        if source == "jellyfin":
+            return self.send_json(*_handle_jellyfin_hook(p))
         n = map_hook(source, p)
         if source in ("radarr", "sonarr") and p.get("eventType") == "Grab":
             # the torrent hash -> the movie/show title for the live progress notification, then wake the phone

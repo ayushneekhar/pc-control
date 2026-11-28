@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,10 +25,23 @@ data class SeerrDetailUiState(
     val error: String? = null,
     val overviewExpanded: Boolean = false,
     val submitting: Boolean = false,
+    // Watchlist (My List)
+    val inWatchlist: Boolean = false,
+    val togglingWatchlist: Boolean = false,
+    // Active Radarr/Sonarr download progress
+    val activeDownload: WatchDownloadItem? = null,
+    // TV Episode Browser
+    val selectedEpisodeSeason: Int? = null,
+    val episodesBySeason: Map<Int, WatchEpisodesResponse> = emptyMap(),
+    val loadingEpisodes: Boolean = false,
+    val episodesError: String? = null,
+    val playingEpisodeId: String? = null,
+    // Play on TV
     val playingOnTv: Boolean = false,
     val playOnTvStatus: String? = null,
     val playOnTvError: String? = null,
     val playOnTvShowRemoteAction: Boolean = false,
+    // TV Request season picker
     val selectedSeasons: Set<Int> = emptySet(),
     val showSeasonSheet: Boolean = false,
     val collectionSheet: SeerrCollectionSheetState = SeerrCollectionSheetState(),
@@ -41,6 +56,17 @@ data class SeerrDetailUiState(
 
     val canRequestMovie: Boolean
         get() = item != null && item.isMovie && SeerrHelpers.isRequestableMovie(item.status)
+
+    val currentSeasonEpisodes: WatchEpisodesResponse?
+        get() = selectedEpisodeSeason?.let { episodesBySeason[it] }
+
+    val browsableSeasons: List<SeerrSeason>
+        get() {
+            val all = item?.seasons.orEmpty()
+            val regular = all.filter { it.seasonNumber > 0 }.sortedBy { it.seasonNumber }
+            val specials = all.filter { it.seasonNumber == 0 }
+            return regular + specials
+        }
 }
 
 class SeerrDetailViewModel(
@@ -51,6 +77,7 @@ class SeerrDetailViewModel(
 ) : ViewModel() {
 
     private val normalizedType: String = if (mediaType == "tv") "tv" else "movie"
+    private val watchlistKey: String = SeerrHelpers.watchlistKey(normalizedType, tmdbId)
 
     private val _uiState = MutableStateFlow(
         SeerrDetailUiState(
@@ -58,6 +85,7 @@ class SeerrDetailViewModel(
             tmdbId = tmdbId,
             item = seed,
             loading = tmdbId > 0,
+            inWatchlist = watchlistKey in repository.getCachedWatchlistIds(),
             error = if (tmdbId > 0) null else "Missing media ID",
         ),
     )
@@ -67,6 +95,7 @@ class SeerrDetailViewModel(
     val openTvRemoteEvents: SharedFlow<Unit> = _openTvRemoteEvents.asSharedFlow()
 
     private var loadJob: Job? = null
+    private var episodesJob: Job? = null
     private var collectionJob: Job? = null
     private var playOnTvClearJob: Job? = null
 
@@ -76,13 +105,15 @@ class SeerrDetailViewModel(
         }
     }
 
+    fun resolveImageUrl(pathOrUrl: String?): String? = repository.resolveImageUrl(pathOrUrl)
+
     fun load() {
         val id = _uiState.value.tmdbId
         if (id <= 0) return
         loadJob?.cancel()
         loadJob = viewModelScope.launch {
             try {
-                fetchDetailsInternal(id)
+                fetchAllInternal(id, forceEpisodes = false)
             } finally {
                 _uiState.update { it.copy(loading = false) }
             }
@@ -95,7 +126,7 @@ class SeerrDetailViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(refreshing = true) }
             try {
-                fetchDetailsInternal(id)
+                fetchAllInternal(id, forceEpisodes = true)
             } finally {
                 _uiState.update { it.copy(refreshing = false, loading = false) }
             }
@@ -104,6 +135,97 @@ class SeerrDetailViewModel(
 
     fun toggleOverviewExpanded() {
         _uiState.update { it.copy(overviewExpanded = !it.overviewExpanded) }
+    }
+
+    fun toggleWatchlist() {
+        val id = _uiState.value.tmdbId
+        if (id <= 0 || _uiState.value.togglingWatchlist) return
+        val current = _uiState.value.item
+        val wasIn = _uiState.value.inWatchlist
+
+        _uiState.update { it.copy(inWatchlist = !wasIn, togglingWatchlist = true) }
+        viewModelScope.launch {
+            val res = repository.toggleWatchlist(
+                WatchWatchlistRequestBody(
+                    id = id,
+                    mediaType = normalizedType,
+                    action = if (wasIn) "remove" else "add",
+                    title = current?.title,
+                    year = current?.year,
+                    poster = current?.poster,
+                    backdrop = current?.backdrop,
+                    overview = current?.overview,
+                    voteAverage = current?.voteAverage,
+                ),
+            )
+            when (res) {
+                is ApiResult.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            inWatchlist = res.data.inWatchlist,
+                            togglingWatchlist = false,
+                        )
+                    }
+                }
+                is ApiResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            inWatchlist = wasIn,
+                            togglingWatchlist = false,
+                            error = res.message,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun selectEpisodeSeason(seasonNumber: Int) {
+        if (seasonNumber == _uiState.value.selectedEpisodeSeason &&
+            _uiState.value.episodesBySeason.containsKey(seasonNumber)
+        ) return
+        _uiState.update {
+            it.copy(
+                selectedEpisodeSeason = seasonNumber,
+                episodesError = null,
+            )
+        }
+        if (!_uiState.value.episodesBySeason.containsKey(seasonNumber)) {
+            loadSeasonEpisodes(seasonNumber)
+        }
+    }
+
+    fun retrySeasonEpisodes() {
+        val season = _uiState.value.selectedEpisodeSeason ?: return
+        loadSeasonEpisodes(season)
+    }
+
+    private fun loadSeasonEpisodes(seasonNumber: Int) {
+        val id = _uiState.value.tmdbId
+        if (id <= 0) return
+        episodesJob?.cancel()
+        episodesJob = viewModelScope.launch {
+            _uiState.update { it.copy(loadingEpisodes = true, episodesError = null) }
+            when (val res = repository.getWatchEpisodes(id, seasonNumber)) {
+                is ApiResult.Success -> {
+                    _uiState.update { state ->
+                        state.copy(
+                            episodesBySeason = state.episodesBySeason + (seasonNumber to res.data),
+                            loadingEpisodes = false,
+                            episodesError = null,
+                        )
+                    }
+                }
+                is ApiResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            loadingEpisodes = false,
+                            episodesError = res.message,
+                        )
+                    }
+                }
+            }
+        }
     }
 
     fun openSeasonSheet() {
@@ -148,47 +270,74 @@ class SeerrDetailViewModel(
                     playOnTvError = null,
                 )
             }
-            when (
-                val res = repository.playOnTv(
-                    mediaUrl = current.mediaUrl,
-                    tmdbId = current.id,
-                    mediaType = normalizedType,
-                    title = current.title,
+            val res = repository.playOnTv(
+                mediaUrl = current.mediaUrl,
+                tmdbId = current.id,
+                mediaType = normalizedType,
+                title = current.title,
+            )
+            handlePlayOnTvResponse(res)
+        }
+    }
+
+    fun playEpisodeOnTv(episode: WatchEpisode) {
+        val jfId = episode.jellyfinItemId?.takeIf { it.isNotBlank() } ?: return
+        if (_uiState.value.playingEpisodeId != null || _uiState.value.playingOnTv) return
+        playOnTvClearJob?.cancel()
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    playingEpisodeId = jfId,
+                    playOnTvStatus = null,
+                    playOnTvError = null,
                 )
-            ) {
-                is ApiResult.Success -> {
-                    val device = res.data.device?.takeIf { it.isNotBlank() } ?: "TV"
-                    val isView = res.data.action == "view"
-                    val statusMessage = if (isView) {
-                        "Opened on $device"
-                    } else {
-                        "Sent to $device"
-                    }
-                    _uiState.update {
-                        it.copy(
-                            playingOnTv = false,
-                            playOnTvStatus = statusMessage,
-                            playOnTvError = null,
-                            playOnTvShowRemoteAction = isView,
-                        )
-                    }
-                    if (!isView) {
-                        _openTvRemoteEvents.tryEmit(Unit)
-                    }
-                    playOnTvClearJob = viewModelScope.launch {
-                        delay(3_000L)
-                        _uiState.update { it.copy(playOnTvStatus = null) }
-                    }
+            }
+            val res = repository.playOnTv(
+                tmdbId = _uiState.value.tmdbId,
+                mediaType = "episode",
+                title = episode.name,
+                jellyfinItemId = jfId,
+                startPositionTicks = episode.positionTicks.takeIf { it > 0L && !episode.played },
+            )
+            _uiState.update { it.copy(playingEpisodeId = null) }
+            handlePlayOnTvResponse(res)
+        }
+    }
+
+    private fun handlePlayOnTvResponse(res: ApiResult<PlayOnTvResponse>) {
+        when (res) {
+            is ApiResult.Success -> {
+                val device = res.data.device?.takeIf { it.isNotBlank() } ?: "TV"
+                val isView = res.data.action == "view"
+                val statusMessage = if (isView) {
+                    "Opened on $device"
+                } else {
+                    "Sent to $device"
                 }
-                is ApiResult.Error -> {
-                    _uiState.update {
-                        it.copy(
-                            playingOnTv = false,
-                            playOnTvStatus = null,
-                            playOnTvError = res.message,
-                            playOnTvShowRemoteAction = false,
-                        )
-                    }
+                _uiState.update {
+                    it.copy(
+                        playingOnTv = false,
+                        playOnTvStatus = statusMessage,
+                        playOnTvError = null,
+                        playOnTvShowRemoteAction = isView,
+                    )
+                }
+                if (!isView) {
+                    _openTvRemoteEvents.tryEmit(Unit)
+                }
+                playOnTvClearJob = viewModelScope.launch {
+                    delay(3_000L)
+                    _uiState.update { it.copy(playOnTvStatus = null) }
+                }
+            }
+            is ApiResult.Error -> {
+                _uiState.update {
+                    it.copy(
+                        playingOnTv = false,
+                        playOnTvStatus = null,
+                        playOnTvError = res.message,
+                        playOnTvShowRemoteAction = false,
+                    )
                 }
             }
         }
@@ -393,6 +542,42 @@ class SeerrDetailViewModel(
                 item = updatedItem,
                 collectionSheet = state.collectionSheet.copy(collection = updatedCollection),
             )
+        }
+    }
+
+    private suspend fun fetchAllInternal(id: Int, forceEpisodes: Boolean) {
+        coroutineScope {
+            val detailDef = async { fetchDetailsInternal(id) }
+            val dlDef = async { repository.getWatchDownloads(tmdbId = id, mediaType = normalizedType) }
+            val wlDef = async { repository.getWatchDiscover(category = "watchlist") }
+
+            detailDef.await()
+
+            val dlRes = dlDef.await()
+            if (dlRes is ApiResult.Success) {
+                _uiState.update { it.copy(activeDownload = dlRes.data.items.firstOrNull()) }
+            }
+
+            val wlRes = wlDef.await()
+            if (wlRes is ApiResult.Success) {
+                val found = wlRes.data.items.any {
+                    it.id == id && it.mediaType == normalizedType
+                }
+                _uiState.update { it.copy(inWatchlist = found) }
+            }
+        }
+
+        // Load Episode Browser automatically for TV shows
+        val detail = _uiState.value.item
+        if (normalizedType == "tv" && detail != null && detail.seasons.isNotEmpty()) {
+            val targetSeason = _uiState.value.selectedEpisodeSeason
+                ?: SeerrHelpers.defaultEpisodeSeason(detail.seasons)
+            if (targetSeason != null) {
+                _uiState.update { it.copy(selectedEpisodeSeason = targetSeason) }
+                if (forceEpisodes || !_uiState.value.episodesBySeason.containsKey(targetSeason)) {
+                    loadSeasonEpisodes(targetSeason)
+                }
+            }
         }
     }
 

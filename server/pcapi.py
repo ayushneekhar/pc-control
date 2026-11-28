@@ -73,8 +73,10 @@ if _SERVER_DIR not in sys.path:
 import bazarr_trigger as bazarr_mod  # noqa: E402
 import chat as chat_mod  # noqa: E402
 import link_preview as link_preview_mod  # noqa: E402
+import watch as watch_mod  # noqa: E402
 
 CHAT = None
+WATCH = None
 
 
 def _chat_manager():
@@ -82,6 +84,20 @@ def _chat_manager():
     if CHAT is None:
         CHAT = chat_mod.ChatManager(notify=NOTIFY)
     return CHAT
+
+
+def _watch_service():
+    global WATCH
+    if WATCH is None:
+        WATCH = watch_mod.WatchService(
+            seerr_client_fn=lambda: SEERR,
+            jellyfin_url_fn=lambda: JELLYFIN_URL,
+            jellyfin_key_fn=_jellyfin_api_key,
+            arr_config_fn=lambda: ARR,
+            downloads_fn=lambda: DOWNLOADS,
+            preferred_user_fn=lambda: str(CONFIG.get("jellyfin_user") or "ayush"),
+        )
+    return WATCH
 
 HOME = os.path.expanduser("~")
 PORT = int(os.environ.get("PCAPI_PORT", "1990"))
@@ -4673,7 +4689,7 @@ def jellyfin_proxy_image(item_id, image_type_name="Primary", series_id=None, max
     return 404, {"error": "image not found"}, None
 
 
-def _jellyfin_send_remote_command(key, session_id, item_id, media_type, title=""):
+def _jellyfin_send_remote_command(key, session_id, item_id, media_type, title="", start_position_ticks=None):
     sid = urllib.parse.quote(session_id, safe="")
     if media_type == "tv":
         qs = urllib.parse.urlencode({
@@ -4684,10 +4700,13 @@ def _jellyfin_send_remote_command(key, session_id, item_id, media_type, title=""
         url = f"{JELLYFIN_URL}/Sessions/{sid}/Viewing?{qs}"
         action = "view"
     else:
-        qs = urllib.parse.urlencode({
+        params = {
             "itemIds": item_id,
             "playCommand": "PlayNow",
-        })
+        }
+        if isinstance(start_position_ticks, int) and start_position_ticks > 0:
+            params["startPositionTicks"] = str(start_position_ticks)
+        qs = urllib.parse.urlencode(params)
         url = f"{JELLYFIN_URL}/Sessions/{sid}/Playing?{qs}"
         action = "play"
     req = urllib.request.Request(
@@ -4700,9 +4719,18 @@ def _jellyfin_send_remote_command(key, session_id, item_id, media_type, title=""
 
 
 def jellyfin_play_on_tv(body):
-    """Send an available movie or TV show to the configured Jellyfin Android TV session.
+    """Send an available movie, TV show, or specific episode to the configured Jellyfin Android TV session.
+    Accepts optional `jellyfinItemId` (32-hex) to play a specific item/episode directly on TV.
     Level 2 (auto-launching org.jellyfin.androidtv via Android TV Remote v2 / ADB when no
     session is active) can hook in right after `_jellyfin_find_tv_session` returns None."""
+    raw_jf_item_id = body.get("jellyfinItemId")
+    explicit_item_id = None
+    if raw_jf_item_id is not None and str(raw_jf_item_id).strip():
+        cand = str(raw_jf_item_id).strip()
+        if not JELLYFIN_ITEM_ID_RE.match(cand):
+            return 400, {"ok": False, "error": "Invalid jellyfinItemId."}
+        explicit_item_id = cand
+
     media_url = body.get("mediaUrl")
     tmdb_id_raw = body.get("tmdbId")
     tmdb_id = None
@@ -4713,15 +4741,25 @@ def jellyfin_play_on_tv(body):
                 tmdb_id = val
         except (TypeError, ValueError):
             pass
-    media_type = "tv" if str(body.get("mediaType") or "").strip().lower() == "tv" else "movie"
+    raw_mt = str(body.get("mediaType") or "").strip().lower()
+    if raw_mt == "episode":
+        media_type = "episode"
+    elif raw_mt == "tv":
+        media_type = "tv"
+    else:
+        media_type = "movie"
+    start_pos_ticks = _jellyfin_safe_int(body.get("startPositionTicks"))
+    if start_pos_ticks is not None and start_pos_ticks <= 0:
+        start_pos_ticks = None
     title = str(body.get("title") or "").strip()
     target_device, explicit_device = _jellyfin_resolve_target_device(body.get("deviceName"))
 
     try:
         key = _jellyfin_api_key()
-        item_id = _jellyfin_extract_item_id(media_url)
+        item_id = explicit_item_id or _jellyfin_extract_item_id(media_url)
         if not item_id and tmdb_id is not None:
-            item_id = _jellyfin_lookup_item_by_tmdb(key, tmdb_id, media_type)
+            lookup_mt = "tv" if media_type == "tv" else "movie"
+            item_id = _jellyfin_lookup_item_by_tmdb(key, tmdb_id, lookup_mt)
         if not item_id:
             return 404, {"ok": False, "error": "Item not found in Jellyfin library."}
 
@@ -4730,7 +4768,9 @@ def jellyfin_play_on_tv(body):
         if not session:
             return _jellyfin_tv_offline_response(target_device)
 
-        action = _jellyfin_send_remote_command(key, str(session["Id"]), item_id, media_type, title=title)
+        action = _jellyfin_send_remote_command(
+            key, str(session["Id"]), item_id, media_type, title=title, start_position_ticks=start_pos_ticks
+        )
         device_label = str(session.get("DeviceName") or session.get("Client") or target_device)
         return 200, {"ok": True, "device": device_label, "action": action, "itemId": item_id}
     except (OSError, ValueError) as e:
@@ -5871,6 +5911,30 @@ def route_round4_get(path, qs):
         return SEERR.requests(take=take, status_filter=flt)
     if path == "/api/jellyfin/tv/session":
         return jellyfin_tv_session(device_name=(qs.get("deviceName") or [None])[0])
+    if path == "/api/watch/home":
+        refresh = (qs.get("refresh") or [""])[0] in ("1", "true", "yes")
+        return _watch_service().home(force_refresh=refresh)
+    if path == "/api/watch/discover":
+        return _watch_service().discover(
+            category=(qs.get("category") or ["all"])[0],
+            media_type=(qs.get("mediaType") or [None])[0],
+            genre_id=(qs.get("genreId") or [None])[0],
+            network_id=(qs.get("networkId") or [None])[0],
+            page=(qs.get("page") or ["1"])[0],
+            sort=(qs.get("sort") or [None])[0],
+        )
+    if path == "/api/watch/watchlist":
+        return _watch_service().get_watchlist()
+    if path == "/api/watch/episodes":
+        return _watch_service().episodes(
+            tmdb_id_raw=(qs.get("tmdbId") or [None])[0],
+            season_raw=(qs.get("season") or [None])[0],
+        )
+    if path == "/api/watch/downloads":
+        return _watch_service().downloads(
+            tmdb_id_raw=(qs.get("tmdbId") or [None])[0],
+            media_type_raw=(qs.get("mediaType") or [None])[0],
+        )
     return None
 
 
@@ -5910,6 +5974,8 @@ def route_round4_post(path, b):
         return SEERR.create_request(b)
     if path == "/api/seerr/resolve":
         return SEERR.resolve_url(b)
+    if path == "/api/watch/watchlist":
+        return _watch_service().update_watchlist(b)
     return None
 
 

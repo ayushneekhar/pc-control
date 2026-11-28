@@ -174,4 +174,43 @@ class SeerrHelpersTest {
         assertEquals("TV", SeerrHelpers.formatSeasonTag("tv", emptyList()))
         assertEquals("Movie", SeerrHelpers.formatSeasonTag("movie", emptyList()))
     }
+
+    @Test
+    fun watchHelpers_formatRemainingMinutesAndDownloadBytes() {
+        assertNull(SeerrHelpers.formatRemainingMinutes(null))
+        assertNull(SeerrHelpers.formatRemainingMinutes(0))
+        assertEquals("34m left", SeerrHelpers.formatRemainingMinutes(34))
+        assertEquals("2h left", SeerrHelpers.formatRemainingMinutes(120))
+        assertEquals("1h 42m left", SeerrHelpers.formatRemainingMinutes(102))
+
+        assertEquals("0 B", SeerrHelpers.formatDownloadBytes(0L))
+        assertEquals("512 MB", SeerrHelpers.formatDownloadBytes(512L * 1024L * 1024L))
+        assertEquals("2.5 GB", SeerrHelpers.formatDownloadBytes((2.5 * 1024.0 * 1024.0 * 1024.0).toLong()))
+    }
+
+    @Test
+    fun watchHelpers_watchlistKeyPendingBadgeAndDefaultEpisodeSeason() {
+        assertEquals("movie:466272", SeerrHelpers.watchlistKey("MOVIE", 466272))
+        assertEquals("tv:95480", SeerrHelpers.watchlistKey("tv", 95480))
+
+        assertEquals(0, SeerrHelpers.pendingRequestsBadgeCount(null))
+        assertEquals(5, SeerrHelpers.pendingRequestsBadgeCount(mapOf("pending" to 2, "processing" to 3, "available" to 10)))
+
+        val seasons = listOf(
+            SeerrSeason(seasonNumber = 0, name = "Specials", status = SeerrStatus.AVAILABLE),
+            SeerrSeason(seasonNumber = 1, name = "Season 1", status = SeerrStatus.NONE),
+            SeerrSeason(seasonNumber = 2, name = "Season 2", status = SeerrStatus.AVAILABLE),
+        )
+        assertEquals(2, SeerrHelpers.defaultEpisodeSeason(seasons))
+        assertEquals(
+            1,
+            SeerrHelpers.defaultEpisodeSeason(
+                listOf(
+                    SeerrSeason(seasonNumber = 0, name = "Specials", status = SeerrStatus.NONE),
+                    SeerrSeason(seasonNumber = 1, name = "Season 1", status = SeerrStatus.NONE),
+                ),
+            ),
+        )
+        assertNull(SeerrHelpers.defaultEpisodeSeason(emptyList()))
+    }
 }

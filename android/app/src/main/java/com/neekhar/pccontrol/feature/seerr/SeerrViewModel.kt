@@ -5,8 +5,12 @@ import androidx.lifecycle.viewModelScope
 import com.neekhar.pccontrol.core.network.ApiResult
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
@@ -26,10 +30,32 @@ data class SeerrCollectionSheetState(
 )
 
 data class SeerrUiState(
+    val activeTab: WatchTab = WatchTab.ALL,
+    val searchExpanded: Boolean = false,
     val query: String = "",
     val searchResults: List<SeerrItem>? = null,
     val searchMediaFilter: SeerrSearchMediaFilter = SeerrSearchMediaFilter.ALL,
     val searching: Boolean = false,
+    // Watch Home
+    val watchHome: WatchHomeResponse? = null,
+    val loadingHome: Boolean = false,
+    val watchlistIds: Set<String> = emptySet(),
+    val busyWatchlistKey: String? = null,
+    val playingOnTvKey: String? = null,
+    val playOnTvNotice: String? = null,
+    // Browse / Discover (In Library, Movies, TV, My List, Genre/Network see-all)
+    val discoverItems: List<WatchItem>? = null,
+    val discoverGenres: List<WatchGenre> = emptyList(),
+    val selectedGenreId: Int? = null,
+    val selectedNetworkId: Int? = null,
+    val selectedNetworkLabel: String? = null,
+    val libraryFilter: WatchLibraryFilter = WatchLibraryFilter.ALL,
+    val librarySort: WatchLibrarySort = WatchLibrarySort.RECENT,
+    val discoverPage: Int = 1,
+    val discoverTotalPages: Int = 1,
+    val loadingDiscover: Boolean = false,
+    val loadingMoreDiscover: Boolean = false,
+    // Requests tab
     val statusFilter: SeerrRequestFilter = SeerrRequestFilter.ALL,
     val requests: List<SeerrRequestItem>? = null,
     val counts: Map<String, Int>? = null,
@@ -44,6 +70,15 @@ data class SeerrUiState(
 
     val filteredSearchResults: List<SeerrItem>
         get() = SeerrHelpers.filterSearchResults(searchResults.orEmpty(), searchMediaFilter)
+
+    val pendingRequestsBadge: Int
+        get() = SeerrHelpers.pendingRequestsBadgeCount(counts)
+
+    val isSearchMode: Boolean
+        get() = searchExpanded || query.isNotBlank() || searchResults != null
+
+    val hasMoreDiscover: Boolean
+        get() = discoverPage < discoverTotalPages
 }
 
 @OptIn(FlowPreview::class)
@@ -57,18 +92,29 @@ class SeerrViewModel(
         private const val MIN_AUTO_SEARCH_LEN = 3
     }
 
+    private val cachedHome = repository.getCachedWatchHome()
+
     private val _uiState = MutableStateFlow(
         SeerrUiState(
+            watchHome = cachedHome,
+            loadingHome = cachedHome == null,
+            watchlistIds = cachedHome?.watchlistIds?.toSet().orEmpty(),
             requests = repository.getCachedRequests(),
             counts = repository.getCachedCounts(),
         ),
     )
     val uiState: StateFlow<SeerrUiState> = _uiState.asStateFlow()
 
+    private val _openTvRemoteEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val openTvRemoteEvents: SharedFlow<Unit> = _openTvRemoteEvents.asSharedFlow()
+
     private val queryFlow = MutableStateFlow("")
     private var searchJob: Job? = null
+    private var homeJob: Job? = null
+    private var discoverJob: Job? = null
     private var requestsJob: Job? = null
     private var collectionJob: Job? = null
+    private var noticeClearJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -83,17 +129,168 @@ class SeerrViewModel(
                 }
         }
         if (autoLoad) {
+            loadWatchHome(forceRefresh = false)
             loadRequests(SeerrRequestFilter.ALL, showSpinner = false)
         }
     }
 
+    fun resolveImageUrl(pathOrUrl: String?): String? = repository.resolveImageUrl(pathOrUrl)
+
     fun onScreenResume() {
-        if (requestsJob?.isActive == true) return
-        loadRequests(_uiState.value.statusFilter, showSpinner = false)
+        // Sync watchlist IDs from cache immediately in case Detail screen toggled My List
+        val cachedIds = repository.getCachedWatchlistIds()
+        if (cachedIds.isNotEmpty() || _uiState.value.watchlistIds.isNotEmpty()) {
+            _uiState.update { state ->
+                val merged = if (cachedIds.isNotEmpty()) cachedIds else state.watchlistIds
+                state.copy(
+                    watchlistIds = merged,
+                    watchHome = state.watchHome?.let { h ->
+                        h.copy(
+                            watchlistIds = merged.toList(),
+                            hero = h.hero?.let { hero ->
+                                hero.copy(inWatchlist = SeerrHelpers.watchlistKey(hero.mediaType, hero.id) in merged)
+                            },
+                        )
+                    },
+                )
+            }
+        }
+        if (homeJob?.isActive != true) {
+            loadWatchHome(forceRefresh = false)
+        }
+        if (requestsJob?.isActive != true) {
+            loadRequests(_uiState.value.statusFilter, showSpinner = false)
+        }
+        if (_uiState.value.activeTab == WatchTab.MY_LIST && discoverJob?.isActive != true) {
+            loadDiscover(page = 1, append = false)
+        }
+    }
+
+    fun selectTab(tab: WatchTab) {
+        if (tab == _uiState.value.activeTab &&
+            _uiState.value.selectedNetworkId == null
+        ) return
+        _uiState.update {
+            it.copy(
+                activeTab = tab,
+                selectedGenreId = null,
+                selectedNetworkId = null,
+                selectedNetworkLabel = null,
+                discoverItems = if (tab == WatchTab.ALL || tab == WatchTab.REQUESTS) it.discoverItems else null,
+                discoverGenres = emptyList(),
+                discoverPage = 1,
+                discoverTotalPages = 1,
+                error = null,
+            )
+        }
+        when (tab) {
+            WatchTab.ALL -> {
+                if (_uiState.value.watchHome == null) {
+                    loadWatchHome(forceRefresh = false)
+                }
+            }
+            WatchTab.REQUESTS -> {
+                loadRequests(_uiState.value.statusFilter, showSpinner = _uiState.value.requests == null)
+            }
+            WatchTab.LIBRARY, WatchTab.MOVIES, WatchTab.TV, WatchTab.MY_LIST -> {
+                loadDiscover(page = 1, append = false)
+            }
+        }
+    }
+
+    fun openRailSeeAll(rail: WatchRail) {
+        val targetTab = when {
+            rail.category == "movies" || rail.mediaType == "movie" -> WatchTab.MOVIES
+            rail.category == "tv" || rail.category == "network" || rail.mediaType == "tv" -> WatchTab.TV
+            else -> WatchTab.MOVIES
+        }
+        _uiState.update {
+            it.copy(
+                activeTab = targetTab,
+                selectedGenreId = rail.genreId,
+                selectedNetworkId = rail.networkId,
+                selectedNetworkLabel = if (rail.networkId != null) rail.title else null,
+                discoverItems = null,
+                discoverPage = 1,
+                discoverTotalPages = 1,
+                error = null,
+            )
+        }
+        loadDiscover(page = 1, append = false)
+    }
+
+    fun selectGenre(genreId: Int?) {
+        if (genreId == _uiState.value.selectedGenreId && _uiState.value.selectedNetworkId == null) return
+        _uiState.update {
+            it.copy(
+                selectedGenreId = genreId,
+                selectedNetworkId = null,
+                selectedNetworkLabel = null,
+                discoverItems = null,
+                discoverPage = 1,
+                discoverTotalPages = 1,
+            )
+        }
+        loadDiscover(page = 1, append = false)
+    }
+
+    fun clearNetworkFilter() {
+        if (_uiState.value.selectedNetworkId == null) return
+        _uiState.update {
+            it.copy(
+                selectedNetworkId = null,
+                selectedNetworkLabel = null,
+                discoverItems = null,
+                discoverPage = 1,
+                discoverTotalPages = 1,
+            )
+        }
+        loadDiscover(page = 1, append = false)
+    }
+
+    fun selectLibraryFilter(filter: WatchLibraryFilter) {
+        if (filter == _uiState.value.libraryFilter) return
+        _uiState.update {
+            it.copy(
+                libraryFilter = filter,
+                discoverItems = null,
+                discoverPage = 1,
+                discoverTotalPages = 1,
+            )
+        }
+        loadDiscover(page = 1, append = false)
+    }
+
+    fun selectLibrarySort(sort: WatchLibrarySort) {
+        if (sort == _uiState.value.librarySort) return
+        _uiState.update {
+            it.copy(
+                librarySort = sort,
+                discoverItems = null,
+                discoverPage = 1,
+                discoverTotalPages = 1,
+            )
+        }
+        loadDiscover(page = 1, append = false)
+    }
+
+    fun loadMoreDiscover() {
+        val st = _uiState.value
+        if (st.loadingDiscover || st.loadingMoreDiscover || !st.hasMoreDiscover) return
+        loadDiscover(page = st.discoverPage + 1, append = true)
+    }
+
+    fun toggleSearchExpanded() {
+        val currentlyExpanded = _uiState.value.searchExpanded
+        if (currentlyExpanded) {
+            clearSearch()
+        } else {
+            _uiState.update { it.copy(searchExpanded = true) }
+        }
     }
 
     fun onQueryChange(value: String) {
-        _uiState.update { it.copy(query = value) }
+        _uiState.update { it.copy(query = value, searchExpanded = true) }
         val trimmed = value.trim()
         if (trimmed.isEmpty()) {
             searchJob?.cancel()
@@ -124,6 +321,7 @@ class SeerrViewModel(
         queryFlow.value = ""
         _uiState.update {
             it.copy(
+                searchExpanded = false,
                 query = "",
                 searching = false,
                 searchResults = null,
@@ -146,11 +344,23 @@ class SeerrViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(refreshing = true) }
             try {
-                val currentFilter = _uiState.value.statusFilter
-                fetchRequestsInternal(currentFilter)
-                val q = _uiState.value.query.trim()
+                val st = _uiState.value
+                val q = st.query.trim()
                 if (q.isNotEmpty()) {
                     fetchSearchInternal(q)
+                } else {
+                    when (st.activeTab) {
+                        WatchTab.ALL -> {
+                            fetchWatchHomeInternal(forceRefresh = true)
+                            fetchRequestsInternal(SeerrRequestFilter.ALL)
+                        }
+                        WatchTab.REQUESTS -> {
+                            fetchRequestsInternal(st.statusFilter)
+                        }
+                        WatchTab.LIBRARY, WatchTab.MOVIES, WatchTab.TV, WatchTab.MY_LIST -> {
+                            fetchDiscoverInternal(page = 1, append = false)
+                        }
+                    }
                 }
             } finally {
                 _uiState.update { it.copy(refreshing = false) }
@@ -160,6 +370,142 @@ class SeerrViewModel(
 
     fun reloadRequests() {
         loadRequests(_uiState.value.statusFilter, showSpinner = false)
+    }
+
+    fun toggleWatchlist(item: WatchItem) {
+        if (item.id <= 0) return
+        val key = SeerrHelpers.watchlistKey(item.mediaType, item.id)
+        if (_uiState.value.busyWatchlistKey == key) return
+        val wasIn = key in _uiState.value.watchlistIds
+
+        // Optimistic update
+        _uiState.update { state ->
+            val nextIds = if (wasIn) state.watchlistIds - key else state.watchlistIds + key
+            state.copy(
+                busyWatchlistKey = key,
+                watchlistIds = nextIds,
+                watchHome = state.watchHome?.let { h ->
+                    h.copy(
+                        watchlistIds = nextIds.toList(),
+                        hero = h.hero?.let { hero ->
+                            if (SeerrHelpers.watchlistKey(hero.mediaType, hero.id) == key) {
+                                hero.copy(inWatchlist = !wasIn)
+                            } else {
+                                hero
+                            }
+                        },
+                    )
+                },
+                discoverItems = if (state.activeTab == WatchTab.MY_LIST && wasIn) {
+                    state.discoverItems?.filterNot {
+                        SeerrHelpers.watchlistKey(it.mediaType, it.id) == key
+                    }
+                } else {
+                    state.discoverItems
+                },
+            )
+        }
+
+        viewModelScope.launch {
+            val res = repository.toggleWatchlist(
+                WatchWatchlistRequestBody(
+                    id = item.id,
+                    mediaType = item.mediaType,
+                    action = if (wasIn) "remove" else "add",
+                    title = item.title,
+                    year = item.year,
+                    poster = item.poster,
+                    backdrop = item.backdrop,
+                    overview = item.overview,
+                    voteAverage = item.voteAverage,
+                ),
+            )
+            when (res) {
+                is ApiResult.Success -> {
+                    val serverIds = res.data.ids.toSet()
+                    _uiState.update { state ->
+                        state.copy(
+                            busyWatchlistKey = null,
+                            watchlistIds = serverIds,
+                            watchHome = state.watchHome?.let { h ->
+                                h.copy(
+                                    watchlistIds = res.data.ids,
+                                    hero = h.hero?.let { hero ->
+                                        hero.copy(
+                                            inWatchlist = SeerrHelpers.watchlistKey(hero.mediaType, hero.id) in serverIds,
+                                        )
+                                    },
+                                )
+                            },
+                        )
+                    }
+                }
+                is ApiResult.Error -> {
+                    // Revert optimistic change
+                    _uiState.update { state ->
+                        val reverted = if (wasIn) state.watchlistIds + key else state.watchlistIds - key
+                        state.copy(
+                            busyWatchlistKey = null,
+                            watchlistIds = reverted,
+                            error = res.message,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun playHeroOnTv(item: WatchItem) {
+        val key = "hero:${item.mediaType}:${item.id}"
+        if (_uiState.value.playingOnTvKey != null) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(playingOnTvKey = key, error = null) }
+            val res = repository.playOnTv(
+                tmdbId = item.id.takeIf { it > 0 },
+                mediaType = item.mediaType,
+                title = item.title,
+                jellyfinItemId = item.jellyfinItemId,
+            )
+            handlePlayOnTvResult(res)
+        }
+    }
+
+    fun playContinueOnTv(item: WatchContinueItem) {
+        val key = "cw:${item.jellyfinItemId}"
+        if (_uiState.value.playingOnTvKey != null) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(playingOnTvKey = key, error = null) }
+            val res = repository.playOnTv(
+                tmdbId = item.id.takeIf { it > 0 },
+                mediaType = if (item.isTv) "episode" else "movie",
+                title = item.episodeTitle ?: item.title,
+                jellyfinItemId = item.jellyfinItemId,
+                startPositionTicks = item.positionTicks.takeIf { it > 0L && !item.isNextUp },
+            )
+            handlePlayOnTvResult(res)
+        }
+    }
+
+    private fun handlePlayOnTvResult(res: ApiResult<PlayOnTvResponse>) {
+        when (res) {
+            is ApiResult.Success -> {
+                val device = res.data.device?.takeIf { it.isNotBlank() } ?: "TV"
+                val isView = res.data.action == "view"
+                val msg = if (isView) "Opened on $device" else "Playing on $device"
+                _uiState.update { it.copy(playingOnTvKey = null, playOnTvNotice = msg) }
+                if (!isView) {
+                    _openTvRemoteEvents.tryEmit(Unit)
+                }
+                noticeClearJob?.cancel()
+                noticeClearJob = viewModelScope.launch {
+                    delay(3_000L)
+                    _uiState.update { it.copy(playOnTvNotice = null) }
+                }
+            }
+            is ApiResult.Error -> {
+                _uiState.update { it.copy(playingOnTvKey = null, error = res.message) }
+            }
+        }
     }
 
     fun requestMovie(movieId: Int) {
@@ -309,6 +655,123 @@ class SeerrViewModel(
         }
     }
 
+    // ------------------------------------------------------------------ Internal fetchers
+
+    private fun loadWatchHome(forceRefresh: Boolean) {
+        homeJob?.cancel()
+        homeJob = viewModelScope.launch {
+            if (_uiState.value.watchHome == null) {
+                _uiState.update { it.copy(loadingHome = true) }
+            }
+            try {
+                fetchWatchHomeInternal(forceRefresh = forceRefresh)
+            } finally {
+                _uiState.update { it.copy(loadingHome = false) }
+            }
+        }
+    }
+
+    private suspend fun fetchWatchHomeInternal(forceRefresh: Boolean) {
+        when (val res = repository.getWatchHome(forceRefresh = forceRefresh)) {
+            is ApiResult.Success -> {
+                val home = res.data
+                _uiState.update {
+                    it.copy(
+                        watchHome = home,
+                        watchlistIds = home.watchlistIds.toSet(),
+                        error = null,
+                    )
+                }
+            }
+            is ApiResult.Error -> {
+                _uiState.update { it.copy(error = res.message) }
+            }
+        }
+    }
+
+    private fun loadDiscover(page: Int, append: Boolean) {
+        discoverJob?.cancel()
+        discoverJob = viewModelScope.launch {
+            if (append) {
+                _uiState.update { it.copy(loadingMoreDiscover = true) }
+            } else {
+                _uiState.update { it.copy(loadingDiscover = true, error = null) }
+            }
+            try {
+                fetchDiscoverInternal(page = page, append = append)
+            } finally {
+                _uiState.update { it.copy(loadingDiscover = false, loadingMoreDiscover = false) }
+            }
+        }
+    }
+
+    private suspend fun fetchDiscoverInternal(page: Int, append: Boolean) {
+        val st = _uiState.value
+        val category: String
+        val mediaType: String?
+        val sort: String?
+
+        when (st.activeTab) {
+            WatchTab.LIBRARY -> {
+                category = "library"
+                mediaType = st.libraryFilter.mediaType
+                sort = st.librarySort.wire
+            }
+            WatchTab.MY_LIST -> {
+                category = "watchlist"
+                mediaType = null
+                sort = null
+            }
+            WatchTab.MOVIES -> {
+                category = if (st.selectedGenreId != null) "genre" else "movies"
+                mediaType = "movie"
+                sort = null
+            }
+            WatchTab.TV -> {
+                category = when {
+                    st.selectedNetworkId != null -> "network"
+                    st.selectedGenreId != null -> "genre"
+                    else -> "tv"
+                }
+                mediaType = "tv"
+                sort = null
+            }
+            else -> return
+        }
+
+        val res = repository.getWatchDiscover(
+            category = category,
+            mediaType = mediaType,
+            genreId = st.selectedGenreId,
+            networkId = st.selectedNetworkId,
+            page = page,
+            sort = sort,
+        )
+        when (res) {
+            is ApiResult.Success -> {
+                val resp = res.data
+                _uiState.update { cur ->
+                    val mergedItems = if (append && !cur.discoverItems.isNullOrEmpty()) {
+                        val existingKeys = cur.discoverItems.map { "${it.mediaType}:${it.id}:${it.jellyfinItemId}" }.toSet()
+                        cur.discoverItems + resp.items.filter { "${it.mediaType}:${it.id}:${it.jellyfinItemId}" !in existingKeys }
+                    } else {
+                        resp.items
+                    }
+                    cur.copy(
+                        discoverItems = mergedItems,
+                        discoverGenres = if (resp.genres.isNotEmpty()) resp.genres else cur.discoverGenres,
+                        discoverPage = resp.page,
+                        discoverTotalPages = resp.totalPages,
+                        error = null,
+                    )
+                }
+            }
+            is ApiResult.Error -> {
+                _uiState.update { it.copy(error = res.message) }
+            }
+        }
+    }
+
     private fun executeSearch(query: String) {
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
@@ -369,7 +832,9 @@ class SeerrViewModel(
                 }
             }
             is ApiResult.Error -> {
-                _uiState.update { it.copy(error = res.message) }
+                if (_uiState.value.activeTab == WatchTab.REQUESTS) {
+                    _uiState.update { it.copy(error = res.message) }
+                }
             }
         }
     }
@@ -378,6 +843,23 @@ class SeerrViewModel(
         _uiState.update { state ->
             state.copy(
                 searchResults = state.searchResults?.map { item ->
+                    if (item.id == movieId && item.isMovie) item.copy(status = status) else item
+                },
+                watchHome = state.watchHome?.let { h ->
+                    h.copy(
+                        hero = h.hero?.let { hero ->
+                            if (hero.id == movieId && hero.isMovie) hero.copy(status = status) else hero
+                        },
+                        rails = h.rails.map { rail ->
+                            rail.copy(
+                                items = rail.items.map { it ->
+                                    if (it.id == movieId && it.isMovie) it.copy(status = status) else it
+                                },
+                            )
+                        },
+                    )
+                },
+                discoverItems = state.discoverItems?.map { item ->
                     if (item.id == movieId && item.isMovie) item.copy(status = status) else item
                 },
                 collectionSheet = state.collectionSheet.copy(

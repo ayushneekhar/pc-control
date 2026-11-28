@@ -17,7 +17,122 @@ class SeerrRepository(
     companion object {
         private const val CACHE_KEY_REQUESTS = "seerr:requests"
         private const val CACHE_KEY_COUNTS = "seerr:requestCounts"
+        private const val CACHE_KEY_WATCH_HOME = "watch:home"
         private const val SEERR_TIMEOUT_MS = 25_000L
+    }
+
+    fun resolveImageUrl(pathOrUrl: String?): String? {
+        val trimmed = pathOrUrl?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return api.resolveUrl(trimmed)
+    }
+
+    suspend fun getWatchHome(forceRefresh: Boolean = false): ApiResult<WatchHomeResponse> {
+        val suffix = if (forceRefresh) "?refresh=1" else ""
+        val result = api.getJson<WatchHomeResponse>(
+            "/pc/api/watch/home$suffix",
+            timeoutMs = SEERR_TIMEOUT_MS,
+        )
+        if (result is ApiResult.Success) {
+            saveCachedWatchHome(result.data)
+        }
+        return result
+    }
+
+    suspend fun getWatchDiscover(
+        category: String,
+        mediaType: String? = null,
+        genreId: Int? = null,
+        networkId: Int? = null,
+        page: Int = 1,
+        sort: String? = null,
+    ): ApiResult<WatchDiscoverResponse> {
+        val params = mutableListOf("category=${URLEncoder.encode(category, "UTF-8")}")
+        if (!mediaType.isNullOrBlank()) {
+            params.add("mediaType=${URLEncoder.encode(mediaType, "UTF-8")}")
+        }
+        if (genreId != null && genreId > 0) {
+            params.add("genreId=$genreId")
+        }
+        if (networkId != null && networkId > 0) {
+            params.add("networkId=$networkId")
+        }
+        if (page > 1) {
+            params.add("page=$page")
+        }
+        if (!sort.isNullOrBlank()) {
+            params.add("sort=${URLEncoder.encode(sort, "UTF-8")}")
+        }
+        return api.getJson<WatchDiscoverResponse>(
+            "/pc/api/watch/discover?${params.joinToString("&")}",
+            timeoutMs = SEERR_TIMEOUT_MS,
+        )
+    }
+
+    suspend fun toggleWatchlist(body: WatchWatchlistRequestBody): ApiResult<WatchWatchlistResponse> {
+        val res = api.postJson<WatchWatchlistRequestBody, WatchWatchlistResponse>(
+            pathOrUrl = "/pc/api/watch/watchlist",
+            body = body,
+        )
+        if (res is ApiResult.Success) {
+            updateCachedWatchlistIds(res.data.ids)
+        }
+        return res
+    }
+
+    suspend fun getWatchEpisodes(tmdbId: Int, season: Int): ApiResult<WatchEpisodesResponse> {
+        return api.getJson<WatchEpisodesResponse>(
+            "/pc/api/watch/episodes?tmdbId=$tmdbId&season=$season",
+            timeoutMs = SEERR_TIMEOUT_MS,
+        )
+    }
+
+    suspend fun getWatchDownloads(
+        tmdbId: Int? = null,
+        mediaType: String? = null,
+    ): ApiResult<WatchDownloadsResponse> {
+        val params = mutableListOf<String>()
+        if (tmdbId != null && tmdbId > 0) {
+            params.add("tmdbId=$tmdbId")
+        }
+        if (!mediaType.isNullOrBlank()) {
+            params.add("mediaType=${URLEncoder.encode(mediaType, "UTF-8")}")
+        }
+        val suffix = if (params.isNotEmpty()) "?${params.joinToString("&")}" else ""
+        return api.getJson<WatchDownloadsResponse>(
+            "/pc/api/watch/downloads$suffix",
+            timeoutMs = 12_000L,
+        )
+    }
+
+    fun getCachedWatchHome(): WatchHomeResponse? {
+        val raw = cache?.getString(CACHE_KEY_WATCH_HOME) ?: return null
+        return runCatching {
+            api.json.decodeFromString(WatchHomeResponse.serializer(), raw)
+        }.getOrNull()
+    }
+
+    fun getCachedWatchlistIds(): Set<String> {
+        return getCachedWatchHome()?.watchlistIds?.toSet().orEmpty()
+    }
+
+    private fun saveCachedWatchHome(home: WatchHomeResponse) {
+        val localCache = cache ?: return
+        runCatching {
+            val encoded = api.json.encodeToString(WatchHomeResponse.serializer(), home)
+            localCache.putString(CACHE_KEY_WATCH_HOME, encoded)
+        }
+    }
+
+    private fun updateCachedWatchlistIds(ids: List<String>) {
+        val prev = getCachedWatchHome() ?: return
+        val idSet = ids.toSet()
+        val updated = prev.copy(
+            watchlistIds = ids,
+            hero = prev.hero?.let { h ->
+                h.copy(inWatchlist = SeerrHelpers.watchlistKey(h.mediaType, h.id) in idSet)
+            },
+        )
+        saveCachedWatchHome(updated)
     }
 
     suspend fun search(query: String): ApiResult<List<SeerrItem>> {
@@ -98,12 +213,18 @@ class SeerrRepository(
     }
 
     suspend fun playOnTv(
-        mediaUrl: String?,
-        tmdbId: Int?,
-        mediaType: String,
-        title: String?,
+        mediaUrl: String? = null,
+        tmdbId: Int? = null,
+        mediaType: String = "movie",
+        title: String? = null,
+        jellyfinItemId: String? = null,
+        startPositionTicks: Long? = null,
     ): ApiResult<PlayOnTvResponse> {
-        val type = if (mediaType == "tv") "tv" else "movie"
+        val type = when (mediaType.trim().lowercase()) {
+            "episode" -> "episode"
+            "tv" -> "tv"
+            else -> "movie"
+        }
         return api.postJson<PlayOnTvRequestBody, PlayOnTvResponse>(
             pathOrUrl = "/pc/api/jellyfin/play-on-tv",
             body = PlayOnTvRequestBody(
@@ -111,6 +232,8 @@ class SeerrRepository(
                 tmdbId = tmdbId?.takeIf { it > 0 },
                 mediaType = type,
                 title = title?.takeIf { it.isNotBlank() },
+                jellyfinItemId = jellyfinItemId?.takeIf { it.isNotBlank() },
+                startPositionTicks = startPositionTicks?.takeIf { it > 0L },
             ),
         )
     }

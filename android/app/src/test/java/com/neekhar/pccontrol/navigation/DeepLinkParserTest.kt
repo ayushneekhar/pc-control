@@ -36,6 +36,14 @@ class DeepLinkParserTest {
             DeepLinkParser.parseUri("pccontrol://seerr/movie/550"),
         )
         assertEquals(
+            DeepLinkTarget.Route(PcRoute.Seerr),
+            DeepLinkParser.parseUri("pccontrol://watch"),
+        )
+        assertEquals(
+            DeepLinkTarget.Route(PcRoute.SeerrDetail(mediaType = "tv", id = 95480)),
+            DeepLinkParser.parseUri("pccontrol://watch/tv/95480"),
+        )
+        assertEquals(
             DeepLinkTarget.Route(PcRoute.SeerrPerson(id = 287)),
             DeepLinkParser.parseUri("pccontrol://seerr/person/287"),
         )

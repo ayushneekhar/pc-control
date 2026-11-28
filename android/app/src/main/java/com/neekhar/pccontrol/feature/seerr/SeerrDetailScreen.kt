@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -43,7 +45,9 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckBox
 import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.Person
@@ -92,11 +96,13 @@ import com.neekhar.pccontrol.core.ui.PcErrorBanner
 import com.neekhar.pccontrol.core.ui.PcListCard
 import com.neekhar.pccontrol.core.ui.PcListRow
 import com.neekhar.pccontrol.core.ui.PcPill
+import com.neekhar.pccontrol.core.ui.PcProgressBar
 import com.neekhar.pccontrol.core.ui.PcSectionLabel
 import com.neekhar.pccontrol.core.ui.PcStatusBarScrim
 import com.neekhar.pccontrol.core.ui.PcTone
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteUiState
 import com.neekhar.pccontrol.feature.tvremote.TvRemoteViewModel
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -202,7 +208,7 @@ fun SeerrDetailScreen(
                             .background(colors.surfaceRaised),
                     ) {
                         AsyncImage(
-                            model = item!!.backdrop,
+                            model = viewModel.resolveImageUrl(item!!.backdrop),
                             contentDescription = item.title,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize(),
@@ -261,7 +267,7 @@ fun SeerrDetailScreen(
             if (!state.error.isNullOrBlank()) {
                 item(key = "error") {
                     Box(modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp)) {
-                        PcErrorBanner(title = "Seerr", message = state.error)
+                        PcErrorBanner(title = "Watch", message = state.error)
                     }
                 }
             }
@@ -289,7 +295,7 @@ fun SeerrDetailScreen(
                             ),
                     ) {
                         SeerrPoster(
-                            url = item?.poster,
+                            url = viewModel.resolveImageUrl(item?.poster),
                             mediaType = state.mediaType,
                             size = SeerrPosterSize.LG,
                         )
@@ -366,7 +372,7 @@ fun SeerrDetailScreen(
                 }
             }
 
-            // Primary Actions (Movie Request / TV Season Picker / Jellyfin)
+            // Primary Actions (Playback / Request / My List — structured so Phase 2 Play on Phone & Offline Download slot right in)
             if (item != null) {
                 item(key = "actions") {
                     Column(
@@ -375,6 +381,37 @@ fun SeerrDetailScreen(
                             .padding(horizontal = 18.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        val isPlayableOnTv = item.status == SeerrStatus.AVAILABLE || item.status == SeerrStatus.PARTIAL
+
+                        if (isPlayableOnTv) {
+                            val connectedDevice = tvState?.connectedDeviceName
+                            val playLabel = state.playOnTvStatus
+                                ?: connectedDevice?.let { "Play on $it" }
+                                ?: "Play on TV"
+                            PcButton(
+                                label = playLabel,
+                                onClick = viewModel::playOnTv,
+                                variant = PcButtonVariant.Primary,
+                                icon = if (state.playOnTvStatus != null) {
+                                    Icons.Rounded.Check
+                                } else {
+                                    Icons.Rounded.Tv
+                                },
+                                busy = state.playingOnTv,
+                                enabled = !state.loading && !state.playingOnTv,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            if (state.playOnTvShowRemoteAction) {
+                                PcButton(
+                                    label = "Open TV Remote",
+                                    onClick = onOpenTvRemote,
+                                    variant = PcButtonVariant.Subtle,
+                                    icon = Icons.Rounded.Tv,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+
                         if (!state.isTv && state.canRequestMovie) {
                             PcButton(
                                 label = if (item.status == SeerrStatus.DELETED) {
@@ -398,54 +435,47 @@ fun SeerrDetailScreen(
                                     "Choose seasons to request"
                                 },
                                 onClick = viewModel::openSeasonSheet,
-                                variant = PcButtonVariant.Primary,
+                                variant = if (isPlayableOnTv) PcButtonVariant.Subtle else PcButtonVariant.Primary,
                                 icon = Icons.Rounded.Add,
                                 busy = state.submitting,
                                 enabled = !state.loading && !state.submitting,
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }
-                        if (item.status == SeerrStatus.AVAILABLE) {
-                            val hasPrimaryRequestAbove = (!state.isTv && state.canRequestMovie) ||
-                                (state.isTv && state.pickableSeasons.isNotEmpty())
-                            val connectedDevice = tvState?.connectedDeviceName
-                            val playLabel = state.playOnTvStatus
-                                ?: connectedDevice?.let { "Play on $it" }
-                                ?: "Play on TV"
+
+                        // Secondary utility row: My List toggle (Phase 2 Play on Phone / Offline Download slot beside this)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
                             PcButton(
-                                label = playLabel,
-                                onClick = viewModel::playOnTv,
-                                variant = if (hasPrimaryRequestAbove) {
-                                    PcButtonVariant.Subtle
-                                } else {
-                                    PcButtonVariant.Primary
-                                },
-                                icon = if (state.playOnTvStatus != null) {
-                                    Icons.Rounded.Check
-                                } else {
-                                    Icons.Rounded.Tv
-                                },
-                                busy = state.playingOnTv,
-                                enabled = !state.loading && !state.playingOnTv,
-                                modifier = Modifier.fillMaxWidth(),
+                                label = if (state.inWatchlist) "In My List" else "My List",
+                                onClick = viewModel::toggleWatchlist,
+                                variant = PcButtonVariant.Subtle,
+                                icon = if (state.inWatchlist) Icons.Rounded.Check else Icons.Rounded.Add,
+                                busy = state.togglingWatchlist,
+                                enabled = !state.togglingWatchlist,
+                                modifier = Modifier.weight(1f),
                             )
-                            if (state.playOnTvShowRemoteAction) {
-                                PcButton(
-                                    label = "Open TV Remote",
-                                    onClick = onOpenTvRemote,
-                                    variant = PcButtonVariant.Subtle,
-                                    icon = Icons.Rounded.Tv,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                            if (!state.playOnTvError.isNullOrBlank()) {
-                                PcErrorBanner(
-                                    title = "Play on TV",
-                                    message = state.playOnTvError,
-                                    tone = PcTone.Warn,
-                                )
-                            }
                         }
+
+                        if (!state.playOnTvError.isNullOrBlank()) {
+                            PcErrorBanner(
+                                title = "Play on TV",
+                                message = state.playOnTvError,
+                                tone = PcTone.Warn,
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Live Download Progress (when Radarr/Sonarr is actively downloading this title)
+            val activeDownload = state.activeDownload
+            if (activeDownload != null) {
+                item(key = "active_download") {
+                    Box(modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
+                        WatchActiveDownloadCard(download = activeDownload)
                     }
                 }
             }
@@ -559,6 +589,116 @@ fun SeerrDetailScreen(
                                             .clickable(onClick = viewModel::toggleOverviewExpanded)
                                             .padding(horizontal = 4.dp, vertical = 2.dp),
                                     )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // TV Episode Browser (Season selector pills + episode stills + progress + per-episode Play on TV)
+            if (state.isTv && state.browsableSeasons.isNotEmpty()) {
+                val epData = state.currentSeasonEpisodes
+                item(key = "episodes_header") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Box(modifier = Modifier.padding(horizontal = 18.dp)) {
+                            PcSectionLabel(
+                                label = "Episodes",
+                                trailing = epData?.let { data ->
+                                    {
+                                        val countLabel = if (data.availableCount > 0) {
+                                            "${data.availableCount} of ${data.totalCount} available"
+                                        } else {
+                                            "${data.totalCount} ${if (data.totalCount == 1) "episode" else "episodes"}"
+                                        }
+                                        Text(
+                                            text = countLabel,
+                                            color = colors.textFaint,
+                                            style = TabularNumStyle.copy(fontSize = 12.sp),
+                                        )
+                                    }
+                                },
+                            )
+                        }
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = 18.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items(state.browsableSeasons, key = { "ep_season:${it.seasonNumber}" }) { season ->
+                                val label = if (season.seasonNumber == 0) {
+                                    "Specials"
+                                } else {
+                                    "Season ${season.seasonNumber}"
+                                }
+                                SeerrFilterChip(
+                                    label = label,
+                                    count = season.episodeCount.takeIf { it > 0 },
+                                    selected = state.selectedEpisodeSeason == season.seasonNumber,
+                                    onClick = { viewModel.selectEpisodeSeason(season.seasonNumber) },
+                                )
+                            }
+                        }
+                    }
+                }
+
+                when {
+                    state.loadingEpisodes && epData == null -> {
+                        item(key = "episodes_loading") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 20.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                CircularProgressIndicator(
+                                    color = colors.accent,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                        }
+                    }
+                    !state.episodesError.isNullOrBlank() && epData == null -> {
+                        item(key = "episodes_error") {
+                            Box(modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp)) {
+                                PcErrorBanner(
+                                    title = "Episodes",
+                                    message = state.episodesError,
+                                    tone = PcTone.Warn,
+                                    actionLabel = "Retry",
+                                    onAction = viewModel::retrySeasonEpisodes,
+                                )
+                            }
+                        }
+                    }
+                    epData != null && epData.episodes.isNotEmpty() -> {
+                        item(key = "episodes_list_${epData.seasonNumber}") {
+                            PcListCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 18.dp, vertical = 8.dp),
+                            ) {
+                                epData.episodes.forEachIndexed { idx, ep ->
+                                    WatchEpisodeRow(
+                                        episode = ep,
+                                        resolveImageUrl = viewModel::resolveImageUrl,
+                                        playingOnTv = state.playingEpisodeId == ep.jellyfinItemId,
+                                        playEnabled = state.playingEpisodeId == null && !state.playingOnTv,
+                                        onPlayOnTv = { viewModel.playEpisodeOnTv(ep) },
+                                    )
+                                    if (idx < epData.episodes.lastIndex) {
+                                        HorizontalDivider(
+                                            thickness = 0.5.dp,
+                                            color = colors.hairline,
+                                            modifier = Modifier.padding(horizontal = 14.dp),
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1390,6 +1530,263 @@ private fun SeerrSeasonPickerSheet(
                     modifier = Modifier.weight(1f),
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun WatchActiveDownloadCard(
+    download: WatchDownloadItem,
+) {
+    val colors = LocalPcColors.current
+    val pct = download.percent.roundToInt().coerceIn(0, 100)
+    val barColor = if (download.status == "warning") colors.warn else colors.accent
+    val statusLabel = when (download.status.lowercase()) {
+        "importing" -> "Importing"
+        "queued" -> "Queued"
+        "paused" -> "Paused"
+        "warning" -> "Needs attention"
+        else -> "Downloading"
+    }
+    val headerTitle = buildString {
+        append(statusLabel)
+        if (!download.episodeLabel.isNullOrBlank()) {
+            append(" · ")
+            append(download.episodeLabel)
+        }
+    }
+    val subParts = buildList {
+        add("$pct%")
+        if (!download.eta.isNullOrBlank()) add("${download.eta} left")
+        if (download.sizeLeft > 0L) add("${SeerrHelpers.formatDownloadBytes(download.sizeLeft)} remaining")
+    }.joinToString(" · ")
+
+    PcCard(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Download,
+                    contentDescription = null,
+                    tint = barColor,
+                    modifier = Modifier.size(18.dp),
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = headerTitle,
+                        color = colors.text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = subParts,
+                        color = colors.textDim,
+                        style = TabularNumStyle.copy(fontSize = 12.sp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            PcProgressBar(
+                progress = (download.percent / 100.0).toFloat().coerceIn(0f, 1f),
+                color = barColor,
+                height = 4.dp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun WatchEpisodeRow(
+    episode: WatchEpisode,
+    resolveImageUrl: (String?) -> String?,
+    playingOnTv: Boolean,
+    playEnabled: Boolean,
+    onPlayOnTv: () -> Unit,
+) {
+    val colors = LocalPcColors.current
+    val stillUrl = resolveImageUrl(episode.still)
+    val runtimeStr = SeerrHelpers.formatRuntime(episode.runtimeMinutes)
+    val metaLine = buildList {
+        runtimeStr?.let { add(it) }
+        when {
+            episode.played -> add("Watched")
+            episode.progressPct > 0.0 -> add("${episode.progressPct.roundToInt()}% watched")
+            episode.available -> add("Available")
+            else -> SeerrHelpers.formatDate(episode.airDate)?.let { add(it) }
+        }
+    }.joinToString(" · ")
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (episode.available && !episode.jellyfinItemId.isNullOrBlank()) {
+                    Modifier.clickable(enabled = playEnabled, onClick = onPlayOnTv)
+                } else {
+                    Modifier
+                },
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // 16:9 episode still thumbnail with watched checkmark & resume progress bar
+            Box(
+                modifier = Modifier
+                    .width(114.dp)
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(colors.surfaceRaised),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Tv,
+                    contentDescription = null,
+                    tint = colors.textFaint,
+                    modifier = Modifier
+                        .size(20.dp)
+                        .align(Alignment.Center),
+                )
+                if (!stillUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = stillUrl,
+                        contentDescription = episode.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                if (episode.played) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(4.dp)
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .background(colors.mediaChip),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.CheckCircle,
+                            contentDescription = "Watched",
+                            tint = colors.ok,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                } else if (episode.available) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(5.dp)
+                            .size(12.dp)
+                            .clip(CircleShape)
+                            .background(colors.mediaChip),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(colors.ok),
+                        )
+                    }
+                }
+                if (episode.progressPct > 0.0 && !episode.played) {
+                    val frac = (episode.progressPct / 100.0).toFloat().coerceIn(0.04f, 1f)
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .background(Color.White.copy(alpha = 0.22f)),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(frac)
+                                .fillMaxHeight()
+                                .background(colors.accent),
+                        )
+                    }
+                }
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(
+                    text = "E${episode.episodeNumber} · ${episode.name.ifBlank { "Episode ${episode.episodeNumber}" }}",
+                    color = if (episode.available) colors.text else colors.textDim,
+                    style = TabularNumStyle.copy(
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        lineHeight = 18.sp,
+                    ),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (metaLine.isNotEmpty()) {
+                    Text(
+                        text = metaLine,
+                        color = if (episode.available && !episode.played) colors.ok else colors.textFaint,
+                        style = TabularNumStyle.copy(fontSize = 12.sp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            // Per-episode playback actions slot (Phase 2 Play on Phone + Offline Download slot right alongside this)
+            if (episode.available && !episode.jellyfinItemId.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(colors.accentSoft)
+                        .clickable(enabled = playEnabled, onClick = onPlayOnTv),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (playingOnTv) {
+                        CircularProgressIndicator(
+                            color = colors.accent,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Rounded.Tv,
+                            contentDescription = "Play episode on TV",
+                            tint = colors.accent,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        if (episode.overview.isNotBlank()) {
+            Text(
+                text = episode.overview,
+                color = colors.textDim,
+                fontSize = 12.5.sp,
+                lineHeight = 17.5.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

@@ -190,7 +190,7 @@ object DeepLinkParser {
                 replayCam = query["cam"],
                 replayTsMs = query["ts"]?.toLongOrNull(),
             )
-            "seerr" -> when {
+            "seerr", "watch" -> when {
                 segments.size >= 3 && segments[1].equals("person", ignoreCase = true) -> {
                     val id = segments[2].toIntOrNull()
                     if (id != null) PcRoute.SeerrPerson(id = id) else PcRoute.Seerr

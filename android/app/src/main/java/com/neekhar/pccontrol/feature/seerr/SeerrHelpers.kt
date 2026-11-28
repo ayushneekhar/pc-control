@@ -265,4 +265,48 @@ object SeerrHelpers {
         if (voteAverage == null || voteAverage <= 0.0 || abs(voteAverage) > 100.0) return null
         return String.format(Locale.US, "%.1f", voteAverage)
     }
+
+    fun watchlistKey(mediaType: String, tmdbId: Int): String {
+        val mt = if (mediaType.trim().lowercase() == "tv") "tv" else "movie"
+        return "$mt:$tmdbId"
+    }
+
+    fun formatRemainingMinutes(minutes: Int?): String? {
+        if (minutes == null || minutes <= 0) return null
+        val h = minutes / 60
+        val m = minutes % 60
+        return when {
+            h <= 0 -> "${m}m left"
+            m == 0 -> "${h}h left"
+            else -> "${h}h ${m}m left"
+        }
+    }
+
+    fun formatDownloadBytes(bytes: Long): String {
+        if (bytes <= 0L) return "0 B"
+        val gb = 1024.0 * 1024.0 * 1024.0
+        val mb = 1024.0 * 1024.0
+        return when {
+            bytes >= gb -> String.format(Locale.US, "%.1f GB", bytes / gb)
+            bytes >= mb -> String.format(Locale.US, "%.0f MB", bytes / mb)
+            else -> "${bytes / 1024L} KB"
+        }
+    }
+
+    fun pendingRequestsBadgeCount(counts: Map<String, Int>?): Int {
+        if (counts == null) return 0
+        val pending = counts["pending"] ?: 0
+        val processing = counts["processing"] ?: 0
+        val grabbing = counts["grabbing"] ?: 0
+        return (pending + processing).coerceAtLeast(pending + grabbing)
+    }
+
+    fun defaultEpisodeSeason(seasons: List<SeerrSeason>): Int? {
+        if (seasons.isEmpty()) return null
+        val regular = seasons.filter { it.seasonNumber > 0 }.sortedBy { it.seasonNumber }
+        val pool = regular.ifEmpty { seasons.sortedBy { it.seasonNumber } }
+        return pool.firstOrNull {
+            it.status == SeerrStatus.AVAILABLE || it.status == SeerrStatus.PARTIAL
+        }?.seasonNumber ?: pool.first().seasonNumber
+    }
 }

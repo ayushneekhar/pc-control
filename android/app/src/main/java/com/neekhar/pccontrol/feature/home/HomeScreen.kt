@@ -1172,8 +1172,8 @@ private fun OpenRoutesSection(
         PcListCard {
             // 1. Primary everyday media & storage apps (curated priority order)
             PcListRow(
-                title = "Seerr",
-                subtitle = "Search & request movies or TV",
+                title = "Watch",
+                subtitle = "Movies & TV",
                 icon = Icons.Rounded.Movie,
                 showChevron = true,
                 showDivider = true,

@@ -294,6 +294,47 @@ class JellyfinPlayOnTvTests(unittest.TestCase):
         self.assertEqual(code, 404)
         self.assertEqual(body, {"ok": False, "error": "Item not found in Jellyfin library."})
 
+    def test_explicit_jellyfin_item_id_for_episode_sends_play_now_with_start_ticks(self):
+        ep_id = "11112222333344445555666677778888"
+        self.jf.sessions = [
+            {
+                "Id": "sess-tv-ep",
+                "DeviceName": "Lumio Arc 7",
+                "Client": "Android TV",
+                "SupportsRemoteControl": True,
+            },
+        ]
+
+        code, body = pcapi.jellyfin_play_on_tv({
+            "jellyfinItemId": ep_id,
+            "mediaType": "episode",
+            "title": "Pilot",
+            "startPositionTicks": 1234567890,
+        })
+
+        self.assertEqual(code, 200)
+        self.assertEqual(body, {
+            "ok": True,
+            "device": "Lumio Arc 7",
+            "action": "play",
+            "itemId": ep_id,
+        })
+        paths = [r["path"] for r in self.jf.requests]
+        self.assertNotIn("/Items", paths)
+        play_req = self.jf.requests[-1]
+        self.assertEqual(play_req["path"], "/Sessions/sess-tv-ep/Playing")
+        self.assertEqual(play_req["query"]["itemIds"], [ep_id])
+        self.assertEqual(play_req["query"]["playCommand"], ["PlayNow"])
+        self.assertEqual(play_req["query"]["startPositionTicks"], ["1234567890"])
+
+    def test_invalid_jellyfin_item_id_returns_400(self):
+        code, body = pcapi.jellyfin_play_on_tv({
+            "jellyfinItemId": "not-a-valid-hex-id",
+            "mediaType": "episode",
+        })
+        self.assertEqual(code, 400)
+        self.assertEqual(body["ok"], False)
+
 
 if __name__ == "__main__":
     unittest.main()

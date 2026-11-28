@@ -334,6 +334,8 @@ data class PlayOnTvRequestBody(
     val tmdbId: Int? = null,
     val mediaType: String = "movie",
     val title: String? = null,
+    val jellyfinItemId: String? = null,
+    val startPositionTicks: Long? = null,
 )
 
 @Serializable
@@ -344,4 +346,218 @@ data class PlayOnTvResponse(
     val itemId: String? = null,
     val code: String? = null,
     val error: String? = null,
+)
+
+// ---------------------------------------------------------------- Watch (Netflix-style hub)
+
+enum class WatchTab(val id: String, val label: String) {
+    ALL("all", "All"),
+    LIBRARY("library", "In Library"),
+    MOVIES("movies", "Movies"),
+    TV("tv", "TV"),
+    MY_LIST("watchlist", "My List"),
+    REQUESTS("requests", "Requests"),
+}
+
+enum class WatchLibraryFilter(val mediaType: String?, val label: String) {
+    ALL(null, "All"),
+    MOVIES("movie", "Movies"),
+    TV("tv", "TV"),
+}
+
+enum class WatchLibrarySort(val wire: String, val label: String) {
+    RECENT("recent", "Recent"),
+    TITLE("title", "Title"),
+    RATING("rating", "Top rated"),
+}
+
+@Serializable
+data class WatchItem(
+    val id: Int = 0,
+    val mediaType: String = "movie",
+    val title: String = "",
+    val year: Int? = null,
+    val overview: String = "",
+    val poster: String? = null,
+    val backdrop: String? = null,
+    val voteAverage: Double? = null,
+    val status: SeerrStatus = SeerrStatus.NONE,
+    val jellyfinItemId: String? = null,
+    val inWatchlist: Boolean = false,
+    val genres: List<String> = emptyList(),
+) {
+    val isMovie: Boolean get() = mediaType == "movie"
+    val isTv: Boolean get() = mediaType == "tv"
+
+    fun toSeedItem(resolveUrl: (String?) -> String? = { it }): SeerrItem = SeerrItem(
+        id = id,
+        mediaType = mediaType,
+        title = title,
+        year = year,
+        poster = resolveUrl(poster),
+        backdrop = resolveUrl(backdrop),
+        overview = overview,
+        status = status,
+        voteAverage = voteAverage,
+        genres = genres,
+    )
+}
+
+@Serializable
+data class WatchContinueItem(
+    val id: Int = 0,
+    val mediaType: String = "movie",
+    val title: String = "",
+    val year: Int? = null,
+    val status: SeerrStatus = SeerrStatus.AVAILABLE,
+    val jellyfinItemId: String = "",
+    val seriesId: String? = null,
+    val episodeLabel: String? = null,
+    val episodeTitle: String? = null,
+    val seasonNumber: Int? = null,
+    val episodeNumber: Int? = null,
+    val progressPct: Double = 0.0,
+    val positionTicks: Long = 0L,
+    val runtimeTicks: Long = 0L,
+    val remainingMinutes: Int? = null,
+    val isNextUp: Boolean = false,
+    val backdrop: String? = null,
+    val poster: String? = null,
+) {
+    val isTv: Boolean get() = mediaType == "tv"
+
+    fun toSeedItem(resolveUrl: (String?) -> String? = { it }): SeerrItem = SeerrItem(
+        id = id,
+        mediaType = mediaType,
+        title = title,
+        year = year,
+        poster = resolveUrl(poster),
+        backdrop = resolveUrl(backdrop),
+        status = status,
+    )
+}
+
+@Serializable
+data class WatchDownloadItem(
+    val tmdbId: Int = 0,
+    val mediaType: String = "movie",
+    val title: String = "",
+    val year: Int? = null,
+    val percent: Double = 0.0,
+    val status: String = "downloading",
+    val eta: String? = null,
+    val etaSeconds: Int? = null,
+    val sizeLeft: Long = 0L,
+    val size: Long = 0L,
+    val episodeLabel: String? = null,
+    val poster: String? = null,
+    val backdrop: String? = null,
+    val source: String = "",
+) {
+    fun toSeedItem(): SeerrItem = SeerrItem(
+        id = tmdbId,
+        mediaType = mediaType,
+        title = title,
+        year = year,
+        poster = poster,
+        backdrop = backdrop,
+        status = SeerrStatus.GRABBING,
+    )
+}
+
+@Serializable
+data class WatchRail(
+    val id: String = "",
+    val title: String = "",
+    val category: String = "all",
+    val mediaType: String? = null,
+    val genreId: Int? = null,
+    val networkId: Int? = null,
+    val items: List<WatchItem> = emptyList(),
+)
+
+@Serializable
+data class WatchHomeResponse(
+    val hero: WatchItem? = null,
+    val continueWatching: List<WatchContinueItem> = emptyList(),
+    val recentlyAdded: List<WatchItem> = emptyList(),
+    val downloads: List<WatchDownloadItem> = emptyList(),
+    val rails: List<WatchRail> = emptyList(),
+    val watchlistIds: List<String> = emptyList(),
+    val libraryCount: Int = 0,
+    val ts: Long = 0L,
+    val degraded: List<String> = emptyList(),
+)
+
+@Serializable
+data class WatchGenre(
+    val id: Int,
+    val name: String = "",
+)
+
+@Serializable
+data class WatchDiscoverResponse(
+    val category: String = "all",
+    val page: Int = 1,
+    val totalPages: Int = 1,
+    val totalResults: Int = 0,
+    val items: List<WatchItem> = emptyList(),
+    val genres: List<WatchGenre> = emptyList(),
+)
+
+@Serializable
+data class WatchWatchlistRequestBody(
+    val id: Int,
+    val mediaType: String,
+    val action: String = "toggle",
+    val title: String? = null,
+    val year: Int? = null,
+    val poster: String? = null,
+    val backdrop: String? = null,
+    val overview: String? = null,
+    val voteAverage: Double? = null,
+)
+
+@Serializable
+data class WatchWatchlistResponse(
+    val ok: Boolean = false,
+    val inWatchlist: Boolean = false,
+    val count: Int = 0,
+    val ids: List<String> = emptyList(),
+)
+
+@Serializable
+data class WatchEpisode(
+    val episodeNumber: Int,
+    val seasonNumber: Int,
+    val name: String = "",
+    val overview: String = "",
+    val airDate: String? = null,
+    val still: String? = null,
+    val runtimeMinutes: Int? = null,
+    val voteAverage: Double? = null,
+    val available: Boolean = false,
+    val jellyfinItemId: String? = null,
+    val played: Boolean = false,
+    val progressPct: Double = 0.0,
+    val positionTicks: Long = 0L,
+    val runtimeTicks: Long = 0L,
+)
+
+@Serializable
+data class WatchEpisodesResponse(
+    val tmdbId: Int = 0,
+    val seasonNumber: Int = 1,
+    val name: String = "",
+    val overview: String = "",
+    val seriesJellyfinId: String? = null,
+    val availableCount: Int = 0,
+    val totalCount: Int = 0,
+    val episodes: List<WatchEpisode> = emptyList(),
+)
+
+@Serializable
+data class WatchDownloadsResponse(
+    val items: List<WatchDownloadItem> = emptyList(),
+    val ts: Long = 0L,
 )

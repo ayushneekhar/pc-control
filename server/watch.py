@@ -36,7 +36,7 @@ TMDB_ORIG_RE = re.compile(r"^https?://image\.tmdb\.org/t/p/original(/.*)$")
 
 PLAYER_DEVICE_ID = "pc-control-watch"
 PLAYER_CLIENT_NAME = "PC Control"
-PLAYER_CLIENT_VERSION = "2.3.1"
+PLAYER_CLIENT_VERSION = "2.3.2"
 MAX_HERO_ITEMS = 6
 USERDATA_PROGRESS_THROTTLE_SEC = 2.0
 
@@ -1936,6 +1936,7 @@ class WatchService:
         subtitle_tracks = []
         video_codec = ""
         default_audio_codec = ""
+        found_default_audio = False
         for st in streams:
             if not isinstance(st, dict):
                 continue
@@ -1948,8 +1949,10 @@ class WatchService:
                 video_codec = codec
             elif stype == "Audio":
                 is_def = bool(st.get("IsDefault"))
-                if is_def or not default_audio_codec:
+                if (is_def and not found_default_audio) or not default_audio_codec:
                     default_audio_codec = codec
+                    if is_def:
+                        found_default_audio = True
                 lang = str(st.get("Language") or "").strip()
                 disp = str(st.get("DisplayTitle") or st.get("Title") or "").strip()
                 if not disp:

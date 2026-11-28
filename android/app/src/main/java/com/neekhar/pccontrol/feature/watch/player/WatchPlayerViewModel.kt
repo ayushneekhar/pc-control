@@ -30,6 +30,7 @@ data class PlayerSubtitleEntry(
     val language: String,
     val uri: String,
     val format: String = "vtt",
+    val isExternal: Boolean = false,
     val isDefault: Boolean = false,
     val isForced: Boolean = false,
 )
@@ -39,6 +40,7 @@ data class PlayerAudioEntry(
     val index: Int,
     val label: String,
     val language: String,
+    val codec: String = "",
     val isDefault: Boolean = false,
 )
 
@@ -64,6 +66,7 @@ data class WatchPlayerUiState(
     val selectedAudioIndex: Int? = null,
     val subtitleTracks: List<PlayerSubtitleEntry> = emptyList(),
     val selectedSubtitleId: String? = null,
+    val hlsAttachedSubtitleId: String? = null,
     val chapters: List<WatchChapter> = emptyList(),
     val nextEpisode: WatchNextEpisode? = null,
     val nextEpisodeDismissed: Boolean = false,
@@ -265,6 +268,7 @@ class WatchPlayerViewModel(
                 language = sub.language,
                 uri = f.toURI().toString(),
                 format = sub.format,
+                isExternal = true,
                 isDefault = sub.isDefault,
                 isForced = sub.isForced,
             )
@@ -300,6 +304,7 @@ class WatchPlayerViewModel(
                 selectedAudioIndex = null,
                 subtitleTracks = subs,
                 selectedSubtitleId = defaultSub,
+                hlsAttachedSubtitleId = null,
                 chapters = emptyList(),
                 nextEpisode = null,
                 isBuffering = true,
@@ -311,22 +316,32 @@ class WatchPlayerViewModel(
         val options = info.qualityOptions.map { opt ->
             opt.copy(streamUrl = playerRepo.resolveTailscaleUrl(opt.streamUrl))
         }
-        val chosen = WatchPlayerHelpers.selectInitialQuality(options, info.recommendedQualityId)
-        val chosenUrl = chosen?.streamUrl?.takeIf { it.isNotBlank() }
-            ?: playerRepo.resolveTailscaleUrl(info.directStreamUrl.ifBlank { info.hlsUrl })
-        val chosenIsHls = chosen?.isHls ?: chosenUrl.contains(".m3u8", ignoreCase = true)
-
         val audioEntries = info.audioTracks.map { tr ->
             PlayerAudioEntry(
                 id = "aud:${tr.index}",
                 index = tr.index,
                 label = tr.displayTitle.ifBlank { tr.language.uppercase().ifBlank { "Audio ${tr.index}" } },
                 language = tr.language,
+                codec = tr.codec,
                 isDefault = tr.isDefault,
             )
         }
-        val defaultAudioIdx = audioEntries.firstOrNull { it.isDefault }?.index
-            ?: audioEntries.firstOrNull()?.index
+        val defaultAudio = audioEntries.firstOrNull { it.isDefault } ?: audioEntries.firstOrNull()
+        val defaultAudioIdx = defaultAudio?.index
+        val defaultAudioUnsupported = WatchPlayerHelpers.isUnsupportedDirectAudioCodec(defaultAudio?.codec)
+
+        var chosen = WatchPlayerHelpers.selectInitialQuality(options, info.recommendedQualityId)
+        if (chosen != null && !chosen.isHls && defaultAudioUnsupported) {
+            // Android MediaCodec cannot natively decode TrueHD / DTS / DTS-HD / MLP:
+            // proactively start on HLS with AAC transcode for instant, error-free playback.
+            chosen = WatchPlayerHelpers.selectHlsFallbackQuality(options) ?: chosen
+        }
+        var chosenUrl = chosen?.streamUrl?.takeIf { it.isNotBlank() }
+            ?: playerRepo.resolveTailscaleUrl(info.directStreamUrl.ifBlank { info.hlsUrl })
+        val chosenIsHls = chosen?.isHls ?: chosenUrl.contains(".m3u8", ignoreCase = true)
+        if (chosenIsHls && defaultAudioIdx != null) {
+            chosenUrl = WatchPlayerHelpers.withAudioStreamIndex(chosenUrl, defaultAudioIdx)
+        }
 
         val subEntries = info.subtitleTracks.map { sub ->
             PlayerSubtitleEntry(
@@ -335,11 +350,18 @@ class WatchPlayerViewModel(
                 language = sub.language,
                 uri = playerRepo.resolveTailscaleUrl(sub.deliveryUrl),
                 format = "vtt",
+                isExternal = sub.isExternal,
                 isDefault = sub.isDefault,
                 isForced = sub.isForced,
             )
         }
-        val defaultSubId = subEntries.firstOrNull { it.isDefault }?.id
+        // In HLS mode, only default-select external subtitles on startup so we never trigger
+        // a slow server-side ffmpeg subtitle extraction before playback begins.
+        val defaultSubId = if (chosenIsHls) {
+            subEntries.firstOrNull { it.isDefault && it.isExternal }?.id
+        } else {
+            subEntries.firstOrNull { it.isDefault }?.id
+        }
 
         val startMs = WatchPlayerHelpers.ticksToMs(info.resumePositionTicks)
         val runtimeMs = WatchPlayerHelpers.ticksToMs(info.runtimeTicks)
@@ -371,6 +393,7 @@ class WatchPlayerViewModel(
                 selectedAudioIndex = defaultAudioIdx,
                 subtitleTracks = subEntries,
                 selectedSubtitleId = defaultSubId,
+                hlsAttachedSubtitleId = null,
                 chapters = info.chapters,
                 nextEpisode = info.nextEpisode,
                 isBuffering = true,
@@ -499,10 +522,10 @@ class WatchPlayerViewModel(
 
     fun onPlayerError(message: String) {
         val st = _uiState.value
-        // Auto-fallback once from Direct play to 1080p NVENC HLS transcode if device decoder fails
+        // Auto-fallback once from Direct Play to 1080p NVENC HLS transcode on any PlaybackException
+        // (including MediaCodecAudioRenderer / NO_UNSUPPORTED_TYPE / decoder init failures)
         if (!st.isOffline && !st.isHls && !fallbackAttempted) {
-            val hlsFallback = st.qualityOptions.firstOrNull { it.isHls && it.id == "1080p" }
-                ?: st.qualityOptions.firstOrNull { it.isHls }
+            val hlsFallback = WatchPlayerHelpers.selectHlsFallbackQuality(st.qualityOptions)
             if (hlsFallback != null) {
                 fallbackAttempted = true
                 showToast("Switching to transcoded stream…")
@@ -518,13 +541,31 @@ class WatchPlayerViewModel(
         }
     }
 
+    fun onDirectPlayAudioUnsupported() {
+        val st = _uiState.value
+        if (st.isOffline || st.isHls || fallbackAttempted) return
+        val hlsFallback = WatchPlayerHelpers.selectHlsFallbackQuality(st.qualityOptions) ?: return
+        fallbackAttempted = true
+        showToast("Switching to transcoded audio…")
+        selectQuality(hlsFallback.id)
+    }
+
     fun selectQuality(qualityId: String) {
         val st = _uiState.value
         val opt = st.qualityOptions.firstOrNull { it.id == qualityId } ?: return
+        if (!opt.isHls) {
+            fallbackAttempted = false
+        }
         var url = opt.streamUrl
         val audioIdx = st.selectedAudioIndex
         if (opt.isHls && audioIdx != null) {
             url = WatchPlayerHelpers.withAudioStreamIndex(url, audioIdx)
+        }
+        val nextSelectedSub = if (opt.isHls) {
+            val currentSub = st.subtitleTracks.firstOrNull { it.id == st.selectedSubtitleId }
+            if (currentSub != null && currentSub.isExternal) currentSub.id else null
+        } else {
+            st.selectedSubtitleId
         }
         _uiState.update { cur ->
             cur.copy(
@@ -533,6 +574,8 @@ class WatchPlayerViewModel(
                 isHls = opt.isHls,
                 startPositionMs = cur.currentPositionMs.coerceAtLeast(0L),
                 streamVersion = cur.streamVersion + 1,
+                selectedSubtitleId = nextSelectedSub,
+                hlsAttachedSubtitleId = null,
                 activeSheet = WatchPlayerSheet.NONE,
                 isBuffering = true,
                 error = null,
@@ -560,6 +603,32 @@ class WatchPlayerViewModel(
                 )
             }
         } else {
+            val targetAudio = st.audioTracks.firstOrNull { it.index == audioIndex }
+            if (!st.isOffline && WatchPlayerHelpers.isUnsupportedDirectAudioCodec(targetAudio?.codec)) {
+                val hlsFallback = WatchPlayerHelpers.selectHlsFallbackQuality(st.qualityOptions)
+                if (hlsFallback != null) {
+                    val updatedUrl = WatchPlayerHelpers.withAudioStreamIndex(hlsFallback.streamUrl, audioIndex)
+                    val currentSub = st.subtitleTracks.firstOrNull { it.id == st.selectedSubtitleId }
+                    val nextSelectedSub = if (currentSub != null && currentSub.isExternal) currentSub.id else null
+                    showToast("Switching to transcoded audio…")
+                    _uiState.update { cur ->
+                        cur.copy(
+                            selectedAudioIndex = audioIndex,
+                            selectedQualityId = hlsFallback.id,
+                            streamUri = updatedUrl,
+                            isHls = true,
+                            startPositionMs = cur.currentPositionMs.coerceAtLeast(0L),
+                            streamVersion = cur.streamVersion + 1,
+                            selectedSubtitleId = nextSelectedSub,
+                            hlsAttachedSubtitleId = null,
+                            activeSheet = WatchPlayerSheet.NONE,
+                            isBuffering = true,
+                            error = null,
+                        )
+                    }
+                    return
+                }
+            }
             // Direct / local file: ExoPlayer switches track in-place without reloading
             _uiState.update {
                 it.copy(
@@ -571,6 +640,27 @@ class WatchPlayerViewModel(
     }
 
     fun selectSubtitleTrack(subtitleId: String?) {
+        val st = _uiState.value
+        if (st.isHls && subtitleId != null) {
+            val entry = st.subtitleTracks.firstOrNull { it.id == subtitleId }
+            val needsOnDemandAttach = entry != null &&
+                !entry.isExternal &&
+                !entry.uri.startsWith("file://", ignoreCase = true) &&
+                st.hlsAttachedSubtitleId != subtitleId
+            if (needsOnDemandAttach) {
+                _uiState.update { cur ->
+                    cur.copy(
+                        selectedSubtitleId = subtitleId,
+                        hlsAttachedSubtitleId = subtitleId,
+                        startPositionMs = cur.currentPositionMs.coerceAtLeast(0L),
+                        streamVersion = cur.streamVersion + 1,
+                        activeSheet = WatchPlayerSheet.NONE,
+                        isBuffering = true,
+                    )
+                }
+                return
+            }
+        }
         _uiState.update {
             it.copy(
                 selectedSubtitleId = subtitleId,

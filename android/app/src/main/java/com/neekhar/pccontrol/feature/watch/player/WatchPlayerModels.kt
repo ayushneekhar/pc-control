@@ -120,6 +120,72 @@ object WatchPlayerHelpers {
     const val NEXT_EPISODE_THRESHOLD_MS = 15_000L
     val SPEED_OPTIONS: List<Float> = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
 
+    private val UNSUPPORTED_DIRECT_AUDIO_CODECS: Set<String> = setOf(
+        "truehd",
+        "true-hd",
+        "mlp",
+        "dts",
+        "dca",
+        "dtshd",
+        "dts-hd",
+        "dts_hd",
+        "dts-hd ma",
+        "dts-hd hra",
+        "dts:x",
+    )
+
+    fun isUnsupportedDirectAudioCodec(codec: String?): Boolean {
+        val norm = codec?.trim()?.lowercase(Locale.US)?.removePrefix("audio/") ?: return false
+        if (norm.isEmpty()) return false
+        return norm in UNSUPPORTED_DIRECT_AUDIO_CODECS ||
+            norm.startsWith("truehd") ||
+            norm.startsWith("true-hd") ||
+            norm.startsWith("dts") ||
+            norm == "dca" ||
+            norm == "mlp"
+    }
+
+    fun selectHlsFallbackQuality(options: List<WatchQualityOption>): WatchQualityOption? {
+        return options.firstOrNull { it.isHls && it.id == "1080p" }
+            ?: options.firstOrNull { it.isHls }
+    }
+
+    /**
+     * Decide which subtitle tracks should be attached as ExoPlayer `SubtitleConfiguration` sidecars.
+     *
+     * - External tracks (`isExternal == true`) and local offline files (`file://`) serve
+     *   instantaneously with zero server-side ffmpeg extraction and are always attached.
+     * - Embedded container tracks (`isExternal == false`) are NEVER attached via HTTP in Direct Play
+     *   (ExoPlayer demuxes MKV/MP4 text subtitles natively at 0ms latency).
+     * - In HLS mode, embedded tracks are NOT attached eagerly on startup; only the single embedded
+     *   track explicitly chosen by the user (`hlsAttachedSubtitleId`) is attached on demand.
+     */
+    fun subtitlesToAttach(
+        tracks: List<PlayerSubtitleEntry>,
+        isHls: Boolean,
+        hlsAttachedSubtitleId: String?,
+    ): List<PlayerSubtitleEntry> {
+        return tracks.filter { sub ->
+            if (sub.uri.isBlank()) return@filter false
+            if (sub.isExternal || sub.uri.startsWith("file://", ignoreCase = true)) {
+                true
+            } else {
+                isHls && hlsAttachedSubtitleId != null && sub.id == hlsAttachedSubtitleId
+            }
+        }
+    }
+
+    fun languagesMatch(a: String?, b: String?): Boolean {
+        val na = a?.trim()?.lowercase(Locale.US).orEmpty()
+        val nb = b?.trim()?.lowercase(Locale.US).orEmpty()
+        if (na.isEmpty() || nb.isEmpty()) return false
+        if (na == nb) return true
+        val isoA = runCatching { Locale.forLanguageTag(na).isO3Language.lowercase(Locale.US) }.getOrNull()
+        val isoB = runCatching { Locale.forLanguageTag(nb).isO3Language.lowercase(Locale.US) }.getOrNull()
+        if (!isoA.isNullOrBlank() && !isoB.isNullOrBlank() && isoA == isoB) return true
+        return na.take(2) == nb.take(2) && na.length >= 2 && nb.length >= 2
+    }
+
     fun ticksToMs(ticks: Long): Long = if (ticks <= 0L) 0L else ticks / TICKS_PER_MS
 
     fun msToTicks(ms: Long): Long = if (ms <= 0L) 0L else ms * TICKS_PER_MS

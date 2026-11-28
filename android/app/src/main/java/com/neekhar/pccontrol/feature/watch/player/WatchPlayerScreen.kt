@@ -161,6 +161,7 @@ fun WatchPlayerScreen(
     val latestOnBack by rememberUpdatedState(onBack)
     val latestOnHandedOff by rememberUpdatedState(onHandedOffToTv)
     val latestInPip by rememberUpdatedState(isInPictureInPictureMode)
+    val latestState by rememberUpdatedState(state)
     val smartCast = rememberSmartCastController(
         tvRemoteViewModel = tvRemoteViewModel,
         onNoDevices = { msg -> viewModel.showCastMessage(msg) },
@@ -212,6 +213,18 @@ fun WatchPlayerScreen(
 
             override fun onTracksChanged(tracks: Tracks) {
                 exoTracksVersion++
+                val currentState = latestState
+                if (!currentState.isOffline && !currentState.isHls) {
+                    val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+                    if (audioGroups.isNotEmpty()) {
+                        val hasSupportedAudio = audioGroups.any { group ->
+                            (0 until group.length).any { idx -> group.isTrackSupported(idx) }
+                        }
+                        if (!hasSupportedAudio) {
+                            viewModel.onDirectPlayAudioUnsupported()
+                        }
+                    }
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -315,7 +328,12 @@ fun WatchPlayerScreen(
     // Load MediaItem whenever streamUri or streamVersion changes
     LaunchedEffect(state.streamUri, state.streamVersion) {
         val uriStr = state.streamUri?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
-        val subConfigs = state.subtitleTracks.map { sub ->
+        val attachedSubs = WatchPlayerHelpers.subtitlesToAttach(
+            tracks = state.subtitleTracks,
+            isHls = state.isHls,
+            hlsAttachedSubtitleId = state.hlsAttachedSubtitleId,
+        )
+        val subConfigs = attachedSubs.map { sub ->
             val mime = if (sub.format.equals("srt", ignoreCase = true)) {
                 MimeTypes.APPLICATION_SUBRIP
             } else {
@@ -1032,14 +1050,25 @@ private fun applySubtitleSelection(
         return
     }
     builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+    builder.clearOverridesOfType(C.TRACK_TYPE_TEXT)
+
     val selectedEntry = subtitleTracks.firstOrNull { it.id == selectedSubtitleId }
     val textGroups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
     var matched = false
+
+    fun matchesAttachedId(fmtId: String?, targetId: String): Boolean {
+        if (fmtId.isNullOrBlank()) return false
+        return fmtId == targetId || fmtId.endsWith(":$targetId") || fmtId.endsWith(targetId)
+    }
+
+    // 1. Direct match against attached external / on-demand HTTP sidecar tracks (by id or exact label)
     for (group in textGroups) {
         for (i in 0 until group.length) {
             val fmt = group.getTrackFormat(i)
-            val idMatch = fmt.id != null && (fmt.id == selectedSubtitleId || fmt.id!!.endsWith(selectedSubtitleId))
-            val labelMatch = selectedEntry != null && fmt.label == selectedEntry.label
+            val idMatch = matchesAttachedId(fmt.id, selectedSubtitleId)
+            val labelMatch = selectedEntry != null &&
+                !fmt.label.isNullOrBlank() &&
+                fmt.label.equals(selectedEntry.label, ignoreCase = true)
             if (idMatch || labelMatch) {
                 builder.setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
                 matched = true
@@ -1048,6 +1077,73 @@ private fun applySubtitleSelection(
         }
         if (matched) break
     }
+
+    // 2. Native embedded MKV/MP4 text tracks demuxed by ExoPlayer (Direct Play)
+    if (!matched && selectedEntry != null && !selectedEntry.isExternal) {
+        val externalIds = subtitleTracks
+            .filter { it.isExternal || it.uri.startsWith("file://", ignoreCase = true) }
+            .map { it.id }
+            .toSet()
+        val embeddedGroups = textGroups.filter { group ->
+            (0 until group.length).none { idx ->
+                val fid = group.getTrackFormat(idx).id
+                externalIds.any { extId -> matchesAttachedId(fid, extId) }
+            }
+        }
+        val embeddedEntries = subtitleTracks.filter {
+            !it.isExternal && !it.uri.startsWith("file://", ignoreCase = true)
+        }
+        val embeddedPos = embeddedEntries.indexOfFirst { it.id == selectedSubtitleId }
+
+        // 2a. Container index match when track count aligns or language is compatible
+        if (embeddedPos in embeddedGroups.indices) {
+            val grp = embeddedGroups[embeddedPos]
+            val fmt = if (grp.length > 0) grp.getTrackFormat(0) else null
+            val langCompatible = fmt == null ||
+                fmt.language.isNullOrBlank() ||
+                fmt.language.equals("und", ignoreCase = true) ||
+                selectedEntry.language.isBlank() ||
+                WatchPlayerHelpers.languagesMatch(fmt.language, selectedEntry.language)
+            if (langCompatible || embeddedGroups.size == embeddedEntries.size) {
+                builder.setOverrideForType(TrackSelectionOverride(grp.mediaTrackGroup, 0))
+                matched = true
+            }
+        }
+
+        // 2b. Language + forced flag match across native embedded groups
+        if (!matched && selectedEntry.language.isNotBlank()) {
+            var fallbackLangCandidate: Pair<Tracks.Group, Int>? = null
+            for (group in embeddedGroups) {
+                for (i in 0 until group.length) {
+                    val fmt = group.getTrackFormat(i)
+                    if (WatchPlayerHelpers.languagesMatch(fmt.language, selectedEntry.language)) {
+                        val isForced = (fmt.selectionFlags and C.SELECTION_FLAG_FORCED) != 0
+                        if (isForced == selectedEntry.isForced) {
+                            builder.setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
+                            matched = true
+                            break
+                        } else if (fallbackLangCandidate == null) {
+                            fallbackLangCandidate = group to i
+                        }
+                    }
+                }
+                if (matched) break
+            }
+            if (!matched && fallbackLangCandidate != null) {
+                builder.setOverrideForType(
+                    TrackSelectionOverride(fallbackLangCandidate.first.mediaTrackGroup, fallbackLangCandidate.second),
+                )
+                matched = true
+            }
+        }
+
+        // 2c. Final fallback to container order if available
+        if (!matched && embeddedPos in embeddedGroups.indices) {
+            builder.setOverrideForType(TrackSelectionOverride(embeddedGroups[embeddedPos].mediaTrackGroup, 0))
+            matched = true
+        }
+    }
+
     if (!matched && selectedEntry != null && selectedEntry.language.isNotBlank()) {
         builder.setPreferredTextLanguage(selectedEntry.language)
     }
@@ -1067,15 +1163,17 @@ private fun applyDirectAudioSelection(
     val builder = player.trackSelectionParameters.buildUpon()
     var matched = false
 
-    // Match by order when track count aligns, or by language/label
-    if (posInList in audioGroups.indices) {
+    // Match by order when track count aligns — ONLY if the track is actually supported by MediaCodec
+    // (never force TrackSelectionOverride onto an unsupported TrueHD/DTS track).
+    if (posInList in audioGroups.indices && audioGroups[posInList].isTrackSupported(0)) {
         builder.setOverrideForType(TrackSelectionOverride(audioGroups[posInList].mediaTrackGroup, 0))
         matched = true
     } else if (targetEntry != null && targetEntry.language.isNotBlank()) {
         for (group in audioGroups) {
             for (i in 0 until group.length) {
+                if (!group.isTrackSupported(i)) continue
                 val fmt = group.getTrackFormat(i)
-                if (fmt.language.equals(targetEntry.language, ignoreCase = true)) {
+                if (WatchPlayerHelpers.languagesMatch(fmt.language, targetEntry.language)) {
                     builder.setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
                     matched = true
                     break

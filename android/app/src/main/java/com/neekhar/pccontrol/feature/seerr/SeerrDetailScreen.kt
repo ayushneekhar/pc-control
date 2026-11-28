@@ -3,8 +3,8 @@ package com.neekhar.pccontrol.feature.seerr
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -78,20 +78,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -100,6 +94,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.neekhar.pccontrol.R
 import com.neekhar.pccontrol.core.theme.LocalPcColors
 import com.neekhar.pccontrol.core.theme.LocalPcType
 import com.neekhar.pccontrol.core.theme.TabularNumStyle
@@ -1467,142 +1462,56 @@ private fun SeerrRatingsStrip(
 private fun RatingSourceLogo(kind: RatingSourceKind) {
     when (kind) {
         RatingSourceKind.IMDB -> {
-            Box(
+            Image(
+                painter = painterResource(id = R.drawable.ic_rating_imdb),
+                contentDescription = "IMDb",
+                contentScale = ContentScale.Fit,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0xFFF5C518))
-                    .padding(horizontal = 5.dp, vertical = 1.5.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "IMDb",
-                    color = Color(0xFF0A0A0A),
-                    fontSize = 10.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = (-0.4).sp,
-                    lineHeight = 12.sp,
-                    maxLines = 1,
-                )
-            }
+                    .height(16.dp)
+                    .width(32.dp),
+            )
         }
         RatingSourceKind.TMDB -> {
-            Box(
+            Image(
+                painter = painterResource(id = R.drawable.ic_rating_tmdb),
+                contentDescription = "TMDB",
+                contentScale = ContentScale.Fit,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0xFF3DDC97))
-                    .padding(horizontal = 5.dp, vertical = 1.5.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "TMDB",
-                    color = Color(0xFF0A0A0A),
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = (-0.2).sp,
-                    lineHeight = 12.sp,
-                    maxLines = 1,
-                )
-            }
+                    .height(15.dp)
+                    .width(35.dp),
+            )
         }
         RatingSourceKind.RT_CRITICS_FRESH -> {
-            Canvas(modifier = Modifier.size(16.dp)) {
-                val w = size.width
-                val h = size.height
-                // Fresh red tomato body
-                drawOval(
-                    color = Color(0xFFFA320A),
-                    topLeft = Offset(w * 0.10f, h * 0.22f),
-                    size = Size(w * 0.80f, h * 0.72f),
-                )
-                // Crisp subtle highlight
-                drawOval(
-                    color = Color.White.copy(alpha = 0.25f),
-                    topLeft = Offset(w * 0.24f, h * 0.34f),
-                    size = Size(w * 0.20f, h * 0.14f),
-                )
-                // Green calyx / stem
-                val stem = Path().apply {
-                    moveTo(w * 0.50f, h * 0.26f)
-                    lineTo(w * 0.34f, h * 0.14f)
-                    moveTo(w * 0.50f, h * 0.26f)
-                    lineTo(w * 0.66f, h * 0.14f)
-                    moveTo(w * 0.50f, h * 0.26f)
-                    lineTo(w * 0.50f, h * 0.08f)
-                }
-                drawPath(
-                    path = stem,
-                    color = Color(0xFF4CAF50),
-                    style = Stroke(width = w * 0.11f, cap = StrokeCap.Round),
-                )
-            }
+            Image(
+                painter = painterResource(id = R.drawable.ic_rating_rt_fresh),
+                contentDescription = "Rotten Tomatoes Fresh",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(18.dp),
+            )
         }
         RatingSourceKind.RT_CRITICS_ROTTEN -> {
-            Canvas(modifier = Modifier.size(16.dp)) {
-                val w = size.width
-                val h = size.height
-                val splatColor = Color(0xFF66BB6A)
-                // Green splat core + 5 irregular droplets
-                drawCircle(color = splatColor, radius = w * 0.30f, center = Offset(w * 0.50f, h * 0.52f))
-                drawCircle(color = splatColor, radius = w * 0.14f, center = Offset(w * 0.22f, h * 0.30f))
-                drawCircle(color = splatColor, radius = w * 0.13f, center = Offset(w * 0.78f, h * 0.28f))
-                drawCircle(color = splatColor, radius = w * 0.14f, center = Offset(w * 0.80f, h * 0.72f))
-                drawCircle(color = splatColor, radius = w * 0.12f, center = Offset(w * 0.22f, h * 0.74f))
-                drawCircle(color = splatColor, radius = w * 0.11f, center = Offset(w * 0.50f, h * 0.16f))
-            }
+            Image(
+                painter = painterResource(id = R.drawable.ic_rating_rt_rotten),
+                contentDescription = "Rotten Tomatoes Rotten",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(18.dp),
+            )
         }
         RatingSourceKind.RT_AUDIENCE_UPRIGHT -> {
-            Canvas(modifier = Modifier.size(16.dp)) {
-                val w = size.width
-                val h = size.height
-                // Fluffy cream/gold popcorn puffs on top
-                val puffColor = Color(0xFFF6E3A1)
-                drawCircle(color = puffColor, radius = w * 0.17f, center = Offset(w * 0.34f, h * 0.28f))
-                drawCircle(color = puffColor, radius = w * 0.19f, center = Offset(w * 0.52f, h * 0.22f))
-                drawCircle(color = puffColor, radius = w * 0.16f, center = Offset(w * 0.68f, h * 0.30f))
-                // Striped popcorn bucket
-                val bucket = Path().apply {
-                    moveTo(w * 0.20f, h * 0.38f)
-                    lineTo(w * 0.80f, h * 0.38f)
-                    lineTo(w * 0.70f, h * 0.94f)
-                    lineTo(w * 0.30f, h * 0.94f)
-                    close()
-                }
-                drawPath(path = bucket, color = Color(0xFFFA320A))
-                // Center white vertical stripe
-                drawRoundRect(
-                    color = Color(0xFFF5F5F5),
-                    topLeft = Offset(w * 0.43f, h * 0.40f),
-                    size = Size(w * 0.14f, h * 0.52f),
-                    cornerRadius = CornerRadius(1f, 1f),
-                )
-            }
+            Image(
+                painter = painterResource(id = R.drawable.ic_rating_rt_aud_fresh),
+                contentDescription = "Rotten Tomatoes Audience Fresh",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(18.dp),
+            )
         }
         RatingSourceKind.RT_AUDIENCE_SPILLED -> {
-            Canvas(modifier = Modifier.size(16.dp)) {
-                val w = size.width
-                val h = size.height
-                // Tipped muted bucket
-                rotate(degrees = 28f, pivot = Offset(w * 0.46f, h * 0.56f)) {
-                    val bucket = Path().apply {
-                        moveTo(w * 0.18f, h * 0.34f)
-                        lineTo(w * 0.70f, h * 0.34f)
-                        lineTo(w * 0.62f, h * 0.86f)
-                        lineTo(w * 0.26f, h * 0.86f)
-                        close()
-                    }
-                    drawPath(path = bucket, color = Color(0xFF8C8C8C))
-                    drawRoundRect(
-                        color = Color(0xFF525252),
-                        topLeft = Offset(w * 0.38f, h * 0.36f),
-                        size = Size(w * 0.12f, h * 0.48f),
-                        cornerRadius = CornerRadius(1f, 1f),
-                    )
-                }
-                // Spilled kernels
-                val kernelColor = Color(0xFFC4B68A)
-                drawCircle(color = kernelColor, radius = w * 0.10f, center = Offset(w * 0.76f, h * 0.78f))
-                drawCircle(color = kernelColor, radius = w * 0.08f, center = Offset(w * 0.88f, h * 0.66f))
-            }
+            Image(
+                painter = painterResource(id = R.drawable.ic_rating_rt_aud_rotten),
+                contentDescription = "Rotten Tomatoes Audience Spilled",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(18.dp),
+            )
         }
     }
 }

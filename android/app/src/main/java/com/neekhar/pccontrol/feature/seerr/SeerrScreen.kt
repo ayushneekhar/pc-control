@@ -1,5 +1,8 @@
 package com.neekhar.pccontrol.feature.seerr
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -58,6 +61,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -99,6 +103,7 @@ import com.neekhar.pccontrol.feature.watch.downloads.OfflineDownloadStatus
 import com.neekhar.pccontrol.feature.watch.downloads.OfflineWatchItem
 import com.neekhar.pccontrol.feature.watch.downloads.WatchOfflineHelpers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -1077,11 +1082,20 @@ private fun WatchHeroCarousel(
 ) {
     val colors = LocalPcColors.current
     val pagerState = rememberPagerState(pageCount = { items.size })
+    val coroutineScope = rememberCoroutineScope()
+    val progress = remember { Animatable(0f) }
 
-    // Smooth auto-advance every 7 seconds when multiple hero items exist; pauses while user drags
-    LaunchedEffect(items.size, pagerState.isScrollInProgress) {
-        if (items.size <= 1 || pagerState.isScrollInProgress) return@LaunchedEffect
-        delay(7_000L)
+    // Reliable 6s auto-advance with linear progress animation; pauses & resets cleanly while dragging
+    LaunchedEffect(items.size, pagerState.currentPage, pagerState.isScrollInProgress) {
+        if (items.size <= 1 || pagerState.isScrollInProgress) {
+            progress.snapTo(0f)
+            return@LaunchedEffect
+        }
+        progress.snapTo(0f)
+        progress.animateTo(
+            targetValue = 1f,
+            animationSpec = tween(durationMillis = 6_000, easing = LinearEasing),
+        )
         if (!pagerState.isScrollInProgress && items.size > 1) {
             val nextPage = (pagerState.currentPage + 1) % items.size
             pagerState.animateScrollToPage(nextPage)
@@ -1114,7 +1128,7 @@ private fun WatchHeroCarousel(
             )
         }
 
-        // Clean minimal dot indicators at the bottom of the hero
+        // Animated progress pill (active) + crisp tappable dots (inactive)
         if (items.size > 1) {
             Row(
                 modifier = Modifier
@@ -1125,15 +1139,36 @@ private fun WatchHeroCarousel(
             ) {
                 items.indices.forEach { idx ->
                     val active = pagerState.currentPage == idx
-                    Box(
-                        modifier = Modifier
-                            .height(5.dp)
-                            .width(if (active) 18.dp else 5.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (active) colors.accent else Color.White.copy(alpha = 0.30f),
-                            ),
-                    )
+                    if (active) {
+                        Box(
+                            modifier = Modifier
+                                .height(5.dp)
+                                .width(28.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(Color.White.copy(alpha = 0.28f))
+                                .clickable {
+                                    coroutineScope.launch { pagerState.animateScrollToPage(idx) }
+                                },
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(progress.value.coerceIn(0f, 1f))
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(Color(0xFF3DDC97)),
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(5.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.30f))
+                                .clickable {
+                                    coroutineScope.launch { pagerState.animateScrollToPage(idx) }
+                                },
+                        )
+                    }
                 }
             }
         }
